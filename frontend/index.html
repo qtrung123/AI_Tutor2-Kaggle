@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tutoring</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Tutoring navigation">
+        <div class="brand">
+          <div class="brand-mark">T</div>
+          <span>Tutoring</span>
+        </div>
+
+        <nav class="nav-menu">
+          <button class="nav-item active" data-page="overview" type="button">
+            <span>01</span>
+            Overview
+          </button>
+          <button class="nav-item" data-page="tutor" type="button">
+            <span>02</span>
+            AI Tutor
+          </button>
+          <button class="nav-item" data-page="practice" type="button">
+            <span>03</span>
+            Practice
+          </button>
+          <button class="nav-item" data-page="plan" type="button">
+            <span>04</span>
+            Study Plan
+          </button>
+        </nav>
+
+        <div class="semester-card">
+          <p>Spring semester</p>
+          <strong>68% complete</strong>
+          <div class="mini-progress"><span></span></div>
+          <small>Week 11 of 16</small>
+        </div>
+
+        <div class="profile">
+          <div class="avatar">VT</div>
+          <div>
+            <strong>Vuong Thuan</strong>
+            <span>Computer Science</span>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div>
+            <p>Personal learning space</p>
+            <h1 id="page-title">Good afternoon, Thuan</h1>
+          </div>
+          <div class="top-actions">
+            <button class="icon-button" id="reset-button" type="button" title="Reset">Reset</button>
+            <div class="score-pill" id="confidence-pill">3</div>
+          </div>
+        </header>
+
+        <section class="view active" id="overview-view" data-title="Good afternoon, Thuan">
+          <div class="alert-card">
+            <div class="alert-icon">!</div>
+            <div>
+              <p>Progress Monitor Alert</p>
+              <h2>Integration by parts needs attention</h2>
+              <span>Your recent score dropped 18% below your Calculus II average. A focused session can help.</span>
+            </div>
+            <button class="primary-button" data-page-target="tutor" type="button">Start tutoring</button>
+          </div>
+
+          <div class="stats-grid">
+            <article class="stat-card">
+              <span>Course average</span>
+              <strong>78.4%</strong>
+              <small>+2.3% this month</small>
+            </article>
+            <article class="stat-card">
+              <span>Topics mastered</span>
+              <strong>24 / 31</strong>
+              <small>4 in progress</small>
+            </article>
+            <article class="stat-card">
+              <span>Study streak</span>
+              <strong>8 days</strong>
+              <small>Personal best: 12</small>
+            </article>
+            <article class="stat-card">
+              <span>Next deadline</span>
+              <strong>2 days</strong>
+              <small>Calculus problem set</small>
+            </article>
+          </div>
+
+          <div class="dashboard-grid">
+            <article class="panel progress-panel">
+              <div class="panel-heading">
+                <div>
+                  <p>Learning analytics</p>
+                  <h2>Course progress</h2>
+                </div>
+                <span class="soft-badge">Live profile</span>
+              </div>
+              <div class="course-row">
+                <div>
+                  <strong>Data Structures</strong>
+                  <span>9 of 11 topics mastered</span>
+                </div>
+                <b>86%</b>
+                <div class="progress-track"><span style="width: 86%"></span></div>
+              </div>
+              <div class="course-row warning">
+                <div>
+                  <strong>Calculus II</strong>
+                  <span>Weak: integration by parts</span>
+                </div>
+                <b>64%</b>
+                <div class="progress-track"><span style="width: 64%"></span></div>
+              </div>
+              <div class="course-row">
+                <div>
+                  <strong>Database Systems</strong>
+                  <span>7 of 9 topics mastered</span>
+                </div>
+                <b>82%</b>
+                <div class="progress-track"><span style="width: 82%"></span></div>
+              </div>
+            </article>
+
+            <article class="panel week-panel">
+              <div class="panel-heading">
+                <div>
+                  <p>Next up</p>
+                  <h2>This week</h2>
+                </div>
+                <button class="text-button" data-page-target="plan" type="button">View plan</button>
+              </div>
+              <div class="week-item">
+                <time><strong>07</strong><span>Jun</span></time>
+                <div><strong>Calculus problem set</strong><span>Due in 2 days · High priority</span></div>
+              </div>
+              <div class="week-item">
+                <time><strong>09</strong><span>Jun</span></time>
+                <div><strong>Binary tree practice</strong><span>25 min · Adaptive quiz</span></div>
+              </div>
+              <div class="week-item">
+                <time><strong>11</strong><span>Jun</span></time>
+                <div><strong>Database midterm</strong><span>3 topics to review</span></div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="tutor-view" data-title="AI Tutor">
+          <div class="tutor-layout">
+            <aside class="panel tutor-context-card">
+              <div class="context-block">
+                <p class="eyebrow">Current context</p>
+                <h2>Net-centric Computing</h2>
+              </div>
+
+              <div class="context-block">
+                <div class="context-row">
+                  <span>Topic confidence</span>
+                  <strong id="confidence-label">64%</strong>
+                </div>
+                <div class="confidence-meter">
+                  <div class="progress-track"><span id="confidence-bar" style="width: 64%"></span></div>
+                </div>
+              </div>
+
+              <div class="context-block">
+                <input id="source-file-input" class="visually-hidden" type="file" accept=".pdf,.txt" multiple />
+                <button class="secondary-button" id="upload-source-button" type="button">Upload material</button>
+                <p class="upload-status" id="upload-status">PDF or TXT files</p>
+              </div>
+
+              <div class="context-block sources-context">
+                <p class="eyebrow">Retrieved sources</p>
+                <div class="source-list" id="source-list">
+                  <button class="source-card" type="button">
+                    <strong>Loading uploaded files...</strong>
+                    <span>Please wait</span>
+                  </button>
+                </div>
+              </div>
+
+              <button class="secondary-button" data-page-target="practice" type="button">Quiz me on this topic</button>
+            </aside>
+
+            <article class="chat-card tutor-chat-card">
+              <div class="tutor-chat-header">
+                <div>
+                  <h2><span></span>Tutor Agent</h2>
+                  <p>Grounded in your course materials</p>
+                </div>
+                <span class="soft-badge">RAG active</span>
+              </div>
+
+              <div class="message-list" id="message-list">
+                <div class="agent-row">
+                  <div class="agent-avatar">AI</div>
+                  <div class="message tutor-message">
+                    Ask me about socket programming, Go language, data serialization, or application protocols. I will answer from your uploaded Net-centric materials.
+                  </div>
+                </div>
+              </div>
+
+              <div class="prompt-row">
+                <button type="button" data-prompt="Explain TCP socket programming simply">Explain simply</button>
+                <button type="button" data-prompt="Show an example from my Net-centric lectures">Show an example</button>
+                <button type="button" data-prompt="Give me a hint about UDP vs TCP">Give me a hint</button>
+              </div>
+
+              <form class="chat-form" id="chat-form">
+                <input id="chat-input" type="text" placeholder="Ask about Net-centric Computing..." autocomplete="off" />
+                <button class="primary-button" type="submit">Send</button>
+              </form>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="practice-view" data-title="Practice">
+          <div class="assessment-shell">
+            <article class="panel assessment-control">
+              <div class="panel-heading">
+                <div>
+                  <p>Assessment Agent</p>
+                  <h2>Generate a grounded quiz</h2>
+                </div>
+                <span class="soft-badge">Grounded in selected document</span>
+              </div>
+
+              <div class="assessment-form">
+                <label>
+                  <span>Document</span>
+                  <select id="quiz-document-select">
+                    <option value="">Loading indexed documents...</option>
+                  </select>
+                </label>
+                <button class="primary-button" id="generate-quiz-button" type="button">Generate Quiz</button>
+              </div>
+            </article>
+
+            <div class="assessment-stats">
+              <article class="stat-card">
+                <span>Selected lecture</span>
+                <strong id="selected-document-label">None</strong>
+                <small>Indexed material</small>
+              </article>
+              <article class="stat-card">
+                <span>Quiz status</span>
+                <strong id="quiz-status-label">Not generated</strong>
+                <small id="quiz-question-count-label">Auto-sized assessment</small>
+              </article>
+              <article class="stat-card">
+                <span>Quiz progress</span>
+                <strong id="quiz-progress-label">0 / 0</strong>
+                <small id="quiz-accuracy-label">Accuracy 0%</small>
+              </article>
+            </div>
+
+            <article class="panel assessment-results">
+              <div class="panel-heading">
+                <div>
+                  <p>Live quiz</p>
+                  <h2 id="assessment-title">Assessment Agent</h2>
+                </div>
+                <div class="assessment-actions">
+                  <button class="text-button" id="reset-quiz-button" type="button">Reset Quiz</button>
+                  <button class="primary-button" id="submit-quiz-button" type="button">Submit Quiz</button>
+                  <button class="text-button" id="new-quiz-button" type="button">Regenerate Quiz</button>
+                </div>
+              </div>
+
+              <div class="assessment-loading" id="assessment-loading">
+                Assessment Agent is generating quiz from selected lecture...
+              </div>
+              <div class="quiz-list" id="quiz-list">
+                <div class="empty-state">
+                  Choose a document, then generate or start its saved quiz.
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="plan-view" data-title="Study Plan">
+          <div class="plan-grid">
+            <article class="day-card">
+              <span>Monday</span>
+              <strong>Integration warm-up</strong>
+              <p>Review the LIATE rule and solve 4 short examples.</p>
+            </article>
+            <article class="day-card">
+              <span>Tuesday</span>
+              <strong>Adaptive quiz</strong>
+              <p>Practice 3 integration by parts problems with instant feedback.</p>
+            </article>
+            <article class="day-card">
+              <span>Wednesday</span>
+              <strong>Data structures review</strong>
+              <p>Refresh binary tree traversal before the practice set.</p>
+            </article>
+            <article class="day-card">
+              <span>Thursday</span>
+              <strong>Database midterm prep</strong>
+              <p>Summarize keys, joins, and normalization patterns.</p>
+            </article>
+            <article class="day-card">
+              <span>Friday</span>
+              <strong>Problem set sprint</strong>
+              <p>Finish the Calculus problem set and mark unclear steps.</p>
+            </article>
+          </div>
+
+          <article class="panel why-panel">
+            <p class="eyebrow">Why this plan?</p>
+            <h2>Focused recovery before the next deadline</h2>
+            <p class="muted">The plan prioritizes Calculus II because confidence is lowest there and the deadline is closest, while preserving lighter review blocks for stronger courses.</p>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
