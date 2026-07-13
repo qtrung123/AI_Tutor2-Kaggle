@@ -1,68 +1,69 @@
 # TutorFlow — Local RAG Study Tutor
 
-TutorFlow là ứng dụng học tập chạy local, cho phép người dùng upload tài liệu môn học, chat với tài liệu bằng RAG và tạo quiz trắc nghiệm để tự luyện tập.
+TutorFlow is a local learning application for studying from personal course materials. Users can upload documents, ask grounded questions through a RAG chatbot, and generate multiple-choice quizzes for practice.
 
-Toàn bộ tài liệu, vector, lịch sử chat, quiz và kết quả làm bài được lưu trên máy. Chatbot và quiz sử dụng model chạy qua Ollama, không yêu cầu dịch vụ AI cloud.
+Documents, vectors, conversations, quizzes, answers, and learning history are stored locally. Chat and quiz generation use models served by Ollama and do not require a cloud AI service.
 
-## Tính năng hiện tại
+## Features
 
-### Quản lý tài liệu
+### Course Materials
 
-- Upload nhiều file PDF hoặc TXT tại trang **Materials**.
-- Chia tài liệu thành chunk và tạo embedding bằng Ollama.
-- Lưu vector vào Chroma.
-- Bỏ qua file đã được index nếu hash nội dung không thay đổi.
-- Hiển thị số chunk của từng tài liệu.
-- Xóa tài liệu khỏi `data/`, Chroma và `indexed_files.json`.
-- Khi xóa tài liệu, hệ thống cũng xóa quiz liên quan và gỡ tài liệu khỏi các conversation.
+- Upload multiple PDF or TXT files from the dedicated **Materials** page.
+- Split documents into chunks and create embeddings with Ollama.
+- Store vectors in Chroma.
+- Skip unchanged files by comparing content hashes.
+- Display each indexed document and its chunk count.
+- Delete documents from `data/`, Chroma, and `indexed_files.json`.
+- Remove deleted documents from conversation scopes and delete their quiz data.
 
-### Chatbot RAG
+### Grounded Chat
 
-- Mỗi cuộc chat là một conversation/thread độc lập.
-- Mỗi conversation lưu danh sách tài liệu được phép sử dụng.
-- Upload tài liệu mới không tự động thay đổi nguồn của conversation cũ.
-- Cho phép mở lại và tiếp tục conversation sau khi reload.
-- Lưu user message, assistant message, grounding status và citation bằng SQLite.
-- Hỗ trợ câu hỏi nối tiếp bằng lịch sử gần nhất của conversation.
-- Retrieval chỉ tìm trong tài liệu đã chọn cho conversation.
-- Hiển thị trạng thái `Grounded` và citation theo tài liệu/trang.
-- Nếu không đủ dữ liệu, chatbot được yêu cầu trả lời rằng không biết dựa trên tài liệu hiện có.
+- Keep every chat in an independent conversation/thread.
+- Assign a separate set of source documents to each conversation.
+- Upload new documents without changing existing conversation scopes.
+- Reopen old conversations and continue chatting after a page reload.
+- Save user messages, assistant messages, grounding status, and citations in SQLite.
+- Use recent conversation history to understand follow-up questions.
+- Retrieve context only from the documents selected for the active conversation.
+- Show grounding status and document/page citations below answers.
+- Return an insufficient-context response when the selected materials do not support an answer.
 
-### Quiz
+### Quiz Practice
 
-- Tạo quiz từ một tài liệu đã index.
-- Chọn số câu hỏi từ giao diện: 5, 10, 15, 20, 30 hoặc 40.
-- Backend hỗ trợ từ 1 đến 40 câu hỏi.
-- Hỗ trợ đúng ba mức độ:
+- Generate a multiple-choice quiz from one indexed document.
+- Select 5, 10, 15, 20, 30, or 40 questions from the UI.
+- Support between 1 and 40 questions at the backend level.
+- Support exactly three difficulty levels:
   - `easy`
   - `medium`
   - `difficult`
-- Mỗi cặp tài liệu và độ khó được lưu thành một quiz riêng.
-- Quiz key có dạng `document_id::difficulty`.
-- Sử dụng toàn bộ chunk của tài liệu để tạo quiz; mỗi batch tối đa 8 câu.
-- Parse, chuẩn hóa và kiểm tra JSON trả về từ model.
-- Thử sửa/generate lại tối đa 3 lần cho mỗi batch khi JSON hoặc chất lượng không hợp lệ.
-- Hiện đúng/sai ngay khi người dùng chọn đáp án.
-- Tự động lưu tiến độ sau từng câu, không cần nút Submit.
-- Tự hoàn thành attempt khi tất cả câu đã được trả lời.
-- Lưu lịch sử điểm, đáp án và kết quả từng câu.
-- Có thể xem lại các attempt đã hoàn thành.
-- Nút **Explain** gọi RAG khi cần và chỉ giải thích vì sao đáp án đúng là đúng.
-- Explanation được cache để không phải gọi model lại cho cùng một câu hỏi.
+- Store a separate quiz for each document and difficulty.
+- Use `document_id::difficulty` as the persistent quiz key.
+- Use all document chunks during generation and generate at most eight questions per batch.
+- Extract, normalize, and validate the JSON returned by the model.
+- Retry a failed or incomplete batch up to three times.
+- Check an answer immediately after the learner selects it.
+- Save progress after every answered question without requiring a Submit button.
+- Complete and archive an attempt when every question has been answered.
+- Save scores, answers, and per-question results.
+- Review previously completed attempts in Quiz History.
+- Generate explanations only when the learner selects **Explain**.
+- Explain only why the correct answer is correct.
+- Cache generated explanations for later use.
 
-## Công nghệ sử dụng
+## Technology Stack
 
-- **Backend:** FastAPI, Python
-- **Frontend:** HTML, CSS, Vanilla JavaScript
+- **Backend:** FastAPI and Python
+- **Frontend:** HTML, CSS, and vanilla JavaScript
 - **LLM runtime:** Ollama
 - **Chat model:** `hf.co/Qwen/Qwen2.5-3B-Instruct-GGUF:Q4_K_M`
 - **Embedding model:** `bge-m3`
 - **Vector database:** Chroma
 - **RAG integration:** LangChain
 - **Chat history:** SQLite
-- **Quiz storage:** JSON local files
+- **Quiz storage:** Local JSON files
 
-## Kiến trúc tổng quát
+## Architecture
 
 ```text
 Browser (localhost:3000)
@@ -71,19 +72,19 @@ Browser (localhost:3000)
         v
 FastAPI (127.0.0.1:8000)
         |
-        +-- Materials/ingest
+        +-- Materials and ingestion
         |     +-- data/
         |     +-- indexed_files.json
         |     +-- Chroma vectorstore/
         |
         +-- Chat RAG
-        |     +-- Chroma retrieval theo conversation sources
+        |     +-- Chroma retrieval filtered by conversation sources
         |     +-- prompts/rag_prompt.txt
         |     +-- Ollama chat model
         |     +-- data/conversations.db
         |
         +-- Quiz RAG
-              +-- toàn bộ chunk của document
+              +-- all chunks from the selected document
               +-- prompts/quiz_prompt.txt
               +-- Ollama chat model
               +-- generated_quizzes.json
@@ -91,57 +92,57 @@ FastAPI (127.0.0.1:8000)
               +-- quiz_explanations.json
 ```
 
-## Cấu trúc project
+## Project Structure
 
 ```text
 python-ollama-rag/
 ├── backend/
-│   ├── main.py                 # FastAPI models và routes
-│   ├── ingest.py               # Đọc, chunk, embedding, index và xóa tài liệu
-│   ├── rag_service.py          # Chat RAG và quiz explanation RAG
-│   ├── conversation_store.py   # SQLite conversation/message/source/citation
-│   ├── quiz_service.py         # Generate, validate, chấm điểm và quiz history
-│   ├── quiz_store.py           # Persistent JSON storage cho quiz/attempt/explain
+│   ├── main.py                 # FastAPI request models and routes
+│   ├── ingest.py               # Document loading, chunking, indexing, and deletion
+│   ├── rag_service.py          # Chat RAG and quiz explanation RAG
+│   ├── conversation_store.py   # SQLite conversation persistence
+│   ├── quiz_service.py         # Quiz generation, validation, scoring, and history
+│   ├── quiz_store.py           # Persistent quiz, attempt, and explanation storage
 │   └── __init__.py
 ├── frontend/
-│   ├── index.html              # Giao diện ứng dụng
-│   ├── styles.css              # Styling và responsive layout
-│   ├── app.js                  # Frontend state và API calls
-│   ├── server.js               # Static server port 3000
+│   ├── index.html              # Application layout
+│   ├── styles.css              # Styling and responsive layout
+│   ├── app.js                  # Frontend state and API integration
+│   ├── server.js               # Static development server
 │   └── package.json
 ├── prompts/
-│   ├── rag_prompt.txt          # System constraints cho chatbot
-│   └── quiz_prompt.txt         # Prompt generate quiz JSON
-├── data/                       # File upload và dữ liệu persistent
+│   ├── rag_prompt.txt          # Grounded chat instructions
+│   └── quiz_prompt.txt         # Quiz generation instructions
+├── data/                       # Uploaded documents and persistent application data
 ├── vectorstore/                # Chroma database
-├── indexed_files.json          # Metadata tài liệu đã index
-├── config.py                   # Paths, models và chunk settings
+├── indexed_files.json          # Indexed-document metadata
+├── config.py                   # Paths, models, and retrieval settings
 ├── requirements.txt
 └── README.md
 ```
 
-## Dữ liệu được lưu ở đâu?
+## Local Data
 
-| Dữ liệu | Nơi lưu |
+| Data | Storage |
 | --- | --- |
-| PDF/TXT đã upload | `data/` |
-| Vector và metadata chunk | `vectorstore/` |
-| Danh sách file đã index | `indexed_files.json` |
-| Conversation, message, source, citation | `data/conversations.db` |
-| Quiz đã generate | `data/generated_quizzes.json` |
-| Tiến độ và lịch sử làm quiz | `data/quiz_attempts.json` |
-| Explanation đã generate | `data/quiz_explanations.json` |
+| Uploaded PDF/TXT files | `data/` |
+| Document vectors and chunk metadata | `vectorstore/` |
+| Indexed-document registry | `indexed_files.json` |
+| Conversations, messages, sources, and citations | `data/conversations.db` |
+| Generated quizzes | `data/generated_quizzes.json` |
+| Current quiz progress and completed attempts | `data/quiz_attempts.json` |
+| Generated quiz explanations | `data/quiz_explanations.json` |
 
-## Yêu cầu hệ thống
+## Requirements
 
-- Python 3.10 trở lên.
-- Node.js và npm.
-- Ollama đang chạy trên máy.
-- Các model trong `config.py` đã được tải về.
+- Python 3.10 or newer
+- Node.js and npm
+- Ollama running locally
+- The models configured in `config.py`
 
-## Cài đặt
+## Installation
 
-### 1. Tạo virtual environment
+### 1. Create a virtual environment
 
 PowerShell:
 
@@ -150,13 +151,13 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-### 2. Cài Python dependencies
+### 2. Install Python dependencies
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-### 3. Cài frontend dependencies
+### 3. Install frontend dependencies
 
 ```powershell
 cd frontend
@@ -164,250 +165,179 @@ npm install
 cd ..
 ```
 
-### 4. Tải Ollama models
+### 4. Pull the Ollama models
 
 ```powershell
 ollama pull bge-m3
 ollama pull "hf.co/Qwen/Qwen2.5-3B-Instruct-GGUF:Q4_K_M"
 ```
 
-Tên model phải khớp với `CHAT_MODEL` và `EMBEDDING_MODEL` trong `config.py`.
+The installed model names must match `CHAT_MODEL` and `EMBEDDING_MODEL` in `config.py`.
 
-## Chạy ứng dụng
+## Running the Application
 
-### 1. Khởi động Ollama
+### 1. Start Ollama
 
-Nếu Ollama chưa chạy dưới dạng background service:
+If Ollama is not already running as a background service:
 
 ```powershell
 ollama serve
 ```
 
-### 2. Chạy backend
+### 2. Start the backend
 
-Tại thư mục gốc của project:
+Run this command from the project root:
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Backend:
+Backend URL:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-Swagger API documentation:
+FastAPI documentation:
 
 ```text
 http://127.0.0.1:8000/docs
 ```
 
-### 3. Chạy frontend
+### 3. Start the frontend
 
-Mở terminal khác:
+Open another terminal:
 
 ```powershell
 cd frontend
 npm start
 ```
 
-Mở trình duyệt tại:
+Open the application at:
 
 ```text
 http://localhost:3000
 ```
 
-## Cách sử dụng
+## Usage
 
-### Upload tài liệu
+### Upload Materials
 
-1. Mở trang **Materials**.
-2. Chọn **Upload materials**.
-3. Chọn một hoặc nhiều file PDF/TXT.
-4. Chờ trạng thái indexing hoàn tất.
-5. Kiểm tra tài liệu và số chunk trong danh sách.
+1. Open **Materials**.
+2. Select **Upload materials**.
+3. Choose one or more PDF/TXT files.
+4. Wait for indexing to finish.
+5. Confirm that each document appears with a chunk count.
 
-### Chat với tài liệu
+### Chat with Documents
 
-1. Mở trang **AI Tutor**.
-2. Tạo conversation mới hoặc chọn conversation cũ.
-3. Bấm **Sources (n)** trên header chat.
-4. Chọn tài liệu được phép sử dụng và bấm **Apply sources**.
-5. Nhập câu hỏi vào ô `Ask`.
-6. Xem câu trả lời, grounding status và citation.
+1. Open **AI Tutor**.
+2. Create a conversation or select an existing one.
+3. Select **Sources (n)** in the chat header.
+4. Choose the documents available to that conversation.
+5. Select **Apply sources**.
+6. Enter a question in the `Ask` field.
+7. Review the answer, grounding status, and citations.
 
-Conversation mới hiện chọn mặc định tất cả tài liệu đã có tại thời điểm tạo. Việc upload tài liệu sau đó không làm thay đổi source của conversation này.
+A new conversation initially selects all documents available at the time it is created. Uploading another document later does not modify that conversation.
 
-### Tạo và làm quiz
+### Generate and Complete a Quiz
 
-1. Mở trang **Practice**.
-2. Chọn document.
-3. Chọn số câu hỏi.
-4. Chọn `easy`, `medium` hoặc `difficult`.
-5. Bấm **Generate Quiz**.
-6. Chọn đáp án để xem đúng/sai ngay lập tức.
-7. Bấm **Explain** khi cần giải thích đáp án đúng.
-8. Khi trả lời đủ câu, kết quả tự động được thêm vào **Quiz History**.
+1. Open **Practice**.
+2. Select an indexed document.
+3. Select the question count.
+4. Select `easy`, `medium`, or `difficult`.
+5. Select **Generate Quiz**.
+6. Choose an answer to receive immediate feedback.
+7. Select **Explain** when an explanation is needed.
+8. Answer every question to complete the attempt and add it to Quiz History.
 
-## Flow Chatbot hiện tại
+## Chat Flow
 
 ```text
-User gửi câu hỏi
+User sends a question
     -> POST /api/conversations/{conversation_id}/messages
     -> answer_conversation_message()
-    -> tải conversation + message history + document_ids từ SQLite
-    -> lưu user message
-    -> ghép các câu hỏi gần nhất thành retrieval query
-    -> tìm TOP_K chunk trong đúng conversation sources
-    -> ghép system prompt + history + context + question
-    -> gọi ChatOllama
-    -> lưu assistant message + grounding status + citations
-    -> trả kết quả cho frontend
+    -> load the conversation, messages, and document IDs from SQLite
+    -> save the user message
+    -> combine recent user questions into a retrieval query
+    -> retrieve TOP_K chunks from the selected conversation sources
+    -> combine system prompt, history, context, and current question
+    -> call ChatOllama
+    -> save the assistant message, grounding status, and citations
+    -> return the response to the frontend
 ```
 
-`conversation_history` chỉ dùng để hiểu câu hỏi nối tiếp. Nó không được xem là bằng chứng. Mọi nội dung trả lời phải dựa trên context lấy từ tài liệu.
+Conversation history is used only to understand follow-up references. It is not treated as supporting evidence. The answer must be grounded in retrieved document context.
 
-Nếu conversation không có source hoặc không tìm thấy chunk phù hợp, backend trả trạng thái `insufficient_context`.
+If a conversation has no selected source or retrieval finds no matching document chunks, the backend returns `insufficient_context`.
 
-Endpoint `POST /api/chat` cũ vẫn được giữ để tương thích, nhưng UI hiện tại sử dụng conversation endpoint.
+The legacy `POST /api/chat` endpoint remains available for compatibility. The current frontend uses the conversation message endpoint.
 
-## Flow tạo Quiz hiện tại
+## Quiz Generation Flow
 
 ```text
-Chọn document + question_count + difficulty
+Select document, question count, and difficulty
     -> POST /api/quiz/generate
     -> generate_quiz()
-    -> kiểm tra saved quiz bằng key document_id::difficulty
-    -> nếu HIT: trả quiz đã lưu
-    -> nếu MISS: lấy toàn bộ chunk của document từ Chroma
-    -> chia số câu thành các batch, tối đa 8 câu/batch
-    -> build prompt theo difficulty
-    -> gọi Ollama
-    -> extract/parse/normalize/validate JSON
-    -> retry tối đa 3 lần cho batch lỗi
-    -> lưu quiz vào generated_quizzes.json
-    -> trả quiz cho frontend
+    -> check persistent storage with document_id::difficulty
+    -> cache HIT: return the saved quiz
+    -> cache MISS: load all chunks for the selected document
+    -> split the requested count into batches of up to eight questions
+    -> build a difficulty-specific prompt
+    -> call Ollama
+    -> extract, parse, normalize, and validate JSON
+    -> retry a failed batch up to three times
+    -> save the quiz in generated_quizzes.json
+    -> return the quiz to the frontend
 ```
 
-Lưu ý: nếu quiz của cùng `document_id::difficulty` đã tồn tại, API generate trả lại quiz đó. Muốn thay thế bằng bộ câu hỏi mới hoặc đổi số lượng câu, sử dụng chức năng **Regenerate Quiz**.
+If a quiz already exists for the same `document_id::difficulty`, the generate endpoint returns the saved quiz. Use **Regenerate Quiz** to replace it or change its question count.
 
-## API chính
+## API Overview
 
-### System và Materials
+### System and Materials
 
-| Method | Endpoint | Mục đích |
+| Method | Endpoint | Purpose |
 | --- | --- | --- |
-| `GET` | `/` | Kiểm tra backend |
-| `GET` | `/api/model/health` | Xem model đang cấu hình |
-| `GET` | `/api/sources` | Danh sách tài liệu đã index |
-| `POST` | `/api/sources/upload` | Upload và index PDF/TXT |
-| `DELETE` | `/api/sources/{document_id}` | Xóa tài liệu và dữ liệu liên quan |
-| `GET` | `/api/documents` | Danh sách document cho Practice |
+| `GET` | `/` | Check that the backend is running |
+| `GET` | `/api/model/health` | Return the configured chat model |
+| `GET` | `/api/sources` | List indexed materials |
+| `POST` | `/api/sources/upload` | Upload and index PDF/TXT files |
+| `DELETE` | `/api/sources/{document_id}` | Delete a document and related data |
+| `GET` | `/api/documents` | List indexed documents for Practice |
 
 ### Conversations
 
-| Method | Endpoint | Mục đích |
+| Method | Endpoint | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/conversations` | Tạo conversation |
-| `GET` | `/api/conversations` | Liệt kê conversation |
-| `GET` | `/api/conversations/{conversation_id}` | Mở conversation và messages |
-| `PATCH` | `/api/conversations/{conversation_id}` | Đổi tên conversation |
-| `DELETE` | `/api/conversations/{conversation_id}` | Xóa conversation |
-| `PUT` | `/api/conversations/{conversation_id}/sources` | Cập nhật source scope |
-| `POST` | `/api/conversations/{conversation_id}/messages` | Gửi câu hỏi và nhận RAG answer |
+| `POST` | `/api/conversations` | Create a conversation |
+| `GET` | `/api/conversations` | List conversations |
+| `GET` | `/api/conversations/{conversation_id}` | Load a conversation and its messages |
+| `PATCH` | `/api/conversations/{conversation_id}` | Rename a conversation |
+| `DELETE` | `/api/conversations/{conversation_id}` | Delete a conversation |
+| `PUT` | `/api/conversations/{conversation_id}/sources` | Replace the conversation source scope |
+| `POST` | `/api/conversations/{conversation_id}/messages` | Send a question and receive a RAG answer |
 | `POST` | `/api/chat` | Legacy chat endpoint |
 
 ### Quiz
 
-| Method | Endpoint | Mục đích |
+| Method | Endpoint | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/quizzes` | Trạng thái quiz theo document/difficulty |
-| `GET` | `/api/quiz/{document_id}?difficulty=easy` | Mở quiz và tiến độ gần nhất |
-| `POST` | `/api/quiz/generate` | Generate hoặc lấy quiz đã lưu |
-| `POST` | `/api/quiz/{document_id}/regenerate` | Thay quiz hiện tại bằng quiz mới |
-| `PATCH` | `/api/quiz/{document_id}/progress` | Check đáp án và autosave một câu |
-| `DELETE` | `/api/quiz/{document_id}/progress?difficulty=easy` | Reset tiến độ hiện tại |
-| `POST` | `/api/quiz/{document_id}/submit` | Endpoint submit thủ công còn được hỗ trợ |
-| `POST` | `/api/quiz/{document_id}/questions/{question_id}/explain` | Generate/load explanation |
-| `GET` | `/api/quiz-history` | Danh sách attempt hoàn thành |
-| `GET` | `/api/quiz-history/{attempt_id}` | Chi tiết một attempt |
+| `GET` | `/api/quizzes` | List quiz availability by document and difficulty |
+| `GET` | `/api/quiz/{document_id}?difficulty=easy` | Load a quiz and its latest progress |
+| `POST` | `/api/quiz/generate` | Generate or load a saved quiz |
+| `POST` | `/api/quiz/{document_id}/regenerate` | Replace a saved quiz |
+| `PATCH` | `/api/quiz/{document_id}/progress` | Check and save one answer |
+| `DELETE` | `/api/quiz/{document_id}/progress?difficulty=easy` | Reset current progress |
+| `POST` | `/api/quiz/{document_id}/submit` | Submit an attempt manually |
+| `POST` | `/api/quiz/{document_id}/questions/{question_id}/explain` | Generate or load an explanation |
+| `GET` | `/api/quiz-history` | List completed attempts |
+| `GET` | `/api/quiz-history/{attempt_id}` | Load one completed attempt |
 
-## Ví dụ API
+## Configuration
 
-### Tạo conversation
-
-```http
-POST /api/conversations
-Content-Type: application/json
-```
-
-```json
-{
-  "title": "New conversation",
-  "document_ids": ["Lecture 1.pdf"]
-}
-```
-
-### Gửi message
-
-```http
-POST /api/conversations/{conversation_id}/messages
-Content-Type: application/json
-```
-
-```json
-{
-  "message": "TCP hoạt động như thế nào?"
-}
-```
-
-### Generate quiz
-
-```http
-POST /api/quiz/generate
-Content-Type: application/json
-```
-
-```json
-{
-  "document_id": "Lecture 1.pdf",
-  "question_count": 5,
-  "difficulty": "medium"
-}
-```
-
-### Lưu một đáp án
-
-```http
-PATCH /api/quiz/Lecture%201.pdf/progress
-Content-Type: application/json
-```
-
-```json
-{
-  "difficulty": "medium",
-  "question_id": 1,
-  "selected_answer": "A"
-}
-```
-
-### Explain một câu hỏi
-
-```http
-POST /api/quiz/Lecture%201.pdf/questions/1/explain
-Content-Type: application/json
-```
-
-```json
-{
-  "difficulty": "medium"
-}
-```
-
-## Cấu hình
-
-Các cấu hình chính nằm trong `config.py`:
+The main settings are defined in `config.py`:
 
 ```python
 CHAT_MODEL = "hf.co/Qwen/Qwen2.5-3B-Instruct-GGUF:Q4_K_M"
@@ -418,52 +348,31 @@ CHUNK_OVERLAP = 150
 TOP_K = 4
 ```
 
-Nếu thay đổi `EMBEDDING_MODEL`, cần index lại tài liệu vì vector cũ được tạo bằng embedding model trước đó.
+If `EMBEDDING_MODEL` changes, existing documents must be indexed again because their vectors were created with the previous model.
 
-## Index file bằng CLI
+## Troubleshooting
 
-Nếu file đã nằm trong `data/`, có thể chạy ingest trực tiếp:
+### The backend cannot connect to Ollama
 
-```powershell
-.\.venv\Scripts\python.exe -m backend.ingest
-```
-
-## Giới hạn hiện tại
-
-- Chỉ hỗ trợ PDF và TXT.
-- Indexing đang chạy đồng bộ; file lớn có thể cần thời gian chờ.
-- Trạng thái upload/index hiện hiển thị chung, chưa có state machine riêng cho từng file.
-- Retrieval chatbot lấy tối đa `TOP_K = 4` chunk.
-- Chat grounding chủ yếu được kiểm soát bằng prompt; chưa có bước hậu kiểm mọi factual claim/citation.
-- Conversation history chỉ đưa tối đa 8 message gần nhất vào prompt.
-- Quiz sử dụng toàn bộ chunk nhưng giới hạn 900 ký tự cho nội dung mỗi chunk khi build context.
-- Việc chống câu hỏi trùng giữa các difficulty đang tạm tắt; các level khác nhau vẫn có thể sinh câu giống hoặc gần giống nhau.
-- Local model có thể trả JSON lỗi; backend retry nhưng vẫn có thể thất bại nếu không thu đủ số câu hợp lệ.
-- Study Plan hiện mới là UI minh họa, chưa có backend generation.
-
-## Xử lý lỗi thường gặp
-
-### Backend không gọi được Ollama
-
-Kiểm tra:
+Check the locally installed models:
 
 ```powershell
 ollama list
 ```
 
-Đảm bảo tên model trong danh sách khớp `config.py` và Ollama đang chạy.
+Confirm that the model names match `config.py` and that Ollama is running.
 
-### Chat trả insufficient context
+### Chat returns insufficient context
 
-- Mở drawer **Sources** trong conversation.
-- Chọn ít nhất một tài liệu.
-- Bấm **Apply sources**.
-- Kiểm tra tài liệu đã được index và có chunk.
+1. Open **Sources** in the active conversation.
+2. Select at least one indexed document.
+3. Select **Apply sources**.
+4. Confirm that the selected document contains indexed chunks.
 
-### Đổi embedding model nhưng retrieval sai
+### Retrieval becomes incorrect after changing the embedding model
 
-Vector hiện tại được tạo bằng model cũ. Cần xóa/rebuild `vectorstore/` và index lại tài liệu bằng embedding model mới.
+Rebuild `vectorstore/` and index the documents again with the new embedding model.
 
-### Frontend chưa nhận CSS/JavaScript mới
+### The frontend still shows an older UI
 
-Reload trình duyệt bằng `Ctrl + F5` và xác nhận frontend đang chạy tại port 3000.
+Reload the browser with `Ctrl + F5` and confirm that the frontend is running on port 3000.
