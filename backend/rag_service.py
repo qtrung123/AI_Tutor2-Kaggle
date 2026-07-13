@@ -42,8 +42,7 @@ def load_prompt_template() -> str:
     """
     Read the RAG prompt template.
 
-    The template contains placeholders for context, conversation history, and question. Those
-    placeholders are filled in ask_rag() after relevant chunks are retrieved.
+    The template contains placeholders for context, conversation history, and question.
     """
     with open(PROMPT_PATH, "r", encoding="utf-8") as file:
         return file.read()
@@ -73,41 +72,6 @@ def format_docs(docs) -> str:
     return "\n\n".join(context_parts)
 
 
-def ask_rag(question: str) -> tuple[str, list]:
-    """
-    Run the full RAG flow for one user question.
-
-    RAG means:
-    1. Retrieve: embed the user question and find the most relevant chunks.
-    2. Augment: put those chunks into the prompt template as context.
-    3. Generate: send the final prompt to the chat model and return its answer.
-    """
-    vectorstore = load_vectorstore()
-
-    retriever = vectorstore.as_retriever(search_kwargs={"k": TOP_K})
-
-    # Retrieve: find the top-k course chunks most similar to the user question.
-    docs = retriever.invoke(question)
-
-    # Augment: turn retrieved chunks into context and inject it into the prompt.
-    context = format_docs(docs)
-    prompt_template = load_prompt_template()
-    final_prompt = prompt_template.format(
-        context=context,
-        conversation_history="No previous messages.",
-        question=question,
-    )
-
-    # Generate: send the final prompt to Ollama and read the model response.
-    llm = ChatOllama(
-        model=CHAT_MODEL,
-        temperature=0,
-    )
-    response = llm.invoke(final_prompt)
-
-    return response.content, docs
-
-
 def _build_citations(docs) -> list[dict]:
     """
     Shape retrieved documents into the citation objects expected by frontend.
@@ -131,27 +95,6 @@ def _build_citations(docs) -> list[dict]:
         )
 
     return citations
-
-
-def answer_question(
-    message: str,
-    course: str | None = None,
-    topic: str | None = None,
-) -> dict:
-    """
-    Public chat service used by FastAPI.
-
-    backend/main.py calls this function for POST /api/chat. The course/topic
-    arguments are accepted for the API contract, but the current RAG search uses
-    the message text only.
-    """
-    answer, docs = ask_rag(message)
-
-    return {
-        "answer": answer,
-        "model": CHAT_MODEL,
-        "citations": _build_citations(docs),
-    }
 
 
 def _retrieve_conversation_docs(question: str, document_ids: list[str]) -> list:

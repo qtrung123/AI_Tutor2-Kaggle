@@ -6,7 +6,6 @@ const pageTitles = {
   plan: "Study Plan"
 };
 
-const CHAT_API_URL = "http://127.0.0.1:8000/api/chat";
 const CONVERSATIONS_API_URL = "http://127.0.0.1:8000/api/conversations";
 const SOURCES_API_URL = "http://127.0.0.1:8000/api/sources";
 const UPLOAD_API_URL = "http://127.0.0.1:8000/api/sources/upload";

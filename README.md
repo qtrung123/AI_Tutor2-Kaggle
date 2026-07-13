@@ -272,8 +272,6 @@ Conversation history is used only to understand follow-up references. It is not 
 
 If a conversation has no selected source or retrieval finds no matching document chunks, the backend returns `insufficient_context`.
 
-The legacy `POST /api/chat` endpoint remains available for compatibility. The current frontend uses the conversation message endpoint.
-
 ## Quiz Generation Flow
 
 ```text
@@ -318,7 +316,6 @@ If a quiz already exists for the same `document_id::difficulty`, the generate en
 | `DELETE` | `/api/conversations/{conversation_id}` | Delete a conversation |
 | `PUT` | `/api/conversations/{conversation_id}/sources` | Replace the conversation source scope |
 | `POST` | `/api/conversations/{conversation_id}/messages` | Send a question and receive a RAG answer |
-| `POST` | `/api/chat` | Legacy chat endpoint |
 
 ### Quiz
 
@@ -330,7 +327,6 @@ If a quiz already exists for the same `document_id::difficulty`, the generate en
 | `POST` | `/api/quiz/{document_id}/regenerate` | Replace a saved quiz |
 | `PATCH` | `/api/quiz/{document_id}/progress` | Check and save one answer |
 | `DELETE` | `/api/quiz/{document_id}/progress?difficulty=easy` | Reset current progress |
-| `POST` | `/api/quiz/{document_id}/submit` | Submit an attempt manually |
 | `POST` | `/api/quiz/{document_id}/questions/{question_id}/explain` | Generate or load an explanation |
 | `GET` | `/api/quiz-history` | List completed attempts |
 | `GET` | `/api/quiz-history/{attempt_id}` | Load one completed attempt |

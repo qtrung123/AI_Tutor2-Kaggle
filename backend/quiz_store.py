@@ -107,35 +107,6 @@ def get_latest_attempt(document_id: str, difficulty: str) -> dict | None:
     return (document_attempts.get(difficulty) or {}).get("latest_attempt")
 
 
-def save_quiz_attempt(document_id: str, difficulty: str, attempt: dict) -> dict:
-    """Save a completed quiz attempt and make it the latest result."""
-    attempts = load_attempts()
-    document_attempts = attempts.setdefault(document_id, {})
-    if "latest_attempt" in document_attempts:
-        legacy_difficulty = (document_attempts.get("latest_attempt") or {}).get("difficulty", "medium")
-        document_attempts = {legacy_difficulty: document_attempts}
-        attempts[document_id] = document_attempts
-    level_attempts = document_attempts.setdefault(
-        difficulty,
-        {
-            "document_id": document_id,
-            "difficulty": difficulty,
-            "latest_attempt": None,
-            "history": [],
-        },
-    )
-
-    saved_attempt = {
-        **attempt,
-        "attempt_id": attempt.get("attempt_id") or str(uuid4()),
-        "submitted_at": attempt.get("submitted_at") or utc_now_iso(),
-    }
-    level_attempts["latest_attempt"] = saved_attempt
-    level_attempts.setdefault("history", []).append(saved_attempt)
-    save_attempts(attempts)
-    return saved_attempt
-
-
 def save_quiz_progress(document_id: str, difficulty: str, progress: dict) -> dict:
     """Upsert current quiz progress and archive it once when it becomes complete."""
     attempts = load_attempts()

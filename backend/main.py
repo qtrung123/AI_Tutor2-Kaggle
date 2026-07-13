@@ -15,7 +15,6 @@ from backend.quiz_service import (
     list_quiz_statuses,
     load_quiz_with_attempt,
     load_completed_quiz_attempt,
-    submit_quiz_attempt,
     update_quiz_progress,
 )
 from backend.quiz_store import delete_document_quiz_data
@@ -28,40 +27,8 @@ from backend.conversation_store import (
     set_conversation_sources,
     update_conversation_title,
 )
-from backend.rag_service import answer_conversation_message, answer_question, list_uploaded_sources
+from backend.rag_service import answer_conversation_message, list_uploaded_sources
 from config import CHAT_MODEL, DATA_DIR
-
-
-class ChatRequest(BaseModel):
-    """
-    Request body for POST /api/chat.
-
-    The frontend sends the user question in message. course/topic are currently
-    accepted for future filtering, but the current RAG search uses message only.
-    """
-    message: str
-    course: Optional[str] = None
-    topic: Optional[str] = None
-
-
-class Citation(BaseModel):
-    """
-    One retrieved source chunk used by the chatbot answer.
-
-    The frontend shows these citations in the AI Tutor source panel after a
-    question is answered.
-    """
-    sourceId: int
-    title: str
-    page: str
-    content: Optional[str] = None
-
-
-class ChatResponse(BaseModel):
-    """Response body returned by POST /api/chat."""
-    answer: str
-    model: str
-    citations: list[Citation]
 
 
 class ConversationCreateRequest(BaseModel):
@@ -148,12 +115,6 @@ class QuizGenerateRequest(BaseModel):
 class QuizRegenerateRequest(BaseModel):
     """Request body for POST /api/quiz/{document_id}/regenerate."""
     question_count: int = Field(ge=1, le=40)
-    difficulty: str = Field(pattern="^(easy|medium|difficult)$")
-
-
-class QuizSubmitRequest(BaseModel):
-    """Request body for POST /api/quiz/{document_id}/submit."""
-    answers: dict[str, str]
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
 
 
@@ -434,24 +395,6 @@ def quiz_generate(request: QuizGenerateRequest) -> QuizGenerateResponse:
         ) from error
 
 
-@app.post("/api/quiz/{document_id}/submit")
-def quiz_submit(document_id: str, request: QuizSubmitRequest) -> dict:
-    """Score, save, and return the latest attempt for one generated quiz."""
-    try:
-        return submit_quiz_attempt(
-            document_id=document_id,
-            difficulty=request.difficulty,
-            answers=request.answers,
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except Exception as error:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Could not submit quiz attempt. Original error: {error}",
-        ) from error
-
-
 @app.patch("/api/quiz/{document_id}/progress")
 def quiz_progress(document_id: str, request: QuizProgressRequest) -> dict:
     """Check one selected answer and autosave current quiz progress."""
@@ -514,34 +457,6 @@ def quiz_regenerate(document_id: str, request: QuizRegenerateRequest) -> QuizGen
         raise HTTPException(
             status_code=500,
             detail=f"Could not regenerate quiz. Original error: {error}",
-        ) from error
-
-
-@app.post("/api/chat", response_model=ChatResponse)
-def chat(request: ChatRequest) -> ChatResponse:
-    """
-    Answer a user question using the chatbot RAG service.
-
-    The real RAG logic lives in backend.rag_service.answer_question()/ask_rag().
-    This route only validates the request and returns the API response shape.
-    """
-    if not request.message.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="Message is required. Please enter a question before sending.",
-        )
-
-    try:
-        result = answer_question(request.message, request.course, request.topic)
-        return ChatResponse(**result)
-    except Exception as error:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "RAG backend failed to answer. Please check that Ollama is running, "
-                "the configured models are pulled, and the Chroma vectorstore has data. "
-                f"Original error: {error}"
-            ),
         ) from error
 
 

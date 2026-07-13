@@ -19,7 +19,6 @@ from backend.quiz_store import (
     save_quiz,
     save_quiz_explanation,
     save_quiz_progress,
-    save_quiz_attempt,
     reset_quiz_progress,
     utc_now_iso,
 )
@@ -59,16 +58,6 @@ MAX_CHARS_PER_CHUNK = 900
 MAX_QUESTIONS_PER_BATCH = 8
 MAX_BATCH_GENERATION_ATTEMPTS = 3
 QUIZ_CONTEXT_WINDOWS = (4096, 8192, 16384, 32768)
-
-
-def clear_quiz_cache(document_id: str | None = None) -> None:
-    """
-    Kept for backwards-compatible imports.
-
-    Generated quizzes are now persisted in data/generated_quizzes.json, so there
-    is no RAM cache to clear.
-    """
-    return None
 
 
 def _load_indexed_files() -> dict:
@@ -389,7 +378,6 @@ def _looks_like_raw_chunk(option: str) -> bool:
 def _validate_question_quality(
     question: dict,
     options: list[str],
-    avoid_questions: list[str] | None = None,
 ) -> None:
     """
     Reject low-value model output before it reaches persistent quiz storage.
@@ -438,10 +426,8 @@ def _validate_difficulty_quality(question_text: str, difficulty: str) -> None:
 
 def _validate_quiz_batch(
     data: dict,
-    document_id: str,
     num_questions: int,
     start_id: int,
-    avoid_questions: list[str] | None = None,
     difficulty: str = "easy",
 ) -> list[dict]:
     questions = data.get("questions")
@@ -467,9 +453,6 @@ def _validate_quiz_batch(
         _validate_question_quality(
             question=normalized_questions[-1],
             options=options,
-            avoid_questions=(avoid_questions or []) + [
-                item["question"] for item in normalized_questions[:-1]
-            ],
         )
         _validate_difficulty_quality(normalized_questions[-1]["question"], difficulty)
 
@@ -574,12 +557,8 @@ def _generate_quiz_batch(
                 try:
                     normalized = _validate_quiz_batch(
                         {"questions": [raw_question]},
-                        document_id,
                         1,
                         start_id + len(accepted_questions),
-                        base_avoid_questions + [
-                            question["question"] for question in accepted_questions
-                        ],
                         difficulty,
                     )[0]
                     accepted_questions.append(normalized)
@@ -719,63 +698,6 @@ def list_quiz_statuses() -> list[dict]:
         )
 
     return statuses
-
-
-def submit_quiz_attempt(document_id: str, difficulty: str, answers: dict) -> dict:
-    """
-    Score and persist a completed quiz submission.
-
-    answers maps question id to the selected answer letter. The backend is the
-    source of truth for scoring so frontend reloads and retakes stay consistent.
-    """
-    quiz = get_quiz(document_id, difficulty)
-    if not quiz:
-        raise ValueError("Quiz has not been generated for this document.")
-
-    normalized_answers = {
-        str(question_id): str(answer).strip().upper()[:1]
-        for question_id, answer in (answers or {}).items()
-    }
-    question_results = []
-    score = 0
-
-    for question in quiz.get("questions", []):
-        question_id = str(question.get("id"))
-        selected_answer = normalized_answers.get(question_id, "")
-        correct_answer = str(question.get("correct_answer", "")).upper()
-        is_correct = selected_answer == correct_answer
-        if is_correct:
-            score += 1
-
-        question_results.append(
-            {
-                "question_id": int(question.get("id")),
-                "selected_answer": selected_answer,
-                "correct_answer": correct_answer,
-                "is_correct": is_correct,
-            }
-        )
-
-    total = len(quiz.get("questions", []))
-    attempt = {
-        "document_id": document_id,
-        "difficulty": difficulty,
-        "score": score,
-        "total": total,
-        "completed": True,
-        "answers": normalized_answers,
-        "question_results": question_results,
-    }
-    saved_attempt = save_quiz_attempt(document_id, difficulty, attempt)
-
-    return {
-        "document_id": document_id,
-        "score": score,
-        "total": total,
-        "completed": True,
-        "submitted_at": saved_attempt["submitted_at"],
-        "latest_attempt": saved_attempt,
-    }
 
 
 def update_quiz_progress(
