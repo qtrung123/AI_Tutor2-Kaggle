@@ -2,6 +2,7 @@ import json
 import math
 import re
 from pathlib import Path
+from uuid import uuid4
 
 from langchain_chroma import Chroma
 from langchain_ollama import ChatOllama, OllamaEmbeddings
@@ -10,12 +11,19 @@ from backend.quiz_store import (
     delete_document_attempts,
     get_latest_attempt,
     get_quiz,
-    load_attempts,
-    load_quizzes,
+    get_quiz_explanation,
+    list_document_quizzes,
+    list_quiz_history as load_quiz_history,
+    get_quiz_history_attempt,
+    quiz_cache_key,
     save_quiz,
+    save_quiz_explanation,
+    save_quiz_progress,
     save_quiz_attempt,
+    reset_quiz_progress,
     utc_now_iso,
 )
+from backend.rag_service import explain_quiz_answer
 from config import (
     CHAT_MODEL,
     COLLECTION_NAME,
@@ -27,7 +35,7 @@ from config import (
 
 
 OPTION_LETTERS = {"A", "B", "C", "D"}
-DIFFICULTY_ORDER = ["easy", "medium", "hard"]
+QUIZ_DIFFICULTIES = {"easy", "medium", "difficult"}
 GENERIC_QUESTION_PATTERNS = [
     r"\bwhich statement is supported\b",
     r"\bwhich (option|statement) is (correct|true)\b",
@@ -44,12 +52,13 @@ GENERIC_OPTION_PATTERNS = [
     r"\bthe document does not mention\b",
 ]
 
-# The local model gets a bounded amount of context per batch. Quiz generation
-# still covers the full lecture by sampling different windows across the whole
-# ordered chunk list instead of taking only the first or most similar chunks.
+# Every quiz-generation batch receives every indexed chunk from the selected
+# lecture. Individual chunk text is still bounded so one unusually large chunk
+# cannot dominate the prompt.
 MAX_CHARS_PER_CHUNK = 900
-MAX_CHUNKS_PER_BATCH = 8
 MAX_QUESTIONS_PER_BATCH = 8
+MAX_BATCH_GENERATION_ATTEMPTS = 3
+QUIZ_CONTEXT_WINDOWS = (4096, 8192, 16384, 32768)
 
 
 def clear_quiz_cache(document_id: str | None = None) -> None:
@@ -91,48 +100,6 @@ def list_indexed_documents() -> list[dict]:
 
 def _document_lookup() -> dict[str, dict]:
     return {document["id"]: document for document in list_indexed_documents()}
-
-
-def determine_question_count(chunk_count: int) -> int:
-    """
-    Pick a quiz size from indexed lecture length.
-
-    Rule for presentation:
-    - short lecture, up to 8 chunks: 10 questions
-    - medium lecture, 9-20 chunks: 15 questions
-    - longer lecture, 21-40 chunks: 20 questions
-    - long lecture, 41-70 chunks: 30 questions
-    - very long lecture, more than 70 chunks: 40 questions maximum
-    """
-    if chunk_count <= 8:
-        return 10
-    if chunk_count <= 20:
-        return 15
-    if chunk_count <= 40:
-        return 20
-    if chunk_count <= 70:
-        return 30
-    return 40
-
-
-def difficulty_distribution(question_count: int) -> dict[str, int]:
-    """
-    Split questions into 30% easy, 40% medium, 30% hard.
-
-    Remainder questions are assigned to medium first because it is the core
-    understanding level, then easy/hard as needed.
-    """
-    counts = {
-        "easy": math.floor(question_count * 0.3),
-        "medium": math.floor(question_count * 0.4),
-        "hard": math.floor(question_count * 0.3),
-    }
-
-    for difficulty in ["medium", "easy", "hard"]:
-        if sum(counts.values()) < question_count:
-            counts[difficulty] += 1
-
-    return counts
 
 
 def _load_vectorstore() -> Chroma:
@@ -202,34 +169,6 @@ def get_document_chunks(document_id: str) -> list[dict]:
     return _result_to_chunks(result, document_id, filter_source=True)
 
 
-def _select_even_chunks(chunks: list[dict], target_count: int, window_index: int, window_count: int) -> list[dict]:
-    """
-    Pick a small window from across the whole lecture.
-
-    Each generation batch receives a different lecture segment. Inside that
-    segment, chunks are sampled evenly so the prompt does not collapse to only
-    the first few chunks.
-    """
-    if not chunks:
-        return []
-
-    target_count = max(1, min(target_count, len(chunks)))
-    window_count = max(1, window_count)
-    start = math.floor(len(chunks) * window_index / window_count)
-    end = math.floor(len(chunks) * (window_index + 1) / window_count)
-    window = chunks[start:end] or chunks
-
-    if len(window) <= target_count:
-        return window
-
-    selected = []
-    last_index = len(window) - 1
-    for index in range(target_count):
-        position = round(index * last_index / max(1, target_count - 1))
-        selected.append(window[position])
-    return selected
-
-
 def _format_context(chunks: list[dict]) -> str:
     parts = []
     for index, chunk in enumerate(chunks, start=1):
@@ -254,15 +193,51 @@ def load_quiz_prompt_template() -> str:
         return file.read()
 
 
-def _build_prompt(document_id: str, num_questions: int, difficulty: str, chunks: list[dict]) -> str:
+def _difficulty_instructions(difficulty: str) -> str:
+    instructions = {
+        "easy": """EASY
+- Test one directly stated fact, definition, purpose, syntax element, or explicit step.
+- The learner should answer by recognizing or recalling one piece of information.
+- Do not require combining separate chunks or inferring an unstated consequence.""",
+        "medium": """MEDIUM
+- Require understanding through comparison, cause and effect, ordering, code interpretation, or applying one stated rule to a short situation.
+- Each question must require at least one reasoning step beyond copying a sentence.
+- Prefer stems such as "Why...", "How would...", "What happens when...", "Which outcome...", or "Which option best explains the relationship...".
+- Do not ask direct who/when questions, isolated definitions, simple syntax recognition, or "Which ... is a characteristic of ...?" questions.""",
+        "difficult": """DIFFICULT
+- Require analysis, diagnosis, prediction, or application in a concrete scenario.
+- Combine at least two related facts, rules, examples, or code behaviors from the context whenever the material supports it.
+- Prefer predicting code behavior, choosing a design consequence, diagnosing an error, or distinguishing subtly plausible alternatives.
+- Do not ask names, dates, direct definitions, direct syntax recognition, or any question answerable by copying one sentence.""",
+    }
+    return instructions[difficulty]
+
+
+def _format_avoid_questions(questions: list[str]) -> str:
+    if not questions:
+        return "(None yet.)"
+    return "\n".join(f"- {question}" for question in questions)
+
+
+def _build_prompt(
+    document_id: str,
+    num_questions: int,
+    difficulty: str,
+    chunks: list[dict],
+    avoid_questions: list[str] | None = None,
+) -> str:
+    print(f"[quiz-prompt] difficulty={difficulty}")
     prompt_template = load_quiz_prompt_template()
-    return (
+    prompt = (
         prompt_template
         .replace("{document_id}", document_id)
-        .replace("{difficulty}", difficulty)
         .replace("{num_questions}", str(num_questions))
+        .replace("{difficulty}", difficulty)
+        .replace("{difficulty_instructions}", _difficulty_instructions(difficulty))
+        .replace("{avoid_questions}", _format_avoid_questions(avoid_questions or []))
         .replace("{context}", _format_context(chunks))
     )
+    return prompt
 
 
 def _build_retry_prompt(
@@ -271,6 +246,7 @@ def _build_retry_prompt(
     difficulty: str,
     chunks: list[dict],
     error: Exception,
+    avoid_questions: list[str] | None = None,
 ) -> str:
     """
     Ask the model for a corrected batch after JSON or quality validation fails.
@@ -282,11 +258,17 @@ def _build_retry_prompt(
 Return valid JSON only. Regenerate the quiz batch for this document.
 
 DOCUMENT: {document_id}
-DIFFICULTY: {difficulty}
 NUMBER OF QUESTIONS: {num_questions}
+QUIZ DIFFICULTY: {difficulty}
 
 The previous answer was rejected for this reason:
 {error}
+
+REPAIR INSTRUCTION:
+- Completely discard every rejected question named in the error above.
+- Do not reword or paraphrase a rejected question.
+- Choose a different concept from the context for its replacement.
+- A repeated rejected question makes the entire response invalid.
 
 Hard requirements:
 - exactly {num_questions} questions
@@ -294,11 +276,19 @@ Hard requirements:
 - do not start questions with "According to"
 - do not ask "which statement is supported/correct/true"
 - no raw chunk text as options
-- no generic distractors about unrelated material, missing information, or impossible explanation
+- no generic distractors about unrelated material or missing information
 - options must be short, plausible, same-topic choices
-- explanation must say why the correct answer is right and why each wrong option is wrong
-- every question difficulty must be "{difficulty}"
+- all questions must follow the requested difficulty level
+- do not repeat or paraphrase any previously used question listed below
+- escape double quotes inside JSON strings as \\\"
+- encode line breaks inside strings as \\n and close every string, array, and object
 - return JSON only, no markdown
+
+DIFFICULTY CONTRACT:
+{_difficulty_instructions(difficulty)}
+
+PREVIOUSLY USED QUESTIONS:
+{_format_avoid_questions(avoid_questions or [])}
 
 JSON shape:
 {{
@@ -308,15 +298,7 @@ JSON shape:
       "id": 1,
       "question": "Specific concept question",
       "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}},
-      "correct_answer": "A",
-      "explanation": {{
-        "correct_answer_text": "A. ...",
-        "why_correct": "...",
-        "why_others_wrong": {{"A": "This is correct.", "B": "...", "C": "...", "D": "..."}},
-        "short_feedback": "..."
-      }},
-      "difficulty": "{difficulty}",
-      "source": {{"title": "{document_id}", "page": "Unknown", "chunk": 0}}
+      "correct_answer": "A"
     }}
   ]
 }}
@@ -388,29 +370,6 @@ def _clean_inline_text(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
-def _normalize_explanation(raw_explanation) -> str:
-    if isinstance(raw_explanation, dict):
-        parts = []
-        for key in ["correct_answer_text", "why_correct", "short_feedback"]:
-            value = str(raw_explanation.get(key, "")).strip()
-            if value:
-                parts.append(value)
-
-        why_others_wrong = raw_explanation.get("why_others_wrong")
-        if isinstance(why_others_wrong, dict):
-            wrong_parts = [
-                f"{letter}: {text}"
-                for letter, text in why_others_wrong.items()
-                if str(text).strip()
-            ]
-            if wrong_parts:
-                parts.append("Why the other options are not correct: " + " ".join(wrong_parts))
-
-        return _clean_inline_text(" ".join(parts))
-
-    return _clean_inline_text(str(raw_explanation or ""))
-
-
 def _option_text(option: str) -> str:
     return re.sub(r"^[ABCD][\.\)]\s*", "", str(option).strip(), flags=re.IGNORECASE)
 
@@ -427,7 +386,11 @@ def _looks_like_raw_chunk(option: str) -> bool:
     return False
 
 
-def _validate_question_quality(question: dict, options: list[str], explanation: str) -> None:
+def _validate_question_quality(
+    question: dict,
+    options: list[str],
+    avoid_questions: list[str] | None = None,
+) -> None:
     """
     Reject low-value model output before it reaches persistent quiz storage.
 
@@ -440,7 +403,6 @@ def _validate_question_quality(question: dict, options: list[str], explanation: 
         raise ValueError("Question is too short to be specific.")
     if any(re.search(pattern, lowered_question) for pattern in GENERIC_QUESTION_PATTERNS):
         raise ValueError(f"Question is too generic: {question_text}")
-
     option_bodies = [_option_text(option) for option in options]
     if len({body.lower() for body in option_bodies}) != 4:
         raise ValueError("Question options are not distinct.")
@@ -454,31 +416,37 @@ def _validate_question_quality(question: dict, options: list[str], explanation: 
         if _looks_like_raw_chunk(option):
             raise ValueError(f"Option looks like copied raw chunk text: {option[:80]}")
 
-    lowered_explanation = explanation.lower()
-    if len(explanation.split()) < 18:
-        raise ValueError("Explanation is too short.")
-    if "grounded in the selected lecture chunk" in lowered_explanation:
-        raise ValueError("Explanation is generic fallback text.")
+
+def _validate_difficulty_quality(question_text: str, difficulty: str) -> None:
+    """Reject obvious recall questions when a higher cognitive level was requested."""
+    lowered = question_text.lower().strip()
+    direct_recall_patterns = [
+        r"^(who|when)\b",
+        r"\bofficial announcement date\b",
+        r"^what (is|was) the (type|name|date|definition|syntax)\b",
+        r"^which of the following is (a )?(valid|correct)\b",
+        r"^which (of the following )?.*\bcharacteristic(s)? of\b",
+    ]
+    if difficulty in {"medium", "difficult"} and any(
+        re.search(pattern, lowered) for pattern in direct_recall_patterns
+    ):
+        raise ValueError(f"Question is direct recall and does not match {difficulty}: {question_text}")
+
+    if difficulty == "difficult" and len(question_text.split()) < 9:
+        raise ValueError(f"Difficult question is too shallow or underspecified: {question_text}")
 
 
 def _validate_quiz_batch(
     data: dict,
     document_id: str,
     num_questions: int,
-    difficulty: str,
-    chunks: list[dict],
     start_id: int,
+    avoid_questions: list[str] | None = None,
+    difficulty: str = "easy",
 ) -> list[dict]:
     questions = data.get("questions")
     if not isinstance(questions, list):
         raise ValueError("Quiz JSON does not contain a questions list.")
-
-    default_page = "Unknown page"
-    default_chunk = 0
-    if chunks:
-        default_metadata = chunks[0].get("metadata") or {}
-        default_page = str(default_metadata.get("page", default_page))
-        default_chunk = int(default_metadata.get("chunk", default_chunk))
 
     normalized_questions = []
     for offset, question in enumerate(questions[:num_questions]):
@@ -487,44 +455,33 @@ def _validate_quiz_batch(
             raise ValueError(f"Question {offset + 1} does not have exactly 4 options.")
 
         correct_answer = _normalize_correct_answer(question.get("correct_answer", ""), options)
-        source = question.get("source") or {}
-        page = str(source.get("page", default_page)).strip() or default_page
-        chunk_number = source.get("chunk", default_chunk)
-        try:
-            chunk_number = int(chunk_number)
-        except (TypeError, ValueError):
-            chunk_number = default_chunk
-
-        raw_difficulty = str(question.get("difficulty", difficulty)).lower().strip()
-        if raw_difficulty not in DIFFICULTY_ORDER:
-            raw_difficulty = difficulty
-
         normalized_questions.append(
             {
                 "id": start_id + offset,
                 "question": _clean_inline_text(question.get("question", "")),
                 "options": options,
                 "correct_answer": correct_answer,
-                "explanation": _normalize_explanation(question.get("explanation", "")),
-                "difficulty": raw_difficulty,
-                "source": {
-                    "title": document_id,
-                    "page": page,
-                    "chunk": chunk_number,
-                },
             }
         )
 
         _validate_question_quality(
             question=normalized_questions[-1],
             options=options,
-            explanation=normalized_questions[-1]["explanation"],
+            avoid_questions=(avoid_questions or []) + [
+                item["question"] for item in normalized_questions[:-1]
+            ],
         )
+        _validate_difficulty_quality(normalized_questions[-1]["question"], difficulty)
 
     if len(normalized_questions) != num_questions:
         raise ValueError(f"Expected {num_questions} questions, got {len(normalized_questions)}.")
 
     return normalized_questions
+
+
+def _quiz_output_budget(missing_count: int, attempt_index: int) -> int:
+    """Reserve enough output tokens to finish the JSON, with extra room on repair attempts."""
+    return max(500, missing_count * 220) + (attempt_index * 120)
 
 
 def _generate_quiz_batch(
@@ -533,45 +490,127 @@ def _generate_quiz_batch(
     difficulty: str,
     chunks: list[dict],
     start_id: int,
+    avoid_questions: list[str] | None = None,
 ) -> list[dict]:
-    llm = ChatOllama(
-        model=CHAT_MODEL,
-        temperature=0,
-        format="json",
-        num_predict=max(1200, num_questions * 260),
-    )
+    accepted_questions: list[dict] = []
+    generation_errors: list[str] = []
+    base_avoid_questions = list(avoid_questions or [])
 
-    try:
-        prompt = _build_prompt(document_id, num_questions, difficulty, chunks)
-        response = llm.invoke(prompt)
-        parsed = _extract_json(response.content)
-        return _validate_quiz_batch(parsed, document_id, num_questions, difficulty, chunks, start_id)
-    except Exception as first_error:
-        retry_prompt = _build_retry_prompt(document_id, num_questions, difficulty, chunks, first_error)
-        response = llm.invoke(retry_prompt)
-        try:
-            parsed = _extract_json(response.content)
-            return _validate_quiz_batch(parsed, document_id, num_questions, difficulty, chunks, start_id)
-        except Exception as retry_error:
+    for attempt_index in range(MAX_BATCH_GENERATION_ATTEMPTS):
+        missing_count = num_questions - len(accepted_questions)
+        if missing_count <= 0:
+            break
+
+        current_avoid_questions = base_avoid_questions + [
+            question["question"] for question in accepted_questions
+        ]
+        if attempt_index == 0:
+            prompt = _build_prompt(
+                document_id,
+                missing_count,
+                difficulty,
+                chunks,
+                current_avoid_questions,
+            )
+        else:
+            prompt = _build_retry_prompt(
+                document_id,
+                missing_count,
+                difficulty,
+                chunks,
+                ValueError("; ".join(generation_errors[-5:])),
+                current_avoid_questions,
+            )
+
+        # Truncated JSON cannot be partially parsed safely. Reserve enough room
+        # for every requested question and increase it after a malformed reply.
+        num_predict = _quiz_output_budget(missing_count, attempt_index)
+        estimated_required_tokens = math.ceil(len(prompt) / 3) + num_predict + 512
+        num_ctx = next(
+            (window for window in QUIZ_CONTEXT_WINDOWS if window >= estimated_required_tokens),
+            None,
+        )
+        if num_ctx is None:
             raise ValueError(
-                "Quiz generation failed quality validation after one retry. "
-                "No low-quality fallback quiz was saved. "
-                f"First error: {first_error}. Retry error: {retry_error}"
-            ) from retry_error
+                "The full lecture context is too large for the model's 32768-token context window. "
+                f"Estimated required tokens: {estimated_required_tokens}."
+            )
+
+        temperatures = (
+            {"easy": 0.1, "medium": 0.2, "difficult": 0.3},
+            {"easy": 0.45, "medium": 0.65, "difficult": 0.75},
+            {"easy": 0.6, "medium": 0.75, "difficult": 0.85},
+        )
+        llm = ChatOllama(
+            model=CHAT_MODEL,
+            temperature=temperatures[attempt_index][difficulty],
+            format="json",
+            num_ctx=num_ctx,
+            num_predict=num_predict,
+        )
+        print(
+            f"[quiz-llm] attempt={attempt_index + 1}, difficulty={difficulty}, "
+            f"missing_questions={missing_count}, chunks={len(chunks)}, "
+            f"num_ctx={num_ctx}, num_predict={num_predict}"
+        )
+
+        try:
+            response = llm.invoke(prompt)
+            done_reason = (getattr(response, "response_metadata", {}) or {}).get(
+                "done_reason", "unknown"
+            )
+            print(
+                f"[quiz-json] response_chars={len(str(response.content))}, "
+                f"done_reason={done_reason}"
+            )
+            parsed = _extract_json(response.content)
+            raw_questions = parsed.get("questions")
+            if not isinstance(raw_questions, list):
+                raise ValueError("Quiz JSON does not contain a questions list.")
+
+            for raw_question in raw_questions:
+                if len(accepted_questions) >= num_questions:
+                    break
+                try:
+                    normalized = _validate_quiz_batch(
+                        {"questions": [raw_question]},
+                        document_id,
+                        1,
+                        start_id + len(accepted_questions),
+                        base_avoid_questions + [
+                            question["question"] for question in accepted_questions
+                        ],
+                        difficulty,
+                    )[0]
+                    accepted_questions.append(normalized)
+                except Exception as question_error:
+                    generation_errors.append(str(question_error))
+                    print(f"[quiz-validation] discarded question: {question_error}")
+        except Exception as response_error:
+            generation_errors.append(str(response_error))
+            print(f"[quiz-validation] response rejected: {response_error}")
+
+    if len(accepted_questions) != num_questions:
+        raise ValueError(
+            f"Quiz generation produced {len(accepted_questions)}/{num_questions} valid questions "
+            f"after {MAX_BATCH_GENERATION_ATTEMPTS} attempts. "
+            f"Errors: {'; '.join(generation_errors[-5:])}"
+        )
+
+    return accepted_questions
 
 
-def _batch_plan(distribution: dict[str, int]) -> list[tuple[str, int]]:
+def _batch_plan(question_count: int) -> list[int]:
     plan = []
-    for difficulty in DIFFICULTY_ORDER:
-        remaining = distribution.get(difficulty, 0)
-        while remaining > 0:
-            batch_size = min(MAX_QUESTIONS_PER_BATCH, remaining)
-            plan.append((difficulty, batch_size))
-            remaining -= batch_size
+    remaining = question_count
+    while remaining > 0:
+        batch_size = min(MAX_QUESTIONS_PER_BATCH, remaining)
+        plan.append(batch_size)
+        remaining -= batch_size
     return plan
 
 
-def generate_quiz(document_id: str, regenerate: bool = False) -> dict:
+def generate_quiz(document_id: str, question_count: int, difficulty: str, regenerate: bool = False) -> dict:
     """
     Generate or load the persistent quiz for one indexed document.
 
@@ -582,107 +621,114 @@ def generate_quiz(document_id: str, regenerate: bool = False) -> dict:
     known_documents = _document_lookup()
     if document_id not in known_documents:
         raise ValueError("document_id was not found in indexed documents.")
+    if not 1 <= question_count <= 40:
+        raise ValueError("question_count must be between 1 and 40.")
+    difficulty = difficulty.lower().strip()
+    if difficulty not in QUIZ_DIFFICULTIES:
+        raise ValueError("difficulty must be easy, medium, or difficult.")
+    print(f"[quiz-service] difficulty={difficulty}")
+    cache_key = quiz_cache_key(document_id, difficulty)
 
     if not regenerate:
-        saved_quiz = get_quiz(document_id)
+        saved_quiz = get_quiz(document_id, difficulty)
         if saved_quiz:
+            print(f"[quiz-cache] key={cache_key} HIT")
             return saved_quiz
+        print(f"[quiz-cache] key={cache_key} MISS")
+    else:
+        print(f"[quiz-cache] key={cache_key} MISS (regenerate)")
 
     document = known_documents[document_id]
-    chunk_count = int(document.get("chunks", 0))
-    question_count = determine_question_count(chunk_count)
-    distribution = difficulty_distribution(question_count)
+    # Cross-level duplicates are temporarily accepted. Do not inject saved
+    # questions into the prompt or reject new questions by text similarity.
+    avoid_questions: list[str] = []
     chunks = get_document_chunks(document_id)
     if not chunks:
         raise ValueError("No chunks were found for the selected document.")
 
-    plan = _batch_plan(distribution)
+    plan = _batch_plan(question_count)
     questions = []
     next_id = 1
 
-    for batch_index, (difficulty, batch_size) in enumerate(plan):
-        context_chunks = _select_even_chunks(
-            chunks=chunks,
-            target_count=MAX_CHUNKS_PER_BATCH,
-            window_index=batch_index,
-            window_count=len(plan),
-        )
+    for batch_size in plan:
         batch_questions = _generate_quiz_batch(
             document_id=document_id,
             num_questions=batch_size,
             difficulty=difficulty,
-            chunks=context_chunks,
+            chunks=chunks,
             start_id=next_id,
+            avoid_questions=avoid_questions,
         )
         questions.extend(batch_questions)
+        avoid_questions.extend(question["question"] for question in batch_questions)
         next_id += len(batch_questions)
 
     quiz = {
+        "quiz_id": str(uuid4()),
         "document_id": document_id,
         "document_hash": document.get("hash", ""),
         "title": document.get("title", document_id),
+        "difficulty": difficulty,
         "question_count": len(questions),
-        "difficulty_distribution": distribution,
         "created_at": utc_now_iso(),
         "questions": questions,
     }
     if regenerate:
-        delete_document_attempts(document_id)
-    return save_quiz(document_id, quiz)
+        delete_document_attempts(document_id, difficulty)
+    print(f"[quiz-save] cache_key={cache_key}")
+    return save_quiz(document_id, difficulty, quiz)
 
 
-def load_quiz_with_attempt(document_id: str) -> dict:
+def load_quiz_with_attempt(document_id: str, difficulty: str) -> dict:
     """Return a saved quiz plus the latest attempt for the Practice page."""
     known_documents = _document_lookup()
     if document_id not in known_documents:
         raise ValueError("document_id was not found in indexed documents.")
+    if difficulty not in QUIZ_DIFFICULTIES:
+        raise ValueError("difficulty must be easy, medium, or difficult.")
 
     return {
         "document_id": document_id,
-        "quiz": get_quiz(document_id),
-        "latest_attempt": get_latest_attempt(document_id),
+        "difficulty": difficulty,
+        "quiz": get_quiz(document_id, difficulty),
+        "latest_attempt": get_latest_attempt(document_id, difficulty),
     }
 
 
 def list_quiz_statuses() -> list[dict]:
     """Return quiz/status information for every indexed document."""
-    quizzes = load_quizzes()
-    attempts = load_attempts()
     statuses = []
 
     for document in list_indexed_documents():
         document_id = document["id"]
-        quiz = quizzes.get(document_id)
-        latest_attempt = (attempts.get(document_id) or {}).get("latest_attempt")
-        status = "not_generated"
-        if quiz and latest_attempt:
-            status = "completed" if latest_attempt.get("completed") else "in_progress"
-        elif quiz:
-            status = "not_started"
+        document_quizzes = list_document_quizzes(document_id)
+        available_difficulties = [level for level in ["easy", "medium", "difficult"] if level in document_quizzes]
 
         statuses.append(
             {
                 "document_id": document_id,
                 "title": document["title"],
                 "chunks": document["chunks"],
-                "has_quiz": bool(quiz),
-                "question_count": int((quiz or {}).get("question_count", 0)),
-                "status": status,
-                "latest_attempt": latest_attempt,
+                "has_quiz": bool(available_difficulties),
+                "available_difficulties": available_difficulties,
+                "quizzes": {
+                    level: {"question_count": int(document_quizzes[level].get("question_count", 0))}
+                    for level in available_difficulties
+                },
             }
         )
 
     return statuses
 
 
-def submit_quiz_attempt(document_id: str, answers: dict) -> dict:
+def submit_quiz_attempt(document_id: str, difficulty: str, answers: dict) -> dict:
     """
     Score and persist a completed quiz submission.
 
     answers maps question id to the selected answer letter. The backend is the
     source of truth for scoring so frontend reloads and retakes stay consistent.
     """
-    quiz = get_quiz(document_id)
+    quiz = get_quiz(document_id, difficulty)
     if not quiz:
         raise ValueError("Quiz has not been generated for this document.")
 
@@ -713,13 +759,14 @@ def submit_quiz_attempt(document_id: str, answers: dict) -> dict:
     total = len(quiz.get("questions", []))
     attempt = {
         "document_id": document_id,
+        "difficulty": difficulty,
         "score": score,
         "total": total,
         "completed": True,
         "answers": normalized_answers,
         "question_results": question_results,
     }
-    saved_attempt = save_quiz_attempt(document_id, attempt)
+    saved_attempt = save_quiz_attempt(document_id, difficulty, attempt)
 
     return {
         "document_id": document_id,
@@ -729,3 +776,147 @@ def submit_quiz_attempt(document_id: str, answers: dict) -> dict:
         "submitted_at": saved_attempt["submitted_at"],
         "latest_attempt": saved_attempt,
     }
+
+
+def update_quiz_progress(
+    document_id: str,
+    difficulty: str,
+    question_id: int,
+    selected_answer: str,
+) -> dict:
+    """Check one answer and persist the learner's current progress immediately."""
+    difficulty = difficulty.lower().strip()
+    quiz = get_quiz(document_id, difficulty)
+    if not quiz:
+        raise ValueError("Quiz has not been generated for this document and difficulty.")
+    selected_answer = selected_answer.strip().upper()
+    if selected_answer not in OPTION_LETTERS:
+        raise ValueError("selected_answer must be A, B, C, or D.")
+
+    questions = quiz.get("questions", [])
+    target_question = next(
+        (question for question in questions if int(question.get("id")) == question_id),
+        None,
+    )
+    if not target_question:
+        raise ValueError("question_id was not found in this quiz.")
+
+    previous = get_latest_attempt(document_id, difficulty) or {}
+    answers = {str(key): value for key, value in (previous.get("answers") or {}).items()}
+    answers[str(question_id)] = selected_answer
+    results = []
+    score = 0
+    for question in questions:
+        current_id = str(question.get("id"))
+        if current_id not in answers:
+            continue
+        correct_answer = str(question.get("correct_answer", "")).upper()
+        is_correct = answers[current_id] == correct_answer
+        score += int(is_correct)
+        results.append(
+            {
+                "question_id": int(question.get("id")),
+                "question": question.get("question", ""),
+                "options": list(question.get("options", [])),
+                "selected_answer": answers[current_id],
+                "correct_answer": correct_answer,
+                "is_correct": is_correct,
+            }
+        )
+
+    total = len(questions)
+    now = utc_now_iso()
+    quiz_id = quiz.get("quiz_id") or (
+        f"{quiz_cache_key(document_id, difficulty)}::{quiz.get('created_at', 'legacy')}"
+    )
+    progress = {
+        "quiz_id": quiz_id,
+        "document_id": document_id,
+        "difficulty": difficulty,
+        "started_at": previous.get("started_at") or now,
+        "completed_at": now if len(results) == total else None,
+        "score": score,
+        "answered": len(results),
+        "total": total,
+        "completed": len(results) == total,
+        "answers": answers,
+        "question_results": results,
+    }
+    return save_quiz_progress(document_id, difficulty, progress)
+
+
+def list_completed_quiz_attempts(
+    document_id: str | None = None,
+    difficulty: str | None = None,
+) -> list[dict]:
+    """Return compact summaries for the Quiz History UI."""
+    summaries = []
+    for attempt in load_quiz_history(document_id, difficulty):
+        total = int(attempt.get("total", 0))
+        score = int(attempt.get("score", 0))
+        summaries.append(
+            {
+                "attempt_id": attempt.get("attempt_id"),
+                "quiz_id": attempt.get("quiz_id"),
+                "document_id": attempt.get("document_id"),
+                "difficulty": attempt.get("difficulty", "medium"),
+                "score": score,
+                "total": total,
+                "percentage": round((score / total) * 100) if total else 0,
+                "completed_at": attempt.get("completed_at") or attempt.get("submitted_at"),
+            }
+        )
+    return summaries
+
+
+def load_completed_quiz_attempt(attempt_id: str) -> dict:
+    """Return one completed attempt with question snapshots for review."""
+    attempt = get_quiz_history_attempt(attempt_id)
+    if not attempt:
+        raise ValueError("Quiz history attempt was not found.")
+    return attempt
+
+
+def clear_quiz_progress(document_id: str, difficulty: str) -> dict:
+    """Reset current answers for one saved quiz."""
+    if not get_quiz(document_id, difficulty):
+        raise ValueError("Quiz has not been generated for this document and difficulty.")
+    reset_quiz_progress(document_id, difficulty)
+    return {"document_id": document_id, "difficulty": difficulty, "reset": True}
+
+
+def explain_quiz_question(
+    document_id: str,
+    difficulty: str,
+    question_id: int,
+) -> dict:
+    """Return a cached or on-demand RAG explanation for one answered question."""
+    quiz = get_quiz(document_id, difficulty)
+    if not quiz:
+        raise ValueError("Quiz has not been generated for this document and difficulty.")
+    question = next(
+        (item for item in quiz.get("questions", []) if int(item.get("id")) == question_id),
+        None,
+    )
+    if not question:
+        raise ValueError("question_id was not found in this quiz.")
+    explanation_key = f"{quiz_cache_key(document_id, difficulty)}::{question_id}"
+    cached = get_quiz_explanation(explanation_key)
+    if cached:
+        return {**cached, "cache_hit": True}
+
+    result = explain_quiz_answer(
+        document_id=document_id,
+        question=question["question"],
+        options=question["options"],
+        correct_answer=question["correct_answer"],
+    )
+    saved = {
+        "document_id": document_id,
+        "difficulty": difficulty,
+        "question_id": question_id,
+        **result,
+        "created_at": utc_now_iso(),
+    }
+    save_quiz_explanation(explanation_key, saved)
+    return {**saved, "cache_hit": False}

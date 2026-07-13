@@ -3,18 +3,32 @@ from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.ingest import delete_indexed_file, index_files
 from backend.quiz_service import (
+    clear_quiz_progress,
+    explain_quiz_question,
     generate_quiz,
     list_indexed_documents,
+    list_completed_quiz_attempts,
     list_quiz_statuses,
     load_quiz_with_attempt,
+    load_completed_quiz_attempt,
     submit_quiz_attempt,
+    update_quiz_progress,
 )
 from backend.quiz_store import delete_document_quiz_data
-from backend.rag_service import answer_question, list_uploaded_sources
+from backend.conversation_store import (
+    create_conversation,
+    delete_conversation,
+    get_conversation,
+    list_conversations,
+    remove_source_from_conversations,
+    set_conversation_sources,
+    update_conversation_title,
+)
+from backend.rag_service import answer_conversation_message, answer_question, list_uploaded_sources
 from config import CHAT_MODEL, DATA_DIR
 
 
@@ -48,6 +62,23 @@ class ChatResponse(BaseModel):
     answer: str
     model: str
     citations: list[Citation]
+
+
+class ConversationCreateRequest(BaseModel):
+    title: str = "New conversation"
+    document_ids: list[str] = Field(default_factory=list)
+
+
+class ConversationUpdateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
+class ConversationSourcesRequest(BaseModel):
+    document_ids: list[str] = Field(default_factory=list)
+
+
+class ConversationMessageRequest(BaseModel):
+    message: str = Field(min_length=1)
 
 
 class HealthResponse(BaseModel):
@@ -110,18 +141,30 @@ class DocumentSummary(BaseModel):
 class QuizGenerateRequest(BaseModel):
     """Request body for POST /api/quiz/generate."""
     document_id: str
+    question_count: int = Field(ge=1, le=40)
+    difficulty: str = Field(pattern="^(easy|medium|difficult)$")
+
+
+class QuizRegenerateRequest(BaseModel):
+    """Request body for POST /api/quiz/{document_id}/regenerate."""
+    question_count: int = Field(ge=1, le=40)
+    difficulty: str = Field(pattern="^(easy|medium|difficult)$")
 
 
 class QuizSubmitRequest(BaseModel):
     """Request body for POST /api/quiz/{document_id}/submit."""
     answers: dict[str, str]
+    difficulty: str = Field(pattern="^(easy|medium|difficult)$")
 
 
-class QuizSource(BaseModel):
-    """Source metadata for one generated quiz question."""
-    title: str
-    page: str
-    chunk: Optional[int] = None
+class QuizProgressRequest(BaseModel):
+    difficulty: str = Field(pattern="^(easy|medium|difficult)$")
+    question_id: int = Field(ge=1)
+    selected_answer: str = Field(pattern="^[ABCDabcd]$")
+
+
+class QuizExplainRequest(BaseModel):
+    difficulty: str = Field(pattern="^(easy|medium|difficult)$")
 
 
 class QuizQuestion(BaseModel):
@@ -130,18 +173,16 @@ class QuizQuestion(BaseModel):
     question: str
     options: list[str]
     correct_answer: str
-    explanation: str
-    difficulty: str
-    source: QuizSource
 
 
 class QuizGenerateResponse(BaseModel):
     """Response body returned by POST /api/quiz/generate."""
     document_id: str
+    quiz_id: Optional[str] = None
     document_hash: Optional[str] = None
     title: Optional[str] = None
     question_count: int
-    difficulty_distribution: dict[str, int]
+    difficulty: str
     created_at: str
     questions: list[QuizQuestion]
 
@@ -273,6 +314,7 @@ def delete_source(document_id: str) -> DeleteSourceResponse:
     try:
         result = delete_indexed_file(document_id)
         delete_document_quiz_data(result["deleted"])
+        remove_source_from_conversations(result["deleted"])
         sources_result = [SourceSummary(**source) for source in list_uploaded_sources()]
 
         return DeleteSourceResponse(
@@ -324,11 +366,29 @@ def quizzes() -> list[dict]:
         ) from error
 
 
+@app.get("/api/quiz-history")
+def quiz_history(document_id: Optional[str] = None, difficulty: Optional[str] = None) -> list[dict]:
+    """List completed quiz attempts for the history UI."""
+    try:
+        return list_completed_quiz_attempts(document_id, difficulty)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Could not load quiz history: {error}") from error
+
+
+@app.get("/api/quiz-history/{attempt_id}")
+def quiz_history_detail(attempt_id: str) -> dict:
+    """Load one completed attempt with its question snapshots."""
+    try:
+        return load_completed_quiz_attempt(attempt_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
 @app.get("/api/quiz/{document_id}")
-def quiz_detail(document_id: str) -> dict:
+def quiz_detail(document_id: str, difficulty: str = "easy") -> dict:
     """Load the saved quiz and latest attempt for one document."""
     try:
-        return load_quiz_with_attempt(document_id)
+        return load_quiz_with_attempt(document_id, difficulty)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except Exception as error:
@@ -351,7 +411,15 @@ def quiz_generate(request: QuizGenerateRequest) -> QuizGenerateResponse:
         raise HTTPException(status_code=400, detail="document_id is required.")
 
     try:
-        result = generate_quiz(document_id=request.document_id)
+        print(
+            f"[quiz-api] document_id={request.document_id}, "
+            f"question_count={request.question_count}, difficulty={request.difficulty}"
+        )
+        result = generate_quiz(
+            document_id=request.document_id,
+            question_count=request.question_count,
+            difficulty=request.difficulty,
+        )
         return QuizGenerateResponse(**result)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -370,7 +438,11 @@ def quiz_generate(request: QuizGenerateRequest) -> QuizGenerateResponse:
 def quiz_submit(document_id: str, request: QuizSubmitRequest) -> dict:
     """Score, save, and return the latest attempt for one generated quiz."""
     try:
-        return submit_quiz_attempt(document_id=document_id, answers=request.answers)
+        return submit_quiz_attempt(
+            document_id=document_id,
+            difficulty=request.difficulty,
+            answers=request.answers,
+        )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:
@@ -380,8 +452,48 @@ def quiz_submit(document_id: str, request: QuizSubmitRequest) -> dict:
         ) from error
 
 
+@app.patch("/api/quiz/{document_id}/progress")
+def quiz_progress(document_id: str, request: QuizProgressRequest) -> dict:
+    """Check one selected answer and autosave current quiz progress."""
+    try:
+        return update_quiz_progress(
+            document_id=document_id,
+            difficulty=request.difficulty,
+            question_id=request.question_id,
+            selected_answer=request.selected_answer,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Could not save quiz progress: {error}") from error
+
+
+@app.delete("/api/quiz/{document_id}/progress")
+def quiz_progress_reset(document_id: str, difficulty: str) -> dict:
+    """Clear current quiz progress while preserving completed history."""
+    try:
+        return clear_quiz_progress(document_id, difficulty)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/quiz/{document_id}/questions/{question_id}/explain")
+def quiz_explain(document_id: str, question_id: int, request: QuizExplainRequest) -> dict:
+    """Generate a short, document-grounded explanation on demand."""
+    try:
+        return explain_quiz_question(
+            document_id=document_id,
+            difficulty=request.difficulty,
+            question_id=question_id,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Could not explain quiz answer: {error}") from error
+
+
 @app.post("/api/quiz/{document_id}/regenerate", response_model=QuizGenerateResponse)
-def quiz_regenerate(document_id: str) -> QuizGenerateResponse:
+def quiz_regenerate(document_id: str, request: QuizRegenerateRequest) -> QuizGenerateResponse:
     """
     Intentionally replace a saved quiz for one document.
 
@@ -389,7 +501,12 @@ def quiz_regenerate(document_id: str) -> QuizGenerateResponse:
     old answers are not shown against a new question set.
     """
     try:
-        result = generate_quiz(document_id=document_id, regenerate=True)
+        result = generate_quiz(
+            document_id=document_id,
+            question_count=request.question_count,
+            difficulty=request.difficulty,
+            regenerate=True,
+        )
         return QuizGenerateResponse(**result)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -425,4 +542,74 @@ def chat(request: ChatRequest) -> ChatResponse:
                 "the configured models are pulled, and the Chroma vectorstore has data. "
                 f"Original error: {error}"
             ),
+        ) from error
+
+
+def _validate_conversation_document_ids(document_ids: list[str]) -> None:
+    available = {source["title"] for source in list_uploaded_sources()}
+    missing = sorted(set(document_ids) - available)
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"These documents are not indexed: {', '.join(missing)}",
+        )
+
+
+@app.post("/api/conversations")
+def conversation_create(request: ConversationCreateRequest) -> dict:
+    _validate_conversation_document_ids(request.document_ids)
+    return create_conversation(request.title, request.document_ids)
+
+
+@app.get("/api/conversations")
+def conversation_list() -> list[dict]:
+    return list_conversations()
+
+
+@app.get("/api/conversations/{conversation_id}")
+def conversation_get(conversation_id: str) -> dict:
+    try:
+        return get_conversation(conversation_id, include_messages=True)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.patch("/api/conversations/{conversation_id}")
+def conversation_update(conversation_id: str, request: ConversationUpdateRequest) -> dict:
+    try:
+        return update_conversation_title(conversation_id, request.title)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.delete("/api/conversations/{conversation_id}")
+def conversation_delete(conversation_id: str) -> dict[str, str]:
+    try:
+        delete_conversation(conversation_id)
+        return {"deleted": conversation_id}
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.put("/api/conversations/{conversation_id}/sources")
+def conversation_sources_update(conversation_id: str, request: ConversationSourcesRequest) -> dict:
+    _validate_conversation_document_ids(request.document_ids)
+    try:
+        return set_conversation_sources(conversation_id, request.document_ids)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.post("/api/conversations/{conversation_id}/messages")
+def conversation_message(conversation_id: str, request: ConversationMessageRequest) -> dict:
+    if not request.message.strip():
+        raise HTTPException(status_code=400, detail="Message is required.")
+    try:
+        return answer_conversation_message(conversation_id, request.message)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not answer this conversation. Original error: {error}",
         ) from error

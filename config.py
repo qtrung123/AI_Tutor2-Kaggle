@@ -9,6 +9,8 @@ QUIZ_PROMPT_PATH = BASE_DIR / "prompts" / "quiz_prompt.txt"
 INDEXED_FILES_PATH = BASE_DIR / "indexed_files.json"
 GENERATED_QUIZZES_PATH = DATA_DIR / "generated_quizzes.json"
 QUIZ_ATTEMPTS_PATH = DATA_DIR / "quiz_attempts.json"
+QUIZ_EXPLANATIONS_PATH = DATA_DIR / "quiz_explanations.json"
+CONVERSATIONS_DB_PATH = DATA_DIR / "conversations.db"
 
 COLLECTION_NAME = "study_documents"
 

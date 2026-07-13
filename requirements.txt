@@ -1,4 +1,5 @@
 fastapi
+httpx
 uvicorn
 python-multipart
 langchain

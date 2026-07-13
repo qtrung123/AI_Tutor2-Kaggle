@@ -1,11 +1,13 @@
 const pageTitles = {
   overview: "Good afternoon, Thuan",
   tutor: "Learn with your AI tutor",
+  materials: "Course Materials",
   practice: "Practice",
   plan: "Study Plan"
 };
 
 const CHAT_API_URL = "http://127.0.0.1:8000/api/chat";
+const CONVERSATIONS_API_URL = "http://127.0.0.1:8000/api/conversations";
 const SOURCES_API_URL = "http://127.0.0.1:8000/api/sources";
 const UPLOAD_API_URL = "http://127.0.0.1:8000/api/sources/upload";
 const DELETE_SOURCE_API_URL = "http://127.0.0.1:8000/api/sources";
@@ -13,6 +15,7 @@ const DOCUMENTS_API_URL = "http://127.0.0.1:8000/api/documents";
 const QUIZZES_API_URL = "http://127.0.0.1:8000/api/quizzes";
 const QUIZ_API_BASE_URL = "http://127.0.0.1:8000/api/quiz";
 const QUIZ_GENERATE_API_URL = "http://127.0.0.1:8000/api/quiz/generate";
+const QUIZ_HISTORY_API_URL = "http://127.0.0.1:8000/api/quiz-history";
 
 const initialState = {
   page: "overview",
@@ -29,6 +32,10 @@ let quizStatuses = [];
 let currentQuiz = null;
 let quizAnswers = {};
 let currentAttempt = null;
+let quizExplanations = {};
+let quizHistory = [];
+let conversations = [];
+let activeConversation = null;
 
 const navItems = document.querySelectorAll(".nav-item");
 const views = document.querySelectorAll(".view");
@@ -46,10 +53,11 @@ const sourceFileInput = document.getElementById("source-file-input");
 const uploadSourceButton = document.getElementById("upload-source-button");
 const uploadStatus = document.getElementById("upload-status");
 const quizDocumentSelect = document.getElementById("quiz-document-select");
+const quizQuestionCountSelect = document.getElementById("quiz-question-count-select");
+const quizDifficultySelect = document.getElementById("quiz-difficulty-select");
 const generateQuizButton = document.getElementById("generate-quiz-button");
 const resetQuizButton = document.getElementById("reset-quiz-button");
 const newQuizButton = document.getElementById("new-quiz-button");
-const submitQuizButton = document.getElementById("submit-quiz-button");
 const selectedDocumentLabel = document.getElementById("selected-document-label");
 const quizStatusLabel = document.getElementById("quiz-status-label");
 const quizQuestionCountLabel = document.getElementById("quiz-question-count-label");
@@ -58,6 +66,20 @@ const quizAccuracyLabel = document.getElementById("quiz-accuracy-label");
 const assessmentLoading = document.getElementById("assessment-loading");
 const quizList = document.getElementById("quiz-list");
 const assessmentTitle = document.getElementById("assessment-title");
+const quizHistoryList = document.getElementById("quiz-history-list");
+const quizHistoryDetail = document.getElementById("quiz-history-detail");
+const refreshQuizHistoryButton = document.getElementById("refresh-quiz-history-button");
+const conversationList = document.getElementById("conversation-list");
+const newConversationButton = document.getElementById("new-conversation-button");
+const conversationSourceList = document.getElementById("conversation-source-list");
+const applyConversationSourcesButton = document.getElementById("apply-conversation-sources-button");
+const chatConversationTitle = document.getElementById("chat-conversation-title");
+const chatSourceSummary = document.getElementById("chat-source-summary");
+const tutorLayout = document.querySelector(".tutor-layout");
+const toggleConversationSourcesButton = document.getElementById("toggle-conversation-sources-button");
+const closeConversationSourcesButton = document.getElementById("close-conversation-sources-button");
+const sourcesDrawerBackdrop = document.getElementById("sources-drawer-backdrop");
+const conversationSourcesPanel = document.getElementById("conversation-sources-panel");
 
 function showToast(message) {
   toast.textContent = message;
@@ -67,6 +89,7 @@ function showToast(message) {
 }
 
 function setPage(page) {
+  if (page !== "tutor") closeSourcesDrawer();
   state.page = page;
   document.body.dataset.page = page;
   navItems.forEach((item) => item.classList.toggle("active", item.dataset.page === page));
@@ -75,10 +98,24 @@ function setPage(page) {
   showToast(`Opened ${pageTitles[page]}`);
 }
 
+function setSourcesDrawerOpen(isOpen) {
+  tutorLayout.classList.toggle("sources-open", isOpen);
+  toggleConversationSourcesButton.setAttribute("aria-expanded", String(isOpen));
+  conversationSourcesPanel.setAttribute("aria-hidden", String(!isOpen));
+  if (isOpen) {
+    renderConversationSources();
+    closeConversationSourcesButton.focus();
+  }
+}
+
+function closeSourcesDrawer() {
+  setSourcesDrawerOpen(false);
+}
+
 function updateConfidence(value) {
   state.confidence = Math.max(0, Math.min(100, value));
-  confidenceLabel.textContent = `${state.confidence}%`;
-  confidenceBar.style.width = `${state.confidence}%`;
+  if (confidenceLabel) confidenceLabel.textContent = `${state.confidence}%`;
+  if (confidenceBar) confidenceBar.style.width = `${state.confidence}%`;
   confidencePill.textContent = Math.max(1, Math.round(state.confidence / 20));
 }
 
@@ -159,6 +196,29 @@ function addMessage(text, type, isLoading = false) {
 
   messageList.scrollTop = messageList.scrollHeight;
   return message;
+}
+
+function appendMessageMeta(messageElement, status, citations = []) {
+  const bubble = messageElement.classList?.contains("agent-row")
+    ? messageElement.querySelector(".message")
+    : messageElement;
+  if (!bubble || (!status && !citations.length)) return;
+
+  const meta = document.createElement("div");
+  meta.className = "message-grounding";
+  if (status) {
+    const badge = document.createElement("span");
+    badge.className = `grounding-badge ${status}`;
+    badge.textContent = status === "supported" ? "Grounded" : "Insufficient context";
+    meta.appendChild(badge);
+  }
+  citations.forEach((citation) => {
+    const cite = document.createElement("span");
+    const title = citation.title || citation.document_id || "Unknown source";
+    cite.textContent = `${title} · p.${citation.page || "?"}`;
+    meta.appendChild(cite);
+  });
+  bubble.appendChild(meta);
 }
 
 function renderSources(sources, mode = "uploaded") {
@@ -261,6 +321,7 @@ async function deleteUploadedSource(source, button) {
     const data = await response.json();
     uploadedSources = data.sources || [];
     renderSources(uploadedSources, "uploaded");
+    renderConversationSources();
     await loadIndexedDocuments();
 
     if (currentQuiz?.document_id === data.deleted) {
@@ -289,15 +350,16 @@ function getFallbackAnswer() {
 }
 
 async function requestTutorAnswer(userText) {
-  const response = await fetch(CHAT_API_URL, {
+  if (!activeConversation?.id) {
+    throw new Error("Create or select a conversation first.");
+  }
+  const response = await fetch(`${CONVERSATIONS_API_URL}/${activeConversation.id}/messages`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      message: userText,
-      course: "Net-centric Computing",
-      topic: "Course materials"
+      message: userText
     })
   });
 
@@ -313,6 +375,169 @@ async function requestTutorAnswer(userText) {
   }
 
   return response.json();
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    let detail = `Request returned ${response.status}`;
+    try {
+      detail = (await response.json()).detail || detail;
+    } catch (error) {
+      // Keep the HTTP status for non-JSON responses.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+function renderConversationSources() {
+  conversationSourceList.innerHTML = "";
+  if (!uploadedSources.length) {
+    conversationSourceList.innerHTML = '<p class="muted">No materials yet. Open Materials to upload one.</p>';
+    return;
+  }
+  const selected = new Set(activeConversation?.document_ids || []);
+  uploadedSources.forEach((source) => {
+    const label = document.createElement("label");
+    label.className = "conversation-source-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = source.title;
+    checkbox.checked = selected.has(source.title);
+    const text = document.createElement("span");
+    text.innerHTML = `<strong></strong><small></small>`;
+    text.querySelector("strong").textContent = source.title;
+    text.querySelector("small").textContent = `${source.chunks} chunks`;
+    label.append(checkbox, text);
+    conversationSourceList.appendChild(label);
+  });
+}
+
+function renderConversationList() {
+  conversationList.innerHTML = "";
+  if (!conversations.length) {
+    conversationList.innerHTML = '<p class="muted">No conversations yet.</p>';
+    return;
+  }
+  conversations.forEach((conversation) => {
+    const row = document.createElement("div");
+    row.className = `conversation-item ${conversation.id === activeConversation?.id ? "active" : ""}`;
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "conversation-open-button";
+    const title = document.createElement("strong");
+    title.textContent = conversation.title;
+    const meta = document.createElement("span");
+    meta.textContent = `${conversation.document_ids?.length || 0} source(s)`;
+    openButton.append(title, meta);
+    openButton.addEventListener("click", () => openConversation(conversation.id));
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "conversation-delete-button";
+    deleteButton.textContent = "×";
+    deleteButton.title = "Delete conversation";
+    deleteButton.addEventListener("click", () => deleteChatConversation(conversation.id));
+    row.append(openButton, deleteButton);
+    conversationList.appendChild(row);
+  });
+}
+
+function renderConversationMessages() {
+  messageList.innerHTML = "";
+  const messages = activeConversation?.messages || [];
+  if (!messages.length) {
+    addMessage("Ask a question about the selected materials. This conversation and its answers will be saved automatically.", "tutor");
+    return;
+  }
+  messages.forEach((message) => {
+    const element = addMessage(message.content, message.role === "user" ? "user" : "tutor");
+    if (message.role === "assistant") {
+      appendMessageMeta(element, message.grounding_status, message.citations || []);
+    }
+  });
+}
+
+function updateConversationHeader() {
+  chatConversationTitle.textContent = activeConversation?.title || "New conversation";
+  const count = activeConversation?.document_ids?.length || 0;
+  chatSourceSummary.textContent = count ? `Grounded in ${count} selected document(s)` : "No source selected";
+  toggleConversationSourcesButton.textContent = count ? `Sources (${count})` : "Choose sources";
+}
+
+async function openConversation(conversationId) {
+  try {
+    activeConversation = await fetchJson(`${CONVERSATIONS_API_URL}/${conversationId}`);
+    localStorage.setItem("activeConversationId", conversationId);
+    renderConversationList();
+    renderConversationSources();
+    renderConversationMessages();
+    updateConversationHeader();
+  } catch (error) {
+    showToast(error.message || "Could not open conversation");
+  }
+}
+
+async function createChatConversation() {
+  try {
+    const documentIds = uploadedSources.map((source) => source.title);
+    const created = await fetchJson(CONVERSATIONS_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "New conversation", document_ids: documentIds })
+    });
+    conversations.unshift(created);
+    await openConversation(created.id);
+    showToast("New conversation created");
+  } catch (error) {
+    showToast(error.message || "Could not create conversation");
+  }
+}
+
+async function deleteChatConversation(conversationId) {
+  try {
+    await fetchJson(`${CONVERSATIONS_API_URL}/${conversationId}`, { method: "DELETE" });
+    conversations = conversations.filter((item) => item.id !== conversationId);
+    if (activeConversation?.id === conversationId) {
+      activeConversation = null;
+      if (conversations.length) await openConversation(conversations[0].id);
+      else await createChatConversation();
+    }
+    renderConversationList();
+  } catch (error) {
+    showToast(error.message || "Could not delete conversation");
+  }
+}
+
+async function loadConversations() {
+  conversations = await fetchJson(CONVERSATIONS_API_URL);
+  if (!conversations.length) {
+    await createChatConversation();
+    return;
+  }
+  const savedId = localStorage.getItem("activeConversationId");
+  const initial = conversations.some((item) => item.id === savedId) ? savedId : conversations[0].id;
+  await openConversation(initial);
+}
+
+async function applyConversationSources() {
+  if (!activeConversation?.id) return;
+  const documentIds = Array.from(conversationSourceList.querySelectorAll("input:checked"), (input) => input.value);
+  try {
+    activeConversation = await fetchJson(`${CONVERSATIONS_API_URL}/${activeConversation.id}/sources`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document_ids: documentIds })
+    });
+    conversations = await fetchJson(CONVERSATIONS_API_URL);
+    renderConversationList();
+    renderConversationSources();
+    updateConversationHeader();
+    closeSourcesDrawer();
+    showToast("Conversation sources updated");
+  } catch (error) {
+    showToast(error.message || "Could not update sources");
+  }
 }
 
 async function handleChatSubmit(event) {
@@ -332,23 +557,17 @@ async function handleChatSubmit(event) {
   try {
     const data = await requestTutorAnswer(userText);
     loadingRow.remove();
-    addMessage(formatBackendAnswer(data), "tutor");
-    renderSources(data.citations || [], "citations");
+    const answerElement = addMessage(formatBackendAnswer(data), "tutor");
+    appendMessageMeta(answerElement, data.grounding_status, data.citations || []);
+    activeConversation.messages = [...(activeConversation.messages || []), data.user_message, data.assistant_message];
+    conversations = await fetchJson(CONVERSATIONS_API_URL);
+    activeConversation.title = conversations.find((item) => item.id === activeConversation.id)?.title || activeConversation.title;
+    renderConversationList();
+    updateConversationHeader();
   } catch (error) {
     loadingRow.remove();
     const detail = error.message || "Backend request failed.";
     addMessage(`I could not reach the RAG answer right now.\n\n${detail}\n\nCheck that FastAPI is running with the project virtual environment and Ollama is still running.`, "tutor");
-    renderSources(
-      [
-        {
-          sourceId: 1,
-          title: "RAG request failed",
-          page: "N/A",
-          content: detail
-        }
-      ],
-      "citations"
-    );
     showToast("RAG request failed");
   } finally {
     chatInput.disabled = false;
@@ -370,6 +589,7 @@ async function loadUploadedSources() {
 
     uploadedSources = await response.json();
     renderSources(uploadedSources, "uploaded");
+    renderConversationSources();
   } catch (error) {
     renderSources(
       [
@@ -415,6 +635,7 @@ async function uploadSourceFiles(files) {
     const data = await response.json();
     uploadedSources = data.sources || [];
     renderSources(uploadedSources, "uploaded");
+    renderConversationSources();
     await loadIndexedDocuments();
 
     uploadStatus.textContent = `${data.new_files} new file(s), ${data.new_chunks} new chunk(s) indexed`;
@@ -436,21 +657,19 @@ function updateAssessmentSummary() {
   const answered = Object.values(quizAnswers).filter(Boolean).length;
   const score = currentAttempt?.score ?? 0;
   const attemptTotal = currentAttempt?.total ?? total;
-  const accuracy = currentAttempt?.completed && attemptTotal ? Math.round((score / attemptTotal) * 100) : 0;
+  const accuracy = answered ? Math.round((score / answered) * 100) : 0;
   const status = getSelectedQuizStatus();
 
   selectedDocumentLabel.textContent = selectedDocument;
   quizStatusLabel.textContent = formatQuizStatus(status);
-  quizQuestionCountLabel.textContent = total ? `${total} questions: easy, medium, hard` : "Auto-sized assessment";
-  quizProgressLabel.textContent = currentAttempt?.completed ? `${score} / ${attemptTotal}` : `${answered} / ${total}`;
-  quizAccuracyLabel.textContent = currentAttempt?.completed ? `Accuracy ${accuracy}%` : "Not submitted";
+  const requestedCount = Number(quizQuestionCountSelect?.value || 10);
+  quizQuestionCountLabel.textContent = total ? `${total} multiple-choice questions` : `${requestedCount}-question assessment`;
+  quizProgressLabel.textContent = `${answered} / ${total}`;
+  quizAccuracyLabel.textContent = answered ? `Score ${score}/${answered} · Accuracy ${accuracy}%` : "Not started";
 
   const hasQuiz = Boolean(currentQuiz?.questions?.length);
   if (generateQuizButton) {
     generateQuizButton.textContent = hasQuiz ? (currentAttempt?.completed ? "Review Quiz" : "Start Quiz") : "Generate Quiz";
-  }
-  if (submitQuizButton) {
-    submitQuizButton.disabled = !hasQuiz || Boolean(currentAttempt?.completed) || answered !== total;
   }
   if (resetQuizButton) {
     resetQuizButton.disabled = !hasQuiz;
@@ -465,14 +684,34 @@ function getSelectedQuizStatus() {
   return quizStatuses.find((item) => item.document_id === documentId);
 }
 
+function selectedDifficulty() {
+  return quizDifficultySelect?.value || "easy";
+}
+
+function currentQuizKey() {
+  return `${quizDocumentSelect?.value || ""}::${selectedDifficulty()}`;
+}
+
+function updateDifficultyOptions() {
+  if (!quizDifficultySelect) {
+    return;
+  }
+  const savedLevels = getSelectedQuizStatus()?.available_difficulties || [];
+  Array.from(quizDifficultySelect.options).forEach((option) => {
+    const label = option.value.charAt(0).toUpperCase() + option.value.slice(1);
+    option.textContent = savedLevels.includes(option.value) ? `${label} (saved)` : label;
+  });
+}
+
 function formatQuizStatus(status) {
-  if (!status?.has_quiz && !currentQuiz) {
+  const levelIsSaved = status?.available_difficulties?.includes(selectedDifficulty());
+  if (!levelIsSaved && !currentQuiz) {
     return "Not generated";
   }
-  if (currentAttempt?.completed || status?.status === "completed") {
+  if (currentAttempt?.completed) {
     return "Completed";
   }
-  if (currentQuiz || status?.has_quiz) {
+  if (currentQuiz || levelIsSaved) {
     return "Ready";
   }
   return "Not generated";
@@ -518,7 +757,8 @@ async function loadIndexedDocuments() {
       const option = document.createElement("option");
       option.value = documentItem.id;
       const status = quizStatuses.find((item) => item.document_id === documentItem.id);
-      const quizLabel = status?.has_quiz ? `quiz ready, ${status.question_count} questions` : "no quiz yet";
+      const levels = status?.available_difficulties || [];
+      const quizLabel = levels.length ? `saved: ${levels.join(", ")}` : "no quiz yet";
       option.textContent = `${documentItem.title} (${documentItem.chunks} chunks, ${quizLabel})`;
       quizDocumentSelect.appendChild(option);
     });
@@ -540,7 +780,6 @@ function setAssessmentLoading(isLoading) {
   generateQuizButton.disabled = isLoading;
   newQuizButton.disabled = isLoading;
   resetQuizButton.disabled = isLoading;
-  submitQuizButton.disabled = isLoading;
 }
 
 async function requestGeneratedQuiz() {
@@ -550,7 +789,9 @@ async function requestGeneratedQuiz() {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      document_id: quizDocumentSelect.value
+      document_id: quizDocumentSelect.value,
+      question_count: Number(quizQuestionCountSelect.value),
+      difficulty: selectedDifficulty()
     })
   });
 
@@ -569,7 +810,8 @@ async function requestGeneratedQuiz() {
 }
 
 async function requestQuizDetail(documentId) {
-  const response = await fetch(`${QUIZ_API_BASE_URL}/${encodeURIComponent(documentId)}`);
+  const query = new URLSearchParams({ difficulty: selectedDifficulty() });
+  const response = await fetch(`${QUIZ_API_BASE_URL}/${encodeURIComponent(documentId)}?${query}`);
   if (!response.ok) {
     let detail = `Quiz detail API returned ${response.status}`;
     try {
@@ -585,7 +827,14 @@ async function requestQuizDetail(documentId) {
 
 async function requestQuizRegeneration(documentId) {
   const response = await fetch(`${QUIZ_API_BASE_URL}/${encodeURIComponent(documentId)}/regenerate`, {
-    method: "POST"
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      question_count: Number(quizQuestionCountSelect.value),
+      difficulty: selectedDifficulty()
+    })
   });
   if (!response.ok) {
     let detail = `Regenerate API returned ${response.status}`;
@@ -600,19 +849,21 @@ async function requestQuizRegeneration(documentId) {
   return response.json();
 }
 
-async function requestQuizSubmit() {
-  const response = await fetch(`${QUIZ_API_BASE_URL}/${encodeURIComponent(currentQuiz.document_id)}/submit`, {
-    method: "POST",
+async function requestQuizProgress(questionId, selectedAnswer) {
+  const response = await fetch(`${QUIZ_API_BASE_URL}/${encodeURIComponent(currentQuiz.document_id)}/progress`, {
+    method: "PATCH",
     headers: {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      answers: quizAnswers
+      difficulty: currentQuiz.difficulty,
+      question_id: questionId,
+      selected_answer: selectedAnswer
     })
   });
 
   if (!response.ok) {
-    let detail = `Submit API returned ${response.status}`;
+    let detail = `Progress API returned ${response.status}`;
     try {
       const errorData = await response.json();
       detail = errorData.detail || detail;
@@ -624,28 +875,176 @@ async function requestQuizSubmit() {
   return response.json();
 }
 
+async function requestQuizProgressReset() {
+  const query = new URLSearchParams({ difficulty: currentQuiz.difficulty });
+  const response = await fetch(
+    `${QUIZ_API_BASE_URL}/${encodeURIComponent(currentQuiz.document_id)}/progress?${query}`,
+    { method: "DELETE" }
+  );
+  if (!response.ok) {
+    throw new Error(`Reset progress API returned ${response.status}`);
+  }
+  return response.json();
+}
+
+async function requestQuizExplanation(questionId) {
+  const response = await fetch(
+    `${QUIZ_API_BASE_URL}/${encodeURIComponent(currentQuiz.document_id)}/questions/${questionId}/explain`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        difficulty: currentQuiz.difficulty
+      })
+    }
+  );
+  if (!response.ok) {
+    let detail = `Explain API returned ${response.status}`;
+    try {
+      const errorData = await response.json();
+      detail = errorData.detail || detail;
+    } catch (error) {
+      // Keep the status message when the backend response is not JSON.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+async function loadQuizHistory() {
+  try {
+    const response = await fetch(QUIZ_HISTORY_API_URL);
+    if (!response.ok) {
+      throw new Error(`Quiz history API returned ${response.status}`);
+    }
+    quizHistory = await response.json();
+  } catch (error) {
+    quizHistory = [];
+  }
+  renderQuizHistory();
+}
+
+async function requestQuizHistoryDetail(attemptId) {
+  const response = await fetch(`${QUIZ_HISTORY_API_URL}/${encodeURIComponent(attemptId)}`);
+  if (!response.ok) {
+    throw new Error(`Quiz history detail API returned ${response.status}`);
+  }
+  return response.json();
+}
+
+function renderQuizHistory() {
+  if (!quizHistoryList) {
+    return;
+  }
+  quizHistoryList.innerHTML = "";
+  if (!quizHistory.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No completed quizzes yet.";
+    quizHistoryList.appendChild(empty);
+    return;
+  }
+
+  quizHistory.forEach((attempt) => {
+    const card = document.createElement("article");
+    card.className = "quiz-history-card";
+    const info = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = `${attempt.document_id} · ${attempt.difficulty}`;
+    const date = document.createElement("small");
+    date.textContent = attempt.completed_at
+      ? new Date(attempt.completed_at).toLocaleString()
+      : "Completion time unavailable";
+    info.append(title, date);
+
+    const score = document.createElement("div");
+    score.className = "quiz-history-score";
+    score.innerHTML = `<strong>${attempt.score}/${attempt.total}</strong><span>${attempt.percentage}%</span>`;
+    const review = document.createElement("button");
+    review.className = "text-button";
+    review.type = "button";
+    review.textContent = "Review";
+    review.addEventListener("click", () => showQuizHistoryDetail(attempt.attempt_id));
+    card.append(info, score, review);
+    quizHistoryList.appendChild(card);
+  });
+}
+
+async function showQuizHistoryDetail(attemptId) {
+  quizHistoryDetail.hidden = false;
+  quizHistoryDetail.textContent = "Loading attempt...";
+  try {
+    const attempt = await requestQuizHistoryDetail(attemptId);
+    quizHistoryDetail.innerHTML = "";
+    const heading = document.createElement("div");
+    heading.className = "quiz-history-detail-heading";
+    const title = document.createElement("h3");
+    title.textContent = `${attempt.document_id} · ${attempt.difficulty} · ${attempt.score}/${attempt.total}`;
+    const close = document.createElement("button");
+    close.className = "text-button";
+    close.type = "button";
+    close.textContent = "Close Review";
+    close.addEventListener("click", () => { quizHistoryDetail.hidden = true; });
+    heading.append(title, close);
+    quizHistoryDetail.appendChild(heading);
+
+    (attempt.question_results || []).forEach((result) => {
+      const item = document.createElement("article");
+      item.className = `quiz-history-question ${result.is_correct ? "correct" : "incorrect"}`;
+      const question = document.createElement("strong");
+      question.textContent = result.question || `Question ${result.question_id}`;
+      const answer = document.createElement("p");
+      answer.textContent = `Your answer: ${result.selected_answer} · Correct answer: ${result.correct_answer}`;
+      item.append(question, answer);
+      quizHistoryDetail.appendChild(item);
+    });
+  } catch (error) {
+    quizHistoryDetail.textContent = error.message || "Could not load this attempt.";
+  }
+}
+
 async function loadSelectedQuiz() {
   const documentId = quizDocumentSelect?.value;
+  const requestedQuizKey = currentQuizKey();
+  updateDifficultyOptions();
   if (!documentId) {
     currentQuiz = null;
     currentAttempt = null;
     quizAnswers = {};
+    quizExplanations = {};
     renderAssessmentQuiz();
     return;
   }
 
   try {
     const detail = await requestQuizDetail(documentId);
+    if (requestedQuizKey !== currentQuizKey()) {
+      return;
+    }
     currentQuiz = detail.quiz || null;
     currentAttempt = detail.latest_attempt || null;
+    quizExplanations = {};
+    if (currentQuiz?.question_count && quizQuestionCountSelect) {
+      quizQuestionCountSelect.value = String(currentQuiz.question_count);
+    }
     quizAnswers = currentAttempt?.answers ? { ...currentAttempt.answers } : {};
     renderAssessmentQuiz();
   } catch (error) {
     currentQuiz = null;
     currentAttempt = null;
     quizAnswers = {};
+    quizExplanations = {};
     renderAssessmentQuiz();
   }
+}
+
+async function handleQuizDifficultyChange() {
+  currentQuiz = null;
+  currentAttempt = null;
+  quizAnswers = {};
+  quizExplanations = {};
+  renderAssessmentQuiz();
+  await loadSelectedQuiz();
 }
 
 async function generateAssessmentQuiz() {
@@ -668,7 +1067,9 @@ async function generateAssessmentQuiz() {
     currentQuiz = await requestGeneratedQuiz();
     currentAttempt = null;
     quizAnswers = {};
+    quizExplanations = {};
     await loadQuizStatuses();
+    updateDifficultyOptions();
     renderAssessmentQuiz();
     showToast("Quiz ready");
   } catch (error) {
@@ -701,7 +1102,9 @@ async function regenerateAssessmentQuiz() {
     currentQuiz = await requestQuizRegeneration(quizDocumentSelect.value);
     currentAttempt = null;
     quizAnswers = {};
+    quizExplanations = {};
     await loadQuizStatuses();
+    updateDifficultyOptions();
     renderAssessmentQuiz();
     showToast("Quiz regenerated");
   } catch (error) {
@@ -720,7 +1123,7 @@ async function regenerateAssessmentQuiz() {
 function renderAssessmentQuiz() {
   quizList.innerHTML = "";
   assessmentTitle.textContent = currentQuiz
-    ? `${currentQuiz.questions.length} questions from ${currentQuiz.document_id}`
+    ? `${currentQuiz.questions.length} ${currentQuiz.difficulty} questions from ${currentQuiz.document_id}`
     : "Assessment Agent";
 
   if (!currentQuiz?.questions?.length) {
@@ -741,15 +1144,14 @@ function renderAssessmentQuiz() {
     heading.className = "quiz-question-heading";
 
     const number = document.createElement("span");
-    number.textContent = `Question ${question.id} · ${question.difficulty}`;
-
-    const source = document.createElement("small");
-    source.textContent = `${question.source.title}, page ${question.source.page}, chunk ${question.source.chunk ?? "N/A"}`;
-
-    heading.append(number, source);
+    number.textContent = `Question ${question.id}`;
+    heading.appendChild(number);
 
     const questionText = document.createElement("h3");
     questionText.textContent = question.question;
+    const questionResult = currentAttempt?.question_results?.find(
+      (result) => result.question_id === question.id
+    );
 
     const options = document.createElement("div");
     options.className = "answer-list";
@@ -764,12 +1166,12 @@ function renderAssessmentQuiz() {
       if (selectedLetter === optionLetter) {
         button.classList.add("selected");
       }
-      if (currentAttempt?.completed) {
+      if (questionResult) {
         button.disabled = true;
-        if (optionLetter === question.correct_answer) {
+        if (optionLetter === questionResult.correct_answer) {
           button.classList.add("correct");
         }
-        if (selectedLetter === optionLetter && selectedLetter !== question.correct_answer) {
+        if (selectedLetter === optionLetter && !questionResult.is_correct) {
           button.classList.add("incorrect");
         }
       }
@@ -777,24 +1179,34 @@ function renderAssessmentQuiz() {
       options.appendChild(button);
     });
 
-    const explanation = document.createElement("div");
-    explanation.className = "feedback";
-    if (currentAttempt?.completed) {
-      const selectedLetter = quizAnswers[String(question.id)] || "";
-      const isCorrect = selectedLetter === question.correct_answer;
-      explanation.className = `feedback ${isCorrect ? "good" : "bad"}`;
-      explanation.textContent = `${isCorrect ? "Correct." : "Not quite."} Correct answer: ${question.correct_answer}. ${question.explanation}`;
+    const feedback = document.createElement("div");
+    feedback.className = "feedback";
+    if (questionResult) {
+      feedback.className = `feedback ${questionResult.is_correct ? "good" : "bad"}`;
+      feedback.textContent = `${questionResult.is_correct ? "Correct." : "Incorrect."} Correct answer: ${questionResult.correct_answer}.`;
     }
 
-    card.append(heading, questionText, options, explanation);
+    const explainButton = document.createElement("button");
+    explainButton.className = "text-button explain-button";
+    explainButton.type = "button";
+    explainButton.textContent = "Explain";
+    explainButton.hidden = !questionResult;
+    explainButton.addEventListener("click", () => explainAssessmentQuestion(question, explainButton));
+
+    const explanation = document.createElement("div");
+    explanation.className = "quiz-explanation";
+    explanation.hidden = !quizExplanations[String(question.id)];
+    explanation.textContent = quizExplanations[String(question.id)] || "";
+
+    card.append(heading, questionText, options, feedback, explainButton, explanation);
     quizList.appendChild(card);
   });
 
   updateAssessmentSummary();
 }
 
-function selectAssessmentAnswer(question, option, card) {
-  if (currentAttempt?.completed) {
+async function selectAssessmentAnswer(question, option, card) {
+  if (currentAttempt?.question_results?.some((result) => result.question_id === question.id)) {
     return;
   }
 
@@ -803,45 +1215,71 @@ function selectAssessmentAnswer(question, option, card) {
 
   const buttons = card.querySelectorAll(".answer-option");
   buttons.forEach((button) => {
-    button.classList.toggle("selected", button.textContent === option);
+    const buttonLetter = button.textContent.trim().charAt(0).toUpperCase();
+    button.disabled = true;
+    button.classList.toggle("correct", buttonLetter === question.correct_answer);
+    button.classList.toggle("incorrect", buttonLetter === selectedLetter && selectedLetter !== question.correct_answer);
+    button.classList.toggle("selected", buttonLetter === selectedLetter);
   });
 
-  const explanation = card.querySelector(".feedback");
-  explanation.className = "feedback";
-  explanation.textContent = "";
+  const feedback = card.querySelector(".feedback");
+  const isCorrect = selectedLetter === question.correct_answer;
+  feedback.className = `feedback ${isCorrect ? "good" : "bad"}`;
+  feedback.textContent = isCorrect ? "Correct." : `Incorrect. Correct answer: ${question.correct_answer}.`;
+  card.querySelector(".explain-button").hidden = false;
   updateAssessmentSummary();
+
+  try {
+    currentAttempt = await requestQuizProgress(question.id, selectedLetter);
+    quizAnswers = { ...currentAttempt.answers };
+    renderAssessmentQuiz();
+    if (currentAttempt.completed) {
+      await loadQuizHistory();
+      showToast(`Quiz completed: ${currentAttempt.score}/${currentAttempt.total}`);
+    }
+  } catch (error) {
+    delete quizAnswers[String(question.id)];
+    renderAssessmentQuiz();
+    showToast(error.message || "Could not save answer");
+  }
 }
 
-function resetAssessmentQuiz() {
-  currentAttempt = null;
-  quizAnswers = {};
-  renderAssessmentQuiz();
-}
-
-async function submitAssessmentQuiz() {
+async function resetAssessmentQuiz() {
   if (!currentQuiz?.questions?.length) {
     return;
   }
+  try {
+    await requestQuizProgressReset();
+    currentAttempt = null;
+    quizAnswers = {};
+    quizExplanations = {};
+    renderAssessmentQuiz();
+    showToast("Quiz progress reset");
+  } catch (error) {
+    showToast(error.message || "Could not reset quiz progress");
+  }
+}
 
-  const answered = Object.values(quizAnswers).filter(Boolean).length;
-  if (answered !== currentQuiz.questions.length) {
-    showToast("Answer every question before submitting");
+async function explainAssessmentQuestion(question, button) {
+  const selectedAnswer = quizAnswers[String(question.id)];
+  if (!selectedAnswer || button.disabled) {
     return;
   }
-
-  setAssessmentLoading(true);
+  const card = button.closest(".quiz-question-card");
+  const explanation = card.querySelector(".quiz-explanation");
+  button.disabled = true;
+  button.textContent = "Explaining...";
+  explanation.hidden = false;
+  explanation.textContent = "Generating a short explanation from the selected lecture...";
   try {
-    const result = await requestQuizSubmit();
-    currentAttempt = result.latest_attempt;
-    quizAnswers = currentAttempt?.answers ? { ...currentAttempt.answers } : quizAnswers;
-    await loadQuizStatuses();
-    renderAssessmentQuiz();
-    showToast(`Score saved: ${result.score}/${result.total}`);
+    const result = await requestQuizExplanation(question.id);
+    quizExplanations[String(question.id)] = result.explanation;
+    explanation.textContent = result.explanation;
+    button.textContent = result.cache_hit ? "Explanation loaded" : "Explained";
   } catch (error) {
-    showToast(error.message || "Submit failed");
-  } finally {
-    setAssessmentLoading(false);
-    updateAssessmentSummary();
+    explanation.textContent = error.message || "Could not generate an explanation.";
+    button.disabled = false;
+    button.textContent = "Try Explain Again";
   }
 }
 
@@ -852,7 +1290,7 @@ function resetApp() {
   state.quizScore = initialState.quizScore;
   state.answered = initialState.answered;
   messageList.innerHTML = "";
-  addMessage("Ask me about socket programming, Go language, data serialization, or application protocols. I will answer from your uploaded Net-centric materials.", "tutor");
+  renderConversationMessages();
   renderSources(uploadedSources, "uploaded");
   updateConfidence(initialState.confidence);
   currentQuiz = null;
@@ -871,25 +1309,43 @@ document.querySelectorAll("[data-page-target]").forEach((button) => {
   button.addEventListener("click", () => setPage(button.dataset.pageTarget));
 });
 
-document.querySelectorAll("[data-prompt]").forEach((button) => {
-  button.addEventListener("click", () => {
-    chatInput.value = button.dataset.prompt;
-    chatInput.focus();
-  });
-});
-
 chatForm.addEventListener("submit", handleChatSubmit);
 resetButton.addEventListener("click", resetApp);
 uploadSourceButton.addEventListener("click", () => sourceFileInput.click());
 sourceFileInput.addEventListener("change", () => uploadSourceFiles(sourceFileInput.files));
+newConversationButton.addEventListener("click", createChatConversation);
+applyConversationSourcesButton.addEventListener("click", applyConversationSources);
+toggleConversationSourcesButton.addEventListener("click", () => {
+  setSourcesDrawerOpen(!tutorLayout.classList.contains("sources-open"));
+});
+closeConversationSourcesButton.addEventListener("click", closeSourcesDrawer);
+sourcesDrawerBackdrop.addEventListener("click", closeSourcesDrawer);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && tutorLayout.classList.contains("sources-open")) {
+    closeSourcesDrawer();
+    toggleConversationSourcesButton.focus();
+  }
+});
 generateQuizButton.addEventListener("click", generateAssessmentQuiz);
 newQuizButton.addEventListener("click", regenerateAssessmentQuiz);
-submitQuizButton.addEventListener("click", submitAssessmentQuiz);
 resetQuizButton.addEventListener("click", resetAssessmentQuiz);
 quizDocumentSelect.addEventListener("change", loadSelectedQuiz);
+quizQuestionCountSelect.addEventListener("change", updateAssessmentSummary);
+quizDifficultySelect.addEventListener("change", handleQuizDifficultyChange);
+refreshQuizHistoryButton.addEventListener("click", loadQuizHistory);
 
 document.body.dataset.page = state.page;
 updateConfidence(state.confidence);
 renderAssessmentQuiz();
-loadUploadedSources();
+async function initializeChatWorkspace() {
+  await loadUploadedSources();
+  try {
+    await loadConversations();
+  } catch (error) {
+    showToast(error.message || "Could not load conversations");
+  }
+}
+
+initializeChatWorkspace();
 loadIndexedDocuments();
+loadQuizHistory();

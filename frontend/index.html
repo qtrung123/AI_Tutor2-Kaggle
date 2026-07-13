@@ -23,12 +23,16 @@
             <span>02</span>
             AI Tutor
           </button>
-          <button class="nav-item" data-page="practice" type="button">
+          <button class="nav-item" data-page="materials" type="button">
             <span>03</span>
+            Materials
+          </button>
+          <button class="nav-item" data-page="practice" type="button">
+            <span>04</span>
             Practice
           </button>
           <button class="nav-item" data-page="plan" type="button">
-            <span>04</span>
+            <span>05</span>
             Study Plan
           </button>
         </nav>
@@ -154,50 +158,47 @@
           </div>
         </section>
 
+        <section class="view" id="materials-view" data-title="Course Materials">
+          <div class="materials-layout">
+            <article class="panel materials-upload-card">
+              <p class="eyebrow">Knowledge base</p>
+              <h2>Course materials</h2>
+              <p class="muted">Upload and manage PDF or TXT files here. Adding a file does not change the sources of existing conversations.</p>
+              <input id="source-file-input" class="visually-hidden" type="file" accept=".pdf,.txt" multiple />
+              <button class="primary-button" id="upload-source-button" type="button">Upload materials</button>
+              <p class="upload-status" id="upload-status">PDF or TXT files</p>
+            </article>
+            <article class="panel materials-list-card">
+              <div class="panel-heading">
+                <div><p>Indexed library</p><h2>Available documents</h2></div>
+              </div>
+              <div class="source-list" id="source-list">
+                <article class="source-card"><strong>Loading uploaded files...</strong><span>Please wait</span></article>
+              </div>
+            </article>
+          </div>
+        </section>
+
         <section class="view" id="tutor-view" data-title="AI Tutor">
           <div class="tutor-layout">
-            <aside class="panel tutor-context-card">
-              <div class="context-block">
-                <p class="eyebrow">Current context</p>
-                <h2>Net-centric Computing</h2>
+            <aside class="panel conversation-sidebar">
+              <div class="conversation-sidebar-header">
+                <div><p class="eyebrow">Your chats</p><h2>Conversations</h2></div>
+                <button class="primary-button compact-button" id="new-conversation-button" type="button">+ New</button>
               </div>
-
-              <div class="context-block">
-                <div class="context-row">
-                  <span>Topic confidence</span>
-                  <strong id="confidence-label">64%</strong>
-                </div>
-                <div class="confidence-meter">
-                  <div class="progress-track"><span id="confidence-bar" style="width: 64%"></span></div>
-                </div>
-              </div>
-
-              <div class="context-block">
-                <input id="source-file-input" class="visually-hidden" type="file" accept=".pdf,.txt" multiple />
-                <button class="secondary-button" id="upload-source-button" type="button">Upload material</button>
-                <p class="upload-status" id="upload-status">PDF or TXT files</p>
-              </div>
-
-              <div class="context-block sources-context">
-                <p class="eyebrow">Retrieved sources</p>
-                <div class="source-list" id="source-list">
-                  <button class="source-card" type="button">
-                    <strong>Loading uploaded files...</strong>
-                    <span>Please wait</span>
-                  </button>
-                </div>
-              </div>
-
-              <button class="secondary-button" data-page-target="practice" type="button">Quiz me on this topic</button>
+              <div class="conversation-list" id="conversation-list"></div>
             </aside>
 
             <article class="chat-card tutor-chat-card">
               <div class="tutor-chat-header">
                 <div>
-                  <h2><span></span>Tutor Agent</h2>
-                  <p>Grounded in your course materials</p>
+                  <h2 id="chat-conversation-title"><span></span>New conversation</h2>
+                  <p id="chat-source-summary">Select materials for this conversation</p>
                 </div>
-                <span class="soft-badge">RAG active</span>
+                <div class="tutor-header-actions">
+                  <span class="soft-badge">RAG active</span>
+                  <button class="sources-toggle-button" id="toggle-conversation-sources-button" type="button" aria-expanded="false" aria-controls="conversation-sources-panel">Sources</button>
+                </div>
               </div>
 
               <div class="message-list" id="message-list">
@@ -209,17 +210,23 @@
                 </div>
               </div>
 
-              <div class="prompt-row">
-                <button type="button" data-prompt="Explain TCP socket programming simply">Explain simply</button>
-                <button type="button" data-prompt="Show an example from my Net-centric lectures">Show an example</button>
-                <button type="button" data-prompt="Give me a hint about UDP vs TCP">Give me a hint</button>
-              </div>
-
               <form class="chat-form" id="chat-form">
-                <input id="chat-input" type="text" placeholder="Ask about Net-centric Computing..." autocomplete="off" />
+                <input id="chat-input" type="text" placeholder="Ask" autocomplete="off" />
                 <button class="primary-button" type="submit">Send</button>
               </form>
             </article>
+
+            <button class="sources-drawer-backdrop" id="sources-drawer-backdrop" type="button" aria-label="Close sources"></button>
+            <aside class="panel conversation-sources-card" id="conversation-sources-panel" aria-hidden="true">
+              <div class="sources-drawer-header">
+                <div><p class="eyebrow">Conversation scope</p><h2>Sources</h2></div>
+                <button class="sources-close-button" id="close-conversation-sources-button" type="button" aria-label="Close sources">×</button>
+              </div>
+              <p class="muted">Only checked documents can be used to answer in this thread.</p>
+              <div class="conversation-source-list" id="conversation-source-list"></div>
+              <button class="secondary-button" id="apply-conversation-sources-button" type="button">Apply sources</button>
+              <button class="text-button source-manager-link" data-page-target="materials" type="button">Manage materials</button>
+            </aside>
           </div>
         </section>
 
@@ -241,6 +248,25 @@
                     <option value="">Loading indexed documents...</option>
                   </select>
                 </label>
+                <label>
+                  <span>Number of questions</span>
+                  <select id="quiz-question-count-select">
+                    <option value="5">5 questions</option>
+                    <option value="10" selected>10 questions</option>
+                    <option value="15">15 questions</option>
+                    <option value="20">20 questions</option>
+                    <option value="30">30 questions</option>
+                    <option value="40">40 questions</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Difficulty</span>
+                  <select id="quiz-difficulty-select">
+                    <option value="easy">Easy</option>
+                    <option value="medium">Medium</option>
+                    <option value="difficult">Difficult</option>
+                  </select>
+                </label>
                 <button class="primary-button" id="generate-quiz-button" type="button">Generate Quiz</button>
               </div>
             </article>
@@ -254,7 +280,7 @@
               <article class="stat-card">
                 <span>Quiz status</span>
                 <strong id="quiz-status-label">Not generated</strong>
-                <small id="quiz-question-count-label">Auto-sized assessment</small>
+                <small id="quiz-question-count-label">10-question assessment</small>
               </article>
               <article class="stat-card">
                 <span>Quiz progress</span>
@@ -271,7 +297,6 @@
                 </div>
                 <div class="assessment-actions">
                   <button class="text-button" id="reset-quiz-button" type="button">Reset Quiz</button>
-                  <button class="primary-button" id="submit-quiz-button" type="button">Submit Quiz</button>
                   <button class="text-button" id="new-quiz-button" type="button">Regenerate Quiz</button>
                 </div>
               </div>
@@ -284,6 +309,20 @@
                   Choose a document, then generate or start its saved quiz.
                 </div>
               </div>
+            </article>
+
+            <article class="panel quiz-history-panel">
+              <div class="panel-heading">
+                <div>
+                  <p>Past performance</p>
+                  <h2>Quiz History</h2>
+                </div>
+                <button class="text-button" id="refresh-quiz-history-button" type="button">Refresh</button>
+              </div>
+              <div id="quiz-history-list" class="quiz-history-list">
+                <div class="empty-state">No completed quizzes yet.</div>
+              </div>
+              <div id="quiz-history-detail" class="quiz-history-detail" hidden></div>
             </article>
           </div>
         </section>
