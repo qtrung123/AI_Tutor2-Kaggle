@@ -1,8 +1,10 @@
+import os
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
 from pydantic import BaseModel, Field
 
 from backend.ingest import delete_indexed_file, index_files
@@ -28,7 +30,7 @@ from backend.conversation_store import (
     update_conversation_title,
 )
 from backend.rag_service import answer_conversation_message, list_uploaded_sources
-from config import CHAT_MODEL, DATA_DIR
+from config import CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL
 
 
 class ConversationCreateRequest(BaseModel):
@@ -53,6 +55,16 @@ class HealthResponse(BaseModel):
     ok: bool
     model: str
     status: str
+
+
+class ServiceHealthResponse(BaseModel):
+    status: str
+    ollama: bool
+    chat_model: str
+    embedding_model: str
+    models_ready: bool
+    missing_models: list[str] = Field(default_factory=list)
+    error: Optional[str] = None
 
 
 class SourceSummary(BaseModel):
@@ -152,9 +164,17 @@ class QuizGenerateResponse(BaseModel):
 app = FastAPI(title="Tutoring Backend")
 
 # CORS allows the frontend dev server on port 3000 to call the backend on 8000.
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "AI_TUTOR_CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    ).split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -184,6 +204,41 @@ def model_health() -> HealthResponse:
         model=CHAT_MODEL,
         status="Backend is running",
     )
+
+
+@app.get("/api/health", response_model=ServiceHealthResponse)
+def service_health() -> ServiceHealthResponse:
+    """Check Ollama and configured model availability without running inference."""
+    try:
+        response = httpx.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=3.0)
+        response.raise_for_status()
+        available = {
+            str(item.get("name", ""))
+            for item in response.json().get("models", [])
+        }
+        missing = [
+            model for model in (CHAT_MODEL, EMBEDDING_MODEL)
+            if model not in available and f"{model}:latest" not in available
+        ]
+        return ServiceHealthResponse(
+            status="ok" if not missing else "degraded",
+            ollama=True,
+            chat_model=CHAT_MODEL,
+            embedding_model=EMBEDDING_MODEL,
+            models_ready=not missing,
+            missing_models=missing,
+            error=(f"Missing Ollama model(s): {', '.join(missing)}" if missing else None),
+        )
+    except Exception as error:
+        return ServiceHealthResponse(
+            status="degraded",
+            ollama=False,
+            chat_model=CHAT_MODEL,
+            embedding_model=EMBEDDING_MODEL,
+            models_ready=False,
+            missing_models=[CHAT_MODEL, EMBEDDING_MODEL],
+            error=f"Ollama is not ready at {OLLAMA_BASE_URL}: {error}",
+        )
 
 
 @app.get("/api/sources", response_model=list[SourceSummary])

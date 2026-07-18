@@ -2,7 +2,8 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 
-const PORT = 3000;
+const PORT = Number(process.env.FRONTEND_PORT || process.env.PORT || 3000);
+const HOST = process.env.FRONTEND_HOST || "127.0.0.1";
 const ROOT = __dirname;
 
 const mimeTypes = {
@@ -37,6 +38,15 @@ function sendFile(response, filePath) {
 
 const server = http.createServer((request, response) => {
   const requestUrl = new URL(request.url, `http://${request.headers.host}`);
+  if (requestUrl.pathname === "/app-config.js") {
+    const apiBaseUrl = process.env.API_BASE_URL ?? "http://127.0.0.1:8000";
+    response.writeHead(200, {
+      "Content-Type": "text/javascript; charset=utf-8",
+      "Cache-Control": "no-store"
+    });
+    response.end(`window.APP_CONFIG = ${JSON.stringify({ API_BASE_URL: apiBaseUrl })};`);
+    return;
+  }
   const safePath = path
     .normalize(decodeURIComponent(requestUrl.pathname))
     .replace(/^(\.\.[/\\])+/, "")
@@ -53,6 +63,6 @@ const server = http.createServer((request, response) => {
   sendFile(response, filePath);
 });
 
-server.listen(PORT, () => {
-  console.log(`Tutoring frontend running at http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`Tutoring frontend running at http://${HOST}:${PORT}`);
 });

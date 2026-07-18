@@ -11,7 +11,7 @@ This document maps every function in the `backend/` package to its primary respo
 | `rag_service.py` | Retrieve grounded context and call the chat model. |
 | `conversation_store.py` | Persist conversations, messages, source scopes, and citations in SQLite. |
 | `quiz_service.py` | Orchestrate quiz generation, validation, scoring, progress, history, and explanations. |
-| `quiz_store.py` | Persist quizzes, attempts, progress, history, and explanations in JSON files. |
+| `quiz_store.py` | Persist quizzes, attempts, progress, history, and explanations in SQLite. |
 | `__init__.py` | Mark `backend` as a Python package; it currently defines no functions. |
 
 > Functions beginning with `_` are internal helpers. Other functions form the module's public service interface or FastAPI route layer.
@@ -154,34 +154,38 @@ This module contains quiz business logic. It reads indexed material, builds prom
 
 ## `backend/quiz_store.py`
 
-This module is the persistent JSON repository for quiz-related data.
+This module is the SQLite repository for versioned quizzes, questions, options, attempts, answers, and explanations. It also performs a one-time import from the legacy JSON files.
 
-### Shared Storage Helpers
+### Database and Migration Helpers
 
 | Function | Responsibility |
 | --- | --- |
 | `utc_now_iso()` | Produce a stable UTC timestamp for quiz records. |
-| `_read_json()` | Read JSON from disk or return a supplied default value. |
-| `_write_json()` | Ensure the data directory exists and write formatted UTF-8 JSON. |
+| `_connect()` | Open the shared SQLite database with foreign keys and a busy timeout. |
+| `_read_legacy_json()` | Read an old quiz JSON file only for one-time migration. |
+| `initialize_quiz_store()` | Create all quiz tables/indexes and trigger migration once. |
+| `_iter_legacy_quizzes()` | Normalize legacy flat/nested quiz JSON into document/difficulty variants. |
+| `_migrate_legacy_json()` | Import existing quizzes, attempts, answers, and explanations into SQLite. |
 
 ### Generated Quiz Storage
 
 | Function | Responsibility |
 | --- | --- |
-| `load_quizzes()` | Load all persisted generated quizzes. |
-| `save_quizzes()` | Persist the complete generated-quiz dictionary. |
 | `quiz_cache_key()` | Build the stable `document_id::difficulty` quiz key. |
-| `get_quiz()` | Load one quiz variant, including backward-compatible legacy formats. |
-| `save_quiz()` | Save one generated quiz under its document/difficulty key. |
-| `list_document_quizzes()` | Return every saved difficulty variant for one document. |
+| `_normalize_options()` | Normalize legacy dictionary/list options before SQL insertion. |
+| `_insert_quiz()` | Deactivate the previous variant and insert a versioned quiz with questions/options. |
+| `_row_to_quiz()` | Reconstruct the quiz API shape from normalized SQL rows. |
+| `get_quiz()` | Load the active quiz for one document and difficulty. |
+| `save_quiz()` | Persist a new active quiz version in one transaction. |
+| `list_document_quizzes()` | Return every active difficulty variant for one document. |
 
 ### Attempt and Progress Storage
 
 | Function | Responsibility |
 | --- | --- |
-| `load_attempts()` | Load all active attempts and completed-attempt history. |
-| `save_attempts()` | Persist the complete attempt dictionary. |
+| `_row_to_attempt()` | Reconstruct answers and question-result snapshots from SQL rows. |
 | `get_latest_attempt()` | Return the latest attempt/progress for one document and difficulty. |
+| `_save_attempt_row()` | Upsert an attempt and replace its normalized answer rows. |
 | `save_quiz_progress()` | Upsert current progress and archive it once when it first becomes complete. |
 | `reset_quiz_progress()` | Clear the latest active attempt without deleting completed history. |
 
@@ -189,7 +193,6 @@ This module is the persistent JSON repository for quiz-related data.
 
 | Function | Responsibility |
 | --- | --- |
-| `load_quiz_explanations()` | Load all cached quiz explanations. |
 | `get_quiz_explanation()` | Retrieve one explanation by its cache key. |
 | `save_quiz_explanation()` | Persist one generated explanation. |
 | `delete_document_quiz_data()` | Delete all quizzes, attempts, and explanations for a removed document. |
@@ -216,7 +219,7 @@ quiz_service.py
   -> quiz business rules and orchestration
 
 quiz_store.py
-  -> JSON quiz persistence
+  -> SQLite quiz persistence and legacy JSON migration
 ```
 
 Keeping these boundaries intact prevents route handlers from accumulating business logic and prevents storage modules from depending on UI or HTTP concerns.

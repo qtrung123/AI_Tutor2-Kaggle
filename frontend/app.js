@@ -6,15 +6,21 @@ const pageTitles = {
   plan: "Study Plan"
 };
 
-const CONVERSATIONS_API_URL = "http://127.0.0.1:8000/api/conversations";
-const SOURCES_API_URL = "http://127.0.0.1:8000/api/sources";
-const UPLOAD_API_URL = "http://127.0.0.1:8000/api/sources/upload";
-const DELETE_SOURCE_API_URL = "http://127.0.0.1:8000/api/sources";
-const DOCUMENTS_API_URL = "http://127.0.0.1:8000/api/documents";
-const QUIZZES_API_URL = "http://127.0.0.1:8000/api/quizzes";
-const QUIZ_API_BASE_URL = "http://127.0.0.1:8000/api/quiz";
-const QUIZ_GENERATE_API_URL = "http://127.0.0.1:8000/api/quiz/generate";
-const QUIZ_HISTORY_API_URL = "http://127.0.0.1:8000/api/quiz-history";
+const API_BASE_URL = (
+  window.APP_CONFIG?.API_BASE_URL ||
+  localStorage.getItem("API_BASE_URL") ||
+  ""
+).replace(/\/$/, "");
+const apiUrl = (path) => `${API_BASE_URL}${path}`;
+const CONVERSATIONS_API_URL = apiUrl("/api/conversations");
+const SOURCES_API_URL = apiUrl("/api/sources");
+const UPLOAD_API_URL = apiUrl("/api/sources/upload");
+const DELETE_SOURCE_API_URL = apiUrl("/api/sources");
+const DOCUMENTS_API_URL = apiUrl("/api/documents");
+const QUIZZES_API_URL = apiUrl("/api/quizzes");
+const QUIZ_API_BASE_URL = apiUrl("/api/quiz");
+const QUIZ_GENERATE_API_URL = apiUrl("/api/quiz/generate");
+const QUIZ_HISTORY_API_URL = apiUrl("/api/quiz-history");
 
 const initialState = {
   page: "overview",
@@ -33,6 +39,7 @@ let quizAnswers = {};
 let currentAttempt = null;
 let quizExplanations = {};
 let quizHistory = [];
+let quizQuestionIndex = 0;
 let conversations = [];
 let activeConversation = null;
 
@@ -57,17 +64,16 @@ const quizDifficultySelect = document.getElementById("quiz-difficulty-select");
 const generateQuizButton = document.getElementById("generate-quiz-button");
 const resetQuizButton = document.getElementById("reset-quiz-button");
 const newQuizButton = document.getElementById("new-quiz-button");
-const selectedDocumentLabel = document.getElementById("selected-document-label");
-const quizStatusLabel = document.getElementById("quiz-status-label");
-const quizQuestionCountLabel = document.getElementById("quiz-question-count-label");
 const quizProgressLabel = document.getElementById("quiz-progress-label");
 const quizAccuracyLabel = document.getElementById("quiz-accuracy-label");
+const quizProgressBar = document.getElementById("quiz-progress-bar");
 const assessmentLoading = document.getElementById("assessment-loading");
 const quizList = document.getElementById("quiz-list");
 const assessmentTitle = document.getElementById("assessment-title");
 const quizHistoryList = document.getElementById("quiz-history-list");
 const quizHistoryDetail = document.getElementById("quiz-history-detail");
 const refreshQuizHistoryButton = document.getElementById("refresh-quiz-history-button");
+const quizPopoverPanels = document.querySelectorAll(".collapsible-panel");
 const conversationList = document.getElementById("conversation-list");
 const newConversationButton = document.getElementById("new-conversation-button");
 const conversationSourceList = document.getElementById("conversation-source-list");
@@ -651,20 +657,17 @@ async function uploadSourceFiles(files) {
 }
 
 function updateAssessmentSummary() {
-  const selectedDocument = quizDocumentSelect?.selectedOptions[0]?.textContent || "None";
   const total = currentQuiz?.questions?.length || 0;
   const answered = Object.values(quizAnswers).filter(Boolean).length;
   const score = currentAttempt?.score ?? 0;
-  const attemptTotal = currentAttempt?.total ?? total;
   const accuracy = answered ? Math.round((score / answered) * 100) : 0;
-  const status = getSelectedQuizStatus();
-
-  selectedDocumentLabel.textContent = selectedDocument;
-  quizStatusLabel.textContent = formatQuizStatus(status);
-  const requestedCount = Number(quizQuestionCountSelect?.value || 10);
-  quizQuestionCountLabel.textContent = total ? `${total} multiple-choice questions` : `${requestedCount}-question assessment`;
+  const percentage = total ? Math.round((answered / total) * 100) : 0;
   quizProgressLabel.textContent = `${answered} / ${total}`;
   quizAccuracyLabel.textContent = answered ? `Score ${score}/${answered} · Accuracy ${accuracy}%` : "Not started";
+  if (quizProgressBar) {
+    quizProgressBar.style.width = `${percentage}%`;
+    quizProgressBar.parentElement.setAttribute("aria-valuenow", String(percentage));
+  }
 
   const hasQuiz = Boolean(currentQuiz?.questions?.length);
   if (generateQuizButton) {
@@ -1011,6 +1014,7 @@ async function loadSelectedQuiz() {
     currentAttempt = null;
     quizAnswers = {};
     quizExplanations = {};
+    quizQuestionIndex = 0;
     renderAssessmentQuiz();
     return;
   }
@@ -1027,12 +1031,17 @@ async function loadSelectedQuiz() {
       quizQuestionCountSelect.value = String(currentQuiz.question_count);
     }
     quizAnswers = currentAttempt?.answers ? { ...currentAttempt.answers } : {};
+    const firstUnansweredIndex = currentQuiz?.questions?.findIndex(
+      (question) => !quizAnswers[String(question.id)]
+    );
+    quizQuestionIndex = firstUnansweredIndex >= 0 ? firstUnansweredIndex : 0;
     renderAssessmentQuiz();
   } catch (error) {
     currentQuiz = null;
     currentAttempt = null;
     quizAnswers = {};
     quizExplanations = {};
+    quizQuestionIndex = 0;
     renderAssessmentQuiz();
   }
 }
@@ -1042,6 +1051,7 @@ async function handleQuizDifficultyChange() {
   currentAttempt = null;
   quizAnswers = {};
   quizExplanations = {};
+  quizQuestionIndex = 0;
   renderAssessmentQuiz();
   await loadSelectedQuiz();
 }
@@ -1067,6 +1077,7 @@ async function generateAssessmentQuiz() {
     currentAttempt = null;
     quizAnswers = {};
     quizExplanations = {};
+    quizQuestionIndex = 0;
     await loadQuizStatuses();
     updateDifficultyOptions();
     renderAssessmentQuiz();
@@ -1102,6 +1113,7 @@ async function regenerateAssessmentQuiz() {
     currentAttempt = null;
     quizAnswers = {};
     quizExplanations = {};
+    quizQuestionIndex = 0;
     await loadQuizStatuses();
     updateDifficultyOptions();
     renderAssessmentQuiz();
@@ -1134,7 +1146,9 @@ function renderAssessmentQuiz() {
     return;
   }
 
-  currentQuiz.questions.forEach((question) => {
+  quizQuestionIndex = Math.max(0, Math.min(quizQuestionIndex, currentQuiz.questions.length - 1));
+  const question = currentQuiz.questions[quizQuestionIndex];
+  {
     const card = document.createElement("article");
     card.className = "quiz-question-card";
     card.dataset.questionId = question.id;
@@ -1143,7 +1157,7 @@ function renderAssessmentQuiz() {
     heading.className = "quiz-question-heading";
 
     const number = document.createElement("span");
-    number.textContent = `Question ${question.id}`;
+    number.textContent = `Question ${quizQuestionIndex + 1} of ${currentQuiz.questions.length}`;
     heading.appendChild(number);
 
     const questionText = document.createElement("h3");
@@ -1197,11 +1211,44 @@ function renderAssessmentQuiz() {
     explanation.hidden = !quizExplanations[String(question.id)];
     explanation.textContent = quizExplanations[String(question.id)] || "";
 
-    card.append(heading, questionText, options, feedback, explainButton, explanation);
+    const navigation = document.createElement("div");
+    navigation.className = "quiz-navigation";
+
+    const previousButton = document.createElement("button");
+    previousButton.className = "secondary-button quiz-nav-button";
+    previousButton.type = "button";
+    previousButton.textContent = "Previous";
+    previousButton.disabled = quizQuestionIndex === 0;
+    previousButton.addEventListener("click", () => moveQuizQuestion(-1));
+
+    const nextButton = document.createElement("button");
+    nextButton.className = "primary-button quiz-nav-button";
+    nextButton.type = "button";
+    nextButton.textContent = quizQuestionIndex === currentQuiz.questions.length - 1 ? "Finish" : "Next";
+    nextButton.disabled = !questionResult;
+    nextButton.addEventListener("click", () => moveQuizQuestion(1));
+
+    navigation.append(previousButton, nextButton);
+    card.append(heading, questionText, options, feedback, explainButton, explanation, navigation);
     quizList.appendChild(card);
-  });
+  }
 
   updateAssessmentSummary();
+}
+
+function moveQuizQuestion(direction) {
+  if (!currentQuiz?.questions?.length) {
+    return;
+  }
+  const nextIndex = quizQuestionIndex + direction;
+  if (nextIndex >= currentQuiz.questions.length) {
+    showToast(currentAttempt?.completed
+      ? `Quiz completed: ${currentAttempt.score}/${currentAttempt.total}`
+      : "Answer every question to finish the quiz");
+    return;
+  }
+  quizQuestionIndex = Math.max(0, nextIndex);
+  renderAssessmentQuiz();
 }
 
 async function selectAssessmentAnswer(question, option, card) {
@@ -1252,6 +1299,7 @@ async function resetAssessmentQuiz() {
     currentAttempt = null;
     quizAnswers = {};
     quizExplanations = {};
+    quizQuestionIndex = 0;
     renderAssessmentQuiz();
     showToast("Quiz progress reset");
   } catch (error) {
@@ -1295,6 +1343,7 @@ function resetApp() {
   currentQuiz = null;
   currentAttempt = null;
   quizAnswers = {};
+  quizQuestionIndex = 0;
   renderAssessmentQuiz();
   setPage(initialState.page);
   showToast("Tutoring reset");
@@ -1332,6 +1381,28 @@ quizDocumentSelect.addEventListener("change", loadSelectedQuiz);
 quizQuestionCountSelect.addEventListener("change", updateAssessmentSummary);
 quizDifficultySelect.addEventListener("change", handleQuizDifficultyChange);
 refreshQuizHistoryButton.addEventListener("click", loadQuizHistory);
+quizPopoverPanels.forEach((panel) => {
+  panel.addEventListener("toggle", () => {
+    if (!panel.open) {
+      return;
+    }
+    quizPopoverPanels.forEach((otherPanel) => {
+      if (otherPanel !== panel) {
+        otherPanel.removeAttribute("open");
+      }
+    });
+  });
+});
+document.addEventListener("click", (event) => {
+  if (![...quizPopoverPanels].some((panel) => panel.contains(event.target))) {
+    quizPopoverPanels.forEach((panel) => panel.removeAttribute("open"));
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    quizPopoverPanels.forEach((panel) => panel.removeAttribute("open"));
+  }
+});
 
 document.body.dataset.page = state.page;
 updateConfidence(state.confidence);

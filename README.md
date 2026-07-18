@@ -61,7 +61,7 @@ Documents, vectors, conversations, quizzes, answers, and learning history are st
 - **Vector database:** Chroma
 - **RAG integration:** LangChain
 - **Chat history:** SQLite
-- **Quiz storage:** Local JSON files
+- **Application database:** SQLite
 
 ## Architecture
 
@@ -81,15 +81,13 @@ FastAPI (127.0.0.1:8000)
         |     +-- Chroma retrieval filtered by conversation sources
         |     +-- prompts/rag_prompt.txt
         |     +-- Ollama chat model
-        |     +-- data/conversations.db
+        |     +-- data/conversations.db (SQLite)
         |
         +-- Quiz RAG
               +-- all chunks from the selected document
               +-- prompts/quiz_prompt.txt
               +-- Ollama chat model
-              +-- generated_quizzes.json
-              +-- quiz_attempts.json
-              +-- quiz_explanations.json
+              +-- data/conversations.db (SQLite)
 ```
 
 ## Project Structure
@@ -129,9 +127,9 @@ python-ollama-rag/
 | Document vectors and chunk metadata | `vectorstore/` |
 | Indexed-document registry | `indexed_files.json` |
 | Conversations, messages, sources, and citations | `data/conversations.db` |
-| Generated quizzes | `data/generated_quizzes.json` |
-| Current quiz progress and completed attempts | `data/quiz_attempts.json` |
-| Generated quiz explanations | `data/quiz_explanations.json` |
+| Generated quizzes and questions | `data/conversations.db` |
+| Current quiz progress and completed attempts | `data/conversations.db` |
+| Generated quiz explanations | `data/conversations.db` |
 
 ## Requirements
 
@@ -286,11 +284,13 @@ Select document, question count, and difficulty
     -> call Ollama
     -> extract, parse, normalize, and validate JSON
     -> retry a failed batch up to three times
-    -> save the quiz in generated_quizzes.json
+    -> save the versioned quiz in SQLite
     -> return the quiz to the frontend
 ```
 
 If a quiz already exists for the same `document_id::difficulty`, the generate endpoint returns the saved quiz. Use **Regenerate Quiz** to replace it or change its question count.
+
+On first startup after this storage upgrade, existing quiz JSON files are imported into SQLite once. The original JSON files are retained only as migration backups and are no longer updated.
 
 ## API Overview
 

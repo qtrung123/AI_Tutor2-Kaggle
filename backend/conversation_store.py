@@ -4,7 +4,17 @@ import sqlite3
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from config import CONVERSATIONS_DB_PATH
+from config import DATABASE_PATH
+
+
+class _ClosingConnection(sqlite3.Connection):
+    """Close SQLite file handles when a transaction context exits."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
 
 
 def _now() -> str:
@@ -12,10 +22,11 @@ def _now() -> str:
 
 
 def _connect() -> sqlite3.Connection:
-    CONVERSATIONS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(CONVERSATIONS_DB_PATH)
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(DATABASE_PATH, timeout=15, factory=_ClosingConnection)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 15000")
     return connection
 
 

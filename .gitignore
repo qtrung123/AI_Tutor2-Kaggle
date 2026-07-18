@@ -22,6 +22,12 @@ indexed_files.json
 # Node
 node_modules/
 npm-debug.log*
+*.gguf
+
+# Kaggle/runtime processes and logs
+ai-tutor-logs/
+ai-tutor-runtime/
+*.pid
 
 # OS/editor
 .DS_Store

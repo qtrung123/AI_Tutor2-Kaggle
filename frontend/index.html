@@ -232,60 +232,57 @@
 
         <section class="view" id="practice-view" data-title="Practice">
           <div class="assessment-shell">
-            <article class="panel assessment-control">
-              <div class="panel-heading">
+            <details class="panel assessment-control collapsible-panel">
+              <summary>
                 <div>
                   <p>Assessment Agent</p>
-                  <h2>Generate a grounded quiz</h2>
+                  <h2>Create or change quiz</h2>
                 </div>
-                <span class="soft-badge">Grounded in selected document</span>
-              </div>
+                <span class="summary-action">Open settings</span>
+              </summary>
 
-              <div class="assessment-form">
-                <label>
-                  <span>Document</span>
-                  <select id="quiz-document-select">
-                    <option value="">Loading indexed documents...</option>
-                  </select>
-                </label>
-                <label>
-                  <span>Number of questions</span>
-                  <select id="quiz-question-count-select">
-                    <option value="5">5 questions</option>
-                    <option value="10" selected>10 questions</option>
-                    <option value="15">15 questions</option>
-                    <option value="20">20 questions</option>
-                    <option value="30">30 questions</option>
-                    <option value="40">40 questions</option>
-                  </select>
-                </label>
-                <label>
-                  <span>Difficulty</span>
-                  <select id="quiz-difficulty-select">
-                    <option value="easy">Easy</option>
-                    <option value="medium">Medium</option>
-                    <option value="difficult">Difficult</option>
-                  </select>
-                </label>
-                <button class="primary-button" id="generate-quiz-button" type="button">Generate Quiz</button>
+              <div class="collapsible-popover settings-popover">
+                <div class="assessment-form">
+                  <label>
+                    <span>Document</span>
+                    <select id="quiz-document-select">
+                      <option value="">Loading indexed documents...</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Number of questions</span>
+                    <select id="quiz-question-count-select">
+                      <option value="5">5 questions</option>
+                      <option value="10" selected>10 questions</option>
+                      <option value="15">15 questions</option>
+                      <option value="20">20 questions</option>
+                      <option value="30">30 questions</option>
+                      <option value="40">40 questions</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Difficulty</span>
+                    <select id="quiz-difficulty-select">
+                      <option value="easy">Easy</option>
+                      <option value="medium">Medium</option>
+                      <option value="difficult">Difficult</option>
+                    </select>
+                  </label>
+                  <button class="primary-button" id="generate-quiz-button" type="button">Generate Quiz</button>
+                </div>
               </div>
-            </article>
+            </details>
 
             <div class="assessment-stats">
-              <article class="stat-card">
-                <span>Selected lecture</span>
-                <strong id="selected-document-label">None</strong>
-                <small>Indexed material</small>
-              </article>
-              <article class="stat-card">
-                <span>Quiz status</span>
-                <strong id="quiz-status-label">Not generated</strong>
-                <small id="quiz-question-count-label">10-question assessment</small>
-              </article>
-              <article class="stat-card">
-                <span>Quiz progress</span>
-                <strong id="quiz-progress-label">0 / 0</strong>
-                <small id="quiz-accuracy-label">Accuracy 0%</small>
+              <article class="stat-card quiz-progress-card">
+                <div class="quiz-progress-copy">
+                  <span>Quiz progress</span>
+                  <strong id="quiz-progress-label">0 / 0</strong>
+                  <small id="quiz-accuracy-label">Not started</small>
+                </div>
+                <div class="quiz-progress-track" role="progressbar" aria-label="Quiz progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                  <span id="quiz-progress-bar"></span>
+                </div>
               </article>
             </div>
 
@@ -311,19 +308,24 @@
               </div>
             </article>
 
-            <article class="panel quiz-history-panel">
-              <div class="panel-heading">
+            <details class="panel quiz-history-panel collapsible-panel">
+              <summary>
                 <div>
                   <p>Past performance</p>
                   <h2>Quiz History</h2>
                 </div>
-                <button class="text-button" id="refresh-quiz-history-button" type="button">Refresh</button>
+                <span class="summary-action">View performance</span>
+              </summary>
+              <div class="collapsible-popover performance-popover">
+                <div class="quiz-history-toolbar">
+                  <button class="text-button" id="refresh-quiz-history-button" type="button">Refresh</button>
+                </div>
+                <div id="quiz-history-list" class="quiz-history-list">
+                  <div class="empty-state">No completed quizzes yet.</div>
+                </div>
+                <div id="quiz-history-detail" class="quiz-history-detail" hidden></div>
               </div>
-              <div id="quiz-history-list" class="quiz-history-list">
-                <div class="empty-state">No completed quizzes yet.</div>
-              </div>
-              <div id="quiz-history-detail" class="quiz-history-detail" hidden></div>
-            </article>
+            </details>
           </div>
         </section>
 
@@ -366,6 +368,7 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="app-config.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

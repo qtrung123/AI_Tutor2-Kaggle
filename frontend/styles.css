@@ -1152,11 +1152,126 @@ body[data-page="tutor"] .tutor-layout {
 
 .assessment-shell {
   display: grid;
-  gap: 24px;
+  gap: 16px;
+}
+
+@media (min-width: 1081px) {
+  body[data-page="practice"] .topbar {
+    margin-bottom: 20px;
+  }
+
+  .assessment-shell {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .assessment-control {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .quiz-history-panel {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .assessment-stats,
+  .assessment-results {
+    grid-column: 1 / -1;
+  }
+
+  .assessment-stats {
+    grid-row: 2;
+  }
+
+  .assessment-results {
+    grid-row: 3;
+  }
 }
 
 .assessment-control {
-  padding-bottom: 24px;
+  padding: 0;
+}
+
+.collapsible-panel {
+  position: relative;
+  padding: 0;
+  overflow: visible;
+}
+
+.collapsible-panel[open] {
+  z-index: 10;
+}
+
+.collapsible-panel summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px 24px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.collapsible-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.collapsible-panel summary p {
+  margin: 0 0 4px;
+  color: var(--navy-2);
+  font-size: 11px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.collapsible-panel summary h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.summary-action {
+  color: var(--navy-2);
+  font-size: 14px;
+  font-weight: 850;
+}
+
+.summary-action::after {
+  content: " +";
+}
+
+.collapsible-panel[open] .summary-action::after {
+  content: " -";
+}
+
+.collapsible-panel[open] summary {
+  border-radius: 20px;
+  box-shadow: inset 0 0 0 2px rgba(29, 90, 74, 0.15);
+}
+
+.collapsible-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  z-index: 20;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #ffffff;
+  box-shadow: 0 24px 60px rgba(18, 63, 53, 0.2);
+}
+
+.settings-popover {
+  left: 0;
+  width: min(900px, calc(200% + 16px));
+}
+
+.performance-popover {
+  right: 0;
+  width: min(900px, calc(200% + 16px));
+  max-height: min(620px, calc(100vh - 180px));
+  overflow-y: auto;
+}
+
+.collapsible-panel .assessment-form {
+  padding: 22px 24px;
 }
 
 .assessment-form {
@@ -1188,14 +1303,41 @@ body[data-page="tutor"] .tutor-layout {
 }
 
 .assessment-stats {
-  display: grid;
-  grid-template-columns: 1.5fr 1fr 1fr;
-  gap: 18px;
+  display: block;
 }
 
-.assessment-stats .stat-card strong {
-  overflow-wrap: anywhere;
-  font-size: 24px;
+.quiz-progress-card {
+  display: grid;
+  grid-template-columns: auto minmax(220px, 1fr);
+  align-items: center;
+  gap: 24px;
+  padding: 16px 22px;
+}
+
+.quiz-progress-copy {
+  min-width: 170px;
+}
+
+.assessment-stats .quiz-progress-copy strong {
+  display: inline;
+  margin: 0 10px;
+  font-size: 22px;
+}
+
+.quiz-progress-track {
+  height: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8eee7;
+}
+
+.quiz-progress-track span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--mint);
+  transition: width 220ms ease;
 }
 
 .assessment-actions {
@@ -1220,8 +1362,7 @@ body[data-page="tutor"] .tutor-layout {
 }
 
 .quiz-list {
-  display: grid;
-  gap: 18px;
+  min-height: 0;
 }
 
 .empty-state {
@@ -1234,7 +1375,10 @@ body[data-page="tutor"] .tutor-layout {
 }
 
 .quiz-question-card {
-  padding: 22px;
+  display: flex;
+  min-height: min(520px, calc(100vh - 410px));
+  padding: 24px;
+  flex-direction: column;
   border: 1px solid var(--line);
   border-radius: 16px;
   background: #fbfcf8;
@@ -1338,9 +1482,35 @@ body[data-page="tutor"] .tutor-layout {
   display: none;
 }
 
+.quiz-navigation {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: auto;
+  padding-top: 20px;
+}
+
+.quiz-nav-button {
+  width: auto;
+  min-width: 120px;
+  margin: 0;
+}
+
+.quiz-nav-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.quiz-history-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 14px 24px 0;
+}
+
 .quiz-history-list {
   display: grid;
   gap: 12px;
+  padding: 14px 24px 24px;
 }
 
 .quiz-history-card {
@@ -1381,7 +1551,7 @@ body[data-page="tutor"] .tutor-layout {
 .quiz-history-detail {
   display: grid;
   gap: 12px;
-  margin-top: 20px;
+  margin: 0 24px 24px;
   padding-top: 20px;
   border-top: 1px solid var(--line);
 }
@@ -1522,6 +1692,13 @@ body[data-page="tutor"] .tutor-layout {
     grid-template-columns: 1fr;
   }
 
+  .settings-popover,
+  .performance-popover {
+    right: 0;
+    left: 0;
+    width: 100%;
+  }
+
   .tutor-context-card,
   .conversation-sidebar,
   .conversation-sources-card,
@@ -1566,5 +1743,28 @@ body[data-page="tutor"] .tutor-layout {
 
   .message {
     max-width: 100%;
+  }
+
+  .quiz-progress-card {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .quiz-question-card {
+    min-height: auto;
+    padding: 18px;
+  }
+
+  .quiz-question-card h3 {
+    font-size: 19px;
+  }
+
+  .answer-option {
+    padding: 14px;
+  }
+
+  .collapsible-panel summary {
+    align-items: flex-start;
+    padding: 16px 18px;
   }
 }
