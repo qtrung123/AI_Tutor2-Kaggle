@@ -578,7 +578,7 @@ def _generate_quiz_batch(
 
         llm = ChatOllama(
             model=CHAT_MODEL,
-            temperature=0,
+            temperature=0.3,
             format=_quiz_json_schema(missing_count),
             num_ctx=num_ctx,
             num_predict=num_predict,
