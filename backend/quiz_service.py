@@ -55,8 +55,6 @@ GENERIC_OPTION_PATTERNS = [
 # lecture. Individual chunk text is still bounded so one unusually large chunk
 # cannot dominate the prompt.
 MAX_CHARS_PER_CHUNK = 900
-MIN_CONTEXT_CHUNKS_PER_BATCH = 6
-MAX_CONTEXT_CHUNKS_PER_BATCH = 12
 MAX_QUESTIONS_PER_BATCH = 8
 MAX_BATCH_GENERATION_ATTEMPTS = 3
 QUIZ_CONTEXT_WINDOWS = (4096, 8192, 16384, 32768)
@@ -177,29 +175,6 @@ def _format_context(chunks: list[dict]) -> str:
             f"Content:\n{content}"
         )
     return "\n\n".join(parts)
-
-
-def _select_batch_context(
-    chunks: list[dict],
-    num_questions: int,
-    batch_index: int,
-) -> list[dict]:
-    """Select a small, document-wide context sample and rotate it per batch."""
-    target_count = min(
-        len(chunks),
-        max(MIN_CONTEXT_CHUNKS_PER_BATCH, min(MAX_CONTEXT_CHUNKS_PER_BATCH, num_questions * 2)),
-    )
-    if target_count >= len(chunks):
-        return chunks
-
-    selected_indices: list[int] = []
-    for stratum_index in range(target_count):
-        start = (stratum_index * len(chunks)) // target_count
-        end = ((stratum_index + 1) * len(chunks)) // target_count
-        width = max(1, end - start)
-        selected_indices.append(start + (batch_index % width))
-
-    return [chunks[index] for index in selected_indices]
 
 
 def _quiz_json_schema(num_questions: int) -> dict:
@@ -682,16 +657,15 @@ def generate_quiz(document_id: str, question_count: int, difficulty: str, regene
     next_id = 1
 
     for batch_index, batch_size in enumerate(plan):
-        batch_chunks = _select_batch_context(chunks, batch_size, batch_index)
         print(
             f"[quiz-context] batch={batch_index + 1}/{len(plan)}, "
-            f"selected_chunks={len(batch_chunks)}/{len(chunks)}"
+            f"chunks={len(chunks)} (full document)"
         )
         batch_questions = _generate_quiz_batch(
             document_id=document_id,
             num_questions=batch_size,
             difficulty=difficulty,
-            chunks=batch_chunks,
+            chunks=chunks,
             start_id=next_id,
             avoid_questions=avoid_questions,
         )
