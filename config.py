@@ -24,7 +24,7 @@ LEGACY_QUIZ_EXPLANATIONS_PATH = DATA_DIR / "quiz_explanations.json"
 COLLECTION_NAME = "study_documents"
 
 # Model dùng để trả lời
-CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "hf.co/Qwen/Qwen2.5-3B-Instruct-GGUF:Q4_K_M")
+CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "hf.co/Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M")
 
 # Model dùng để embedding
 EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "bge-m3")

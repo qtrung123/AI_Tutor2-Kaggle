@@ -56,7 +56,7 @@ Documents, vectors, conversations, quizzes, answers, and learning history are st
 - **Backend:** FastAPI and Python
 - **Frontend:** HTML, CSS, and vanilla JavaScript
 - **LLM runtime:** Ollama
-- **Chat model:** `hf.co/Qwen/Qwen2.5-3B-Instruct-GGUF:Q4_K_M`
+- **Chat model:** `hf.co/Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M`
 - **Embedding model:** `bge-m3`
 - **Vector database:** Chroma
 - **RAG integration:** LangChain
@@ -167,7 +167,7 @@ cd ..
 
 ```powershell
 ollama pull bge-m3
-ollama pull "hf.co/Qwen/Qwen2.5-3B-Instruct-GGUF:Q4_K_M"
+ollama pull "hf.co/Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"
 ```
 
 The installed model names must match `CHAT_MODEL` and `EMBEDDING_MODEL` in `config.py`.
@@ -336,7 +336,7 @@ On first startup after this storage upgrade, existing quiz JSON files are import
 The main settings are defined in `config.py`:
 
 ```python
-CHAT_MODEL = "hf.co/Qwen/Qwen2.5-3B-Instruct-GGUF:Q4_K_M"
+CHAT_MODEL = "hf.co/Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"
 EMBEDDING_MODEL = "bge-m3"
 
 CHUNK_SIZE = 800
