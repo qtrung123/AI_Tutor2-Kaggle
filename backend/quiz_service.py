@@ -38,9 +38,7 @@ QUIZ_DIFFICULTIES = {"easy", "medium", "difficult"}
 GENERIC_QUESTION_PATTERNS = [
     r"\bwhich statement is supported\b",
     r"\bwhich (option|statement) is (correct|true)\b",
-    r"\baccording to (the )?(lecture|document|context|chunk)\b",
     r"\bwhat does this (chunk|segment|context) say\b",
-    r"\bprovided context\b",
 ]
 GENERIC_OPTION_PATTERNS = [
     r"\bunrelated to the selected material\b",
@@ -56,7 +54,7 @@ GENERIC_OPTION_PATTERNS = [
 # cannot dominate the prompt.
 MAX_CHARS_PER_CHUNK = 900
 MAX_QUESTIONS_PER_BATCH = 8
-MAX_BATCH_GENERATION_ATTEMPTS = 3
+MAX_BATCH_GENERATION_ATTEMPTS = 5
 QUIZ_CONTEXT_WINDOWS = (4096, 8192, 16384, 32768)
 
 
