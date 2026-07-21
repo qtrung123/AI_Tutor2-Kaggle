@@ -32,7 +32,7 @@ Script tạo một `Modelfile` runtime trỏ trực tiếp đến input (kể c�
 1. Import hoặc mở [kaggle_run.ipynb](kaggle_run.ipynb), chọn **Copy & Edit**.
 2. Trong **Settings**, chọn GPU accelerator và bật Internet.
 3. Attach input chứa GGUF. Có thể attach thêm input bài giảng.
-4. Trong **Add-ons > Secrets**, tạo secret `NGROK_AUTHTOKEN` bằng token từ tài khoản Ngrok. Không dán token vào cell hoặc source code.
+4. Trong **Add-ons > Secrets**, tạo secret `NGROK_AUTHTOKEN` bằng token từ tài khoản Ngrok. Không dán token vào cell hoặc source code. Nếu muốn giữ dữ liệu qua các session (xem [Dữ liệu và tính lâu bền](#dữ-liệu-và-tính-lâu-bền)), tạo thêm 2 secret `KAGGLE_USERNAME` và `KAGGLE_KEY`.
 5. Sửa duy nhất cell **User configuration**. Nếu có bài giảng, đặt `LECTURE_INPUT_DIR` tới thư mục input chứa PDF/TXT.
 6. Chọn **Run All**. Mở URL được in theo dạng `AI Tutor URL: https://...`.
 
@@ -84,16 +84,24 @@ Khi một service không sẵn sàng trước timeout, `start_kaggle.sh` in log 
 
 ## Dữ liệu và tính lâu bền
 
-`/kaggle/input` là read-only. Tài liệu upload, `data/conversations.db`, `vectorstore/` và `indexed_files.json` được ghi dưới `/kaggle/working/AI_Tutor2`. Chúng mất khi session bị xóa nếu chưa lưu version/output.
+`/kaggle/input` là read-only. Tài liệu upload, `data/conversations.db`, `vectorstore/` và `indexed_files.json` được ghi dưới `/kaggle/working/AI_Tutor2`. Chúng mất khi session kết thúc nếu không được lưu lại.
 
-Để giữ dữ liệu, trước khi kết thúc session hãy tạo archive trong `/kaggle/working`:
+`kaggle_run.ipynb` tự động hoá việc này bằng hai Kaggle Dataset riêng tư (không cần tạo trước, lần lưu đầu tiên sẽ tự tạo):
 
-```bash
-tar -czf /kaggle/working/ai-tutor-state.tar.gz \
-  -C /kaggle/working/AI_Tutor2 data vectorstore indexed_files.json
-```
+| Biến cấu hình | Nội dung lưu | Tác dụng |
+| --- | --- | --- |
+| `STATE_DATASET_SLUG` | `data/`, `vectorstore/`, `indexed_files.json` | Hội thoại, quiz, tài liệu đã index không mất khi mở session mới |
+| `CACHE_DATASET_SLUG` | Model Ollama + cache pip/npm | Không phải tải lại `bge-m3` và cài lại package mỗi lần chạy |
 
-Chọn **Save Version** để archive trở thành Notebook Output. Ở session sau, attach output đó và giải nén vào project trước cell khởi động. Không publish output nếu tài liệu hoặc hội thoại là dữ liệu riêng tư.
+Cách bật:
+
+1. Tạo 2 Kaggle Secret `KAGGLE_USERNAME` và `KAGGLE_KEY` (lấy từ kaggle.com/settings → **Create New Token**, mở `kaggle.json` tải về).
+2. Trong cell **User configuration**, điền `STATE_DATASET_SLUG` (bắt buộc để không mất dữ liệu) và tuỳ chọn `CACHE_DATASET_SLUG` theo dạng `"<kaggle-username>/<slug>"`.
+3. Cell **Restore previous session** (chạy tự động ngay sau khi clone repo) sẽ tải bản lưu gần nhất về trước khi cài đặt và khởi động service. Lần đầu chưa có gì để tải thì bỏ qua, không lỗi.
+4. Cell **Save progress** ở cuối notebook mặc định không làm gì (`SAVE_STATE_NOW = False`). Bất cứ lúc nào muốn chốt lại tiến trình — đặc biệt là trước khi dừng session — đặt biến này thành `True` rồi chạy lại cell đó.
+5. Cell **Save cache** hoạt động tương tự (`SAVE_CACHE_NOW`), chỉ cần chạy sau lần setup thành công đầu tiên hoặc khi đổi model/package; không cần chạy mỗi session vì dung lượng vài GB.
+
+Không đặt `STATE_DATASET_SLUG`/`CACHE_DATASET_SLUG` nếu không muốn dữ liệu hội thoại rời khỏi máy Kaggle của bạn — cơ chế này hoàn toàn tuỳ chọn và dataset luôn ở chế độ riêng tư.
 
 ## Lỗi thường gặp
 
@@ -104,3 +112,5 @@ Chọn **Save Version** để archive trở thành Notebook Output. Ở session 
 - **Retrieval sai sau khi đổi embedding:** tạo lại Chroma với cùng embedding model dùng khi truy vấn.
 - **Model chạy CPU:** kiểm tra `ollama ps`, VRAM và `nvidia-smi`; chọn GGUF quantization vừa VRAM.
 - **`git pull --ff-only` thất bại:** thư mục Kaggle working có thay đổi source cục bộ. Xóa project working hoặc xử lý thay đổi trước khi chạy lại.
+- **Cell Restore/Save báo "State persistence disabled":** thiếu secret `KAGGLE_USERNAME`/`KAGGLE_KEY`, hoặc `STATE_DATASET_SLUG`/`CACHE_DATASET_SLUG` để trống. Thêm secret và điền slug dạng `"<kaggle-username>/<slug>"` rồi chạy lại cell Restore.
+- **Save progress báo lỗi 403/404 từ Kaggle API:** slug dataset không thuộc tài khoản đang đăng nhập, hoặc token đã hết hạn — tạo lại token tại kaggle.com/settings và cập nhật secret `KAGGLE_KEY`.

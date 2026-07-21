@@ -346,6 +346,14 @@ TOP_K = 4
 
 If `EMBEDDING_MODEL` changes, existing documents must be indexed again because their vectors were created with the previous model.
 
+## Kaggle Deployment
+
+`kaggle_run.ipynb` runs the full stack (Ollama, backend, frontend, nginx, ngrok tunnel) inside a
+Kaggle notebook, including optional persistence of chat/quiz data and the model/package cache
+across sessions via private Kaggle Datasets. This only affects the notebook and `deployment/`; it
+has no effect on running the backend and frontend locally. See
+[KAGGLE_DEPLOYMENT.md](KAGGLE_DEPLOYMENT.md) for the full setup and troubleshooting guide.
+
 ## Troubleshooting
 
 ### The backend cannot connect to Ollama
