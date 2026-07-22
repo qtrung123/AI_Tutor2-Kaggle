@@ -56,7 +56,7 @@ GENERIC_OPTION_PATTERNS = [
 # cannot dominate the prompt.
 MAX_CHARS_PER_CHUNK = 900
 MAX_QUESTIONS_PER_BATCH = 8
-MAX_BATCH_GENERATION_ATTEMPTS = 3
+MAX_BATCH_GENERATION_ATTEMPTS = 8
 QUIZ_CONTEXT_WINDOWS = (4096, 8192, 16384, 32768)
 
 
@@ -524,7 +524,7 @@ def _generate_quiz_batch(
         )
         llm = ChatOllama(
             model=CHAT_MODEL,
-            temperature=temperatures[attempt_index][difficulty],
+            temperature=temperatures[min(attempt_index, len(temperatures) - 1)][difficulty],
             format="json",
             num_ctx=num_ctx,
             num_predict=num_predict,
