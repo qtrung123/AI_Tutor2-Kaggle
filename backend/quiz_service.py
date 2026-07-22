@@ -56,7 +56,7 @@ GENERIC_OPTION_PATTERNS = [
 # cannot dominate the prompt.
 MAX_CHARS_PER_CHUNK = 900
 MAX_QUESTIONS_PER_BATCH = 8
-MAX_BATCH_GENERATION_ATTEMPTS = 7
+MAX_BATCH_GENERATION_ATTEMPTS = 3
 QUIZ_CONTEXT_WINDOWS = (4096, 8192, 16384, 32768)
 
 
@@ -175,40 +175,6 @@ def _format_context(chunks: list[dict]) -> str:
             f"Content:\n{content}"
         )
     return "\n\n".join(parts)
-
-
-def _quiz_json_schema(num_questions: int) -> dict:
-    """Return the exact structured-output contract for one quiz batch."""
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "questions": {
-                "type": "array",
-                "minItems": num_questions,
-                "maxItems": num_questions,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "question": {"type": "string", "minLength": 1},
-                        "options": {
-                            "type": "array",
-                            "minItems": 4,
-                            "maxItems": 4,
-                            "items": {"type": "string", "minLength": 1},
-                        },
-                        "correct_answer": {
-                            "type": "string",
-                            "enum": ["A", "B", "C", "D"],
-                        },
-                    },
-                    "required": ["question", "options", "correct_answer"],
-                },
-            }
-        },
-        "required": ["questions"],
-    }
 
 
 def load_quiz_prompt_template() -> str:
@@ -551,10 +517,15 @@ def _generate_quiz_batch(
                 f"Estimated required tokens: {estimated_required_tokens}."
             )
 
+        temperatures = (
+            {"easy": 0.1, "medium": 0.2, "difficult": 0.3},
+            {"easy": 0.45, "medium": 0.65, "difficult": 0.75},
+            {"easy": 0.6, "medium": 0.75, "difficult": 0.85},
+        )
         llm = ChatOllama(
             model=CHAT_MODEL,
-            temperature=0.3,
-            format=_quiz_json_schema(missing_count),
+            temperature=temperatures[attempt_index][difficulty],
+            format="json",
             num_ctx=num_ctx,
             num_predict=num_predict,
         )
