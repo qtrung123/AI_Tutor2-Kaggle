@@ -24,6 +24,15 @@ The following questions have already been used for this document. Do not repeat 
 
 Select different concepts when possible. If the same broad topic must be used, test it through a genuinely different cognitive operation.
 
+WITHIN-BATCH UNIQUENESS
+
+The {num_questions} questions you generate in this single response must also be unique from one another:
+
+* No two questions may test the same fact, concept, or correct-answer relationship, even if reworded.
+* Do not center every question on the single most prominent concept in the CONTEXT. Spread the {num_questions} questions across different sections, concepts, or sub-topics of the CONTEXT.
+* Each question must be solvable independently of the others.
+* Before finalizing, compare every question against every other question in this response; rewrite or replace any pair that overlaps in meaning.
+
 CONTENT REQUIREMENTS
 
 * Use only information from the CONTEXT.
@@ -83,6 +92,7 @@ Before returning the JSON, verify that:
 6. The correct answers are distributed without an obvious pattern.
 7. The JSON is valid and contains no extra text.
 8. No question repeats, paraphrases, or tests the same fact as a question in CROSS-QUIZ UNIQUENESS.
+9. No two questions within this response repeat, paraphrase, or test the same fact, concept, or correct-answer relationship as each other.
 
 CONTEXT:
 
