@@ -268,6 +268,7 @@ Hard requirements:
 - no generic distractors about unrelated material or missing information
 - options must be short, plausible, same-topic choices
 - all questions must follow the requested difficulty level
+- no two questions in this response may test the same fact, concept, or correct-answer relationship, even if reworded
 - do not repeat or paraphrase any previously used question listed below
 - escape double quotes inside JSON strings as \\\"
 - encode line breaks inside strings as \\n and close every string, array, and object
