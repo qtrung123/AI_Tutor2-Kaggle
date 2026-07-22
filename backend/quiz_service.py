@@ -1,3 +1,4 @@
+import difflib
 import json
 import math
 import re
@@ -423,6 +424,30 @@ def _validate_difficulty_quality(question_text: str, difficulty: str) -> None:
         raise ValueError(f"Difficult question is too shallow or underspecified: {question_text}")
 
 
+def _normalize_question_key(text: str) -> str:
+    lowered = re.sub(r"[^a-z0-9\s]", "", str(text).lower())
+    return re.sub(r"\s+", " ", lowered).strip()
+
+
+def _is_duplicate_question(question_text: str, existing_questions: list[str]) -> bool:
+    """
+    Catch exact and near-duplicate questions the prompt alone failed to prevent
+    (e.g. the same question reworded with a different option list). 0.85 was
+    picked to reject obvious rewordings while still allowing distinct questions
+    that happen to share common exam phrasing.
+    """
+    candidate_key = _normalize_question_key(question_text)
+    for existing in existing_questions:
+        existing_key = _normalize_question_key(existing)
+        if not existing_key:
+            continue
+        if candidate_key == existing_key:
+            return True
+        if difflib.SequenceMatcher(None, candidate_key, existing_key).ratio() >= 0.85:
+            return True
+    return False
+
+
 def _validate_quiz_batch(
     data: dict,
     num_questions: int,
@@ -560,6 +585,13 @@ def _generate_quiz_batch(
                         start_id + len(accepted_questions),
                         difficulty,
                     )[0]
+                    existing_questions = base_avoid_questions + [
+                        question["question"] for question in accepted_questions
+                    ]
+                    if _is_duplicate_question(normalized["question"], existing_questions):
+                        raise ValueError(
+                            f"Question duplicates an existing question: {normalized['question']}"
+                        )
                     accepted_questions.append(normalized)
                 except Exception as question_error:
                     generation_errors.append(str(question_error))
