@@ -97,14 +97,23 @@ def _build_citations(docs) -> list[dict]:
     return citations
 
 
-def _retrieve_conversation_docs(question: str, document_ids: list[str]) -> list:
-    """Retrieve globally relevant chunks while strictly enforcing the thread's source scope."""
-    vectorstore = load_vectorstore()
+def _chroma_filter(document_ids: list[str], topic_id: str | None = None) -> dict:
     source_filter = (
         {"source": document_ids[0]}
         if len(document_ids) == 1
         else {"source": {"$in": document_ids}}
     )
+    if not topic_id:
+        return source_filter
+    return {"$and": [source_filter, {"topic_id": topic_id}]}
+
+
+def _retrieve_conversation_docs(
+    question: str, document_ids: list[str], topic_id: str | None = None
+) -> list:
+    """Retrieve globally relevant chunks while strictly enforcing the thread's source scope."""
+    vectorstore = load_vectorstore()
+    source_filter = _chroma_filter(document_ids, topic_id)
     try:
         ranked_docs = vectorstore.similarity_search_with_score(
             question, k=TOP_K, filter=source_filter
@@ -116,7 +125,7 @@ def _retrieve_conversation_docs(question: str, document_ids: list[str]) -> list:
         for document_id in document_ids:
             ranked_docs.extend(
                 vectorstore.similarity_search_with_score(
-                    question, k=TOP_K, filter={"source": document_id}
+                    question, k=TOP_K, filter=_chroma_filter([document_id], topic_id)
                 )
             )
 

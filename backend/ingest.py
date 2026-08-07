@@ -8,11 +8,14 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 
+from backend.topic_extractor import TOPIC_SCHEMA_VERSION, TopicExtractor, ollama_heading_refiner
+
 from config import (
     DATA_DIR,
     VECTORSTORE_DIR,
     COLLECTION_NAME,
     EMBEDDING_MODEL,
+    CHAT_MODEL,
     CHUNK_SIZE,
     CHUNK_OVERLAP,
     INDEXED_FILES_PATH,
@@ -91,6 +94,7 @@ def split_documents(documents):
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
+        add_start_index=True,
     )
 
     return splitter.split_documents(documents)
@@ -107,6 +111,25 @@ def get_vectorstore():
     )
 
     return vectorstore
+
+
+def add_topic_metadata(documents, chunks, ids, extractor: TopicExtractor | None = None) -> list[dict]:
+    """Add stable chunk IDs and extracted topic metadata without changing chunk text."""
+    extractor = extractor or TopicExtractor(llm_refiner=ollama_heading_refiner(CHAT_MODEL))
+    topics, headings = extractor.extract(documents)
+    extractor.map_chunks(chunks, documents, topics, headings)
+    for chunk, chunk_id in zip(chunks, ids):
+        chunk.metadata["chunk_id"] = chunk_id
+    return topics
+
+
+def delete_stale_source_vectors(vectorstore, source: str, current_ids: list[str]) -> list[str]:
+    """Delete source vectors not present in the completed replacement index."""
+    result = vectorstore.get(where={"source": source})
+    stale_ids = sorted(set(result.get("ids", []) or []) - set(current_ids))
+    if stale_ids:
+        vectorstore.delete(ids=stale_ids)
+    return stale_ids
 
 
 def index_files(file_paths: List[Path]):
@@ -137,9 +160,10 @@ def index_files(file_paths: List[Path]):
         file_key = file_path.name
 
         if file_key in indexed_files and indexed_files[file_key]["hash"] == file_hash:
-            print(f"Skipping already indexed file: {file_path.name}")
-            skipped_files.append(file_path.name)
-            continue
+            if indexed_files[file_key].get("topic_schema_version") == TOPIC_SCHEMA_VERSION:
+                print(f"Skipping already indexed file: {file_path.name}")
+                skipped_files.append(file_path.name)
+                continue
 
         documents = load_single_file(file_path)
         documents = clean_documents(documents)
@@ -163,15 +187,20 @@ def index_files(file_paths: List[Path]):
             for i in range(len(chunks))
         ]
 
+        topics = add_topic_metadata(documents, chunks, ids)
+
         vectorstore.add_documents(
             documents=chunks,
             ids=ids,
         )
+        delete_stale_source_vectors(vectorstore, file_key, ids)
 
         indexed_files[file_key] = {
             "hash": file_hash,
             "chunks": len(chunks),
             "path": str(file_path),
+            "topic_schema_version": TOPIC_SCHEMA_VERSION,
+            "topics": topics,
         }
 
         total_new_files += 1

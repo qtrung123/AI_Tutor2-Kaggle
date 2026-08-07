@@ -6,7 +6,8 @@ Using only the information provided in the CONTEXT, generate exactly {num_questi
 
 The selected quiz difficulty level is: {difficulty}
 
-The questions must assess the learner’s understanding of the most important concepts in the provided document.
+The selected topic is: {topic_name} ({topic_id}).
+Each question must test one concept from this selected topic and be grounded only in the provided context chunks.
 
 DIFFICULTY CONTRACT
 
@@ -47,7 +48,7 @@ ANSWER OPTION REQUIREMENTS
 * Each question must have exactly 4 options: A, B, C, and D.
 * Each question must have exactly one correct answer.
 * The correct answer must be supported by the CONTEXT.
-* Distractors must be plausible, relevant, and clearly incorrect.
+* Distractors must be plausible, relevant, and clearly incorrect without asserting unsupported facts.
 * Options must be distinct, non-overlapping, and similar in length.
 * Distribute correct answers across A, B, C, and D without an obvious pattern.
 
@@ -58,7 +59,8 @@ Return only one valid JSON object.
 Do not use Markdown.
 Do not wrap the JSON in a code block.
 Do not include introductory text, comments, explanations, or any content outside the JSON.
-Do not generate explanation, difficulty, source, page, chunk, topic, or metadata fields.
+For every question, generate a concise explanation grounded in the cited context and a non-empty source_chunk_ids array.
+Every source_chunk_ids value must exactly match a Chunk ID shown in CONTEXT.
 Escape every double quote inside question or option text as \".
 Encode line breaks inside JSON strings as \n; never place a raw newline inside a string.
 Finish and close every JSON string, array, and object before returning the response.
@@ -75,7 +77,9 @@ The output must follow this exact structure:
 "C. Option C in English",
 "D. Option D in English"
 ],
-"correct_answer": "A"
+"correct_answer": "A",
+"explanation": "Why the correct answer follows from the cited context.",
+"source_chunk_ids": ["exact_chunk_id_from_context"]
 }
 ]
 }

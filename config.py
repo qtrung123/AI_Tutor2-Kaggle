@@ -24,7 +24,28 @@ LEGACY_QUIZ_EXPLANATIONS_PATH = DATA_DIR / "quiz_explanations.json"
 COLLECTION_NAME = "study_documents"
 
 # Model dùng để trả lời
-CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "hf.co/Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M")
+CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "hf.co/Qwen/Qwen2.5-3B-Instruct-GGUF:Q4_K_M")
+QUIZ_VALIDATION_MODEL = os.getenv("QUIZ_VALIDATION_MODEL", CHAT_MODEL)
+QUIZ_SEMANTIC_VALIDATION_ENABLED = os.getenv(
+    "QUIZ_SEMANTIC_VALIDATION_ENABLED", "true"
+).lower() in {"1", "true", "yes", "on"}
+QUIZ_VALIDATION_NUM_CTX = int(os.getenv("QUIZ_VALIDATION_NUM_CTX", "4096"))
+QUIZ_VALIDATION_ATTEMPTS = int(os.getenv("QUIZ_VALIDATION_ATTEMPTS", "2"))
+QUIZ_QUALITY_RETRY_LIMIT = int(os.getenv("QUIZ_QUALITY_RETRY_LIMIT", "1"))
+
+MASTERY_DIFFICULTY_WEIGHTS = {
+    "easy": float(os.getenv("MASTERY_EASY_WEIGHT", "1.0")),
+    "medium": float(os.getenv("MASTERY_MEDIUM_WEIGHT", "1.5")),
+    "difficult": float(os.getenv("MASTERY_DIFFICULT_WEIGHT", "2.0")),
+}
+MASTERY_QUALITY_WEIGHTS = {
+    "accepted": 1.0,
+    "accepted_quality_warning": float(os.getenv("MASTERY_QUALITY_WARNING_WEIGHT", "0.75")),
+}
+MASTERY_MIN_QUESTIONS = int(os.getenv("MASTERY_MIN_QUESTIONS", "3"))
+MASTERY_DEVELOPING_THRESHOLD = float(os.getenv("MASTERY_DEVELOPING_THRESHOLD", "50"))
+MASTERY_PROFICIENT_THRESHOLD = float(os.getenv("MASTERY_PROFICIENT_THRESHOLD", "70"))
+MASTERY_MASTERED_THRESHOLD = float(os.getenv("MASTERY_MASTERED_THRESHOLD", "85"))
 
 # Model dùng để embedding
 EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "bge-m3")

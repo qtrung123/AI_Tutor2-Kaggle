@@ -59,6 +59,7 @@ const sourceFileInput = document.getElementById("source-file-input");
 const uploadSourceButton = document.getElementById("upload-source-button");
 const uploadStatus = document.getElementById("upload-status");
 const quizDocumentSelect = document.getElementById("quiz-document-select");
+const quizTopicSelect = document.getElementById("quiz-topic-select");
 const quizQuestionCountSelect = document.getElementById("quiz-question-count-select");
 const quizDifficultySelect = document.getElementById("quiz-difficulty-select");
 const generateQuizButton = document.getElementById("generate-quiz-button");
@@ -690,15 +691,21 @@ function selectedDifficulty() {
   return quizDifficultySelect?.value || "easy";
 }
 
+function selectedTopicId() {
+  return quizTopicSelect?.value || "";
+}
+
 function currentQuizKey() {
-  return `${quizDocumentSelect?.value || ""}::${selectedDifficulty()}`;
+  return `${quizDocumentSelect?.value || ""}::${selectedTopicId()}::${selectedDifficulty()}`;
 }
 
 function updateDifficultyOptions() {
   if (!quizDifficultySelect) {
     return;
   }
-  const savedLevels = getSelectedQuizStatus()?.available_difficulties || [];
+  const savedLevels = (getSelectedQuizStatus()?.variants || [])
+    .filter((variant) => variant.topic_id === selectedTopicId())
+    .map((variant) => variant.difficulty);
   Array.from(quizDifficultySelect.options).forEach((option) => {
     const label = option.value.charAt(0).toUpperCase() + option.value.slice(1);
     option.textContent = savedLevels.includes(option.value) ? `${label} (saved)` : label;
@@ -706,7 +713,9 @@ function updateDifficultyOptions() {
 }
 
 function formatQuizStatus(status) {
-  const levelIsSaved = status?.available_difficulties?.includes(selectedDifficulty());
+  const levelIsSaved = (status?.variants || []).some(
+    (variant) => variant.topic_id === selectedTopicId() && variant.difficulty === selectedDifficulty()
+  );
   if (!levelIsSaved && !currentQuiz) {
     return "Not generated";
   }
@@ -759,12 +768,13 @@ async function loadIndexedDocuments() {
       const option = document.createElement("option");
       option.value = documentItem.id;
       const status = quizStatuses.find((item) => item.document_id === documentItem.id);
-      const levels = status?.available_difficulties || [];
+      const levels = [...new Set((status?.variants || []).map((variant) => variant.difficulty))];
       const quizLabel = levels.length ? `saved: ${levels.join(", ")}` : "no quiz yet";
       option.textContent = `${documentItem.title} (${documentItem.chunks} chunks, ${quizLabel})`;
       quizDocumentSelect.appendChild(option);
     });
 
+    updateTopicOptions();
     await loadSelectedQuiz();
   } catch (error) {
     quizDocumentSelect.innerHTML = "";
@@ -775,6 +785,31 @@ async function loadIndexedDocuments() {
     showToast("Could not load indexed documents");
     updateAssessmentSummary();
   }
+}
+
+function updateTopicOptions() {
+  if (!quizTopicSelect) return;
+  const selectedDocument = indexedDocuments.find((item) => item.id === quizDocumentSelect?.value);
+  const topics = selectedDocument?.topics || [];
+  quizTopicSelect.innerHTML = "";
+  if (!topics.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No extracted topics available";
+    quizTopicSelect.appendChild(option);
+    return;
+  }
+  topics.forEach((topic) => {
+    const option = document.createElement("option");
+    option.value = topic.topic_id;
+    option.textContent = topic.name;
+    quizTopicSelect.appendChild(option);
+  });
+}
+
+async function handleQuizDocumentChange() {
+  updateTopicOptions();
+  await loadSelectedQuiz();
 }
 
 function setAssessmentLoading(isLoading) {
@@ -792,6 +827,7 @@ async function requestGeneratedQuiz() {
     },
     body: JSON.stringify({
       document_id: quizDocumentSelect.value,
+      topic_id: selectedTopicId(),
       question_count: Number(quizQuestionCountSelect.value),
       difficulty: selectedDifficulty()
     })
@@ -812,7 +848,7 @@ async function requestGeneratedQuiz() {
 }
 
 async function requestQuizDetail(documentId) {
-  const query = new URLSearchParams({ difficulty: selectedDifficulty() });
+  const query = new URLSearchParams({ difficulty: selectedDifficulty(), topic_id: selectedTopicId() });
   const response = await fetch(`${QUIZ_API_BASE_URL}/${encodeURIComponent(documentId)}?${query}`);
   if (!response.ok) {
     let detail = `Quiz detail API returned ${response.status}`;
@@ -835,7 +871,8 @@ async function requestQuizRegeneration(documentId) {
     },
     body: JSON.stringify({
       question_count: Number(quizQuestionCountSelect.value),
-      difficulty: selectedDifficulty()
+      difficulty: selectedDifficulty(),
+      topic_id: selectedTopicId()
     })
   });
   if (!response.ok) {
@@ -859,6 +896,7 @@ async function requestQuizProgress(questionId, selectedAnswer) {
     },
     body: JSON.stringify({
       difficulty: currentQuiz.difficulty,
+      topic_id: currentQuiz.topic_id,
       question_id: questionId,
       selected_answer: selectedAnswer
     })
@@ -878,7 +916,7 @@ async function requestQuizProgress(questionId, selectedAnswer) {
 }
 
 async function requestQuizProgressReset() {
-  const query = new URLSearchParams({ difficulty: currentQuiz.difficulty });
+  const query = new URLSearchParams({ difficulty: currentQuiz.difficulty, topic_id: currentQuiz.topic_id });
   const response = await fetch(
     `${QUIZ_API_BASE_URL}/${encodeURIComponent(currentQuiz.document_id)}/progress?${query}`,
     { method: "DELETE" }
@@ -896,7 +934,8 @@ async function requestQuizExplanation(questionId) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        difficulty: currentQuiz.difficulty
+        difficulty: currentQuiz.difficulty,
+        topic_id: currentQuiz.topic_id
       })
     }
   );
@@ -1009,7 +1048,7 @@ async function loadSelectedQuiz() {
   const documentId = quizDocumentSelect?.value;
   const requestedQuizKey = currentQuizKey();
   updateDifficultyOptions();
-  if (!documentId) {
+  if (!documentId || !selectedTopicId()) {
     currentQuiz = null;
     currentAttempt = null;
     quizAnswers = {};
@@ -1061,6 +1100,10 @@ async function generateAssessmentQuiz() {
     showToast("Choose an indexed document first");
     return;
   }
+  if (!selectedTopicId()) {
+    showToast("Choose an extracted topic first");
+    return;
+  }
 
   if (currentQuiz?.questions?.length) {
     renderAssessmentQuiz();
@@ -1101,6 +1144,10 @@ async function generateAssessmentQuiz() {
 async function regenerateAssessmentQuiz() {
   if (!quizDocumentSelect.value) {
     showToast("Choose an indexed document first");
+    return;
+  }
+  if (!selectedTopicId()) {
+    showToast("Choose an extracted topic first");
     return;
   }
 
@@ -1377,7 +1424,8 @@ document.addEventListener("keydown", (event) => {
 generateQuizButton.addEventListener("click", generateAssessmentQuiz);
 newQuizButton.addEventListener("click", regenerateAssessmentQuiz);
 resetQuizButton.addEventListener("click", resetAssessmentQuiz);
-quizDocumentSelect.addEventListener("change", loadSelectedQuiz);
+quizDocumentSelect.addEventListener("change", handleQuizDocumentChange);
+quizTopicSelect.addEventListener("change", loadSelectedQuiz);
 quizQuestionCountSelect.addEventListener("change", updateAssessmentSummary);
 quizDifficultySelect.addEventListener("change", handleQuizDifficultyChange);
 refreshQuizHistoryButton.addEventListener("click", loadQuizHistory);

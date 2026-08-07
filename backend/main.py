@@ -20,6 +20,7 @@ from backend.quiz_service import (
     update_quiz_progress,
 )
 from backend.quiz_store import delete_document_quiz_data
+from backend.mastery_service import recompute_all_mastery, recompute_topic_mastery
 from backend.conversation_store import (
     create_conversation,
     delete_conversation,
@@ -115,11 +116,13 @@ class DocumentSummary(BaseModel):
     id: str
     title: str
     chunks: int
+    topics: list[dict] = Field(default_factory=list)
 
 
 class QuizGenerateRequest(BaseModel):
     """Request body for POST /api/quiz/generate."""
     document_id: str
+    topic_id: str
     question_count: int = Field(ge=1, le=40)
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
 
@@ -128,16 +131,26 @@ class QuizRegenerateRequest(BaseModel):
     """Request body for POST /api/quiz/{document_id}/regenerate."""
     question_count: int = Field(ge=1, le=40)
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
+    topic_id: str
 
 
 class QuizProgressRequest(BaseModel):
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
     question_id: int = Field(ge=1)
     selected_answer: str = Field(pattern="^[ABCDabcd]$")
+    topic_id: str
+    student_id: str = "local_student"
+
+
+class MasteryRecomputeRequest(BaseModel):
+    student_id: Optional[str] = None
+    document_id: Optional[str] = None
+    topic_id: Optional[str] = None
 
 
 class QuizExplainRequest(BaseModel):
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
+    topic_id: str
 
 
 class QuizQuestion(BaseModel):
@@ -146,6 +159,10 @@ class QuizQuestion(BaseModel):
     question: str
     options: list[str]
     correct_answer: str
+    topic_id: str
+    difficulty: str
+    explanation: str
+    source_chunk_ids: list[str]
 
 
 class QuizGenerateResponse(BaseModel):
@@ -156,6 +173,8 @@ class QuizGenerateResponse(BaseModel):
     title: Optional[str] = None
     question_count: int
     difficulty: str
+    topic_id: str
+    topic_name: Optional[str] = None
     created_at: str
     questions: list[QuizQuestion]
 
@@ -401,10 +420,13 @@ def quiz_history_detail(attempt_id: str) -> dict:
 
 
 @app.get("/api/quiz/{document_id}")
-def quiz_detail(document_id: str, difficulty: str = "easy") -> dict:
+def quiz_detail(
+    document_id: str, topic_id: str, difficulty: str = "easy",
+    student_id: str = "local_student",
+) -> dict:
     """Load the saved quiz and latest attempt for one document."""
     try:
-        return load_quiz_with_attempt(document_id, difficulty)
+        return load_quiz_with_attempt(document_id, difficulty, topic_id, student_id)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except Exception as error:
@@ -433,6 +455,7 @@ def quiz_generate(request: QuizGenerateRequest) -> QuizGenerateResponse:
         )
         result = generate_quiz(
             document_id=request.document_id,
+            topic_id=request.topic_id,
             question_count=request.question_count,
             difficulty=request.difficulty,
         )
@@ -457,8 +480,10 @@ def quiz_progress(document_id: str, request: QuizProgressRequest) -> dict:
         return update_quiz_progress(
             document_id=document_id,
             difficulty=request.difficulty,
+            topic_id=request.topic_id,
             question_id=request.question_id,
             selected_answer=request.selected_answer,
+            student_id=request.student_id,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -467,10 +492,13 @@ def quiz_progress(document_id: str, request: QuizProgressRequest) -> dict:
 
 
 @app.delete("/api/quiz/{document_id}/progress")
-def quiz_progress_reset(document_id: str, difficulty: str) -> dict:
+def quiz_progress_reset(
+    document_id: str, topic_id: str, difficulty: str,
+    student_id: str = "local_student",
+) -> dict:
     """Clear current quiz progress while preserving completed history."""
     try:
-        return clear_quiz_progress(document_id, difficulty)
+        return clear_quiz_progress(document_id, difficulty, topic_id, student_id)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -482,6 +510,7 @@ def quiz_explain(document_id: str, question_id: int, request: QuizExplainRequest
         return explain_quiz_question(
             document_id=document_id,
             difficulty=request.difficulty,
+            topic_id=request.topic_id,
             question_id=question_id,
         )
     except ValueError as error:
@@ -501,6 +530,7 @@ def quiz_regenerate(document_id: str, request: QuizRegenerateRequest) -> QuizGen
     try:
         result = generate_quiz(
             document_id=document_id,
+            topic_id=request.topic_id,
             question_count=request.question_count,
             difficulty=request.difficulty,
             regenerate=True,
@@ -513,6 +543,34 @@ def quiz_regenerate(document_id: str, request: QuizRegenerateRequest) -> QuizGen
             status_code=500,
             detail=f"Could not regenerate quiz. Original error: {error}",
         ) from error
+
+
+@app.get("/api/mastery/{document_id}/{topic_id}")
+def topic_mastery(
+    document_id: str, topic_id: str, student_id: str = "local_student"
+) -> dict:
+    """Return mastery rebuilt from completed attempt-answer snapshots."""
+    try:
+        return recompute_topic_mastery(student_id, document_id, topic_id)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Could not compute mastery: {error}") from error
+
+
+@app.post("/api/mastery/recompute")
+def mastery_recompute(request: MasteryRecomputeRequest) -> list[dict] | dict:
+    """Rebuild one topic or every historical mastery cache entry."""
+    try:
+        if request.document_id or request.topic_id:
+            if not request.student_id or not request.document_id or not request.topic_id:
+                raise ValueError("student_id, document_id, and topic_id are all required for one-topic recomputation.")
+            return recompute_topic_mastery(
+                request.student_id, request.document_id, request.topic_id
+            )
+        return recompute_all_mastery(request.student_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Could not rebuild mastery: {error}") from error
 
 
 def _validate_conversation_document_ids(document_ids: list[str]) -> None:
