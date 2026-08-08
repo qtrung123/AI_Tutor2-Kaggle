@@ -8,7 +8,7 @@ BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 PUBLIC_PORT="${PUBLIC_PORT:-7860}"
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
-OLLAMA_CHAT_MODEL="${OLLAMA_CHAT_MODEL:-qwen-tutor-7b}"
+OLLAMA_CHAT_MODEL="${OLLAMA_CHAT_MODEL:-hf.co/unsloth/GLM-4.7-Flash-REAP-23B-A3B-GGUF:UD-Q4_K_XL}"
 OLLAMA_EMBEDDING_MODEL="${OLLAMA_EMBEDDING_MODEL:-bge-m3}"
 GGUF_MODEL_PATH="${GGUF_MODEL_PATH:-}"
 RECREATE_OLLAMA_MODEL="${RECREATE_OLLAMA_MODEL:-0}"
@@ -129,7 +129,10 @@ log "Starting Ollama"
 ollama serve >"$LOG_DIR/ollama.log" 2>&1 & echo $! >"$RUNTIME_DIR/ollama.pid"
 wait_http "Ollama" "$OLLAMA_HOST/api/tags" 120 "$LOG_DIR/ollama.log"
 
-if [[ "$RECREATE_OLLAMA_MODEL" == "1" ]] || ! ollama_has_model "$OLLAMA_CHAT_MODEL"; then
+if [[ "$OLLAMA_CHAT_MODEL" == hf.co/* ]]; then
+  log "Pulling Hugging Face chat model $OLLAMA_CHAT_MODEL"
+  ollama pull "$OLLAMA_CHAT_MODEL" >>"$LOG_DIR/ollama.log" 2>&1
+elif [[ "$RECREATE_OLLAMA_MODEL" == "1" ]] || ! ollama_has_model "$OLLAMA_CHAT_MODEL"; then
   [[ -n "$GGUF_MODEL_PATH" ]] || fail "GGUF_MODEL_PATH must be set because chat model '$OLLAMA_CHAT_MODEL' is absent."
   [[ -f "$GGUF_MODEL_PATH" ]] || fail "GGUF file does not exist: $GGUF_MODEL_PATH"
   MODELFILE="$RUNTIME_DIR/Modelfile"
