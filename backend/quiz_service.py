@@ -14,6 +14,7 @@ from backend.quiz_store import (
     get_quiz,
     get_quiz_explanation,
     list_document_quizzes,
+    list_completed_answer_snapshots,
     list_quiz_history as load_quiz_history,
     get_quiz_history_attempt,
     invalidate_document_quizzes_for_topic_schema,
@@ -26,8 +27,16 @@ from backend.quiz_store import (
     utc_now_iso,
 )
 from backend.quiz_validation import validate_question_semantics
-from backend.mastery_service import recompute_topic_mastery
+from backend.assessment_planner import (
+    PLANNER_VERSION,
+    allocate_document_topics,
+    build_topic_plan,
+)
+from backend.mastery_service import calculate_mastery, recompute_topic_mastery
 from backend.rag_service import explain_quiz_answer
+from backend.auth_store import LEGACY_USER_ID
+from backend.indexed_document_store import list_indexed_documents as load_owned_documents
+from backend.ingest import migrate_legacy_vector_ownership
 from config import (
     CHAT_MODEL,
     COLLECTION_NAME,
@@ -68,25 +77,21 @@ MAX_BATCH_GENERATION_ATTEMPTS = 8
 QUIZ_CONTEXT_WINDOWS = (4096, 8192, 16384, 32768)
 
 
-def _load_indexed_files() -> dict:
-    if not INDEXED_FILES_PATH.exists():
-        return {}
-
-    with open(INDEXED_FILES_PATH, "r", encoding="utf-8") as file:
-        return json.load(file)
+def _load_indexed_files(owner_id: str) -> dict:
+    return {document["document_id"]: document for document in load_owned_documents(owner_id)}
 
 
-def list_indexed_documents() -> list[dict]:
+def list_indexed_documents(owner_id: str = LEGACY_USER_ID) -> list[dict]:
     """
     Return documents available for quiz generation.
 
     The hash is included internally so generated quizzes can remember which
     exact uploaded file version they belong to.
     """
-    indexed_files = _load_indexed_files()
+    indexed_files = _load_indexed_files(owner_id)
     for file_name, info in indexed_files.items():
         invalidate_document_quizzes_for_topic_schema(
-            file_name, int(info.get("topic_schema_version", 0))
+            file_name, int(info.get("topic_schema_version", 0)), owner_id
         )
     return [
         {
@@ -101,17 +106,19 @@ def list_indexed_documents() -> list[dict]:
     ]
 
 
-def _document_lookup() -> dict[str, dict]:
-    return {document["id"]: document for document in list_indexed_documents()}
+def _document_lookup(owner_id: str) -> dict[str, dict]:
+    return {document["id"]: document for document in list_indexed_documents(owner_id)}
 
 
 def _load_vectorstore() -> Chroma:
     embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
-    return Chroma(
+    store = Chroma(
         persist_directory=str(VECTORSTORE_DIR),
         collection_name=COLLECTION_NAME,
         embedding_function=embeddings,
     )
+    migrate_legacy_vector_ownership(store)
+    return store
 
 
 def _source_matches(source: str, document_id: str) -> bool:
@@ -151,7 +158,7 @@ def _result_to_chunks(result: dict, document_id: str, filter_source: bool) -> li
     return sorted(chunks, key=lambda item: int((item.get("metadata") or {}).get("chunk", 0)))
 
 
-def get_topic_chunks(document_id: str, topic_id: str) -> list[dict]:
+def get_topic_chunks(document_id: str, topic_id: str, owner_id: str = LEGACY_USER_ID) -> list[dict]:
     """
     Load all chunks for the selected document.
 
@@ -163,7 +170,7 @@ def get_topic_chunks(document_id: str, topic_id: str) -> list[dict]:
 
     try:
         result = vectorstore.get(
-            where={"$and": [{"source": document_id}, {"topic_id": topic_id}]}
+            where={"$and": [{"owner_id": owner_id}, {"document_id": document_id}, {"topic_id": topic_id}]}
         )
         chunks = _result_to_chunks(result, document_id, filter_source=False)
         if chunks:
@@ -171,10 +178,12 @@ def get_topic_chunks(document_id: str, topic_id: str) -> list[dict]:
     except Exception:
         pass
 
-    result = vectorstore.get(limit=10000)
+    result = vectorstore.get(where={"owner_id": owner_id}, limit=10000)
     return [
         chunk for chunk in _result_to_chunks(result, document_id, filter_source=True)
-        if chunk["metadata"].get("topic_id") == topic_id
+        if chunk["metadata"].get("owner_id") == owner_id
+        and chunk["metadata"].get("document_id", chunk["metadata"].get("source")) == document_id
+        and chunk["metadata"].get("topic_id") == topic_id
     ]
 
 
@@ -342,6 +351,20 @@ def _extract_json(text: str) -> dict:
         return json.loads(match.group(0))
 
 
+def _parse_quiz_response(text: str, attempt_index: int) -> dict:
+    """Parse quiz JSON and safely log the complete escaped response on failure."""
+    raw_response = str(text)
+    try:
+        return _extract_json(raw_response)
+    except json.JSONDecodeError as error:
+        print(
+            f"[quiz-json-parse-error] attempt={attempt_index + 1}, "
+            f"error={error}, raw_response_json="
+            f"{json.dumps(raw_response, ensure_ascii=False)}"
+        )
+        raise
+
+
 def _normalize_correct_answer(raw_answer, options: list[str]) -> str:
     answer = str(raw_answer or "").strip().upper()
     if answer in OPTION_LETTERS:
@@ -486,6 +509,10 @@ def _validate_quiz_batch(
     difficulty: str = "easy",
     topic_id: str = "document",
     allowed_chunk_ids: set[str] | None = None,
+    topic_name: str = "Whole document",
+    concept_id: str = "",
+    concept_name: str = "",
+    assessment_capacity: int = 0,
 ) -> list[dict]:
     questions = data.get("questions")
     if not isinstance(questions, list):
@@ -520,6 +547,10 @@ def _validate_quiz_batch(
                 "options": options,
                 "correct_answer": correct_answer,
                 "topic_id": topic_id,
+                "topic_name": topic_name,
+                "concept_id": concept_id,
+                "concept_name": concept_name,
+                "assessment_capacity": int(assessment_capacity),
                 "difficulty": difficulty,
                 "explanation": explanation,
                 "source_chunk_ids": source_chunk_ids,
@@ -556,6 +587,10 @@ def _generate_quiz_batch(
     batch_index: int = 0,
     document_hash: str = "",
     topic_schema_version: int = 0,
+    concept_id: str = "",
+    concept_name: str = "",
+    assessment_capacity: int = 0,
+    owner_id: str = LEGACY_USER_ID,
 ) -> list[dict]:
     accepted_questions: list[dict] = []
     generation_errors: list[str] = []
@@ -587,7 +622,7 @@ def _generate_quiz_batch(
                 difficulty=difficulty,
                 chunks=chunks,
                 topic_id=topic_id,
-                topic_name=topic_name,
+                topic_name=f"{topic_name} — target concept: {concept_name}" if concept_name else topic_name,
                 avoid_questions=current_avoid_questions,
             )
         else:
@@ -598,7 +633,7 @@ def _generate_quiz_batch(
                 chunks=chunks,
                 error=ValueError("; ".join(generation_errors[-5:])),
                 topic_id=topic_id,
-                topic_name=topic_name,
+                topic_name=f"{topic_name} — target concept: {concept_name}" if concept_name else topic_name,
                 avoid_questions=current_avoid_questions,
             )
 
@@ -643,7 +678,7 @@ def _generate_quiz_batch(
                 f"[quiz-json] response_chars={len(str(response.content))}, "
                 f"done_reason={done_reason}"
             )
-            parsed = _extract_json(response.content)
+            parsed = _parse_quiz_response(response.content, attempt_index)
             raw_questions = parsed.get("questions")
             if not isinstance(raw_questions, list):
                 raise ValueError("Quiz JSON does not contain a questions list.")
@@ -659,6 +694,10 @@ def _generate_quiz_batch(
                         difficulty,
                         topic_id,
                         batch_chunk_ids,
+                        topic_name,
+                        concept_id,
+                        concept_name,
+                        assessment_capacity,
                     )[0]
                     cited_chunks = [chunks_by_id[chunk_id] for chunk_id in normalized["source_chunk_ids"]]
                     semantic = validate_question_semantics(
@@ -667,6 +706,7 @@ def _generate_quiz_batch(
                     failures = semantic.hard_failures + semantic.quality_failures
                     event = {
                         "generation_run_id": generation_run_id,
+                        "owner_id": owner_id,
                         "document_id": document_id,
                         "document_hash": document_hash,
                         "topic_id": topic_id,
@@ -728,22 +768,13 @@ def _generate_quiz_batch(
     return accepted_questions
 
 
-def _batch_plan(question_count: int) -> list[int]:
-    plan = []
-    remaining = question_count
-    while remaining > 0:
-        batch_size = min(MAX_QUESTIONS_PER_BATCH, remaining)
-        plan.append(batch_size)
-        remaining -= batch_size
-    return plan
-
-
 def generate_quiz(
     document_id: str,
-    topic_id: str,
-    question_count: int,
     difficulty: str,
+    assessment_scope: str,
+    topic_id: str | None = None,
     regenerate: bool = False,
+    owner_id: str = LEGACY_USER_ID,
 ) -> dict:
     """
     Generate or load the persistent quiz for one indexed document.
@@ -752,26 +783,27 @@ def generate_quiz(
     not create a different quiz. Passing regenerate=True intentionally replaces
     the saved quiz.
     """
-    known_documents = _document_lookup()
+    known_documents = _document_lookup(owner_id)
     if document_id not in known_documents:
         raise ValueError("document_id was not found in indexed documents.")
-    if not 1 <= question_count <= 40:
-        raise ValueError("question_count must be between 1 and 40.")
     difficulty = difficulty.lower().strip()
     if difficulty not in QUIZ_DIFFICULTIES:
         raise ValueError("difficulty must be easy, medium, or difficult.")
     print(f"[quiz-service] difficulty={difficulty}")
     document = known_documents[document_id]
+    assessment_scope = str(assessment_scope).lower().strip()
+    if assessment_scope not in {"topic", "document"}:
+        raise ValueError("assessment_scope must be topic or document.")
     topic_lookup = {topic.get("topic_id"): topic for topic in document.get("topics", [])}
-    if topic_id not in topic_lookup:
+    if assessment_scope == "topic" and topic_id not in topic_lookup:
         raise ValueError("topic_id was not found in the selected document.")
-    topic = topic_lookup[topic_id]
+    scope_topic_id = str(topic_id) if assessment_scope == "topic" else "document"
     topic_schema_version = int(document.get("topic_schema_version", 0))
-    invalidate_document_quizzes_for_topic_schema(document_id, topic_schema_version)
-    cache_key = quiz_cache_key(document_id, difficulty, topic_id)
+    invalidate_document_quizzes_for_topic_schema(document_id, topic_schema_version, owner_id)
+    cache_key = quiz_cache_key(document_id, difficulty, scope_topic_id, owner_id)
 
     if not regenerate:
-        saved_quiz = get_quiz(document_id, difficulty, topic_id)
+        saved_quiz = get_quiz(document_id, difficulty, scope_topic_id, owner_id)
         if saved_quiz:
             print(f"[quiz-cache] key={cache_key} HIT")
             return saved_quiz
@@ -779,40 +811,72 @@ def generate_quiz(
     else:
         print(f"[quiz-cache] key={cache_key} MISS (regenerate)")
 
-    # Cross-level duplicates are temporarily accepted. Do not inject saved
-    # questions into the prompt or reject new questions by text similarity.
-    avoid_questions: list[str] = []
-    chunks = get_topic_chunks(document_id, topic_id)
-    if not chunks:
-        raise ValueError("No chunks were found for the selected document and topic.")
+    topics_to_plan = [topic_lookup[topic_id]] if assessment_scope == "topic" else list(document.get("topics") or [])
+    topic_plans = []
+    topic_chunks = {}
+    for topic in topics_to_plan:
+        current_chunks = get_topic_chunks(document_id, str(topic["topic_id"]), owner_id)
+        if not current_chunks:
+            continue
+        topic_chunks[str(topic["topic_id"])] = current_chunks
+        topic_plans.append(build_topic_plan(topic, current_chunks))
+    if assessment_scope == "document":
+        allocation = allocate_document_topics(topic_plans)
+        planned_topics = allocation["topics"]
+        excluded_topic_ids = allocation["excluded_topic_ids"]
+    else:
+        planned_topics = []
+        for plan in topic_plans:
+            capacity = int(plan["assessment_capacity"])
+            planned_topics.append({
+                **plan,
+                "allocated_questions": capacity,
+                "selected_concepts": list(plan["concepts"]),
+            })
+        excluded_topic_ids = []
+    if not any(plan["allocated_questions"] for plan in planned_topics):
+        raise ValueError("No grounded assessable concepts were found for the selected assessment scope.")
 
-    plan = _batch_plan(question_count)
     generation_run_id = str(uuid4())
     questions = []
     next_id = 1
-
-    for batch_index, batch_size in enumerate(plan):
-        print(
-            f"[quiz-context] batch={batch_index + 1}/{len(plan)}, "
-            f"chunks={len(chunks)} (full document)"
-        )
-        batch_questions = _generate_quiz_batch(
-            document_id=document_id,
-            num_questions=batch_size,
-            difficulty=difficulty,
-            chunks=chunks,
-            start_id=next_id,
-            topic_id=topic_id,
-            topic_name=topic.get("name", topic_id),
-            avoid_questions=avoid_questions,
-            generation_run_id=generation_run_id,
-            batch_index=batch_index + 1,
-            document_hash=document.get("hash", ""),
-            topic_schema_version=topic_schema_version,
-        )
-        questions.extend(batch_questions)
-        avoid_questions.extend(question["question"] for question in batch_questions)
-        next_id += len(batch_questions)
+    avoid_questions: list[str] = []
+    batch_index = 0
+    for topic_plan in planned_topics:
+        chunks_by_id = {
+            str(chunk["metadata"]["chunk_id"]): chunk
+            for chunk in topic_chunks.get(topic_plan["topic_id"], [])
+        }
+        for concept in topic_plan.get("selected_concepts", []):
+            evidence_chunks = [
+                chunks_by_id[chunk_id] for chunk_id in concept["source_chunk_ids"]
+                if chunk_id in chunks_by_id
+            ]
+            if not evidence_chunks:
+                continue
+            batch_index += 1
+            concept_label = str(concept["name"])
+            batch_questions = _generate_quiz_batch(
+                document_id=document_id,
+                num_questions=1,
+                difficulty=difficulty,
+                chunks=evidence_chunks,
+                start_id=next_id,
+                topic_id=topic_plan["topic_id"],
+                topic_name=topic_plan["topic_name"],
+                avoid_questions=avoid_questions,
+                generation_run_id=generation_run_id,
+                batch_index=batch_index,
+                document_hash=document.get("hash", ""),
+                topic_schema_version=topic_schema_version,
+                concept_id=concept["concept_id"],
+                concept_name=concept_label,
+                assessment_capacity=topic_plan["assessment_capacity"],
+                owner_id=owner_id,
+            )
+            questions.extend(batch_questions)
+            avoid_questions.extend(question["question"] for question in batch_questions)
+            next_id += 1
 
     quiz = {
         "quiz_id": str(uuid4()),
@@ -820,24 +884,32 @@ def generate_quiz(
         "document_hash": document.get("hash", ""),
         "title": document.get("title", document_id),
         "difficulty": difficulty,
-        "topic_id": topic_id,
-        "topic_name": topic.get("name", topic_id),
+        "topic_id": scope_topic_id,
+        "topic_name": topic_lookup[topic_id].get("name", topic_id) if assessment_scope == "topic" else "Entire document",
+        "assessment_scope": assessment_scope,
+        "assessment_plan": {
+            "planner_version": PLANNER_VERSION,
+            "scope": assessment_scope,
+            "topics": planned_topics,
+            "excluded_topic_ids": excluded_topic_ids,
+            "total_questions": len(questions),
+        },
         "topic_schema_version": topic_schema_version,
         "question_count": len(questions),
         "created_at": utc_now_iso(),
         "questions": questions,
     }
     if regenerate:
-        delete_document_attempts(document_id, difficulty, topic_id)
+        delete_document_attempts(document_id, difficulty, scope_topic_id, owner_id)
     print(f"[quiz-save] cache_key={cache_key}")
-    return save_quiz(document_id, difficulty, quiz)
+    return save_quiz(document_id, difficulty, quiz, owner_id)
 
 
 def load_quiz_with_attempt(
-    document_id: str, difficulty: str, topic_id: str, student_id: str = "local_student"
+    document_id: str, difficulty: str, topic_id: str, student_id: str = LEGACY_USER_ID
 ) -> dict:
     """Return a saved quiz plus the latest attempt for the Practice page."""
-    known_documents = _document_lookup()
+    known_documents = _document_lookup(student_id)
     if document_id not in known_documents:
         raise ValueError("document_id was not found in indexed documents.")
     if difficulty not in QUIZ_DIFFICULTIES:
@@ -847,18 +919,18 @@ def load_quiz_with_attempt(
         "document_id": document_id,
         "difficulty": difficulty,
         "topic_id": topic_id,
-        "quiz": get_quiz(document_id, difficulty, topic_id),
+        "quiz": get_quiz(document_id, difficulty, topic_id, student_id),
         "latest_attempt": get_latest_attempt(document_id, difficulty, topic_id, student_id),
     }
 
 
-def list_quiz_statuses() -> list[dict]:
+def list_quiz_statuses(owner_id: str = LEGACY_USER_ID) -> list[dict]:
     """Return quiz/status information for every indexed document."""
     statuses = []
 
-    for document in list_indexed_documents():
+    for document in list_indexed_documents(owner_id):
         document_id = document["id"]
-        document_quizzes = list_document_quizzes(document_id)
+        document_quizzes = list_document_quizzes(document_id, owner_id)
         variants = [
             {
                 "topic_id": quiz["topic_id"],
@@ -887,11 +959,11 @@ def update_quiz_progress(
     topic_id: str,
     question_id: int,
     selected_answer: str,
-    student_id: str = "local_student",
+    student_id: str = LEGACY_USER_ID,
 ) -> dict:
     """Check one answer and persist the learner's current progress immediately."""
     difficulty = difficulty.lower().strip()
-    quiz = get_quiz(document_id, difficulty, topic_id)
+    quiz = get_quiz(document_id, difficulty, topic_id, student_id)
     if not quiz:
         raise ValueError("Quiz has not been generated for this document and difficulty.")
     selected_answer = selected_answer.strip().upper()
@@ -928,13 +1000,18 @@ def update_quiz_progress(
                 "is_correct": is_correct,
                 "question_difficulty": question.get("difficulty", difficulty),
                 "validation_outcome": question.get("validation_outcome", "accepted"),
+                "topic_id": question.get("topic_id", topic_id),
+                "topic_name": question.get("topic_name", ""),
+                "concept_id": question.get("concept_id", ""),
+                "assessment_capacity": int(question.get("assessment_capacity") or 0),
+                "evidence_requirement_version": "concept_coverage_v1",
             }
         )
 
     total = len(questions)
     now = utc_now_iso()
     quiz_id = quiz.get("quiz_id") or (
-        f"{quiz_cache_key(document_id, difficulty, topic_id)}::{quiz.get('created_at', 'legacy')}"
+        f"{quiz_cache_key(document_id, difficulty, topic_id, student_id)}::{quiz.get('created_at', 'legacy')}"
     )
     progress = {
         "quiz_id": quiz_id,
@@ -953,17 +1030,26 @@ def update_quiz_progress(
     }
     saved = save_quiz_progress(document_id, difficulty, progress, topic_id, student_id)
     if saved["completed"]:
-        saved["mastery"] = recompute_topic_mastery(student_id, document_id, topic_id)
+        represented_topics = sorted({
+            str(result.get("topic_id")) for result in results if result.get("topic_id")
+        })
+        saved["mastery_by_topic"] = {
+            represented_topic: recompute_topic_mastery(student_id, document_id, represented_topic)
+            for represented_topic in represented_topics
+        }
+        if len(represented_topics) == 1:
+            saved["mastery"] = saved["mastery_by_topic"][represented_topics[0]]
     return saved
 
 
 def list_completed_quiz_attempts(
     document_id: str | None = None,
     difficulty: str | None = None,
+    student_id: str = LEGACY_USER_ID,
 ) -> list[dict]:
     """Return compact summaries for the Quiz History UI."""
     summaries = []
-    for attempt in load_quiz_history(document_id, difficulty):
+    for attempt in load_quiz_history(document_id, difficulty, student_id):
         total = int(attempt.get("total", 0))
         score = int(attempt.get("score", 0))
         summaries.append(
@@ -981,19 +1067,94 @@ def list_completed_quiz_attempts(
     return summaries
 
 
-def load_completed_quiz_attempt(attempt_id: str) -> dict:
+def build_learning_dashboard(student_id: str = LEGACY_USER_ID) -> dict:
+    """Aggregate real indexed-document, attempt, and mastery state for Overview."""
+    documents = list_indexed_documents(student_id)
+    mastery_rows = []
+    for document in documents:
+        for topic in document.get("topics", []):
+            history = list_completed_answer_snapshots(student_id, document["id"], topic["topic_id"])
+            mastery = {
+                "student_id": student_id,
+                "document_id": document["id"],
+                "topic_id": topic["topic_id"],
+                **calculate_mastery(history, len({row["attempt_id"] for row in history})),
+            }
+            mastery_rows.append({
+                **mastery,
+                "topic_name": topic.get("name") or topic["topic_id"],
+                "document_name": document.get("title") or document["id"],
+            })
+
+    attempts = load_quiz_history(student_id=student_id)
+    answer_rows = [result for attempt in attempts for result in attempt.get("question_results", [])]
+    correct_answers = sum(int(bool(result.get("is_correct"))) for result in answer_rows)
+    answered_questions = len(answer_rows)
+    assessed = [mastery for mastery in mastery_rows if mastery.get("has_evidence")]
+    latest_attempt = attempts[0] if attempts else None
+    latest_summary = None
+    if latest_attempt:
+        represented_topics = sorted({
+            str(result.get("topic_id")) for result in latest_attempt.get("question_results", [])
+            if result.get("topic_id") and result.get("topic_id") != "document"
+        })
+        latest_summary = {
+            "attempt_id": latest_attempt.get("attempt_id"),
+            "document_id": latest_attempt.get("document_id"),
+            "topic_id": latest_attempt.get("topic_id"),
+            "difficulty": latest_attempt.get("difficulty"),
+            "score": latest_attempt.get("score", 0),
+            "total": latest_attempt.get("total", 0),
+            "completed_at": latest_attempt.get("completed_at") or latest_attempt.get("submitted_at"),
+            "represented_topic_ids": represented_topics,
+        }
+
+    mastery_by_document = {}
+    for mastery in mastery_rows:
+        mastery_by_document.setdefault(mastery["document_id"], []).append(mastery)
+    material_rows = []
+    for document in documents:
+        rows = mastery_by_document.get(document["id"], [])
+        material_rows.append({
+            "document_id": document["id"],
+            "document_name": document.get("title") or document["id"],
+            "topic_count": len(document.get("topics", [])),
+            "assessed_topic_count": sum(int(bool(row.get("has_evidence"))) for row in rows),
+            "indexed": True,
+        })
+
+    return {
+        "student_id": student_id,
+        "metrics": {
+            "documents": len(documents),
+            "topics_assessed": len(assessed),
+            "total_topics": len(mastery_rows),
+            "quiz_accuracy": round(100 * correct_answers / answered_questions, 2) if answered_questions else None,
+            "answered_questions": answered_questions,
+            "topics_mastered": sum(row.get("mastery_level") == "Mastered" for row in mastery_rows),
+        },
+        "mastery": sorted(
+            mastery_rows,
+            key=lambda row: (not row.get("has_evidence"), -int(row.get("answered_questions", 0)), row["document_name"], row["topic_name"]),
+        ),
+        "latest_attempt": latest_summary,
+        "materials": material_rows,
+    }
+
+
+def load_completed_quiz_attempt(attempt_id: str, student_id: str = LEGACY_USER_ID) -> dict:
     """Return one completed attempt with question snapshots for review."""
-    attempt = get_quiz_history_attempt(attempt_id)
+    attempt = get_quiz_history_attempt(attempt_id, student_id)
     if not attempt:
         raise ValueError("Quiz history attempt was not found.")
     return attempt
 
 
 def clear_quiz_progress(
-    document_id: str, difficulty: str, topic_id: str, student_id: str = "local_student"
+    document_id: str, difficulty: str, topic_id: str, student_id: str = LEGACY_USER_ID
 ) -> dict:
     """Reset current answers for one saved quiz."""
-    if not get_quiz(document_id, difficulty, topic_id):
+    if not get_quiz(document_id, difficulty, topic_id, student_id):
         raise ValueError("Quiz has not been generated for this document and difficulty.")
     reset_quiz_progress(document_id, difficulty, topic_id, student_id)
     return {"student_id": student_id, "document_id": document_id, "topic_id": topic_id, "difficulty": difficulty, "reset": True}
@@ -1004,9 +1165,10 @@ def explain_quiz_question(
     difficulty: str,
     topic_id: str,
     question_id: int,
+    owner_id: str = LEGACY_USER_ID,
 ) -> dict:
     """Return a cached or on-demand RAG explanation for one answered question."""
-    quiz = get_quiz(document_id, difficulty, topic_id)
+    quiz = get_quiz(document_id, difficulty, topic_id, owner_id)
     if not quiz:
         raise ValueError("Quiz has not been generated for this document and difficulty.")
     question = next(
@@ -1025,12 +1187,13 @@ def explain_quiz_question(
             "source_chunk_ids": question.get("source_chunk_ids", []),
             "cache_hit": True,
         }
-    explanation_key = f"{quiz_cache_key(document_id, difficulty, topic_id)}::{question_id}"
-    cached = get_quiz_explanation(explanation_key)
+    explanation_key = f"{quiz_cache_key(document_id, difficulty, topic_id, owner_id)}::{question_id}"
+    cached = get_quiz_explanation(explanation_key, owner_id)
     if cached:
         return {**cached, "cache_hit": True}
 
     result = explain_quiz_answer(
+        owner_id=owner_id,
         document_id=document_id,
         question=question["question"],
         options=question["options"],
@@ -1043,5 +1206,5 @@ def explain_quiz_question(
         **result,
         "created_at": utc_now_iso(),
     }
-    save_quiz_explanation(explanation_key, saved)
+    save_quiz_explanation(explanation_key, saved, owner_id)
     return {**saved, "cache_hit": False}

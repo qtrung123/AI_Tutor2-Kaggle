@@ -12,6 +12,7 @@ from config import (
     LEGACY_QUIZ_ATTEMPTS_PATH,
     LEGACY_QUIZ_EXPLANATIONS_PATH,
 )
+from backend.auth_store import LEGACY_USER_ID, initialize_auth_store
 
 LEGACY_TOPIC_ID = "document"
 
@@ -52,6 +53,7 @@ def _read_legacy_json(path: Path) -> dict:
 
 def initialize_quiz_store() -> None:
     """Create quiz tables and import the old JSON files once."""
+    initialize_auth_store()
     with _connect() as connection:
         connection.executescript(
             """
@@ -197,9 +199,13 @@ def initialize_quiz_store() -> None:
         )
         migrations = {
             "quizzes": {
+                "owner_id": f"TEXT NOT NULL DEFAULT '{LEGACY_USER_ID}'",
                 "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
                 "topic_name": "TEXT NOT NULL DEFAULT 'Whole document'",
                 "topic_schema_version": "INTEGER NOT NULL DEFAULT 0",
+                "assessment_scope": "TEXT NOT NULL DEFAULT 'topic'",
+                "assessment_plan_json": "TEXT NOT NULL DEFAULT '{}'",
+                "planner_version": "TEXT NOT NULL DEFAULT 'legacy'",
             },
             "quiz_questions": {
                 "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
@@ -207,6 +213,10 @@ def initialize_quiz_store() -> None:
                 "explanation": "TEXT NOT NULL DEFAULT ''",
                 "source_chunk_ids_json": "TEXT NOT NULL DEFAULT '[]'",
                 "validation_outcome": "TEXT NOT NULL DEFAULT 'accepted'",
+                "topic_name": "TEXT NOT NULL DEFAULT ''",
+                "concept_id": "TEXT NOT NULL DEFAULT ''",
+                "concept_name": "TEXT NOT NULL DEFAULT ''",
+                "assessment_capacity": "INTEGER NOT NULL DEFAULT 0",
             },
             "quiz_attempts": {
                 "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
@@ -215,6 +225,24 @@ def initialize_quiz_store() -> None:
             "quiz_attempt_answers": {
                 "question_difficulty": "TEXT NOT NULL DEFAULT 'easy'",
                 "validation_outcome": "TEXT NOT NULL DEFAULT 'accepted'",
+                "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
+                "topic_name": "TEXT NOT NULL DEFAULT ''",
+                "concept_id": "TEXT NOT NULL DEFAULT ''",
+                "assessment_capacity": "INTEGER NOT NULL DEFAULT 0",
+                "evidence_requirement_version": "TEXT NOT NULL DEFAULT 'question_count_v1'",
+            },
+            "topic_mastery": {
+                "assessment_capacity": "INTEGER NOT NULL DEFAULT 0",
+                "distinct_concepts_assessed": "INTEGER NOT NULL DEFAULT 0",
+                "concept_coverage_ratio": "REAL NOT NULL DEFAULT 0",
+                "required_concept_coverage": "REAL NOT NULL DEFAULT 0",
+                "required_concepts": "INTEGER NOT NULL DEFAULT 0",
+            },
+            "quiz_explanations": {
+                "owner_id": f"TEXT NOT NULL DEFAULT '{LEGACY_USER_ID}'",
+            },
+            "quiz_validation_events": {
+                "owner_id": f"TEXT NOT NULL DEFAULT '{LEGACY_USER_ID}'",
             },
         }
         added_columns = set()
@@ -235,11 +263,22 @@ def initialize_quiz_store() -> None:
                 )
                 """
             )
+        if ("quiz_attempt_answers", "topic_id") in added_columns:
+            connection.execute(
+                """
+                UPDATE quiz_attempt_answers
+                SET topic_id = COALESCE(
+                    (SELECT topic_id FROM quiz_attempts
+                     WHERE quiz_attempts.attempt_id = quiz_attempt_answers.attempt_id),
+                    'document'
+                )
+                """
+            )
         connection.executescript(
             """
             DROP INDEX IF EXISTS idx_active_quiz_variant;
             CREATE UNIQUE INDEX idx_active_quiz_variant
-                ON quizzes(document_id, topic_id, difficulty) WHERE is_active = 1;
+                ON quizzes(owner_id, document_id, topic_id, difficulty) WHERE is_active = 1;
             DROP INDEX IF EXISTS idx_latest_attempt_variant;
             CREATE UNIQUE INDEX idx_latest_attempt_variant
                 ON quiz_attempts(student_id, document_id, topic_id, difficulty) WHERE is_latest = 1;
@@ -259,8 +298,8 @@ def initialize_quiz_store() -> None:
             )
 
 
-def quiz_cache_key(document_id: str, difficulty: str, topic_id: str = LEGACY_TOPIC_ID) -> str:
-    return f"{document_id}::{topic_id}::{difficulty}"
+def quiz_cache_key(document_id: str, difficulty: str, topic_id: str = LEGACY_TOPIC_ID, owner_id: str = LEGACY_USER_ID) -> str:
+    return f"{owner_id}::{document_id}::{topic_id}::{difficulty}"
 
 
 def _normalize_options(options) -> list[str]:
@@ -269,7 +308,7 @@ def _normalize_options(options) -> list[str]:
     return [str(option) for option in (options or [])][:4]
 
 
-def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: str, quiz: dict) -> dict:
+def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: str, quiz: dict, owner_id: str = LEGACY_USER_ID) -> dict:
     quiz_id = str(quiz.get("quiz_id") or uuid4())
     questions = list(quiz.get("questions") or [])
     stored = {
@@ -277,21 +316,23 @@ def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: s
         "quiz_id": quiz_id,
         "document_id": document_id,
         "difficulty": difficulty,
+        "owner_id": owner_id,
         "topic_id": str(quiz.get("topic_id") or LEGACY_TOPIC_ID),
         "question_count": len(questions),
         "created_at": quiz.get("created_at") or utc_now_iso(),
     }
     connection.execute(
-        "UPDATE quizzes SET is_active = 0 WHERE document_id = ? AND topic_id = ? AND difficulty = ?",
-        (document_id, stored["topic_id"], difficulty),
+        "UPDATE quizzes SET is_active = 0 WHERE owner_id = ? AND document_id = ? AND topic_id = ? AND difficulty = ?",
+        (owner_id, document_id, stored["topic_id"], difficulty),
     )
     connection.execute("DELETE FROM quizzes WHERE quiz_id = ?", (quiz_id,))
     connection.execute(
         """
         INSERT INTO quizzes (
             quiz_id, document_id, document_hash, title, difficulty,
-            question_count, created_at, is_active, topic_id, topic_name, topic_schema_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+            question_count, created_at, is_active, topic_id, topic_name, topic_schema_version,
+            assessment_scope, assessment_plan_json, planner_version, owner_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             quiz_id,
@@ -304,6 +345,10 @@ def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: s
             stored["topic_id"],
             stored.get("topic_name", ""),
             int(stored.get("topic_schema_version", 0)),
+            stored.get("assessment_scope", "topic"),
+            json.dumps(stored.get("assessment_plan") or {}, ensure_ascii=False),
+            str((stored.get("assessment_plan") or {}).get("planner_version") or "legacy"),
+            owner_id,
         ),
     )
     for position, question in enumerate(questions, start=1):
@@ -313,7 +358,8 @@ def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: s
             INSERT INTO quiz_questions (
                 quiz_id, question_id, position, question, correct_answer,
                 topic_id, difficulty, explanation, source_chunk_ids_json, validation_outcome
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , topic_name, concept_id, concept_name, assessment_capacity
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 quiz_id,
@@ -326,6 +372,10 @@ def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: s
                 str(question.get("explanation", "")),
                 json.dumps(question.get("source_chunk_ids") or [], ensure_ascii=False),
                 str(question.get("validation_outcome") or "accepted"),
+                str(question.get("topic_name") or stored.get("topic_name", "")),
+                str(question.get("concept_id") or ""),
+                str(question.get("concept_name") or ""),
+                int(question.get("assessment_capacity") or 0),
             ),
         )
         for option_index, option in enumerate(_normalize_options(question.get("options")), start=0):
@@ -344,7 +394,8 @@ def _row_to_quiz(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
     question_rows = connection.execute(
         """
         SELECT question_id, question, correct_answer, topic_id, difficulty,
-               explanation, source_chunk_ids_json, validation_outcome
+               explanation, source_chunk_ids_json, validation_outcome,
+               topic_name, concept_id, concept_name, assessment_capacity
         FROM quiz_questions WHERE quiz_id = ? ORDER BY position
         """,
         (row["quiz_id"],),
@@ -369,11 +420,16 @@ def _row_to_quiz(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
                 "explanation": question_row["explanation"],
                 "source_chunk_ids": json.loads(question_row["source_chunk_ids_json"] or "[]"),
                 "validation_outcome": question_row["validation_outcome"],
+                "topic_name": question_row["topic_name"],
+                "concept_id": question_row["concept_id"],
+                "concept_name": question_row["concept_name"],
+                "assessment_capacity": question_row["assessment_capacity"],
             }
         )
     return {
         "quiz_id": row["quiz_id"],
         "document_id": row["document_id"],
+        "owner_id": row["owner_id"],
         "document_hash": row["document_hash"] or "",
         "title": row["title"],
         "difficulty": row["difficulty"],
@@ -381,36 +437,41 @@ def _row_to_quiz(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
         "topic_name": row["topic_name"],
         "topic_schema_version": row["topic_schema_version"],
         "question_count": row["question_count"],
+        "assessment_scope": (
+            "document" if row["topic_id"] == LEGACY_TOPIC_ID and row["planner_version"] == "legacy"
+            else row["assessment_scope"]
+        ),
+        "assessment_plan": json.loads(row["assessment_plan_json"] or "{}"),
         "created_at": row["created_at"],
         "questions": questions,
     }
 
 
-def get_quiz(document_id: str, difficulty: str, topic_id: str = LEGACY_TOPIC_ID) -> dict | None:
+def get_quiz(document_id: str, difficulty: str, topic_id: str = LEGACY_TOPIC_ID, owner_id: str = LEGACY_USER_ID) -> dict | None:
     initialize_quiz_store()
     with _connect() as connection:
         row = connection.execute(
             """
             SELECT * FROM quizzes
-            WHERE document_id = ? AND topic_id = ? AND difficulty = ? AND is_active = 1
+            WHERE owner_id = ? AND document_id = ? AND topic_id = ? AND difficulty = ? AND is_active = 1
             """,
-            (document_id, topic_id, difficulty),
+            (owner_id, document_id, topic_id, difficulty),
         ).fetchone()
         return _row_to_quiz(connection, row) if row else None
 
 
-def save_quiz(document_id: str, difficulty: str, quiz: dict) -> dict:
+def save_quiz(document_id: str, difficulty: str, quiz: dict, owner_id: str = LEGACY_USER_ID) -> dict:
     initialize_quiz_store()
     with _connect() as connection:
-        return _insert_quiz(connection, document_id, difficulty, quiz)
+        return _insert_quiz(connection, document_id, difficulty, quiz, owner_id)
 
 
-def list_document_quizzes(document_id: str) -> dict[str, dict]:
+def list_document_quizzes(document_id: str, owner_id: str = LEGACY_USER_ID) -> dict[str, dict]:
     initialize_quiz_store()
     with _connect() as connection:
         rows = connection.execute(
-            "SELECT * FROM quizzes WHERE document_id = ? AND is_active = 1",
-            (document_id,),
+            "SELECT * FROM quizzes WHERE owner_id = ? AND document_id = ? AND is_active = 1",
+            (owner_id, document_id),
         ).fetchall()
         return {
             f"{row['topic_id']}::{row['difficulty']}": _row_to_quiz(connection, row)
@@ -437,6 +498,11 @@ def _row_to_attempt(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
             "is_correct": bool(answer["is_correct"]),
             "question_difficulty": answer["question_difficulty"],
             "validation_outcome": answer["validation_outcome"],
+            "topic_id": answer["topic_id"],
+            "topic_name": answer["topic_name"],
+            "concept_id": answer["concept_id"],
+            "assessment_capacity": answer["assessment_capacity"],
+            "evidence_requirement_version": answer["evidence_requirement_version"],
         }
         for answer in answer_rows
     ]
@@ -552,8 +618,9 @@ def _save_attempt_row(
             INSERT INTO quiz_attempt_answers (
                 attempt_id, question_id, question, options_json,
                 selected_answer, correct_answer, is_correct
-                , question_difficulty, validation_outcome
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , question_difficulty, validation_outcome, topic_id, topic_name,
+                concept_id, assessment_capacity, evidence_requirement_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 attempt_id,
@@ -565,6 +632,11 @@ def _save_attempt_row(
                 int(bool(result.get("is_correct"))),
                 str(result.get("question_difficulty") or difficulty),
                 str(result.get("validation_outcome") or "accepted"),
+                str(result.get("topic_id") or topic_id),
+                str(result.get("topic_name") or ""),
+                str(result.get("concept_id") or ""),
+                int(result.get("assessment_capacity") or 0),
+                str(result.get("evidence_requirement_version") or "concept_coverage_v1"),
             ),
         )
     return attempt_id
@@ -610,27 +682,26 @@ def reset_quiz_progress(
         )
 
 
-def get_quiz_explanation(cache_key: str) -> dict | None:
+def get_quiz_explanation(cache_key: str, owner_id: str = LEGACY_USER_ID) -> dict | None:
     initialize_quiz_store()
     with _connect() as connection:
         row = connection.execute(
-            "SELECT payload_json FROM quiz_explanations WHERE cache_key = ?", (cache_key,)
+            "SELECT payload_json FROM quiz_explanations WHERE cache_key = ? AND owner_id = ?", (cache_key, owner_id)
         ).fetchone()
         return json.loads(row["payload_json"]) if row else None
 
 
-def save_quiz_explanation(cache_key: str, explanation: dict) -> dict:
+def save_quiz_explanation(cache_key: str, explanation: dict, owner_id: str = LEGACY_USER_ID) -> dict:
     initialize_quiz_store()
-    parts = cache_key.rsplit("::", 2)
-    document_id = parts[0] if len(parts) == 3 else ""
-    difficulty = parts[1] if len(parts) == 3 else "medium"
-    question_id = int(parts[-1]) if parts and str(parts[-1]).isdigit() else 0
+    document_id = str(explanation.get("document_id") or "")
+    difficulty = str(explanation.get("difficulty") or "medium")
+    question_id = int(explanation.get("question_id") or 0)
     with _connect() as connection:
         connection.execute(
             """
             INSERT INTO quiz_explanations (
-                cache_key, document_id, difficulty, question_id, payload_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                cache_key, document_id, difficulty, question_id, payload_json, created_at, owner_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(cache_key) DO UPDATE SET
                 payload_json = excluded.payload_json,
                 created_at = excluded.created_at
@@ -642,37 +713,40 @@ def save_quiz_explanation(cache_key: str, explanation: dict) -> dict:
                 question_id,
                 json.dumps(explanation, ensure_ascii=False),
                 utc_now_iso(),
+                owner_id,
             ),
         )
     return explanation
 
 
-def delete_document_quiz_data(document_id: str) -> None:
+def delete_document_quiz_data(document_id: str, owner_id: str = LEGACY_USER_ID) -> None:
     initialize_quiz_store()
     with _connect() as connection:
-        connection.execute("DELETE FROM quizzes WHERE document_id = ?", (document_id,))
-        connection.execute("DELETE FROM quiz_attempts WHERE document_id = ?", (document_id,))
-        connection.execute("DELETE FROM quiz_explanations WHERE document_id = ?", (document_id,))
+        connection.execute("DELETE FROM quizzes WHERE owner_id = ? AND document_id = ?", (owner_id, document_id))
+        connection.execute("DELETE FROM quiz_attempts WHERE student_id = ? AND document_id = ?", (owner_id, document_id))
+        connection.execute("DELETE FROM quiz_explanations WHERE owner_id = ? AND document_id = ?", (owner_id, document_id))
+        connection.execute("DELETE FROM topic_mastery WHERE student_id = ? AND document_id = ?", (owner_id, document_id))
+        connection.execute("DELETE FROM quiz_validation_events WHERE owner_id = ? AND document_id = ?", (owner_id, document_id))
 
 
 def delete_document_attempts(
-    document_id: str, difficulty: str, topic_id: str = LEGACY_TOPIC_ID
+    document_id: str, difficulty: str, topic_id: str = LEGACY_TOPIC_ID, owner_id: str = LEGACY_USER_ID
 ) -> None:
     """Reset active progress before regeneration while keeping completed history."""
     initialize_quiz_store()
     with _connect() as connection:
         connection.execute(
-            "UPDATE quiz_attempts SET is_latest = 0 WHERE document_id = ? AND topic_id = ? AND difficulty = ?",
-            (document_id, topic_id, difficulty),
+            "UPDATE quiz_attempts SET is_latest = 0 WHERE student_id = ? AND document_id = ? AND topic_id = ? AND difficulty = ?",
+            (owner_id, document_id, topic_id, difficulty),
         )
         connection.execute(
-            "DELETE FROM quiz_explanations WHERE document_id = ? AND difficulty = ?",
-            (document_id, difficulty),
+            "DELETE FROM quiz_explanations WHERE owner_id = ? AND document_id = ? AND difficulty = ?",
+            (owner_id, document_id, difficulty),
         )
 
 
 def invalidate_document_quizzes_for_topic_schema(
-    document_id: str, topic_schema_version: int
+    document_id: str, topic_schema_version: int, owner_id: str = LEGACY_USER_ID
 ) -> int:
     """Remove quizzes created for an older topic map of this document."""
     initialize_quiz_store()
@@ -680,19 +754,34 @@ def invalidate_document_quizzes_for_topic_schema(
         quiz_ids = [
             row["quiz_id"]
             for row in connection.execute(
-                "SELECT quiz_id FROM quizzes WHERE document_id = ? AND topic_schema_version != ?",
-                (document_id, int(topic_schema_version)),
+                "SELECT quiz_id FROM quizzes WHERE owner_id = ? AND document_id = ? AND topic_schema_version != ?",
+                (owner_id, document_id, int(topic_schema_version)),
             ).fetchall()
         ]
         connection.execute(
-            "DELETE FROM quiz_attempts WHERE document_id = ? AND (quiz_id IS NULL OR quiz_id IN (SELECT quiz_id FROM quizzes WHERE document_id = ? AND topic_schema_version != ?))",
-            (document_id, document_id, int(topic_schema_version)),
+            """
+            DELETE FROM quiz_attempts
+            WHERE student_id = ? AND document_id = ? AND completed = 0
+              AND (quiz_id IS NULL OR quiz_id IN (
+                  SELECT quiz_id FROM quizzes WHERE owner_id = ? AND document_id = ? AND topic_schema_version != ?
+              ))
+            """,
+            (owner_id, document_id, owner_id, document_id, int(topic_schema_version)),
         )
         connection.execute(
-            "DELETE FROM quizzes WHERE document_id = ? AND topic_schema_version != ?",
-            (document_id, int(topic_schema_version)),
+            """
+            UPDATE quiz_attempts SET is_latest = 0
+            WHERE student_id = ? AND document_id = ? AND completed = 1 AND quiz_id IN (
+                SELECT quiz_id FROM quizzes WHERE owner_id = ? AND document_id = ? AND topic_schema_version != ?
+            )
+            """,
+            (owner_id, document_id, owner_id, document_id, int(topic_schema_version)),
         )
-        connection.execute("DELETE FROM topic_mastery WHERE document_id = ?", (document_id,))
+        connection.execute(
+            "DELETE FROM quizzes WHERE owner_id = ? AND document_id = ? AND topic_schema_version != ?",
+            (owner_id, document_id, int(topic_schema_version)),
+        )
+        connection.execute("DELETE FROM topic_mastery WHERE student_id = ? AND document_id = ?", (owner_id, document_id))
         return len(quiz_ids)
 
 
@@ -714,8 +803,8 @@ def save_quiz_validation_event(event: dict) -> dict:
                 generation_prompt_version, validator_model, validator_prompt_version,
                 candidate_question_json, cited_chunk_ids_json, evidence_chunk_ids_json,
                 hard_passed, quality_passed, accepted, outcome, verdict_json,
-                rejection_reasons_json, latency_ms, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rejection_reasons_json, latency_ms, created_at, owner_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 stored["validation_id"], stored["generation_run_id"], stored.get("quiz_id"),
@@ -733,22 +822,23 @@ def save_quiz_validation_event(event: dict) -> dict:
                 json.dumps(stored.get("verdict") or {}, ensure_ascii=False),
                 json.dumps(stored.get("rejection_reasons") or [], ensure_ascii=False),
                 stored.get("latency_ms"), stored["created_at"],
+                stored.get("owner_id", LEGACY_USER_ID),
             ),
         )
     return stored
 
 
-def list_quiz_validation_events(generation_run_id: str | None = None) -> list[dict]:
+def list_quiz_validation_events(generation_run_id: str | None = None, owner_id: str = LEGACY_USER_ID) -> list[dict]:
     initialize_quiz_store()
     with _connect() as connection:
         if generation_run_id:
             rows = connection.execute(
-                "SELECT * FROM quiz_validation_events WHERE generation_run_id = ? ORDER BY created_at",
-                (generation_run_id,),
+                "SELECT * FROM quiz_validation_events WHERE owner_id = ? AND generation_run_id = ? ORDER BY created_at",
+                (owner_id, generation_run_id),
             ).fetchall()
         else:
             rows = connection.execute(
-                "SELECT * FROM quiz_validation_events ORDER BY created_at"
+                "SELECT * FROM quiz_validation_events WHERE owner_id = ? ORDER BY created_at", (owner_id,)
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -761,10 +851,12 @@ def list_completed_answer_snapshots(
         rows = connection.execute(
             """
             SELECT a.attempt_id, a.question_id, a.is_correct,
-                   a.question_difficulty, a.validation_outcome
+                   a.question_difficulty, a.validation_outcome, a.topic_id,
+                   a.topic_name, a.concept_id, a.assessment_capacity,
+                   a.evidence_requirement_version
             FROM quiz_attempt_answers a
             JOIN quiz_attempts t ON t.attempt_id = a.attempt_id
-            WHERE t.student_id = ? AND t.document_id = ? AND t.topic_id = ?
+            WHERE t.student_id = ? AND t.document_id = ? AND a.topic_id = ?
               AND t.completed = 1 AND t.submitted_at IS NOT NULL
             ORDER BY COALESCE(t.submitted_at, t.completed_at), a.question_id
             """,
@@ -783,8 +875,10 @@ def save_topic_mastery(result: dict) -> dict:
                 student_id, document_id, topic_id, mastery_score, mastery_level,
                 earned_weight, possible_weight, correct_answers, answered_questions,
                 completed_attempts, has_evidence, has_sufficient_evidence,
-                minimum_questions_required, formula_version, formula_config_json, computed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                minimum_questions_required, formula_version, formula_config_json, computed_at,
+                assessment_capacity, distinct_concepts_assessed, concept_coverage_ratio,
+                required_concept_coverage, required_concepts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(student_id, document_id, topic_id) DO UPDATE SET
                 mastery_score=excluded.mastery_score, mastery_level=excluded.mastery_level,
                 earned_weight=excluded.earned_weight, possible_weight=excluded.possible_weight,
@@ -793,7 +887,12 @@ def save_topic_mastery(result: dict) -> dict:
                 has_sufficient_evidence=excluded.has_sufficient_evidence,
                 minimum_questions_required=excluded.minimum_questions_required,
                 formula_version=excluded.formula_version,
-                formula_config_json=excluded.formula_config_json, computed_at=excluded.computed_at
+                formula_config_json=excluded.formula_config_json, computed_at=excluded.computed_at,
+                assessment_capacity=excluded.assessment_capacity,
+                distinct_concepts_assessed=excluded.distinct_concepts_assessed,
+                concept_coverage_ratio=excluded.concept_coverage_ratio,
+                required_concept_coverage=excluded.required_concept_coverage,
+                required_concepts=excluded.required_concepts
             """,
             (
                 stored["student_id"], stored["document_id"], stored["topic_id"],
@@ -803,6 +902,9 @@ def save_topic_mastery(result: dict) -> dict:
                 int(stored["has_sufficient_evidence"]), stored["minimum_questions_required"],
                 stored["formula_version"], json.dumps(stored["formula_config"], ensure_ascii=False),
                 stored["computed_at"],
+                stored.get("assessment_capacity", 0), stored.get("distinct_concepts_assessed", 0),
+                stored.get("concept_coverage_ratio", 0), stored.get("required_concept_coverage", 0),
+                stored.get("required_concepts", 0),
             ),
         )
     return stored
@@ -824,17 +926,54 @@ def get_topic_mastery(student_id: str, document_id: str, topic_id: str) -> dict 
         return result
 
 
+def list_topic_mastery(student_id: str, document_id: str | None = None) -> list[dict]:
+    """Return only one student's cached mastery, with names from immutable answer snapshots."""
+    initialize_quiz_store()
+    clauses = ["m.student_id = ?"]
+    parameters: list[str] = [student_id]
+    if document_id is not None:
+        clauses.append("m.document_id = ?")
+        parameters.append(document_id)
+    with _connect() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT m.*,
+                   COALESCE((
+                       SELECT NULLIF(a.topic_name, '')
+                       FROM quiz_attempt_answers a
+                       JOIN quiz_attempts t ON t.attempt_id = a.attempt_id
+                       WHERE t.student_id = m.student_id
+                         AND t.document_id = m.document_id
+                         AND a.topic_id = m.topic_id
+                       ORDER BY COALESCE(t.submitted_at, t.completed_at) DESC, a.question_id
+                       LIMIT 1
+                   ), m.topic_id) AS topic_name
+            FROM topic_mastery m
+            WHERE {' AND '.join(clauses)}
+            """,
+            parameters,
+        ).fetchall()
+    results = []
+    for row in rows:
+        result = dict(row)
+        result["has_evidence"] = bool(result["has_evidence"])
+        result["has_sufficient_evidence"] = bool(result["has_sufficient_evidence"])
+        result["formula_config"] = json.loads(result.pop("formula_config_json"))
+        results.append(result)
+    return results
+
+
 def list_mastery_identities(student_id: str | None = None) -> list[dict]:
     initialize_quiz_store()
     with _connect() as connection:
         if student_id:
             rows = connection.execute(
-                "SELECT DISTINCT student_id, document_id, topic_id FROM quiz_attempts WHERE completed = 1 AND student_id = ?",
+                "SELECT DISTINCT t.student_id, t.document_id, a.topic_id FROM quiz_attempts t JOIN quiz_attempt_answers a ON a.attempt_id=t.attempt_id WHERE t.completed = 1 AND t.student_id = ?",
                 (student_id,),
             ).fetchall()
         else:
             rows = connection.execute(
-                "SELECT DISTINCT student_id, document_id, topic_id FROM quiz_attempts WHERE completed = 1"
+                "SELECT DISTINCT t.student_id, t.document_id, a.topic_id FROM quiz_attempts t JOIN quiz_attempt_answers a ON a.attempt_id=t.attempt_id WHERE t.completed = 1"
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -842,6 +981,7 @@ def list_mastery_identities(student_id: str | None = None) -> list[dict]:
 def list_quiz_history(
     document_id: str | None = None,
     difficulty: str | None = None,
+    student_id: str | None = None,
 ) -> list[dict]:
     initialize_quiz_store()
     clauses = ["completed = 1"]
@@ -852,6 +992,9 @@ def list_quiz_history(
     if difficulty:
         clauses.append("difficulty = ?")
         parameters.append(difficulty)
+    if student_id:
+        clauses.append("student_id = ?")
+        parameters.append(student_id)
     with _connect() as connection:
         rows = connection.execute(
             f"""
@@ -863,12 +1006,12 @@ def list_quiz_history(
         return [_row_to_attempt(connection, row) for row in rows]
 
 
-def get_quiz_history_attempt(attempt_id: str) -> dict | None:
+def get_quiz_history_attempt(attempt_id: str, student_id: str = LEGACY_USER_ID) -> dict | None:
     initialize_quiz_store()
     with _connect() as connection:
         row = connection.execute(
-            "SELECT * FROM quiz_attempts WHERE attempt_id = ? AND completed = 1",
-            (attempt_id,),
+            "SELECT * FROM quiz_attempts WHERE attempt_id = ? AND student_id = ? AND completed = 1",
+            (attempt_id, student_id),
         ).fetchone()
         return _row_to_attempt(connection, row) if row else None
 

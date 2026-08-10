@@ -145,7 +145,7 @@ class MasteryTests(unittest.TestCase):
                 "source_chunk_ids": ["hash_1"],
                 "validation_outcome": "accepted",
             }],
-        })
+        }, "student-edit")
         first = update_quiz_progress(
             "mastery.pdf", "easy", "topic-edit", 1, "A", "student-edit"
         )
@@ -165,7 +165,7 @@ class MasteryTests(unittest.TestCase):
         recompute_topic_mastery("student-a", "stale.pdf", "topic_002")
         recompute_topic_mastery("student-a", "keep.pdf", "topic_001")
 
-        quiz_store.invalidate_document_quizzes_for_topic_schema("stale.pdf", 3)
+        quiz_store.invalidate_document_quizzes_for_topic_schema("stale.pdf", 3, "student-a")
 
         self.assertIsNone(quiz_store.get_topic_mastery("student-a", "stale.pdf", "topic_001"))
         self.assertIsNone(quiz_store.get_topic_mastery("student-a", "stale.pdf", "topic_002"))

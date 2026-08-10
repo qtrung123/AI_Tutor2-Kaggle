@@ -15,6 +15,10 @@ PROMPT_PATH = BASE_DIR / "prompts" / "rag_prompt.txt"
 QUIZ_PROMPT_PATH = BASE_DIR / "prompts" / "quiz_prompt.txt"
 INDEXED_FILES_PATH = _env_path("AI_TUTOR_INDEXED_FILES_PATH", BASE_DIR / "indexed_files.json")
 DATABASE_PATH = _env_path("AI_TUTOR_DATABASE_PATH", DATA_DIR / "conversations.db")
+AUTH_COOKIE_NAME = os.getenv("AI_TUTOR_AUTH_COOKIE_NAME", "ai_tutor_session")
+AUTH_SESSION_DAYS = int(os.getenv("AI_TUTOR_AUTH_SESSION_DAYS", "14"))
+AUTH_COOKIE_SECURE = os.getenv("AI_TUTOR_AUTH_COOKIE_SECURE", "false").lower() in {"1", "true", "yes", "on"}
+LEGACY_USER_EMAIL = os.getenv("AI_TUTOR_LEGACY_EMAIL", "legacy-local@invalid.local")
 
 # Read once by the SQLite migration so existing local quiz data is preserved.
 LEGACY_GENERATED_QUIZZES_PATH = DATA_DIR / "generated_quizzes.json"
@@ -43,9 +47,14 @@ MASTERY_QUALITY_WEIGHTS = {
     "accepted_quality_warning": float(os.getenv("MASTERY_QUALITY_WARNING_WEIGHT", "0.75")),
 }
 MASTERY_MIN_QUESTIONS = int(os.getenv("MASTERY_MIN_QUESTIONS", "3"))
+MASTERY_MIN_CONCEPT_COVERAGE = float(os.getenv("MASTERY_MIN_CONCEPT_COVERAGE", "0.6"))
 MASTERY_DEVELOPING_THRESHOLD = float(os.getenv("MASTERY_DEVELOPING_THRESHOLD", "50"))
 MASTERY_PROFICIENT_THRESHOLD = float(os.getenv("MASTERY_PROFICIENT_THRESHOLD", "70"))
 MASTERY_MASTERED_THRESHOLD = float(os.getenv("MASTERY_MASTERED_THRESHOLD", "85"))
+
+AUTO_QUIZ_MAX_PER_TOPIC = int(os.getenv("AUTO_QUIZ_MAX_PER_TOPIC", "8"))
+AUTO_QUIZ_MAX_DOCUMENT = int(os.getenv("AUTO_QUIZ_MAX_DOCUMENT", "40"))
+ASSESSMENT_PLANNER_CHUNKS_PER_BATCH = int(os.getenv("ASSESSMENT_PLANNER_CHUNKS_PER_BATCH", "8"))
 
 # Model dùng để embedding
 EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "bge-m3")

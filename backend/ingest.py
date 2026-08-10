@@ -1,4 +1,3 @@
-import json
 import hashlib
 from pathlib import Path
 from typing import List
@@ -9,6 +8,12 @@ from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 
 from backend.topic_extractor import TOPIC_SCHEMA_VERSION, TopicExtractor, ollama_heading_refiner
+from backend.auth_store import LEGACY_USER_ID
+from backend.indexed_document_store import (
+    delete_indexed_document,
+    list_indexed_documents,
+    upsert_indexed_document,
+)
 
 from config import (
     DATA_DIR,
@@ -38,7 +43,7 @@ def calculate_file_hash(file_path: Path) -> str:
     return sha256.hexdigest()
 
 
-def load_indexed_files() -> dict:
+def load_indexed_files(owner_id: str = LEGACY_USER_ID) -> dict:
     """
     Load the list of files that have already been indexed.
 
@@ -48,22 +53,18 @@ def load_indexed_files() -> dict:
     If the file does not exist, it means no document has been indexed yet,
     so the function returns an empty dictionary.
     """
-    if not INDEXED_FILES_PATH.exists():
-        return {}
-
-    with open(INDEXED_FILES_PATH, "r", encoding="utf-8") as file:
-        return json.load(file)
+    return {document["document_id"]: document for document in list_indexed_documents(owner_id)}
 
 
-def save_indexed_files(indexed_files: dict):
+def save_indexed_files(indexed_files: dict, owner_id: str = LEGACY_USER_ID):
     """
     Save indexing history to indexed_files.json.
 
     This function is used after indexing finishes.
     It stores information about indexed files, such as hash, chunks, and path.
     """
-    with open(INDEXED_FILES_PATH, "w", encoding="utf-8") as file:
-        json.dump(indexed_files, file, indent=4, ensure_ascii=False)
+    for document_id, info in indexed_files.items():
+        upsert_indexed_document(owner_id, document_id, info)
 
 
 def load_single_file(file_path: Path):
@@ -113,6 +114,26 @@ def get_vectorstore():
     return vectorstore
 
 
+def migrate_legacy_vector_ownership(vectorstore) -> int:
+    """Add legacy ownership in place without changing vector IDs or chunk traceability."""
+    result = vectorstore.get(limit=100000)
+    ids = result.get("ids", []) or []
+    metadatas = result.get("metadatas", []) or []
+    update_ids = []
+    update_metadatas = []
+    for vector_id, metadata in zip(ids, metadatas):
+        metadata = dict(metadata or {})
+        if metadata.get("owner_id"):
+            continue
+        metadata["owner_id"] = LEGACY_USER_ID
+        metadata["document_id"] = str(metadata.get("document_id") or metadata.get("source") or "")
+        update_ids.append(vector_id)
+        update_metadatas.append(metadata)
+    if update_ids:
+        vectorstore._collection.update(ids=update_ids, metadatas=update_metadatas)
+    return len(update_ids)
+
+
 def add_topic_metadata(documents, chunks, ids, extractor: TopicExtractor | None = None) -> list[dict]:
     """Add stable chunk IDs and extracted topic metadata without changing chunk text."""
     extractor = extractor or TopicExtractor(llm_refiner=ollama_heading_refiner(CHAT_MODEL))
@@ -123,16 +144,16 @@ def add_topic_metadata(documents, chunks, ids, extractor: TopicExtractor | None 
     return topics
 
 
-def delete_stale_source_vectors(vectorstore, source: str, current_ids: list[str]) -> list[str]:
+def delete_stale_source_vectors(vectorstore, owner_id: str, document_id: str, current_ids: list[str]) -> list[str]:
     """Delete source vectors not present in the completed replacement index."""
-    result = vectorstore.get(where={"source": source})
+    result = vectorstore.get(where={"$and": [{"owner_id": owner_id}, {"document_id": document_id}]})
     stale_ids = sorted(set(result.get("ids", []) or []) - set(current_ids))
     if stale_ids:
         vectorstore.delete(ids=stale_ids)
     return stale_ids
 
 
-def index_files(file_paths: List[Path]):
+def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
     """
     Incremental indexing:
     - only index new files
@@ -141,8 +162,9 @@ def index_files(file_paths: List[Path]):
     DATA_DIR.mkdir(exist_ok=True)
     VECTORSTORE_DIR.mkdir(exist_ok=True)
 
-    indexed_files = load_indexed_files()
+    indexed_files = load_indexed_files(owner_id)
     vectorstore = get_vectorstore()
+    migrate_legacy_vector_ownership(vectorstore)
 
     total_new_files = 0
     total_chunks = 0
@@ -174,6 +196,8 @@ def index_files(file_paths: List[Path]):
 
         for doc in documents:
             doc.metadata["source"] = file_path.name
+            doc.metadata["document_id"] = file_path.name
+            doc.metadata["owner_id"] = owner_id
             doc.metadata["file_hash"] = file_hash
 
         chunks = split_documents(documents)
@@ -183,7 +207,7 @@ def index_files(file_paths: List[Path]):
             continue
 
         ids = [
-            f"{file_hash}_{i}"
+            f"{file_hash}_{i}" if owner_id == LEGACY_USER_ID else f"{owner_id}_{file_hash}_{i}"
             for i in range(len(chunks))
         ]
 
@@ -193,22 +217,22 @@ def index_files(file_paths: List[Path]):
             documents=chunks,
             ids=ids,
         )
-        delete_stale_source_vectors(vectorstore, file_key, ids)
+        delete_stale_source_vectors(vectorstore, owner_id, file_key, ids)
 
-        indexed_files[file_key] = {
+        info = {
             "hash": file_hash,
             "chunks": len(chunks),
             "path": str(file_path),
             "topic_schema_version": TOPIC_SCHEMA_VERSION,
             "topics": topics,
         }
+        indexed_files[file_key] = info
+        upsert_indexed_document(owner_id, file_key, info)
 
         total_new_files += 1
         total_chunks += len(chunks)
 
         print(f"Indexed: {file_path.name} - {len(chunks)} chunks")
-
-    save_indexed_files(indexed_files)
 
     return {
         "new_files": total_new_files,
@@ -218,7 +242,7 @@ def index_files(file_paths: List[Path]):
     }
 
 
-def delete_indexed_file(file_name: str) -> dict:
+def delete_indexed_file(file_name: str, owner_id: str = LEGACY_USER_ID) -> dict:
     """
     Remove one indexed file from the app.
 
@@ -227,7 +251,7 @@ def delete_indexed_file(file_name: str) -> dict:
     - the metadata entry in indexed_files.json,
     - the original uploaded file in data/ when it exists there.
     """
-    indexed_files = load_indexed_files()
+    indexed_files = load_indexed_files(owner_id)
     file_key = Path(file_name).name
 
     if file_key not in indexed_files:
@@ -239,21 +263,23 @@ def delete_indexed_file(file_name: str) -> dict:
 
     if file_hash and chunk_count:
         vectorstore = get_vectorstore()
-        ids = [f"{file_hash}_{index}" for index in range(chunk_count)]
+        ids = [
+            f"{file_hash}_{index}" if owner_id == LEGACY_USER_ID else f"{owner_id}_{file_hash}_{index}"
+            for index in range(chunk_count)
+        ]
         vectorstore.delete(ids=ids)
 
     source_path = Path(info.get("path") or DATA_DIR / file_key)
     if not source_path.is_absolute():
         source_path = DATA_DIR / source_path.name
 
-    data_root = DATA_DIR.resolve()
+    data_root = (DATA_DIR if owner_id == LEGACY_USER_ID else DATA_DIR / "users" / owner_id).resolve()
     resolved_source = source_path.resolve()
     if resolved_source.exists() and resolved_source.is_file():
         if resolved_source.parent == data_root:
             resolved_source.unlink()
 
-    del indexed_files[file_key]
-    save_indexed_files(indexed_files)
+    delete_indexed_document(owner_id, file_key)
 
     return {
         "deleted": file_key,
@@ -262,14 +288,14 @@ def delete_indexed_file(file_name: str) -> dict:
     }
 
 
-def index_all_data_files():
+def index_all_data_files(owner_id: str = LEGACY_USER_ID):
     """Index all supported files in data/ incrementally."""
     files = []
 
     for pattern in ["*.pdf", "*.txt"]:
         files.extend(DATA_DIR.glob(pattern))
 
-    return index_files(files)
+    return index_files(files, owner_id)
 
 
 def main():

@@ -9,3 +9,4 @@ langchain-chroma
 chromadb
 pypdf
 python-dotenv
+argon2-cffi

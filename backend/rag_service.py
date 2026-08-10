@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 from langchain_chroma import Chroma
@@ -9,6 +8,8 @@ from backend.conversation_store import (
     get_conversation,
     update_conversation_title,
 )
+from backend.indexed_document_store import list_indexed_documents
+from backend.ingest import migrate_legacy_vector_ownership
 
 from config import (
     CHAT_MODEL,
@@ -31,11 +32,13 @@ def load_vectorstore() -> Chroma:
     """
     embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
 
-    return Chroma(
+    store = Chroma(
         persist_directory=str(VECTORSTORE_DIR),
         collection_name=COLLECTION_NAME,
         embedding_function=embeddings,
     )
+    migrate_legacy_vector_ownership(store)
+    return store
 
 
 def load_prompt_template() -> str:
@@ -97,23 +100,24 @@ def _build_citations(docs) -> list[dict]:
     return citations
 
 
-def _chroma_filter(document_ids: list[str], topic_id: str | None = None) -> dict:
+def _chroma_filter(owner_id: str, document_ids: list[str], topic_id: str | None = None) -> dict:
     source_filter = (
-        {"source": document_ids[0]}
+        {"document_id": document_ids[0]}
         if len(document_ids) == 1
-        else {"source": {"$in": document_ids}}
+        else {"document_id": {"$in": document_ids}}
     )
-    if not topic_id:
-        return source_filter
-    return {"$and": [source_filter, {"topic_id": topic_id}]}
+    clauses = [{"owner_id": owner_id}, source_filter]
+    if topic_id:
+        clauses.append({"topic_id": topic_id})
+    return {"$and": clauses}
 
 
 def _retrieve_conversation_docs(
-    question: str, document_ids: list[str], topic_id: str | None = None
+    owner_id: str, question: str, document_ids: list[str], topic_id: str | None = None
 ) -> list:
     """Retrieve globally relevant chunks while strictly enforcing the thread's source scope."""
     vectorstore = load_vectorstore()
-    source_filter = _chroma_filter(document_ids, topic_id)
+    source_filter = _chroma_filter(owner_id, document_ids, topic_id)
     try:
         ranked_docs = vectorstore.similarity_search_with_score(
             question, k=TOP_K, filter=source_filter
@@ -125,7 +129,7 @@ def _retrieve_conversation_docs(
         for document_id in document_ids:
             ranked_docs.extend(
                 vectorstore.similarity_search_with_score(
-                    question, k=TOP_K, filter=_chroma_filter([document_id], topic_id)
+                    question, k=TOP_K, filter=_chroma_filter(owner_id, [document_id], topic_id)
                 )
             )
 
@@ -159,20 +163,20 @@ def _history_for_prompt(messages: list[dict], limit: int = 8) -> str:
     )
 
 
-def answer_conversation_message(conversation_id: str, message: str) -> dict:
+def answer_conversation_message(owner_id: str, conversation_id: str, message: str) -> dict:
     """Answer and persist one message in a source-isolated conversation."""
-    conversation = get_conversation(conversation_id, include_messages=True)
-    user_message = add_message(conversation_id, "user", message.strip())
+    conversation = get_conversation(owner_id, conversation_id, include_messages=True)
+    user_message = add_message(owner_id, conversation_id, "user", message.strip())
 
     existing_messages = conversation.get("messages", [])
     if conversation["title"] == "New conversation" and not existing_messages:
-        update_conversation_title(conversation_id, message.strip()[:64])
+        update_conversation_title(owner_id, conversation_id, message.strip()[:64])
 
     document_ids = conversation.get("document_ids", [])
     if not document_ids:
         answer = "I don't know based on the provided documents. Select at least one material for this conversation."
         assistant_message = add_message(
-            conversation_id, "assistant", answer, "insufficient_context", []
+            owner_id, conversation_id, "assistant", answer, "insufficient_context", []
         )
         return {
             "user_message": user_message,
@@ -187,7 +191,7 @@ def answer_conversation_message(conversation_id: str, message: str) -> dict:
         item["content"] for item in existing_messages[-4:] if item["role"] == "user"
     )
     retrieval_query = f"{recent_user_text}\n{message}".strip()
-    docs = _retrieve_conversation_docs(retrieval_query, document_ids)
+    docs = _retrieve_conversation_docs(owner_id, retrieval_query, document_ids)
     if not docs:
         answer = "I don't know based on the provided documents."
         citations = []
@@ -216,6 +220,7 @@ def answer_conversation_message(conversation_id: str, message: str) -> dict:
         for citation in citations
     ]
     assistant_message = add_message(
+        owner_id,
         conversation_id,
         "assistant",
         answer,
@@ -233,6 +238,7 @@ def answer_conversation_message(conversation_id: str, message: str) -> dict:
 
 
 def explain_quiz_answer(
+    owner_id: str,
     document_id: str,
     question: str,
     options: list[str],
@@ -244,7 +250,7 @@ def explain_quiz_answer(
     docs = vectorstore.similarity_search(
         retrieval_query,
         k=TOP_K,
-        filter={"source": document_id},
+        filter={"$and": [{"owner_id": owner_id}, {"document_id": document_id}]},
     )
     if not docs:
         raise ValueError("No relevant chunks were found in the selected document.")
@@ -277,21 +283,16 @@ COURSE MATERIAL CONTEXT:
     }
 
 
-def list_uploaded_sources() -> list[dict]:
+def list_uploaded_sources(owner_id: str) -> list[dict]:
     """
     Return the indexed document summary shown in the frontend source panel.
 
     This reads indexed_files.json, which is written by backend/ingest.py after
     documents are chunked and saved into Chroma.
     """
-    if not INDEXED_FILES_PATH.exists():
-        return []
-
-    with open(INDEXED_FILES_PATH, "r", encoding="utf-8") as file:
-        indexed_files = json.load(file)
-
     sources = []
-    for source_id, (file_name, info) in enumerate(indexed_files.items(), start=1):
+    for source_id, info in enumerate(list_indexed_documents(owner_id), start=1):
+        file_name = info["document_id"]
         source_path = Path(info.get("path", file_name))
         sources.append(
             {

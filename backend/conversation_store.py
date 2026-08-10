@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from config import DATABASE_PATH
+from backend.auth_store import LEGACY_USER_ID, initialize_auth_store
 
 
 class _ClosingConnection(sqlite3.Connection):
@@ -31,6 +32,7 @@ def _connect() -> sqlite3.Connection:
 
 
 def initialize_conversation_store() -> None:
+    initialize_auth_store()
     with _connect() as connection:
         connection.executescript(
             """
@@ -68,6 +70,14 @@ def initialize_conversation_store() -> None:
                 ON messages(conversation_id, created_at);
             """
         )
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(conversations)")}
+        if "owner_id" not in columns:
+            connection.execute(
+                f"ALTER TABLE conversations ADD COLUMN owner_id TEXT NOT NULL DEFAULT '{LEGACY_USER_ID}'"
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversations_owner ON conversations(owner_id, updated_at)"
+        )
 
 
 def _source_ids(connection: sqlite3.Connection, conversation_id: str) -> list[str]:
@@ -78,28 +88,28 @@ def _source_ids(connection: sqlite3.Connection, conversation_id: str) -> list[st
     return [row["document_id"] for row in rows]
 
 
-def create_conversation(title: str = "New conversation", document_ids: list[str] | None = None) -> dict:
+def create_conversation(owner_id: str, title: str = "New conversation", document_ids: list[str] | None = None) -> dict:
     initialize_conversation_store()
     conversation_id = str(uuid4())
     timestamp = _now()
     with _connect() as connection:
         connection.execute(
-            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (conversation_id, title.strip() or "New conversation", timestamp, timestamp),
+            "INSERT INTO conversations (id, title, created_at, updated_at, owner_id) VALUES (?, ?, ?, ?, ?)",
+            (conversation_id, title.strip() or "New conversation", timestamp, timestamp, owner_id),
         )
         for document_id in dict.fromkeys(document_ids or []):
             connection.execute(
                 "INSERT INTO conversation_sources (conversation_id, document_id) VALUES (?, ?)",
                 (conversation_id, document_id),
             )
-    return get_conversation(conversation_id, include_messages=True)
+    return get_conversation(owner_id, conversation_id, include_messages=True)
 
 
-def list_conversations() -> list[dict]:
+def list_conversations(owner_id: str) -> list[dict]:
     initialize_conversation_store()
     with _connect() as connection:
         rows = connection.execute(
-            "SELECT * FROM conversations ORDER BY updated_at DESC"
+            "SELECT * FROM conversations WHERE owner_id = ? ORDER BY updated_at DESC", (owner_id,)
         ).fetchall()
         return [
             {**dict(row), "document_ids": _source_ids(connection, row["id"])}
@@ -107,11 +117,11 @@ def list_conversations() -> list[dict]:
         ]
 
 
-def get_conversation(conversation_id: str, include_messages: bool = True) -> dict:
+def get_conversation(owner_id: str, conversation_id: str, include_messages: bool = True) -> dict:
     initialize_conversation_store()
     with _connect() as connection:
         row = connection.execute(
-            "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+            "SELECT * FROM conversations WHERE id = ? AND owner_id = ?", (conversation_id, owner_id)
         ).fetchone()
         if row is None:
             raise ValueError("Conversation not found.")
@@ -133,19 +143,19 @@ def get_conversation(conversation_id: str, include_messages: bool = True) -> dic
         return result
 
 
-def update_conversation_title(conversation_id: str, title: str) -> dict:
+def update_conversation_title(owner_id: str, conversation_id: str, title: str) -> dict:
     with _connect() as connection:
         cursor = connection.execute(
-            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
-            (title.strip() or "New conversation", _now(), conversation_id),
+            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ? AND owner_id = ?",
+            (title.strip() or "New conversation", _now(), conversation_id, owner_id),
         )
         if cursor.rowcount == 0:
             raise ValueError("Conversation not found.")
-    return get_conversation(conversation_id, include_messages=False)
+    return get_conversation(owner_id, conversation_id, include_messages=False)
 
 
-def set_conversation_sources(conversation_id: str, document_ids: list[str]) -> dict:
-    get_conversation(conversation_id, include_messages=False)
+def set_conversation_sources(owner_id: str, conversation_id: str, document_ids: list[str]) -> dict:
+    get_conversation(owner_id, conversation_id, include_messages=False)
     with _connect() as connection:
         connection.execute("DELETE FROM conversation_sources WHERE conversation_id = ?", (conversation_id,))
         for document_id in dict.fromkeys(document_ids):
@@ -156,10 +166,11 @@ def set_conversation_sources(conversation_id: str, document_ids: list[str]) -> d
         connection.execute(
             "UPDATE conversations SET updated_at = ? WHERE id = ?", (_now(), conversation_id)
         )
-    return get_conversation(conversation_id, include_messages=True)
+    return get_conversation(owner_id, conversation_id, include_messages=True)
 
 
 def add_message(
+    owner_id: str,
     conversation_id: str,
     role: str,
     content: str,
@@ -169,7 +180,9 @@ def add_message(
     message_id = str(uuid4())
     timestamp = _now()
     with _connect() as connection:
-        exists = connection.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+        exists = connection.execute(
+            "SELECT 1 FROM conversations WHERE id = ? AND owner_id = ?", (conversation_id, owner_id)
+        ).fetchone()
         if exists is None:
             raise ValueError("Conversation not found.")
         connection.execute(
@@ -199,14 +212,19 @@ def add_message(
     }
 
 
-def delete_conversation(conversation_id: str) -> None:
+def delete_conversation(owner_id: str, conversation_id: str) -> None:
     with _connect() as connection:
-        cursor = connection.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        cursor = connection.execute(
+            "DELETE FROM conversations WHERE id = ? AND owner_id = ?", (conversation_id, owner_id)
+        )
         if cursor.rowcount == 0:
             raise ValueError("Conversation not found.")
 
 
-def remove_source_from_conversations(document_id: str) -> None:
+def remove_source_from_conversations(owner_id: str, document_id: str) -> None:
     initialize_conversation_store()
     with _connect() as connection:
-        connection.execute("DELETE FROM conversation_sources WHERE document_id = ?", (document_id,))
+        connection.execute(
+            "DELETE FROM conversation_sources WHERE document_id = ? AND conversation_id IN (SELECT id FROM conversations WHERE owner_id = ?)",
+            (document_id, owner_id),
+        )

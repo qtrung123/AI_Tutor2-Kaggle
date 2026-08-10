@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from pydantic import BaseModel, Field
@@ -18,9 +18,12 @@ from backend.quiz_service import (
     load_quiz_with_attempt,
     load_completed_quiz_attempt,
     update_quiz_progress,
+    build_learning_dashboard,
 )
 from backend.quiz_store import delete_document_quiz_data
 from backend.mastery_service import recompute_all_mastery, recompute_topic_mastery
+from backend.knowledge_gap_service import detect_knowledge_gaps
+from backend.recommendation_service import generate_recommendations
 from backend.conversation_store import (
     create_conversation,
     delete_conversation,
@@ -31,7 +34,14 @@ from backend.conversation_store import (
     update_conversation_title,
 )
 from backend.rag_service import answer_conversation_message, list_uploaded_sources
-from config import CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL
+from config import AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE, AUTH_SESSION_DAYS, CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL
+from backend.auth_store import (
+    authenticate_user,
+    create_session,
+    create_user,
+    get_user_for_session,
+    revoke_session,
+)
 
 
 class ConversationCreateRequest(BaseModel):
@@ -122,16 +132,16 @@ class DocumentSummary(BaseModel):
 class QuizGenerateRequest(BaseModel):
     """Request body for POST /api/quiz/generate."""
     document_id: str
-    topic_id: str
-    question_count: int = Field(ge=1, le=40)
+    assessment_scope: str = Field(pattern="^(topic|document)$")
+    topic_id: Optional[str] = None
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
 
 
 class QuizRegenerateRequest(BaseModel):
     """Request body for POST /api/quiz/{document_id}/regenerate."""
-    question_count: int = Field(ge=1, le=40)
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
-    topic_id: str
+    assessment_scope: str = Field(pattern="^(topic|document)$")
+    topic_id: Optional[str] = None
 
 
 class QuizProgressRequest(BaseModel):
@@ -139,11 +149,9 @@ class QuizProgressRequest(BaseModel):
     question_id: int = Field(ge=1)
     selected_answer: str = Field(pattern="^[ABCDabcd]$")
     topic_id: str
-    student_id: str = "local_student"
 
 
 class MasteryRecomputeRequest(BaseModel):
-    student_id: Optional[str] = None
     document_id: Optional[str] = None
     topic_id: Optional[str] = None
 
@@ -160,6 +168,10 @@ class QuizQuestion(BaseModel):
     options: list[str]
     correct_answer: str
     topic_id: str
+    topic_name: str = ""
+    concept_id: str = ""
+    concept_name: str = ""
+    assessment_capacity: int = 0
     difficulty: str
     explanation: str
     source_chunk_ids: list[str]
@@ -175,8 +187,48 @@ class QuizGenerateResponse(BaseModel):
     difficulty: str
     topic_id: str
     topic_name: Optional[str] = None
+    assessment_scope: str = "topic"
+    assessment_plan: dict = Field(default_factory=dict)
     created_at: str
     questions: list[QuizQuestion]
+
+
+class SignupRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=100)
+    email: str = Field(min_length=5, max_length=254)
+    password: str = Field(min_length=10, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=254)
+    password: str = Field(min_length=1, max_length=128)
+
+
+def require_current_user(request: Request) -> dict:
+    user = get_user_for_session(request.cookies.get(AUTH_COOKIE_NAME))
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    return user
+
+
+def _validate_email(email: str) -> str:
+    import re
+    normalized = email.strip().lower()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", normalized):
+        raise HTTPException(status_code=422, detail="Enter a valid email address.")
+    return normalized
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=token,
+        max_age=AUTH_SESSION_DAYS * 86400,
+        httponly=True,
+        secure=AUTH_COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
 
 
 # FastAPI application object. Uvicorn imports this as backend.main:app.
@@ -198,6 +250,42 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.post("/api/auth/signup", status_code=201)
+def auth_signup(request: SignupRequest, response: Response) -> dict:
+    display_name = request.display_name.strip()
+    if not display_name:
+        raise HTTPException(status_code=422, detail="Display name cannot be blank.")
+    try:
+        user = create_user(display_name, _validate_email(request.email), request.password)
+        token, _session = create_session(user["id"])
+        _set_session_cookie(response, token)
+        return user
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/api/auth/login")
+def auth_login(request: LoginRequest, response: Response) -> dict:
+    user = authenticate_user(_validate_email(request.email), request.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    token, _session = create_session(user["id"])
+    _set_session_cookie(response, token)
+    return user
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request, response: Response) -> dict:
+    revoke_session(request.cookies.get(AUTH_COOKIE_NAME))
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/", secure=AUTH_COOKIE_SECURE, samesite="lax")
+    return {"signed_out": True}
+
+
+@app.get("/api/auth/me")
+def auth_me(current_user: dict = Depends(require_current_user)) -> dict:
+    return current_user
 
 
 @app.get("/")
@@ -261,14 +349,14 @@ def service_health() -> ServiceHealthResponse:
 
 
 @app.get("/api/sources", response_model=list[SourceSummary])
-def sources() -> list[SourceSummary]:
+def sources(current_user: dict = Depends(require_current_user)) -> list[SourceSummary]:
     """
     Return all indexed sources for the AI Tutor source panel.
 
-    Data comes from indexed_files.json through rag_service.list_uploaded_sources().
+    Data comes from the owner-scoped SQLite indexed document registry.
     """
     try:
-        return [SourceSummary(**source) for source in list_uploaded_sources()]
+        return [SourceSummary(**source) for source in list_uploaded_sources(current_user["id"])]
     except Exception as error:
         raise HTTPException(
             status_code=500,
@@ -277,7 +365,7 @@ def sources() -> list[SourceSummary]:
 
 
 @app.post("/api/sources/upload", response_model=UploadResponse)
-async def upload_sources(files: list[UploadFile] = File(...)) -> UploadResponse:
+async def upload_sources(files: list[UploadFile] = File(...), current_user: dict = Depends(require_current_user)) -> UploadResponse:
     """
     Upload PDF/TXT files and index them into the vectorstore.
 
@@ -291,7 +379,8 @@ async def upload_sources(files: list[UploadFile] = File(...)) -> UploadResponse:
     if not files:
         raise HTTPException(status_code=400, detail="Upload at least one PDF or TXT file.")
 
-    DATA_DIR.mkdir(exist_ok=True)
+    user_data_dir = DATA_DIR / "users" / current_user["id"]
+    user_data_dir.mkdir(parents=True, exist_ok=True)
     saved_paths = []
     allowed_extensions = {".pdf", ".txt"}
 
@@ -308,15 +397,15 @@ async def upload_sources(files: list[UploadFile] = File(...)) -> UploadResponse:
                     detail="Only PDF and TXT files can be uploaded.",
                 )
 
-            save_path = DATA_DIR / file_name
+            save_path = user_data_dir / file_name
             content = await uploaded_file.read()
             save_path.write_bytes(content)
             saved_paths.append(save_path)
 
         # index_files() handles duplicate detection through file hashes and
-        # writes both Chroma vectors and indexed_files.json metadata.
-        result = index_files(saved_paths)
-        sources_result = [SourceSummary(**source) for source in list_uploaded_sources()]
+        # Writes owner-scoped Chroma vectors and SQLite indexed-document metadata.
+        result = index_files(saved_paths, current_user["id"])
+        sources_result = [SourceSummary(**source) for source in list_uploaded_sources(current_user["id"])]
 
         return UploadResponse(
             new_files=result["new_files"],
@@ -339,18 +428,18 @@ async def upload_sources(files: list[UploadFile] = File(...)) -> UploadResponse:
 
 
 @app.delete("/api/sources/{document_id}", response_model=DeleteSourceResponse)
-def delete_source(document_id: str) -> DeleteSourceResponse:
+def delete_source(document_id: str, current_user: dict = Depends(require_current_user)) -> DeleteSourceResponse:
     """
     Delete one indexed document from the system.
 
-    This removes the document from Chroma, indexed_files.json, and data/. It also
+    This removes the owner's document from Chroma, the SQLite registry, and data/. It also
     deletes quiz data for that document so stale quiz questions/attempts cannot be reused.
     """
     try:
-        result = delete_indexed_file(document_id)
-        delete_document_quiz_data(result["deleted"])
-        remove_source_from_conversations(result["deleted"])
-        sources_result = [SourceSummary(**source) for source in list_uploaded_sources()]
+        result = delete_indexed_file(document_id, current_user["id"])
+        delete_document_quiz_data(result["deleted"], current_user["id"])
+        remove_source_from_conversations(current_user["id"], result["deleted"])
+        sources_result = [SourceSummary(**source) for source in list_uploaded_sources(current_user["id"])]
 
         return DeleteSourceResponse(
             deleted=result["deleted"],
@@ -368,7 +457,7 @@ def delete_source(document_id: str) -> DeleteSourceResponse:
 
 
 @app.get("/api/documents", response_model=list[DocumentSummary])
-def documents() -> list[DocumentSummary]:
+def documents(current_user: dict = Depends(require_current_user)) -> list[DocumentSummary]:
     """
     Return indexed documents for the Practice quiz dropdown.
 
@@ -376,7 +465,7 @@ def documents() -> list[DocumentSummary]:
     the quiz feature owns the shape it needs.
     """
     try:
-        return [DocumentSummary(**document) for document in list_indexed_documents()]
+        return [DocumentSummary(**document) for document in list_indexed_documents(current_user["id"])]
     except Exception as error:
         raise HTTPException(
             status_code=500,
@@ -385,7 +474,7 @@ def documents() -> list[DocumentSummary]:
 
 
 @app.get("/api/quizzes")
-def quizzes() -> list[dict]:
+def quizzes(current_user: dict = Depends(require_current_user)) -> list[dict]:
     """
     Return quiz generation and completion status for all indexed documents.
 
@@ -393,7 +482,7 @@ def quizzes() -> list[dict]:
     Generate Quiz, Start Quiz, or Review Quiz.
     """
     try:
-        return list_quiz_statuses()
+        return list_quiz_statuses(current_user["id"])
     except Exception as error:
         raise HTTPException(
             status_code=500,
@@ -402,19 +491,19 @@ def quizzes() -> list[dict]:
 
 
 @app.get("/api/quiz-history")
-def quiz_history(document_id: Optional[str] = None, difficulty: Optional[str] = None) -> list[dict]:
+def quiz_history(document_id: Optional[str] = None, difficulty: Optional[str] = None, current_user: dict = Depends(require_current_user)) -> list[dict]:
     """List completed quiz attempts for the history UI."""
     try:
-        return list_completed_quiz_attempts(document_id, difficulty)
+        return list_completed_quiz_attempts(document_id, difficulty, current_user["id"])
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Could not load quiz history: {error}") from error
 
 
 @app.get("/api/quiz-history/{attempt_id}")
-def quiz_history_detail(attempt_id: str) -> dict:
+def quiz_history_detail(attempt_id: str, current_user: dict = Depends(require_current_user)) -> dict:
     """Load one completed attempt with its question snapshots."""
     try:
-        return load_completed_quiz_attempt(attempt_id)
+        return load_completed_quiz_attempt(attempt_id, current_user["id"])
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
@@ -422,11 +511,11 @@ def quiz_history_detail(attempt_id: str) -> dict:
 @app.get("/api/quiz/{document_id}")
 def quiz_detail(
     document_id: str, topic_id: str, difficulty: str = "easy",
-    student_id: str = "local_student",
+    current_user: dict = Depends(require_current_user),
 ) -> dict:
     """Load the saved quiz and latest attempt for one document."""
     try:
-        return load_quiz_with_attempt(document_id, difficulty, topic_id, student_id)
+        return load_quiz_with_attempt(document_id, difficulty, topic_id, current_user["id"])
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except Exception as error:
@@ -437,7 +526,7 @@ def quiz_detail(
 
 
 @app.post("/api/quiz/generate", response_model=QuizGenerateResponse)
-def quiz_generate(request: QuizGenerateRequest) -> QuizGenerateResponse:
+def quiz_generate(request: QuizGenerateRequest, current_user: dict = Depends(require_current_user)) -> QuizGenerateResponse:
     """
     Generate a grounded multiple-choice quiz from one indexed document.
 
@@ -451,13 +540,14 @@ def quiz_generate(request: QuizGenerateRequest) -> QuizGenerateResponse:
     try:
         print(
             f"[quiz-api] document_id={request.document_id}, "
-            f"question_count={request.question_count}, difficulty={request.difficulty}"
+            f"assessment_scope={request.assessment_scope}, difficulty={request.difficulty}"
         )
         result = generate_quiz(
             document_id=request.document_id,
-            topic_id=request.topic_id,
-            question_count=request.question_count,
             difficulty=request.difficulty,
+            assessment_scope=request.assessment_scope,
+            topic_id=request.topic_id,
+            owner_id=current_user["id"],
         )
         return QuizGenerateResponse(**result)
     except ValueError as error:
@@ -474,7 +564,7 @@ def quiz_generate(request: QuizGenerateRequest) -> QuizGenerateResponse:
 
 
 @app.patch("/api/quiz/{document_id}/progress")
-def quiz_progress(document_id: str, request: QuizProgressRequest) -> dict:
+def quiz_progress(document_id: str, request: QuizProgressRequest, current_user: dict = Depends(require_current_user)) -> dict:
     """Check one selected answer and autosave current quiz progress."""
     try:
         return update_quiz_progress(
@@ -483,7 +573,7 @@ def quiz_progress(document_id: str, request: QuizProgressRequest) -> dict:
             topic_id=request.topic_id,
             question_id=request.question_id,
             selected_answer=request.selected_answer,
-            student_id=request.student_id,
+            student_id=current_user["id"],
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -494,17 +584,17 @@ def quiz_progress(document_id: str, request: QuizProgressRequest) -> dict:
 @app.delete("/api/quiz/{document_id}/progress")
 def quiz_progress_reset(
     document_id: str, topic_id: str, difficulty: str,
-    student_id: str = "local_student",
+    current_user: dict = Depends(require_current_user),
 ) -> dict:
     """Clear current quiz progress while preserving completed history."""
     try:
-        return clear_quiz_progress(document_id, difficulty, topic_id, student_id)
+        return clear_quiz_progress(document_id, difficulty, topic_id, current_user["id"])
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @app.post("/api/quiz/{document_id}/questions/{question_id}/explain")
-def quiz_explain(document_id: str, question_id: int, request: QuizExplainRequest) -> dict:
+def quiz_explain(document_id: str, question_id: int, request: QuizExplainRequest, current_user: dict = Depends(require_current_user)) -> dict:
     """Generate a short, document-grounded explanation on demand."""
     try:
         return explain_quiz_question(
@@ -512,6 +602,7 @@ def quiz_explain(document_id: str, question_id: int, request: QuizExplainRequest
             difficulty=request.difficulty,
             topic_id=request.topic_id,
             question_id=question_id,
+            owner_id=current_user["id"],
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -520,7 +611,7 @@ def quiz_explain(document_id: str, question_id: int, request: QuizExplainRequest
 
 
 @app.post("/api/quiz/{document_id}/regenerate", response_model=QuizGenerateResponse)
-def quiz_regenerate(document_id: str, request: QuizRegenerateRequest) -> QuizGenerateResponse:
+def quiz_regenerate(document_id: str, request: QuizRegenerateRequest, current_user: dict = Depends(require_current_user)) -> QuizGenerateResponse:
     """
     Intentionally replace a saved quiz for one document.
 
@@ -530,10 +621,11 @@ def quiz_regenerate(document_id: str, request: QuizRegenerateRequest) -> QuizGen
     try:
         result = generate_quiz(
             document_id=document_id,
-            topic_id=request.topic_id,
-            question_count=request.question_count,
             difficulty=request.difficulty,
+            assessment_scope=request.assessment_scope,
+            topic_id=request.topic_id,
             regenerate=True,
+            owner_id=current_user["id"],
         )
         return QuizGenerateResponse(**result)
     except ValueError as error:
@@ -547,34 +639,70 @@ def quiz_regenerate(document_id: str, request: QuizRegenerateRequest) -> QuizGen
 
 @app.get("/api/mastery/{document_id}/{topic_id}")
 def topic_mastery(
-    document_id: str, topic_id: str, student_id: str = "local_student"
+    document_id: str, topic_id: str, current_user: dict = Depends(require_current_user)
 ) -> dict:
     """Return mastery rebuilt from completed attempt-answer snapshots."""
     try:
-        return recompute_topic_mastery(student_id, document_id, topic_id)
+        return recompute_topic_mastery(current_user["id"], document_id, topic_id)
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Could not compute mastery: {error}") from error
 
 
+@app.get("/api/dashboard")
+def learning_dashboard(current_user: dict = Depends(require_current_user)) -> dict:
+    """Return the real project state used by the Overview and mastery UI."""
+    try:
+        return build_learning_dashboard(current_user["id"])
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Could not load dashboard: {error}") from error
+
+
+@app.get("/api/knowledge-gaps")
+def knowledge_gaps(current_user: dict = Depends(require_current_user)) -> list[dict]:
+    """Return reliable mastery-derived gaps for the authenticated user."""
+    return detect_knowledge_gaps(current_user["id"])
+
+
+@app.get("/api/knowledge-gaps/{document_id}")
+def document_knowledge_gaps(
+    document_id: str, current_user: dict = Depends(require_current_user)
+) -> list[dict]:
+    """Return reliable mastery-derived gaps for one owned assessment history."""
+    return detect_knowledge_gaps(current_user["id"], document_id)
+
+
+@app.get("/api/recommendations")
+def recommendations(current_user: dict = Depends(require_current_user)) -> list[dict]:
+    """Return ranked next actions derived from the authenticated user's current state."""
+    return generate_recommendations(current_user["id"])
+
+
+@app.get("/api/recommendations/{document_id}")
+def document_recommendations(
+    document_id: str, current_user: dict = Depends(require_current_user)
+) -> list[dict]:
+    return generate_recommendations(current_user["id"], document_id)
+
+
 @app.post("/api/mastery/recompute")
-def mastery_recompute(request: MasteryRecomputeRequest) -> list[dict] | dict:
+def mastery_recompute(request: MasteryRecomputeRequest, current_user: dict = Depends(require_current_user)) -> list[dict] | dict:
     """Rebuild one topic or every historical mastery cache entry."""
     try:
         if request.document_id or request.topic_id:
-            if not request.student_id or not request.document_id or not request.topic_id:
-                raise ValueError("student_id, document_id, and topic_id are all required for one-topic recomputation.")
+            if not request.document_id or not request.topic_id:
+                raise ValueError("document_id and topic_id are both required for one-topic recomputation.")
             return recompute_topic_mastery(
-                request.student_id, request.document_id, request.topic_id
+                current_user["id"], request.document_id, request.topic_id
             )
-        return recompute_all_mastery(request.student_id)
+        return recompute_all_mastery(current_user["id"])
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Could not rebuild mastery: {error}") from error
 
 
-def _validate_conversation_document_ids(document_ids: list[str]) -> None:
-    available = {source["title"] for source in list_uploaded_sources()}
+def _validate_conversation_document_ids(owner_id: str, document_ids: list[str]) -> None:
+    available = {source["title"] for source in list_uploaded_sources(owner_id)}
     missing = sorted(set(document_ids) - available)
     if missing:
         raise HTTPException(
@@ -584,56 +712,56 @@ def _validate_conversation_document_ids(document_ids: list[str]) -> None:
 
 
 @app.post("/api/conversations")
-def conversation_create(request: ConversationCreateRequest) -> dict:
-    _validate_conversation_document_ids(request.document_ids)
-    return create_conversation(request.title, request.document_ids)
+def conversation_create(request: ConversationCreateRequest, current_user: dict = Depends(require_current_user)) -> dict:
+    _validate_conversation_document_ids(current_user["id"], request.document_ids)
+    return create_conversation(current_user["id"], request.title, request.document_ids)
 
 
 @app.get("/api/conversations")
-def conversation_list() -> list[dict]:
-    return list_conversations()
+def conversation_list(current_user: dict = Depends(require_current_user)) -> list[dict]:
+    return list_conversations(current_user["id"])
 
 
 @app.get("/api/conversations/{conversation_id}")
-def conversation_get(conversation_id: str) -> dict:
+def conversation_get(conversation_id: str, current_user: dict = Depends(require_current_user)) -> dict:
     try:
-        return get_conversation(conversation_id, include_messages=True)
+        return get_conversation(current_user["id"], conversation_id, include_messages=True)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @app.patch("/api/conversations/{conversation_id}")
-def conversation_update(conversation_id: str, request: ConversationUpdateRequest) -> dict:
+def conversation_update(conversation_id: str, request: ConversationUpdateRequest, current_user: dict = Depends(require_current_user)) -> dict:
     try:
-        return update_conversation_title(conversation_id, request.title)
+        return update_conversation_title(current_user["id"], conversation_id, request.title)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @app.delete("/api/conversations/{conversation_id}")
-def conversation_delete(conversation_id: str) -> dict[str, str]:
+def conversation_delete(conversation_id: str, current_user: dict = Depends(require_current_user)) -> dict[str, str]:
     try:
-        delete_conversation(conversation_id)
+        delete_conversation(current_user["id"], conversation_id)
         return {"deleted": conversation_id}
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @app.put("/api/conversations/{conversation_id}/sources")
-def conversation_sources_update(conversation_id: str, request: ConversationSourcesRequest) -> dict:
-    _validate_conversation_document_ids(request.document_ids)
+def conversation_sources_update(conversation_id: str, request: ConversationSourcesRequest, current_user: dict = Depends(require_current_user)) -> dict:
+    _validate_conversation_document_ids(current_user["id"], request.document_ids)
     try:
-        return set_conversation_sources(conversation_id, request.document_ids)
+        return set_conversation_sources(current_user["id"], conversation_id, request.document_ids)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @app.post("/api/conversations/{conversation_id}/messages")
-def conversation_message(conversation_id: str, request: ConversationMessageRequest) -> dict:
+def conversation_message(conversation_id: str, request: ConversationMessageRequest, current_user: dict = Depends(require_current_user)) -> dict:
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message is required.")
     try:
-        return answer_conversation_message(conversation_id, request.message)
+        return answer_conversation_message(current_user["id"], conversation_id, request.message)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except Exception as error:

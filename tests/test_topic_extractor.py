@@ -114,6 +114,8 @@ class TopicExtractorTests(unittest.TestCase):
                 page_content="TCP server socket",
                 metadata={
                     "source": "lecture.pdf",
+                    "document_id": "lecture.pdf",
+                    "owner_id": "user-a",
                     "page": 6,
                     "chunk_id": "hash_0",
                     "topic_id": "topic_001",
@@ -124,6 +126,8 @@ class TopicExtractorTests(unittest.TestCase):
                 page_content="UDP datagram socket",
                 metadata={
                     "source": "lecture.pdf",
+                    "document_id": "lecture.pdf",
+                    "owner_id": "user-a",
                     "page": 7,
                     "chunk_id": "hash_1",
                     "topic_id": "topic_002",
@@ -145,8 +149,8 @@ class TopicExtractorTests(unittest.TestCase):
         self.assertEqual(result["metadatas"][0]["chunk_id"], "hash_1")
         self.assertEqual(result["metadatas"][0]["topic_name"], "UDP Client")
         self.assertEqual(
-            _chroma_filter(["lecture.pdf"], "topic_002"),
-            {"$and": [{"source": "lecture.pdf"}, {"topic_id": "topic_002"}]},
+            _chroma_filter("user-a", ["lecture.pdf"], "topic_002"),
+            {"$and": [{"owner_id": "user-a"}, {"document_id": "lecture.pdf"}, {"topic_id": "topic_002"}]},
         )
 
     def test_schema_reindex_upserts_current_ids_and_removes_all_stale_source_vectors(self):
@@ -155,7 +159,7 @@ class TopicExtractorTests(unittest.TestCase):
             embedding_function=DeterministicEmbeddings(),
         )
         old_documents = [
-            Document(page_content=f"old {index}", metadata={"source": "lecture.pdf"})
+            Document(page_content=f"old {index}", metadata={"source": "lecture.pdf", "document_id": "lecture.pdf", "owner_id": "user-a"})
             for index in range(3)
         ]
         store.add_documents(old_documents, ids=["samehash_0", "samehash_1", "orphan_99"])
@@ -164,6 +168,8 @@ class TopicExtractorTests(unittest.TestCase):
                 page_content=f"new {index}",
                 metadata={
                     "source": "lecture.pdf",
+                    "document_id": "lecture.pdf",
+                    "owner_id": "user-a",
                     "chunk_id": f"samehash_{index}",
                     "topic_id": "topic_001",
                     "topic_name": "Replacement",
@@ -173,7 +179,7 @@ class TopicExtractorTests(unittest.TestCase):
         ]
         current_ids = ["samehash_0", "samehash_1"]
         store.add_documents(replacement, ids=current_ids)
-        stale_ids = delete_stale_source_vectors(store, "lecture.pdf", current_ids)
+        stale_ids = delete_stale_source_vectors(store, "user-a", "lecture.pdf", current_ids)
         result = store.get(where={"source": "lecture.pdf"})
         store.delete_collection()
 

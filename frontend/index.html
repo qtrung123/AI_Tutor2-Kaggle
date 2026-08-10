@@ -7,7 +7,23 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div class="app-shell">
+    <section class="auth-screen" id="auth-screen">
+      <article class="auth-card">
+        <div class="brand auth-brand"><div class="brand-mark">T</div><span>Tutoring</span></div>
+        <p class="eyebrow">Personal learning space</p>
+        <h1 id="auth-title">Sign in</h1>
+        <p class="muted" id="auth-copy">Access your materials, conversations, quizzes, and mastery.</p>
+        <form id="auth-form" class="auth-form">
+          <label id="auth-name-field" hidden><span>Display name</span><input id="auth-display-name" type="text" maxlength="100" autocomplete="name" /></label>
+          <label><span>Email</span><input id="auth-email" type="email" maxlength="254" autocomplete="email" required /></label>
+          <label><span>Password</span><input id="auth-password" type="password" minlength="10" maxlength="128" autocomplete="current-password" required /></label>
+          <p class="auth-error" id="auth-error" role="alert"></p>
+          <button class="primary-button" id="auth-submit" type="submit">Sign in</button>
+        </form>
+        <button class="text-button auth-switch" id="auth-switch" type="button">Create an account</button>
+      </article>
+    </section>
+    <div class="app-shell" id="app-shell" hidden>
       <aside class="sidebar" aria-label="Tutoring navigation">
         <div class="brand">
           <div class="brand-mark">T</div>
@@ -37,19 +53,20 @@
           </button>
         </nav>
 
-        <div class="semester-card">
-          <p>Spring semester</p>
-          <strong>68% complete</strong>
-          <div class="mini-progress"><span></span></div>
-          <small>Week 11 of 16</small>
+        <div class="semester-card" id="library-status-card">
+          <p>Learning library</p>
+          <strong id="sidebar-document-count">No materials</strong>
+          <div class="mini-progress"><span id="sidebar-topic-progress"></span></div>
+          <small id="sidebar-topic-status">Add a document to begin</small>
         </div>
 
         <div class="profile">
-          <div class="avatar">VT</div>
+          <div class="avatar" id="profile-avatar">U</div>
           <div>
-            <strong>Vuong Thuan</strong>
-            <span>Computer Science</span>
+            <strong id="profile-display-name">User</strong>
+            <span id="profile-email"></span>
           </div>
+          <button class="sidebar-logout" id="logout-button" type="button">Sign out</button>
         </div>
       </aside>
 
@@ -57,105 +74,96 @@
         <header class="topbar">
           <div>
             <p>Personal learning space</p>
-            <h1 id="page-title">Good afternoon, Thuan</h1>
+            <h1 id="page-title">Learning dashboard</h1>
           </div>
           <div class="top-actions">
             <button class="icon-button" id="reset-button" type="button" title="Reset">Reset</button>
-            <div class="score-pill" id="confidence-pill">3</div>
+            <div class="score-pill" id="confidence-pill" hidden></div>
           </div>
         </header>
 
-        <section class="view active" id="overview-view" data-title="Good afternoon, Thuan">
-          <div class="alert-card">
-            <div class="alert-icon">!</div>
+        <section class="view active" id="overview-view" data-title="Learning dashboard">
+          <div class="alert-card" id="learning-status-card">
+            <div class="alert-icon" id="learning-status-icon">→</div>
             <div>
-              <p>Progress Monitor Alert</p>
-              <h2>Integration by parts needs attention</h2>
-              <span>Your recent score dropped 18% below your Calculus II average. A focused session can help.</span>
+              <p>Learning status</p>
+              <h2 id="learning-status-title">Loading your learning state</h2>
+              <span id="learning-status-copy">Please wait.</span>
             </div>
-            <button class="primary-button" data-page-target="tutor" type="button">Start tutoring</button>
+            <button class="primary-button" id="learning-status-action" type="button">Open materials</button>
           </div>
 
-          <div class="stats-grid">
-            <article class="stat-card">
-              <span>Course average</span>
-              <strong>78.4%</strong>
-              <small>+2.3% this month</small>
+          <div class="stats-grid" id="overview-kpis">
+            <article class="stat-card overview-loading-card">
+              <span>Dashboard</span>
+              <strong>Loading</strong>
+              <small>Reading project state</small>
             </article>
-            <article class="stat-card">
-              <span>Topics mastered</span>
-              <strong>24 / 31</strong>
-              <small>4 in progress</small>
+            <article class="stat-card overview-loading-card">
+              <span>Documents</span>
+              <strong>—</strong>
+              <small>Loading</small>
             </article>
-            <article class="stat-card">
-              <span>Study streak</span>
-              <strong>8 days</strong>
-              <small>Personal best: 12</small>
+            <article class="stat-card overview-loading-card">
+              <span>Topics</span>
+              <strong>—</strong>
+              <small>Loading</small>
             </article>
-            <article class="stat-card">
-              <span>Next deadline</span>
-              <strong>2 days</strong>
-              <small>Calculus problem set</small>
+            <article class="stat-card overview-loading-card">
+              <span>Accuracy</span>
+              <strong>—</strong>
+              <small>No result loaded</small>
             </article>
           </div>
 
-          <div class="dashboard-grid">
-            <article class="panel progress-panel">
+          <div class="dashboard-grid overview-dashboard-grid">
+            <article class="panel progress-panel mastery-panel">
               <div class="panel-heading">
                 <div>
                   <p>Learning analytics</p>
-                  <h2>Course progress</h2>
+                  <h2>Topic mastery</h2>
                 </div>
-                <span class="soft-badge">Live profile</span>
+                <button class="text-button" id="overview-practice-action" type="button">Open practice</button>
               </div>
-              <div class="course-row">
-                <div>
-                  <strong>Data Structures</strong>
-                  <span>9 of 11 topics mastered</span>
-                </div>
-                <b>86%</b>
-                <div class="progress-track"><span style="width: 86%"></span></div>
-              </div>
-              <div class="course-row warning">
-                <div>
-                  <strong>Calculus II</strong>
-                  <span>Weak: integration by parts</span>
-                </div>
-                <b>64%</b>
-                <div class="progress-track"><span style="width: 64%"></span></div>
-              </div>
-              <div class="course-row">
-                <div>
-                  <strong>Database Systems</strong>
-                  <span>7 of 9 topics mastered</span>
-                </div>
-                <b>82%</b>
-                <div class="progress-track"><span style="width: 82%"></span></div>
-              </div>
+              <div class="mastery-list" id="overview-mastery-list"><div class="empty-state">Loading mastery...</div></div>
             </article>
 
-            <article class="panel week-panel">
+            <article class="panel continue-panel">
               <div class="panel-heading">
                 <div>
-                  <p>Next up</p>
-                  <h2>This week</h2>
+                  <p>Pick up where you left off</p>
+                  <h2>Continue learning</h2>
                 </div>
-                <button class="text-button" data-page-target="plan" type="button">View plan</button>
               </div>
-              <div class="week-item">
-                <time><strong>07</strong><span>Jun</span></time>
-                <div><strong>Calculus problem set</strong><span>Due in 2 days · High priority</span></div>
-              </div>
-              <div class="week-item">
-                <time><strong>09</strong><span>Jun</span></time>
-                <div><strong>Binary tree practice</strong><span>25 min · Adaptive quiz</span></div>
-              </div>
-              <div class="week-item">
-                <time><strong>11</strong><span>Jun</span></time>
-                <div><strong>Database midterm</strong><span>3 topics to review</span></div>
-              </div>
+              <div class="continue-learning-list" id="continue-learning-list"></div>
             </article>
           </div>
+          <article class="panel knowledge-gaps-panel">
+            <div class="panel-heading">
+              <div>
+                <p>Reliable evidence only</p>
+                <h2>Knowledge Gaps</h2>
+              </div>
+            </div>
+            <div class="knowledge-gaps-list" id="overview-knowledge-gaps-list">
+              <div class="empty-state">Loading knowledge gaps...</div>
+            </div>
+          </article>
+          <article class="panel recommendations-panel">
+            <div class="panel-heading">
+              <div>
+                <p>Based on your current evidence</p>
+                <h2>Recommended Next Steps</h2>
+              </div>
+            </div>
+            <div class="recommendations-list" id="overview-recommendations-list">
+              <div class="empty-state">Loading next actions...</div>
+            </div>
+          </article>
+          <article class="panel overview-materials-panel">
+            <div class="panel-heading"><div><p>Knowledge base</p><h2>Materials</h2></div><button class="text-button" id="overview-materials-action" type="button">View all materials</button></div>
+            <div class="overview-materials-list" id="overview-materials-list"></div>
+          </article>
         </section>
 
         <section class="view" id="materials-view" data-title="Course Materials">
@@ -248,22 +256,18 @@
                     <select id="quiz-document-select">
                       <option value="">Loading indexed documents...</option>
                     </select>
-                  </label>
-                  <label>
-                    <span>Topic</span>
+                    </label>
+                    <label>
+                      <span>Assessment Scope</span>
+                      <select id="quiz-scope-select">
+                        <option value="topic">Topic</option>
+                        <option value="document">Entire Document</option>
+                      </select>
+                    </label>
+                    <label id="quiz-topic-field">
+                      <span>Topic</span>
                     <select id="quiz-topic-select">
                       <option value="">Select a document first</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>Number of questions</span>
-                    <select id="quiz-question-count-select">
-                      <option value="5">5 questions</option>
-                      <option value="10" selected>10 questions</option>
-                      <option value="15">15 questions</option>
-                      <option value="20">20 questions</option>
-                      <option value="30">30 questions</option>
-                      <option value="40">40 questions</option>
                     </select>
                   </label>
                   <label>
@@ -314,6 +318,11 @@
               </div>
             </article>
 
+            <article class="panel practice-mastery-panel" id="practice-mastery-panel" hidden>
+              <div class="panel-heading"><div><p>Updated evidence</p><h2>Topic mastery</h2></div></div>
+              <div class="mastery-list" id="practice-mastery-list"></div>
+            </article>
+
             <details class="panel quiz-history-panel collapsible-panel">
               <summary>
                 <div>
@@ -336,38 +345,10 @@
         </section>
 
         <section class="view" id="plan-view" data-title="Study Plan">
-          <div class="plan-grid">
-            <article class="day-card">
-              <span>Monday</span>
-              <strong>Integration warm-up</strong>
-              <p>Review the LIATE rule and solve 4 short examples.</p>
-            </article>
-            <article class="day-card">
-              <span>Tuesday</span>
-              <strong>Adaptive quiz</strong>
-              <p>Practice 3 integration by parts problems with instant feedback.</p>
-            </article>
-            <article class="day-card">
-              <span>Wednesday</span>
-              <strong>Data structures review</strong>
-              <p>Refresh binary tree traversal before the practice set.</p>
-            </article>
-            <article class="day-card">
-              <span>Thursday</span>
-              <strong>Database midterm prep</strong>
-              <p>Summarize keys, joins, and normalization patterns.</p>
-            </article>
-            <article class="day-card">
-              <span>Friday</span>
-              <strong>Problem set sprint</strong>
-              <p>Finish the Calculus problem set and mark unclear steps.</p>
-            </article>
-          </div>
-
-          <article class="panel why-panel">
-            <p class="eyebrow">Why this plan?</p>
-            <h2>Focused recovery before the next deadline</h2>
-            <p class="muted">The plan prioritizes Calculus II because confidence is lowest there and the deadline is closest, while preserving lighter review blocks for stronger courses.</p>
+          <article class="panel">
+            <p class="eyebrow">Study Plan</p>
+            <h2>No study-plan data yet</h2>
+            <p class="muted">Scheduling and recommendations are not enabled. Use Practice or the AI Tutor with your indexed materials.</p>
           </article>
         </section>
       </main>

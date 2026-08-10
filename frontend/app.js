@@ -1,5 +1,5 @@
 const pageTitles = {
-  overview: "Good afternoon, Thuan",
+  overview: "Learning dashboard",
   tutor: "Learn with your AI tutor",
   materials: "Course Materials",
   practice: "Practice",
@@ -12,6 +12,12 @@ const API_BASE_URL = (
   ""
 ).replace(/\/$/, "");
 const apiUrl = (path) => `${API_BASE_URL}${path}`;
+const originalFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => originalFetch(input, { credentials: "include", ...init });
+const AUTH_ME_API_URL = apiUrl("/api/auth/me");
+const AUTH_LOGIN_API_URL = apiUrl("/api/auth/login");
+const AUTH_SIGNUP_API_URL = apiUrl("/api/auth/signup");
+const AUTH_LOGOUT_API_URL = apiUrl("/api/auth/logout");
 const CONVERSATIONS_API_URL = apiUrl("/api/conversations");
 const SOURCES_API_URL = apiUrl("/api/sources");
 const UPLOAD_API_URL = apiUrl("/api/sources/upload");
@@ -21,6 +27,10 @@ const QUIZZES_API_URL = apiUrl("/api/quizzes");
 const QUIZ_API_BASE_URL = apiUrl("/api/quiz");
 const QUIZ_GENERATE_API_URL = apiUrl("/api/quiz/generate");
 const QUIZ_HISTORY_API_URL = apiUrl("/api/quiz-history");
+const DASHBOARD_API_URL = apiUrl("/api/dashboard");
+const KNOWLEDGE_GAPS_API_URL = apiUrl("/api/knowledge-gaps");
+const RECOMMENDATIONS_API_URL = apiUrl("/api/recommendations");
+const RECOMMENDATIONS_OVERVIEW_LIMIT = Number(window.APP_CONFIG?.RECOMMENDATIONS_OVERVIEW_LIMIT || 4);
 
 const initialState = {
   page: "overview",
@@ -41,6 +51,11 @@ let quizExplanations = {};
 let quizHistory = [];
 let quizQuestionIndex = 0;
 let conversations = [];
+let dashboardData = null;
+let knowledgeGaps = [];
+let recommendations = [];
+let currentUser = null;
+let authMode = "login";
 let activeConversation = null;
 
 const navItems = document.querySelectorAll(".nav-item");
@@ -60,7 +75,8 @@ const uploadSourceButton = document.getElementById("upload-source-button");
 const uploadStatus = document.getElementById("upload-status");
 const quizDocumentSelect = document.getElementById("quiz-document-select");
 const quizTopicSelect = document.getElementById("quiz-topic-select");
-const quizQuestionCountSelect = document.getElementById("quiz-question-count-select");
+const quizScopeSelect = document.getElementById("quiz-scope-select");
+const quizTopicField = document.getElementById("quiz-topic-field");
 const quizDifficultySelect = document.getElementById("quiz-difficulty-select");
 const generateQuizButton = document.getElementById("generate-quiz-button");
 const resetQuizButton = document.getElementById("reset-quiz-button");
@@ -86,6 +102,111 @@ const toggleConversationSourcesButton = document.getElementById("toggle-conversa
 const closeConversationSourcesButton = document.getElementById("close-conversation-sources-button");
 const sourcesDrawerBackdrop = document.getElementById("sources-drawer-backdrop");
 const conversationSourcesPanel = document.getElementById("conversation-sources-panel");
+const overviewKpis = document.getElementById("overview-kpis");
+const overviewMasteryList = document.getElementById("overview-mastery-list");
+const continueLearningList = document.getElementById("continue-learning-list");
+const overviewMaterialsList = document.getElementById("overview-materials-list");
+const overviewKnowledgeGapsList = document.getElementById("overview-knowledge-gaps-list");
+const overviewRecommendationsList = document.getElementById("overview-recommendations-list");
+const learningStatusTitle = document.getElementById("learning-status-title");
+const learningStatusCopy = document.getElementById("learning-status-copy");
+const learningStatusAction = document.getElementById("learning-status-action");
+const sidebarDocumentCount = document.getElementById("sidebar-document-count");
+const sidebarTopicProgress = document.getElementById("sidebar-topic-progress");
+const sidebarTopicStatus = document.getElementById("sidebar-topic-status");
+const practiceMasteryPanel = document.getElementById("practice-mastery-panel");
+const practiceMasteryList = document.getElementById("practice-mastery-list");
+const authScreen = document.getElementById("auth-screen");
+const appShell = document.getElementById("app-shell");
+const authForm = document.getElementById("auth-form");
+const authTitle = document.getElementById("auth-title");
+const authCopy = document.getElementById("auth-copy");
+const authNameField = document.getElementById("auth-name-field");
+const authDisplayName = document.getElementById("auth-display-name");
+const authEmail = document.getElementById("auth-email");
+const authPassword = document.getElementById("auth-password");
+const authError = document.getElementById("auth-error");
+const authSubmit = document.getElementById("auth-submit");
+const authSwitch = document.getElementById("auth-switch");
+const logoutButton = document.getElementById("logout-button");
+const profileDisplayName = document.getElementById("profile-display-name");
+const profileEmail = document.getElementById("profile-email");
+const profileAvatar = document.getElementById("profile-avatar");
+
+function setAuthMode(mode) {
+  authMode = mode;
+  const signup = mode === "signup";
+  authTitle.textContent = signup ? "Create your account" : "Sign in";
+  authCopy.textContent = signup
+    ? "Create a private learning workspace for your own materials and progress."
+    : "Access your materials, conversations, quizzes, and mastery.";
+  authNameField.hidden = !signup;
+  authDisplayName.required = signup;
+  authPassword.autocomplete = signup ? "new-password" : "current-password";
+  authSubmit.textContent = signup ? "Sign up" : "Sign in";
+  authSwitch.textContent = signup ? "Already have an account? Sign in" : "Create an account";
+  authError.textContent = "";
+}
+
+function showAuthenticatedShell(user) {
+  currentUser = user;
+  authScreen.hidden = true;
+  appShell.hidden = false;
+  profileDisplayName.textContent = user.display_name;
+  profileEmail.textContent = user.email;
+  profileAvatar.textContent = (user.display_name || user.email || "U").trim().charAt(0).toUpperCase();
+}
+
+function showAuthentication() {
+  currentUser = null;
+  appShell.hidden = true;
+  authScreen.hidden = false;
+  authPassword.value = "";
+  setAuthMode("login");
+}
+
+async function handleAuthentication(event) {
+  event.preventDefault();
+  authSubmit.disabled = true;
+  authError.textContent = "";
+  const signup = authMode === "signup";
+  try {
+    const user = await fetchJson(signup ? AUTH_SIGNUP_API_URL : AUTH_LOGIN_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...(signup ? { display_name: authDisplayName.value.trim() } : {}),
+        email: authEmail.value.trim(),
+        password: authPassword.value
+      })
+    });
+    showAuthenticatedShell(user);
+    await initializeApplication();
+  } catch (error) {
+    authError.textContent = error.message || "Authentication failed.";
+  } finally {
+    authSubmit.disabled = false;
+  }
+}
+
+async function signOut() {
+  try {
+    await fetchJson(AUTH_LOGOUT_API_URL, { method: "POST" });
+  } catch (error) {
+    // Clear the local view even when the already-expired session cannot be revoked again.
+  }
+  uploadedSources = [];
+  indexedDocuments = [];
+  quizStatuses = [];
+  conversations = [];
+  activeConversation = null;
+  currentQuiz = null;
+  currentAttempt = null;
+  dashboardData = null;
+  knowledgeGaps = [];
+  recommendations = [];
+  showAuthentication();
+}
 
 function showToast(message) {
   toast.textContent = message;
@@ -329,6 +450,7 @@ async function deleteUploadedSource(source, button) {
     renderSources(uploadedSources, "uploaded");
     renderConversationSources();
     await loadIndexedDocuments();
+    await loadDashboard();
 
     if (currentQuiz?.document_id === data.deleted) {
       currentQuiz = null;
@@ -392,6 +514,7 @@ async function fetchJson(url, options = {}) {
     } catch (error) {
       // Keep the HTTP status for non-JSON responses.
     }
+    if (response.status === 401 && currentUser) showAuthentication();
     throw new Error(detail);
   }
   return response.json();
@@ -474,7 +597,7 @@ function updateConversationHeader() {
 async function openConversation(conversationId) {
   try {
     activeConversation = await fetchJson(`${CONVERSATIONS_API_URL}/${conversationId}`);
-    localStorage.setItem("activeConversationId", conversationId);
+    if (currentUser) localStorage.setItem(`activeConversationId:${currentUser.id}`, conversationId);
     renderConversationList();
     renderConversationSources();
     renderConversationMessages();
@@ -521,7 +644,7 @@ async function loadConversations() {
     await createChatConversation();
     return;
   }
-  const savedId = localStorage.getItem("activeConversationId");
+  const savedId = currentUser ? localStorage.getItem(`activeConversationId:${currentUser.id}`) : null;
   const initial = conversations.some((item) => item.id === savedId) ? savedId : conversations[0].id;
   await openConversation(initial);
 }
@@ -643,6 +766,7 @@ async function uploadSourceFiles(files) {
     renderSources(uploadedSources, "uploaded");
     renderConversationSources();
     await loadIndexedDocuments();
+    await loadDashboard();
 
     uploadStatus.textContent = `${data.new_files} new file(s), ${data.new_chunks} new chunk(s) indexed`;
     showToast(data.skipped_files?.length ? "Some files were already indexed" : "Material uploaded");
@@ -692,7 +816,248 @@ function selectedDifficulty() {
 }
 
 function selectedTopicId() {
-  return quizTopicSelect?.value || "";
+  return selectedAssessmentScope() === "document" ? "document" : (quizTopicSelect?.value || "");
+}
+
+function masteryLevelClass(level) {
+  return String(level || "Not assessed").toLowerCase().replace(/[^a-z]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function createMasteryCard(mastery, options = {}) {
+  const row = document.createElement("article");
+  row.className = `mastery-row level-${masteryLevelClass(mastery.mastery_level)}`;
+  const heading = document.createElement("div");
+  heading.className = "mastery-row-heading";
+  const titleBlock = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = mastery.topic_name || mastery.topic_id;
+  const documentName = document.createElement("span");
+  documentName.textContent = options.showDocument && mastery.document_name ? mastery.document_name : "";
+  titleBlock.append(title, documentName);
+  const result = document.createElement("div");
+  result.className = "mastery-result";
+  const score = mastery.has_evidence ? `${Math.round(Number(mastery.mastery_score || 0))}%` : "—";
+  const scoreElement = document.createElement("b");
+  scoreElement.textContent = score;
+  const level = document.createElement("span");
+  level.className = "mastery-level";
+  level.textContent = mastery.mastery_level || "Not assessed";
+  result.append(scoreElement, level);
+  heading.append(titleBlock, result);
+
+  const track = document.createElement("div");
+  track.className = "progress-track mastery-score-track";
+  const fill = document.createElement("span");
+  fill.style.width = mastery.has_evidence ? `${Math.max(0, Math.min(100, Number(mastery.mastery_score || 0)))}%` : "0%";
+  track.appendChild(fill);
+  const capacity = Number(mastery.assessment_capacity || 0);
+  const assessed = Number(mastery.distinct_concepts_assessed || 0);
+  const meta = document.createElement("small");
+  const coverage = capacity ? `Concept coverage: ${assessed} / ${capacity}` : "Concept coverage not available";
+  meta.textContent = `${coverage} · ${Number(mastery.answered_questions || 0)} answered · ${Number(mastery.completed_attempts || 0)} completed quizzes`;
+  row.append(heading, track, meta);
+  return row;
+}
+
+function renderMasteryList(container, masteries, options = {}) {
+  if (!container) return;
+  container.innerHTML = "";
+  if (!masteries.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = options.emptyText || "No extracted topics are available yet.";
+    container.appendChild(empty);
+    return;
+  }
+  masteries.forEach((mastery) => container.appendChild(createMasteryCard(mastery, options)));
+}
+
+async function openPracticeContext(documentId, topicId = "") {
+  setPage("practice");
+  if (documentId && quizDocumentSelect) quizDocumentSelect.value = documentId;
+  updateTopicOptions();
+  if (topicId && topicId !== "document") {
+    quizScopeSelect.value = "topic";
+    quizTopicSelect.value = topicId;
+  } else {
+    quizScopeSelect.value = "document";
+  }
+  updateAssessmentScope();
+  await loadSelectedQuiz();
+}
+
+function dashboardAction(label, page, className = "continue-item", onClick = null) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = label;
+  button.addEventListener("click", onClick || (() => setPage(page)));
+  return button;
+}
+
+function renderDashboard() {
+  if (!dashboardData) return;
+  const metrics = dashboardData.metrics || {};
+  const kpis = [
+    ["Documents", String(metrics.documents || 0), metrics.documents ? "Indexed and available" : "No indexed materials"],
+    ["Topics assessed", `${metrics.topics_assessed || 0} / ${metrics.total_topics || 0}`, metrics.total_topics ? "Based on completed answers" : "No extracted topics"],
+    ["Quiz accuracy", metrics.quiz_accuracy == null ? "—" : `${Math.round(metrics.quiz_accuracy)}%`, metrics.answered_questions ? `${metrics.answered_questions} completed answers` : "No completed answers"],
+    ["Topics mastered", String(metrics.topics_mastered || 0), metrics.topics_assessed ? "Mastery evidence available" : "No assessed topics"],
+  ];
+  overviewKpis.innerHTML = "";
+  kpis.forEach(([label, value, note]) => {
+    const card = document.createElement("article");
+    card.className = "stat-card";
+    const labelElement = document.createElement("span"); labelElement.textContent = label;
+    const valueElement = document.createElement("strong"); valueElement.textContent = value;
+    const noteElement = document.createElement("small"); noteElement.textContent = note;
+    card.append(labelElement, valueElement, noteElement);
+    overviewKpis.appendChild(card);
+  });
+
+  sidebarDocumentCount.textContent = metrics.documents ? `${metrics.documents} indexed document${metrics.documents === 1 ? "" : "s"}` : "No materials";
+  const topicPercent = metrics.total_topics ? Math.round(100 * metrics.topics_assessed / metrics.total_topics) : 0;
+  sidebarTopicProgress.style.width = `${topicPercent}%`;
+  sidebarTopicStatus.textContent = metrics.total_topics ? `${metrics.topics_assessed} of ${metrics.total_topics} topics assessed` : "Add a document to begin";
+  renderMasteryList(overviewMasteryList, (dashboardData.mastery || []).slice(0, 8), { showDocument: true });
+
+  const latest = dashboardData.latest_attempt;
+  if (latest) {
+    learningStatusTitle.textContent = `Continue with ${latest.document_id}`;
+    learningStatusCopy.textContent = `Latest completed quiz: ${latest.score}/${latest.total} at ${latest.difficulty} difficulty.`;
+    learningStatusAction.textContent = "Continue practice";
+    learningStatusAction.onclick = () => openPracticeContext(latest.document_id, latest.topic_id);
+  } else if (metrics.documents) {
+    learningStatusTitle.textContent = "Your materials are ready";
+    learningStatusCopy.textContent = "Generate a grounded assessment to begin collecting mastery evidence.";
+    learningStatusAction.textContent = "Start practicing";
+    learningStatusAction.onclick = () => setPage("practice");
+  } else {
+    learningStatusTitle.textContent = "Add learning material to begin";
+    learningStatusCopy.textContent = "Upload and index a PDF or TXT document before using quizzes and mastery.";
+    learningStatusAction.textContent = "Open materials";
+    learningStatusAction.onclick = () => setPage("materials");
+  }
+
+  continueLearningList.innerHTML = "";
+  if (latest) {
+    const practice = dashboardAction(
+      `Practice · ${latest.document_id}`,
+      "practice",
+      "continue-item",
+      () => openPracticeContext(latest.document_id, latest.topic_id)
+    );
+    continueLearningList.appendChild(practice);
+  }
+  const recentConversation = conversations[0];
+  if (recentConversation) continueLearningList.appendChild(dashboardAction(`AI Tutor · ${recentConversation.title || "Recent conversation"}`, "tutor"));
+  if (!continueLearningList.children.length) {
+    continueLearningList.appendChild(dashboardAction(metrics.documents ? "Start a grounded quiz" : "Add your first material", metrics.documents ? "practice" : "materials"));
+  }
+
+  overviewMaterialsList.innerHTML = "";
+  const materials = dashboardData.materials || [];
+  if (!materials.length) {
+    const empty = document.createElement("div"); empty.className = "empty-state"; empty.textContent = "No indexed documents yet."; overviewMaterialsList.appendChild(empty);
+  } else {
+    materials.slice(0, 5).forEach((material) => {
+      const row = document.createElement("article"); row.className = "overview-material-row";
+      const copy = document.createElement("div"); const title = document.createElement("strong"); title.textContent = material.document_name;
+      const meta = document.createElement("span"); meta.textContent = `${material.topic_count} topics · ${material.assessed_topic_count} assessed · Indexed`;
+      copy.append(title, meta); const action = document.createElement("button"); action.className = "text-button"; action.type = "button"; action.textContent = "Practice";
+      action.addEventListener("click", () => openPracticeContext(material.document_id)); row.append(copy, action); overviewMaterialsList.appendChild(row);
+    });
+  }
+  renderRecommendations();
+}
+
+async function loadDashboard() {
+  try {
+    dashboardData = await fetchJson(DASHBOARD_API_URL);
+    renderDashboard();
+    renderPracticeMastery();
+  } catch (error) {
+    dashboardData = null;
+    learningStatusTitle.textContent = "Dashboard unavailable";
+    learningStatusCopy.textContent = "The current learning state could not be loaded.";
+    overviewKpis.innerHTML = '<div class="empty-state">Dashboard data is unavailable.</div>';
+  }
+}
+
+function renderKnowledgeGaps() {
+  overviewKnowledgeGapsList.innerHTML = "";
+  if (!knowledgeGaps.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No reliable knowledge gaps detected. Unassessed topics are not classified as gaps.";
+    overviewKnowledgeGapsList.appendChild(empty);
+    return;
+  }
+  knowledgeGaps.forEach((gap) => {
+    const row = document.createElement("article");
+    row.className = `knowledge-gap-row severity-${gap.severity}`;
+    const copy = document.createElement("div");
+    const title = document.createElement("strong"); title.textContent = gap.topic_name || gap.topic_id;
+    const detail = document.createElement("span");
+    detail.textContent = `${gap.document_id} · ${Math.round(gap.mastery_score)}% mastery · ${Math.round(100 * gap.concept_coverage_ratio)}% concept coverage`;
+    const evidence = document.createElement("small");
+    evidence.textContent = `${gap.distinct_concepts_assessed}/${gap.assessment_capacity} concepts · ${gap.answered_questions} answers · sufficient evidence`;
+    copy.append(title, detail, evidence);
+    const severity = document.createElement("span");
+    severity.className = "gap-severity";
+    severity.textContent = gap.severity === "high" ? "High priority" : "Moderate";
+    row.append(copy, severity);
+    overviewKnowledgeGapsList.appendChild(row);
+  });
+}
+
+async function loadKnowledgeGaps() {
+  try {
+    knowledgeGaps = await fetchJson(KNOWLEDGE_GAPS_API_URL);
+  } catch (error) {
+    knowledgeGaps = [];
+  }
+  renderKnowledgeGaps();
+}
+
+function renderRecommendations() {
+  overviewRecommendationsList.innerHTML = "";
+  if (!recommendations.length) {
+    const empty = document.createElement("div"); empty.className = "empty-state";
+    if (dashboardData && !(dashboardData.metrics?.documents || 0)) {
+      empty.textContent = "Add learning material to receive grounded next actions.";
+      const action = document.createElement("button"); action.type = "button"; action.className = "text-button"; action.textContent = "Open materials";
+      action.addEventListener("click", () => setPage("materials"));
+      overviewRecommendationsList.append(empty, action);
+    } else {
+      empty.textContent = "No priority learning actions right now.";
+      overviewRecommendationsList.appendChild(empty);
+    }
+    return;
+  }
+  recommendations.slice(0, RECOMMENDATIONS_OVERVIEW_LIMIT).forEach((recommendation) => {
+    const row = document.createElement("article"); row.className = `recommendation-row priority-${recommendation.priority}`;
+    const copy = document.createElement("div");
+    const badge = document.createElement("span"); badge.className = "recommendation-priority";
+    badge.textContent = recommendation.priority === "high" ? "High" : recommendation.priority === "moderate" ? "Moderate" : recommendation.priority === "needs_more_evidence" ? "Needs more evidence" : "Not assessed";
+    const title = document.createElement("strong"); title.textContent = recommendation.topic_name;
+    const metrics = document.createElement("span"); metrics.textContent = `${recommendation.document_name} · Mastery ${Math.round(recommendation.mastery_score)}% · Coverage ${recommendation.distinct_concepts_assessed}/${recommendation.assessment_capacity}`;
+    const reason = document.createElement("small"); reason.textContent = recommendation.reason_text;
+    copy.append(badge, title, metrics, reason);
+    const action = document.createElement("button"); action.type = "button"; action.className = "secondary-button"; action.textContent = recommendation.primary_action.label;
+    action.addEventListener("click", () => openPracticeContext(recommendation.document_id, recommendation.topic_id));
+    row.append(copy, action); overviewRecommendationsList.appendChild(row);
+  });
+}
+
+async function loadRecommendations() {
+  try { recommendations = await fetchJson(RECOMMENDATIONS_API_URL); }
+  catch (error) { recommendations = []; }
+  renderRecommendations();
+}
+
+function selectedAssessmentScope() {
+  return quizScopeSelect?.value || "topic";
 }
 
 function currentQuizKey() {
@@ -807,8 +1172,14 @@ function updateTopicOptions() {
   });
 }
 
+function updateAssessmentScope() {
+  const topicMode = selectedAssessmentScope() === "topic";
+  if (quizTopicField) quizTopicField.hidden = !topicMode;
+}
+
 async function handleQuizDocumentChange() {
   updateTopicOptions();
+  updateAssessmentScope();
   await loadSelectedQuiz();
 }
 
@@ -827,8 +1198,8 @@ async function requestGeneratedQuiz() {
     },
     body: JSON.stringify({
       document_id: quizDocumentSelect.value,
-      topic_id: selectedTopicId(),
-      question_count: Number(quizQuestionCountSelect.value),
+      assessment_scope: selectedAssessmentScope(),
+      topic_id: selectedAssessmentScope() === "topic" ? selectedTopicId() : null,
       difficulty: selectedDifficulty()
     })
   });
@@ -870,9 +1241,9 @@ async function requestQuizRegeneration(documentId) {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      question_count: Number(quizQuestionCountSelect.value),
       difficulty: selectedDifficulty(),
-      topic_id: selectedTopicId()
+      assessment_scope: selectedAssessmentScope(),
+      topic_id: selectedAssessmentScope() === "topic" ? selectedTopicId() : null
     })
   });
   if (!response.ok) {
@@ -1066,9 +1437,6 @@ async function loadSelectedQuiz() {
     currentQuiz = detail.quiz || null;
     currentAttempt = detail.latest_attempt || null;
     quizExplanations = {};
-    if (currentQuiz?.question_count && quizQuestionCountSelect) {
-      quizQuestionCountSelect.value = String(currentQuiz.question_count);
-    }
     quizAnswers = currentAttempt?.answers ? { ...currentAttempt.answers } : {};
     const firstUnansweredIndex = currentQuiz?.questions?.findIndex(
       (question) => !quizAnswers[String(question.id)]
@@ -1100,7 +1468,7 @@ async function generateAssessmentQuiz() {
     showToast("Choose an indexed document first");
     return;
   }
-  if (!selectedTopicId()) {
+  if (selectedAssessmentScope() === "topic" && !selectedTopicId()) {
     showToast("Choose an extracted topic first");
     return;
   }
@@ -1178,6 +1546,25 @@ async function regenerateAssessmentQuiz() {
   }
 }
 
+function renderPracticeMastery() {
+  if (!practiceMasteryPanel || !practiceMasteryList) return;
+  if (!currentAttempt?.completed) {
+    practiceMasteryPanel.hidden = true;
+    practiceMasteryList.innerHTML = "";
+    return;
+  }
+  const topicNames = Object.fromEntries((currentQuiz?.questions || []).map((question) => [question.topic_id, question.topic_name || question.topic_id]));
+  let masteries = Object.values(currentAttempt.mastery_by_topic || {});
+  if (!masteries.length && currentAttempt.mastery) masteries = [currentAttempt.mastery];
+  if (!masteries.length && dashboardData) {
+    const represented = new Set((currentQuiz?.questions || []).map((question) => question.topic_id));
+    masteries = (dashboardData.mastery || []).filter((mastery) => mastery.document_id === currentQuiz.document_id && represented.has(mastery.topic_id));
+  }
+  masteries = masteries.map((mastery) => ({ ...mastery, topic_name: mastery.topic_name || topicNames[mastery.topic_id] || mastery.topic_id }));
+  practiceMasteryPanel.hidden = !masteries.length;
+  renderMasteryList(practiceMasteryList, masteries, { emptyText: "Mastery evidence is not available for this quiz." });
+}
+
 function renderAssessmentQuiz() {
   quizList.innerHTML = "";
   assessmentTitle.textContent = currentQuiz
@@ -1189,6 +1576,7 @@ function renderAssessmentQuiz() {
     empty.className = "empty-state";
     empty.textContent = "Choose a document, then generate or start its saved quiz.";
     quizList.appendChild(empty);
+    renderPracticeMastery();
     updateAssessmentSummary();
     return;
   }
@@ -1281,6 +1669,7 @@ function renderAssessmentQuiz() {
   }
 
   updateAssessmentSummary();
+  renderPracticeMastery();
 }
 
 function moveQuizQuestion(direction) {
@@ -1328,6 +1717,8 @@ async function selectAssessmentAnswer(question, option, card) {
     renderAssessmentQuiz();
     if (currentAttempt.completed) {
       await loadQuizHistory();
+      await loadDashboard();
+      renderPracticeMastery();
       showToast(`Quiz completed: ${currentAttempt.score}/${currentAttempt.total}`);
     }
   } catch (error) {
@@ -1426,9 +1817,18 @@ newQuizButton.addEventListener("click", regenerateAssessmentQuiz);
 resetQuizButton.addEventListener("click", resetAssessmentQuiz);
 quizDocumentSelect.addEventListener("change", handleQuizDocumentChange);
 quizTopicSelect.addEventListener("change", loadSelectedQuiz);
-quizQuestionCountSelect.addEventListener("change", updateAssessmentSummary);
+quizScopeSelect.addEventListener("change", async () => {
+  updateAssessmentScope();
+  await loadSelectedQuiz();
+});
+
+authForm.addEventListener("submit", handleAuthentication);
+authSwitch.addEventListener("click", () => setAuthMode(authMode === "login" ? "signup" : "login"));
+logoutButton.addEventListener("click", signOut);
 quizDifficultySelect.addEventListener("change", handleQuizDifficultyChange);
 refreshQuizHistoryButton.addEventListener("click", loadQuizHistory);
+document.getElementById("overview-practice-action")?.addEventListener("click", () => setPage("practice"));
+document.getElementById("overview-materials-action")?.addEventListener("click", () => setPage("materials"));
 quizPopoverPanels.forEach((panel) => {
   panel.addEventListener("toggle", () => {
     if (!panel.open) {
@@ -1459,11 +1859,26 @@ async function initializeChatWorkspace() {
   await loadUploadedSources();
   try {
     await loadConversations();
+    renderDashboard();
   } catch (error) {
     showToast(error.message || "Could not load conversations");
   }
 }
 
-initializeChatWorkspace();
-loadIndexedDocuments();
-loadQuizHistory();
+async function initializeApplication() {
+  await initializeChatWorkspace();
+  await Promise.all([loadIndexedDocuments(), loadQuizHistory(), loadDashboard(), loadKnowledgeGaps(), loadRecommendations()]);
+}
+
+async function bootstrapAuthentication() {
+  try {
+    const user = await fetchJson(AUTH_ME_API_URL);
+    showAuthenticatedShell(user);
+    await initializeApplication();
+  } catch (error) {
+    showAuthentication();
+  }
+}
+
+setAuthMode("login");
+bootstrapAuthentication();

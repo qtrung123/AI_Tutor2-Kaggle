@@ -1,8 +1,11 @@
+import math
+
 from config import (
     MASTERY_DEVELOPING_THRESHOLD,
     MASTERY_DIFFICULTY_WEIGHTS,
     MASTERY_MASTERED_THRESHOLD,
     MASTERY_MIN_QUESTIONS,
+    MASTERY_MIN_CONCEPT_COVERAGE,
     MASTERY_PROFICIENT_THRESHOLD,
     MASTERY_QUALITY_WEIGHTS,
 )
@@ -21,6 +24,8 @@ def mastery_config() -> dict:
         "difficulty_weights": dict(MASTERY_DIFFICULTY_WEIGHTS),
         "quality_weights": dict(MASTERY_QUALITY_WEIGHTS),
         "minimum_questions_required": MASTERY_MIN_QUESTIONS,
+        "minimum_concept_coverage": MASTERY_MIN_CONCEPT_COVERAGE,
+        "evidence_requirement_version": "concept_coverage_v1",
         "thresholds": {
             "developing": MASTERY_DEVELOPING_THRESHOLD,
             "proficient": MASTERY_PROFICIENT_THRESHOLD,
@@ -44,7 +49,26 @@ def calculate_mastery(answer_rows: list[dict], completed_attempts: int = 0) -> d
 
     answered_questions = len(answer_rows)
     has_evidence = answered_questions > 0
-    has_sufficient_evidence = answered_questions >= MASTERY_MIN_QUESTIONS
+    capacities = [int(answer.get("assessment_capacity") or 0) for answer in answer_rows]
+    assessment_capacity = max(capacities, default=0)
+    distinct_concepts = {
+        str(answer.get("concept_id")) for answer in answer_rows if str(answer.get("concept_id") or "").strip()
+    }
+    distinct_concepts_assessed = len(distinct_concepts)
+    if assessment_capacity > 0:
+        required_concepts = min(
+            assessment_capacity,
+            max(1, math.ceil(assessment_capacity * MASTERY_MIN_CONCEPT_COVERAGE)),
+        )
+        concept_coverage_ratio = min(1.0, distinct_concepts_assessed / assessment_capacity)
+        has_sufficient_evidence = distinct_concepts_assessed >= required_concepts
+        minimum_questions_required = required_concepts
+    else:
+        # Persisted quizzes created before concept planning retain the Phase 3 rule.
+        required_concepts = 0
+        concept_coverage_ratio = 0.0
+        has_sufficient_evidence = answered_questions >= MASTERY_MIN_QUESTIONS
+        minimum_questions_required = MASTERY_MIN_QUESTIONS
     score = round(100.0 * earned_weight / possible_weight, 2) if possible_weight else 0.0
     if not has_evidence:
         level = "Not assessed"
@@ -68,7 +92,12 @@ def calculate_mastery(answer_rows: list[dict], completed_attempts: int = 0) -> d
         "completed_attempts": completed_attempts,
         "has_evidence": has_evidence,
         "has_sufficient_evidence": has_sufficient_evidence,
-        "minimum_questions_required": MASTERY_MIN_QUESTIONS,
+        "minimum_questions_required": minimum_questions_required,
+        "assessment_capacity": assessment_capacity,
+        "distinct_concepts_assessed": distinct_concepts_assessed,
+        "concept_coverage_ratio": round(concept_coverage_ratio, 4),
+        "required_concept_coverage": MASTERY_MIN_CONCEPT_COVERAGE,
+        "required_concepts": required_concepts,
         "formula_version": MASTERY_FORMULA_VERSION,
         "formula_config": mastery_config(),
     }

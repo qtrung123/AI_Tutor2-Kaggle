@@ -1,11 +1,14 @@
+import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 from backend import quiz_store
-from backend.quiz_service import _validate_quiz_batch
+from backend.quiz_service import _parse_quiz_response, _validate_quiz_batch
 
 
 def sample_quiz(topic_id: str, schema_version: int = 2) -> dict:
@@ -35,6 +38,16 @@ def sample_quiz(topic_id: str, schema_version: int = 2) -> dict:
 
 
 class TopicQuizBackendTests(unittest.TestCase):
+    def test_json_parse_failure_logs_complete_escaped_raw_response(self):
+        raw = '{"questions":[{"question":"line one\nline two" "options":[]}]}'
+        output = StringIO()
+        with self.assertRaises(json.JSONDecodeError), redirect_stdout(output):
+            _parse_quiz_response(raw, 2)
+        logged = output.getvalue()
+        self.assertIn("[quiz-json-parse-error] attempt=3", logged)
+        self.assertIn(json.dumps(raw, ensure_ascii=False), logged)
+        self.assertNotIn("line one\nline two", logged)
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database_path = Path(self.temp_dir.name) / "quiz.db"
