@@ -43,11 +43,12 @@ from config import (
     EMBEDDING_MODEL,
     INDEXED_FILES_PATH,
     QUIZ_PROMPT_PATH,
+    QUIZ_GENERATION_RETRY_LIMIT,
     QUIZ_QUALITY_RETRY_LIMIT,
     VECTORSTORE_DIR,
 )
 
-GENERATION_PROMPT_VERSION = "topic_mcq_v1"
+GENERATION_PROMPT_VERSION = "topic_mcq_v2_backend_evidence"
 
 
 OPTION_LETTERS = {"A", "B", "C", "D"}
@@ -73,7 +74,6 @@ GENERIC_OPTION_PATTERNS = [
 # cannot dominate the prompt.
 MAX_CHARS_PER_CHUNK = 900
 MAX_QUESTIONS_PER_BATCH = 8
-MAX_BATCH_GENERATION_ATTEMPTS = 8
 QUIZ_CONTEXT_WINDOWS = (4096, 8192, 16384, 32768)
 
 
@@ -150,7 +150,9 @@ def _result_to_chunks(result: dict, document_id: str, filter_source: bool) -> li
                 "metadata": {
                     **metadata,
                     "chunk": chunk_index,
-                    "chunk_id": metadata.get("chunk_id") or str(raw_id),
+                    # vector_id is internal; chunk_id is the canonical persisted provenance ID.
+                    "vector_id": str(raw_id),
+                    "chunk_id": metadata.get("chunk_id"),
                 },
             }
         )
@@ -304,8 +306,8 @@ Hard requirements:
 - no generic distractors about unrelated material or missing information
 - options must be short, plausible, same-topic choices
 - distractors must not assert facts unsupported by the context
-- include a grounded explanation and non-empty source_chunk_ids for every question
-- every source_chunk_id must exactly match a Chunk ID in this batch context
+- include a grounded explanation for every question
+- source provenance is attached by the backend; do not return source IDs
 - all questions must follow the requested difficulty level
 - no two questions in this response may test the same fact, concept, or correct-answer relationship, even if reworded
 - do not repeat or paraphrase any previously used question listed below
@@ -326,8 +328,7 @@ JSON shape:
       "question": "Specific concept question",
       "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
       "correct_answer": "A"
-      ,"explanation": "Grounded explanation",
-      "source_chunk_ids": ["exact context Chunk ID"]
+      ,"explanation": "Grounded explanation"
     }}
   ]
 }}
@@ -508,7 +509,7 @@ def _validate_quiz_batch(
     start_id: int,
     difficulty: str = "easy",
     topic_id: str = "document",
-    allowed_chunk_ids: set[str] | None = None,
+    source_chunk_ids: list[str] | None = None,
     topic_name: str = "Whole document",
     concept_id: str = "",
     concept_name: str = "",
@@ -528,18 +529,11 @@ def _validate_quiz_batch(
         explanation = _clean_inline_text(question.get("explanation", ""))
         if not explanation:
             raise ValueError(f"Question {offset + 1} is missing an explanation.")
-        raw_source_ids = question.get("source_chunk_ids")
-        if not isinstance(raw_source_ids, list):
-            raise ValueError(f"Question {offset + 1} source_chunk_ids must be a list.")
-        source_chunk_ids = list(dict.fromkeys(str(value).strip() for value in raw_source_ids if str(value).strip()))
-        if not source_chunk_ids:
-            raise ValueError(f"Question {offset + 1} must cite at least one source chunk.")
-        allowed = allowed_chunk_ids or set()
-        invalid_ids = sorted(set(source_chunk_ids) - allowed)
-        if invalid_ids:
-            raise ValueError(
-                f"Question {offset + 1} cites chunks outside its generation batch: {invalid_ids}"
-            )
+        attached_source_ids = list(dict.fromkeys(
+            str(value).strip() for value in (source_chunk_ids or []) if str(value).strip()
+        ))
+        if not attached_source_ids:
+            raise ValueError(f"Question {offset + 1} generation batch has no canonical evidence chunk IDs.")
         normalized_questions.append(
             {
                 "id": start_id + offset,
@@ -553,7 +547,7 @@ def _validate_quiz_batch(
                 "assessment_capacity": int(assessment_capacity),
                 "difficulty": difficulty,
                 "explanation": explanation,
-                "source_chunk_ids": source_chunk_ids,
+                "source_chunk_ids": attached_source_ids,
             }
         )
 
@@ -605,9 +599,12 @@ def _generate_quiz_batch(
         for chunk in chunks
         if chunk.get("metadata", {}).get("chunk_id")
     }
+    if not batch_chunk_ids or len(chunks_by_id) != len(chunks):
+        raise ValueError("Generation batch contains missing or duplicate canonical chunk provenance IDs.")
     quality_rejections_used = 0
 
-    for attempt_index in range(MAX_BATCH_GENERATION_ATTEMPTS):
+    retry_limit = max(1, QUIZ_GENERATION_RETRY_LIMIT)
+    for attempt_index in range(retry_limit):
         missing_count = num_questions - len(accepted_questions)
         if missing_count <= 0:
             break
@@ -693,7 +690,7 @@ def _generate_quiz_batch(
                         start_id + len(accepted_questions),
                         difficulty,
                         topic_id,
-                        batch_chunk_ids,
+                        sorted(batch_chunk_ids),
                         topic_name,
                         concept_id,
                         concept_name,
@@ -761,7 +758,7 @@ def _generate_quiz_batch(
     if len(accepted_questions) != num_questions:
         raise ValueError(
             f"Quiz generation produced {len(accepted_questions)}/{num_questions} valid questions "
-            f"after {MAX_BATCH_GENERATION_ATTEMPTS} attempts. "
+            f"after {retry_limit} attempts. "
             f"Errors: {'; '.join(generation_errors[-5:])}"
         )
 
@@ -839,6 +836,7 @@ def generate_quiz(
 
     generation_run_id = str(uuid4())
     questions = []
+    generation_warnings = []
     next_id = 1
     avoid_questions: list[str] = []
     batch_index = 0
@@ -856,27 +854,37 @@ def generate_quiz(
                 continue
             batch_index += 1
             concept_label = str(concept["name"])
-            batch_questions = _generate_quiz_batch(
-                document_id=document_id,
-                num_questions=1,
-                difficulty=difficulty,
-                chunks=evidence_chunks,
-                start_id=next_id,
-                topic_id=topic_plan["topic_id"],
-                topic_name=topic_plan["topic_name"],
-                avoid_questions=avoid_questions,
-                generation_run_id=generation_run_id,
-                batch_index=batch_index,
-                document_hash=document.get("hash", ""),
-                topic_schema_version=topic_schema_version,
-                concept_id=concept["concept_id"],
-                concept_name=concept_label,
-                assessment_capacity=topic_plan["assessment_capacity"],
-                owner_id=owner_id,
-            )
+            try:
+                batch_questions = _generate_quiz_batch(
+                    document_id=document_id,
+                    num_questions=1,
+                    difficulty=difficulty,
+                    chunks=evidence_chunks,
+                    start_id=next_id,
+                    topic_id=topic_plan["topic_id"],
+                    topic_name=topic_plan["topic_name"],
+                    avoid_questions=avoid_questions,
+                    generation_run_id=generation_run_id,
+                    batch_index=batch_index,
+                    document_hash=document.get("hash", ""),
+                    topic_schema_version=topic_schema_version,
+                    concept_id=concept["concept_id"],
+                    concept_name=concept_label,
+                    assessment_capacity=topic_plan["assessment_capacity"],
+                    owner_id=owner_id,
+                )
+            except Exception as error:
+                warning = f"Skipped concept {concept['concept_id']} ({concept_label}): {error}"
+                generation_warnings.append(warning)
+                print(f"[quiz-generation-warning] {warning}")
+                continue
             questions.extend(batch_questions)
             avoid_questions.extend(question["question"] for question in batch_questions)
             next_id += 1
+
+    if not questions:
+        detail = generation_warnings[-1] if generation_warnings else "No concept produced a grounded question."
+        raise ValueError(f"No valid grounded questions were generated. {detail}")
 
     quiz = {
         "quiz_id": str(uuid4()),
@@ -893,6 +901,7 @@ def generate_quiz(
             "topics": planned_topics,
             "excluded_topic_ids": excluded_topic_ids,
             "total_questions": len(questions),
+            "generation_warnings": generation_warnings,
         },
         "topic_schema_version": topic_schema_version,
         "question_count": len(questions),

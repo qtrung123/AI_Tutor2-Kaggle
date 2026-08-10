@@ -13,7 +13,7 @@ from config import (
 )
 
 
-VALIDATION_PROMPT_VERSION = "semantic_grounding_v1"
+VALIDATION_PROMPT_VERSION = "semantic_grounding_v2_backend_evidence"
 HARD_CRITERIA = (
     "question_supported",
     "correct_answer_supported",
@@ -73,7 +73,7 @@ def _prompt(question: dict, cited_chunks: list[dict], requested_difficulty: str,
     ]
     candidate = {
         key: question[key]
-        for key in ("question", "options", "correct_answer", "explanation", "source_chunk_ids")
+        for key in ("question", "options", "correct_answer", "explanation")
     }
     return f"""
 You are a cautious reviewer of one multiple-choice question. Your judgment is a runtime quality signal, not ground truth.
@@ -93,7 +93,6 @@ Return JSON only with this exact shape:
   "distractor_quality": true,
   "difficulty_match": true,
   "detected_difficulty": "easy",
-  "evidence_chunk_ids": ["exact cited chunk id"],
   "reasons": []
 }}
 
@@ -107,7 +106,7 @@ Quality criteria:
 - distractor_quality: all distractors are plausible, same-domain, and clearly incorrect from the context without invented factual claims.
 - difficulty_match: the cognitive task reasonably matches {requested_difficulty}; allow normal judgment variation.
 
-evidence_chunk_ids are traceability metadata only. They do not by themselves prove support.
+Evidence identity is owned and attached by the backend. Judge semantic support from the cited context.
 """.strip()
 
 
@@ -134,11 +133,8 @@ def validate_question_semantics(
                 num_predict=500,
             ).invoke(_prompt(question, cited_chunks, requested_difficulty, topic_name))
             verdict = _extract_json(response.content)
-            evidence_ids = list(dict.fromkeys(str(value).strip() for value in verdict.get("evidence_chunk_ids", []) if str(value).strip()))
-            invalid_evidence = sorted(set(evidence_ids) - cited_ids)
+            evidence_ids = sorted(cited_ids)
             hard_failures = [criterion for criterion in HARD_CRITERIA if verdict.get(criterion) is not True]
-            if invalid_evidence:
-                hard_failures.append(f"invalid_evidence_ids:{','.join(invalid_evidence)}")
             quality_failures = [criterion for criterion in QUALITY_CRITERIA if verdict.get(criterion) is not True]
             return SemanticValidationResult(
                 True,

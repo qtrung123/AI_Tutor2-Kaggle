@@ -26,7 +26,6 @@ RAW_QUESTION = {
         ],
         "correct_answer": "A",
         "explanation": "The cited material connects acknowledgements with reliable delivery.",
-        "source_chunk_ids": ["hash_1"],
     }]
 }
 
@@ -81,7 +80,7 @@ class QuizSemanticValidationTests(unittest.TestCase):
         self.assertTrue(verdict.hard_passed)
         self.assertTrue(verdict.quality_passed)
 
-    def test_invalid_validator_evidence_is_a_hard_failure(self):
+    def test_validator_evidence_ids_are_backend_owned(self):
         FakeJudge.verdict = {
             "question_supported": True,
             "correct_answer_supported": True,
@@ -95,7 +94,8 @@ class QuizSemanticValidationTests(unittest.TestCase):
         verdict = validate_question_semantics(
             RAW_QUESTION["questions"][0], [CHUNK], "easy", "TCP", llm_factory=FakeJudge
         )
-        self.assertIn("invalid_evidence_ids:not_cited_9", verdict.hard_failures)
+        self.assertEqual(verdict.evidence_chunk_ids, ["hash_1"])
+        self.assertTrue(verdict.hard_passed)
 
     def test_hard_rejection_retries_then_accepts(self):
         events = []
@@ -110,6 +110,23 @@ class QuizSemanticValidationTests(unittest.TestCase):
         self.assertEqual(events[0]["outcome"], "rejected_hard")
         self.assertIn("correct_answer_supported", events[0]["rejection_reasons"])
         self.assertEqual(events[1]["outcome"], "accepted")
+
+    def test_semantic_validator_receives_exact_backend_evidence_batch(self):
+        with patch("backend.quiz_service.ChatOllama", FakeGenerator), \
+             patch("backend.quiz_service.validate_question_semantics", return_value=result()) as validator, \
+             patch("backend.quiz_service.save_quiz_validation_event"):
+            question = _generate_quiz_batch(
+                "lecture.pdf", 1, "easy", [CHUNK], 1, "topic_001", "TCP"
+            )[0]
+        self.assertEqual(question["source_chunk_ids"], ["hash_1"])
+        self.assertEqual(validator.call_args.args[1], [CHUNK])
+
+    def test_missing_canonical_metadata_fails_before_llm_retry(self):
+        chunk = {"content": "Evidence", "metadata": {"vector_id": "owner_hash_1"}}
+        with patch("backend.quiz_service.ChatOllama") as generator:
+            with self.assertRaisesRegex(ValueError, "canonical chunk provenance"):
+                _generate_quiz_batch("lecture.pdf", 1, "easy", [chunk], 1)
+        generator.assert_not_called()
 
     def test_quality_failure_has_one_retry_then_accepts_warning(self):
         events = []

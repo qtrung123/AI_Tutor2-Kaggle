@@ -59,8 +59,8 @@ Return only one valid JSON object.
 Do not use Markdown.
 Do not wrap the JSON in a code block.
 Do not include introductory text, comments, explanations, or any content outside the JSON.
-For every question, generate a concise explanation grounded in the cited context and a non-empty source_chunk_ids array.
-Every source_chunk_ids value must exactly match a Chunk ID shown in CONTEXT.
+For every question, generate a concise explanation grounded in the context.
+Source provenance is attached by the backend. Do not return source IDs.
 Escape every double quote inside question or option text as \".
 Encode line breaks inside JSON strings as \n; never place a raw newline inside a string.
 Finish and close every JSON string, array, and object before returning the response.
@@ -78,8 +78,7 @@ The output must follow this exact structure:
 "D. Option D in English"
 ],
 "correct_answer": "A",
-"explanation": "Why the correct answer follows from the cited context.",
-"source_chunk_ids": ["exact_chunk_id_from_context"]
+"explanation": "Why the correct answer follows from the context."
 }
 ]
 }

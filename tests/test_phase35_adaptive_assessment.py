@@ -196,6 +196,43 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         self.assertNotIn("question_count:", frontend)
         self.assertNotIn("quiz-question-count-select", markup)
 
+    def test_failed_concept_is_skipped_while_other_grounded_questions_survive(self):
+        document = {
+            "id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 2,
+            "topics": [{"topic_id": "topic_a", "name": "A"}],
+        }
+        plan = {
+            "topic_id": "topic_a", "topic_name": "A", "assessment_capacity": 2,
+            "allocated_questions": 0, "concepts": [
+                {"concept_id": "concept_001", "name": "Bad", "source_chunk_ids": ["hash_1"]},
+                {"concept_id": "concept_002", "name": "Good", "source_chunk_ids": ["hash_1"]},
+            ],
+        }
+
+        def generated(**kwargs):
+            if kwargs["concept_id"] == "concept_001":
+                raise ValueError("grounding failed")
+            return [{
+                "id": kwargs["start_id"], "question": "Why is this grounded concept important?",
+                "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
+                "topic_id": "topic_a", "topic_name": "A", "concept_id": "concept_002",
+                "concept_name": "Good", "assessment_capacity": 2, "difficulty": "easy",
+                "explanation": "Supported.", "source_chunk_ids": ["hash_1"],
+                "validation_outcome": "accepted",
+            }]
+
+        with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
+             patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
+             patch.object(quiz_service, "get_topic_chunks", return_value=[{"content": "Evidence", "metadata": {"chunk_id": "hash_1"}}]), \
+             patch.object(quiz_service, "build_topic_plan", return_value=plan), \
+             patch.object(quiz_service, "_generate_quiz_batch", side_effect=generated), \
+             patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _owner: quiz):
+            result = quiz_service.generate_quiz("doc.pdf", "easy", "topic", "topic_a")
+
+        self.assertEqual(result["question_count"], 1)
+        self.assertEqual(result["questions"][0]["concept_id"], "concept_002")
+        self.assertEqual(len(result["assessment_plan"]["generation_warnings"]), 1)
+
     def test_dashboard_empty_state_contains_no_invented_metrics(self):
         with patch.object(quiz_service, "list_indexed_documents", return_value=[]):
             dashboard = quiz_service.build_learning_dashboard("new-student")

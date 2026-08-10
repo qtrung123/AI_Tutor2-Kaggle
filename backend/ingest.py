@@ -206,18 +206,21 @@ def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
             print(f"No chunks created for: {file_path.name}")
             continue
 
-        ids = [
-            f"{file_hash}_{i}" if owner_id == LEGACY_USER_ID else f"{owner_id}_{file_hash}_{i}"
-            for i in range(len(chunks))
+        # Chroma IDs are owner-namespaced for isolation. Provenance IDs remain
+        # stable document-chunk identities and are carried in metadata.
+        provenance_ids = [f"{file_hash}_{i}" for i in range(len(chunks))]
+        vector_ids = [
+            provenance_id if owner_id == LEGACY_USER_ID else f"{owner_id}_{provenance_id}"
+            for provenance_id in provenance_ids
         ]
 
-        topics = add_topic_metadata(documents, chunks, ids)
+        topics = add_topic_metadata(documents, chunks, provenance_ids)
 
         vectorstore.add_documents(
             documents=chunks,
-            ids=ids,
+            ids=vector_ids,
         )
-        delete_stale_source_vectors(vectorstore, owner_id, file_key, ids)
+        delete_stale_source_vectors(vectorstore, owner_id, file_key, vector_ids)
 
         info = {
             "hash": file_hash,

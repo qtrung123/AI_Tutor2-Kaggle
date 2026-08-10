@@ -10,6 +10,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from backend.topic_extractor import TopicExtractor, normalize_heading
 from backend.ingest import add_topic_metadata, delete_stale_source_vectors, split_documents
 from backend.rag_service import _chroma_filter
+from backend.quiz_service import _result_to_chunks
 from config import CHUNK_OVERLAP, CHUNK_SIZE
 
 
@@ -22,6 +23,14 @@ class DeterministicEmbeddings(Embeddings):
 
 
 class TopicExtractorTests(unittest.TestCase):
+    def test_owner_vector_id_is_distinct_from_canonical_provenance_id(self):
+        chunks = _result_to_chunks({
+            "ids": ["user-123_hash_0"], "documents": ["Grounded content"],
+            "metadatas": [{"chunk_id": "hash_0", "document_id": "lecture.pdf", "owner_id": "user-123"}],
+        }, "lecture.pdf", False)
+        self.assertEqual(chunks[0]["metadata"]["vector_id"], "user-123_hash_0")
+        self.assertEqual(chunks[0]["metadata"]["chunk_id"], "hash_0")
+
     def test_800_150_chunk_crossing_heading_uses_largest_character_overlap(self):
         page = Document(
             page_content=(

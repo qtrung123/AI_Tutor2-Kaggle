@@ -75,20 +75,19 @@ class TopicQuizBackendTests(unittest.TestCase):
         self.assertIn("topic_id, difficulty", index_sql)
         self.assertTrue({"topic_id", "difficulty", "explanation", "source_chunk_ids_json"} <= question_columns)
 
-    def test_question_citations_are_limited_to_exact_generation_batch(self):
+    def test_backend_attaches_exact_generation_batch_without_model_echo(self):
         raw = {
             "questions": [{
                 "question": "Which transport behavior is described by the selected topic context?",
                 "options": ["A. One", "B. Two", "C. Three", "D. Four"],
                 "correct_answer": "A",
                 "explanation": "The cited batch chunk states the correct behavior.",
-                "source_chunk_ids": ["batch_1"],
             }]
         }
-        question = _validate_quiz_batch(raw, 1, 1, "easy", "topic_001", {"batch_1"})[0]
+        question = _validate_quiz_batch(raw, 1, 1, "easy", "topic_001", ["batch_1"])[0]
         self.assertEqual(question["source_chunk_ids"], ["batch_1"])
-        with self.assertRaisesRegex(ValueError, "outside its generation batch"):
-            _validate_quiz_batch(raw, 1, 1, "easy", "topic_001", {"different_batch_9"})
+        question = _validate_quiz_batch(raw, 1, 1, "easy", "topic_001", ["different_batch_9"])[0]
+        self.assertEqual(question["source_chunk_ids"], ["different_batch_9"])
 
     def test_same_document_and_difficulty_keep_topics_independent(self):
         quiz_store.save_quiz("lecture.pdf", "easy", sample_quiz("topic_001"))
@@ -101,6 +100,7 @@ class TopicQuizBackendTests(unittest.TestCase):
         self.assertEqual(first["questions"][0]["topic_id"], "topic_001")
         self.assertEqual(second["questions"][0]["topic_id"], "topic_002")
         self.assertEqual(first["questions"][0]["explanation"], "The cited chunk explicitly describes this behavior.")
+        self.assertEqual(first["questions"][0]["source_chunk_ids"], ["hash_0"])
 
     def test_topic_schema_change_invalidates_old_document_quizzes(self):
         quiz_store.save_quiz("lecture.pdf", "easy", sample_quiz("topic_001", schema_version=2))
