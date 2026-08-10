@@ -10,7 +10,6 @@ from config import (
     QUIZ_VALIDATION_ATTEMPTS,
     QUIZ_VALIDATION_MODEL,
     QUIZ_VALIDATION_NUM_CTX,
-    OLLAMA_KEEP_ALIVE,
 )
 
 
@@ -118,46 +117,10 @@ def validate_question_semantics(
     topic_name: str,
     llm_factory=ChatOllama,
 ) -> SemanticValidationResult:
-    return validate_questions_semantics(
-        [(question, cited_chunks, requested_difficulty, topic_name)], llm_factory
-    )[0]
-
-
-def _batch_prompt(items: list[tuple[dict, list[dict], str, str]]) -> str:
-    candidates = []
-    for index, (question, chunks, difficulty, topic_name) in enumerate(items):
-        candidates.append({
-            "item_id": str(index), "topic_name": topic_name,
-            "requested_difficulty": difficulty,
-            "candidate": {key: question[key] for key in ("question", "options", "correct_answer", "explanation")},
-            "cited_context": [{"chunk_id": c["metadata"]["chunk_id"], "content": c["content"]} for c in chunks],
-        })
-    return f"""
-You are a cautious reviewer of multiple independent multiple-choice questions.
-Use only each item's own cited_context. Do not repair questions or use outside knowledge.
-Return one independent verdict for every item_id, in the same order.
-Evidence identity is backend-owned.
-
-ITEMS: {json.dumps(candidates, ensure_ascii=False)}
-
-Return JSON only: {{"results":[{{"item_id":"0","question_supported":true,
-"correct_answer_supported":true,"explanation_supported":true,"meaningful_concept":true,
-"distractor_quality":true,"difficulty_match":true,"detected_difficulty":"easy","reasons":[]}}]}}
-
-Apply all criteria independently: question, correct answer, and explanation must be grounded;
-the concept must be meaningful; distractors must be plausible, same-domain, and clearly wrong;
-and the cognitive task must match the requested difficulty.
-""".strip()
-
-
-def validate_questions_semantics(
-    items: list[tuple[dict, list[dict], str, str]], llm_factory=ChatOllama,
-) -> list[SemanticValidationResult]:
     if not QUIZ_SEMANTIC_VALIDATION_ENABLED:
-        return [SemanticValidationResult(False, QUIZ_VALIDATION_MODEL, VALIDATION_PROMPT_VERSION, {}, [], [], [], 0) for _ in items]
-    if not items:
-        return []
+        return SemanticValidationResult(False, QUIZ_VALIDATION_MODEL, VALIDATION_PROMPT_VERSION, {}, [], [], [], 0)
 
+    cited_ids = {str(chunk["metadata"]["chunk_id"]) for chunk in cited_chunks}
     started = time.perf_counter()
     last_error = None
     for _attempt in range(max(1, QUIZ_VALIDATION_ATTEMPTS)):
@@ -167,26 +130,22 @@ def validate_questions_semantics(
                 temperature=0,
                 format="json",
                 num_ctx=QUIZ_VALIDATION_NUM_CTX,
-                num_predict=max(500, len(items) * 300), keep_alive=OLLAMA_KEEP_ALIVE,
-            ).invoke(_batch_prompt(items))
-            payload = _extract_json(response.content)
-            verdicts = payload.get("results")
-            if len(items) == 1 and not isinstance(verdicts, list):
-                verdicts = [{**payload, "item_id": "0"}]
-            if not isinstance(verdicts, list) or len(verdicts) != len(items):
-                raise ValueError("Semantic validator did not return one verdict per item.")
-            latency = round((time.perf_counter() - started) * 1000)
-            results = []
-            for index, ((_question, chunks, _difficulty, _topic), verdict) in enumerate(zip(items, verdicts)):
-                if str(verdict.get("item_id")) != str(index):
-                    raise ValueError("Semantic validator item IDs are missing or out of order.")
-                results.append(SemanticValidationResult(
-                    True, QUIZ_VALIDATION_MODEL, VALIDATION_PROMPT_VERSION, verdict,
-                    sorted({str(c["metadata"]["chunk_id"]) for c in chunks}),
-                    [c for c in HARD_CRITERIA if verdict.get(c) is not True],
-                    [c for c in QUALITY_CRITERIA if verdict.get(c) is not True], latency,
-                ))
-            return results
+                num_predict=500,
+            ).invoke(_prompt(question, cited_chunks, requested_difficulty, topic_name))
+            verdict = _extract_json(response.content)
+            evidence_ids = sorted(cited_ids)
+            hard_failures = [criterion for criterion in HARD_CRITERIA if verdict.get(criterion) is not True]
+            quality_failures = [criterion for criterion in QUALITY_CRITERIA if verdict.get(criterion) is not True]
+            return SemanticValidationResult(
+                True,
+                QUIZ_VALIDATION_MODEL,
+                VALIDATION_PROMPT_VERSION,
+                verdict,
+                evidence_ids,
+                hard_failures,
+                quality_failures,
+                round((time.perf_counter() - started) * 1000),
+            )
         except Exception as error:
             last_error = error
     raise ValueError(f"Semantic validator failed to return valid JSON: {last_error}")

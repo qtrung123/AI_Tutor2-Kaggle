@@ -9,7 +9,6 @@ from config import (
     AUTO_QUIZ_MAX_DOCUMENT,
     AUTO_QUIZ_MAX_PER_TOPIC,
     CHAT_MODEL,
-    OLLAMA_KEEP_ALIVE,
 )
 
 
@@ -84,10 +83,7 @@ TOPIC: {topic_name}
 CONTEXT:
 {_planner_context(chunks)}
 """.strip()
-    response = ChatOllama(
-        model=CHAT_MODEL, temperature=0, format="json", num_ctx=8192,
-        keep_alive=OLLAMA_KEEP_ALIVE,
-    ).invoke(prompt)
+    response = ChatOllama(model=CHAT_MODEL, temperature=0, format="json", num_ctx=8192).invoke(prompt)
     data = _parse_json(response.content)
     return data.get("concepts") if isinstance(data.get("concepts"), list) else []
 
