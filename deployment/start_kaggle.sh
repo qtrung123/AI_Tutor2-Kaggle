@@ -18,8 +18,8 @@ export PROJECT_ROOT BACKEND_PORT FRONTEND_PORT PUBLIC_PORT OLLAMA_HOST
 export OLLAMA_CHAT_MODEL OLLAMA_EMBEDDING_MODEL
 export AI_TUTOR_DATA_DIR="${AI_TUTOR_DATA_DIR:-$PROJECT_ROOT/data}"
 export AI_TUTOR_VECTORSTORE_DIR="${AI_TUTOR_VECTORSTORE_DIR:-$PROJECT_ROOT/vectorstore}"
-export AI_TUTOR_INDEXED_FILES_PATH="${AI_TUTOR_INDEXED_FILES_PATH:-$PROJECT_ROOT/indexed_files.json}"
 export AI_TUTOR_DATABASE_PATH="${AI_TUTOR_DATABASE_PATH:-$AI_TUTOR_DATA_DIR/conversations.db}"
+export QUIZ_GENERATION_RETRY_LIMIT="${QUIZ_GENERATION_RETRY_LIMIT:-3}"
 
 mkdir -p "$LOG_DIR" "$RUNTIME_DIR" "$AI_TUTOR_DATA_DIR" "$AI_TUTOR_VECTORSTORE_DIR"
 
@@ -73,11 +73,6 @@ prepare_kaggle_chroma() {
     /kaggle/working/*) ;;
     *) fail "Refusing to manage Chroma outside /kaggle/working: $chroma_path" ;;
   esac
-  case "$(realpath -m "$AI_TUTOR_INDEXED_FILES_PATH")" in
-    /kaggle/working/*) ;;
-    *) fail "Refusing to manage the index registry outside /kaggle/working: $AI_TUTOR_INDEXED_FILES_PATH" ;;
-  esac
-
   mkdir -p "$chroma_path"
   if [[ -f "$marker" ]]; then
     current_model="$(tr -d '\r\n' <"$marker")"
@@ -107,12 +102,40 @@ prepare_kaggle_chroma() {
   printf '%s\n' "$OLLAMA_EMBEDDING_MODEL" >"$marker"
   log "Old ChromaDB moved to: $backup_path"
 
-  # The registry must be reset so incremental ingestion repopulates the new DB.
-  if [[ -f "$AI_TUTOR_INDEXED_FILES_PATH" ]]; then
-    local index_backup="${AI_TUTOR_INDEXED_FILES_PATH}.backup-${timestamp}"
-    mv "$AI_TUTOR_INDEXED_FILES_PATH" "$index_backup"
-    log "Old indexed-file registry moved to: $index_backup"
+  # SQLite indexed_documents is authoritative. Clear only that derived registry
+  # so incremental ingestion repopulates the rebuilt vectorstore.
+  if [[ -f "$AI_TUTOR_DATABASE_PATH" ]]; then
+    python - "$AI_TUTOR_DATABASE_PATH" <<'PY'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='indexed_documents'"
+    ).fetchone()
+    if exists:
+        connection.execute("DELETE FROM indexed_documents")
+PY
+    log "Cleared SQLite indexed_documents for embedding-model reindex"
   fi
+}
+
+warm_models_once() {
+  local key marker
+  key="$(printf '%s\n%s\n' "$OLLAMA_CHAT_MODEL" "$OLLAMA_EMBEDDING_MODEL" | sha256sum | awk '{print $1}')"
+  marker="$RUNTIME_DIR/models-warmed-$key"
+  if [[ -f "$marker" ]]; then
+    log "Model warmup already completed in this runtime"
+    return
+  fi
+  log "Warming chat model"
+  curl --fail --silent --show-error --max-time 600 \
+    -H 'Content-Type: application/json' "$OLLAMA_HOST/api/generate" \
+    -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_CHAT_MODEL"], "prompt": "Reply with OK.", "stream": False, "keep_alive": "10m"}))')" >/dev/null
+  log "Warming embedding model"
+  curl --fail --silent --show-error --max-time 180 \
+    -H 'Content-Type: application/json' "$OLLAMA_HOST/api/embed" \
+    -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_EMBEDDING_MODEL"], "input": "AI Tutor embedding health check.", "keep_alive": "10m"}))')" \
+    | python -c 'import json, sys; data=json.load(sys.stdin); assert data.get("embeddings"), "Embedding warmup returned no vector"'
+  touch "$marker"
 }
 
 assert_health_models() {
@@ -129,7 +152,7 @@ log "Starting Ollama"
 ollama serve >"$LOG_DIR/ollama.log" 2>&1 & echo $! >"$RUNTIME_DIR/ollama.pid"
 wait_http "Ollama" "$OLLAMA_HOST/api/tags" 120 "$LOG_DIR/ollama.log"
 
-if [[ "$OLLAMA_CHAT_MODEL" == hf.co/* ]]; then
+if [[ "$OLLAMA_CHAT_MODEL" == hf.co/* ]] && ! ollama_has_model "$OLLAMA_CHAT_MODEL"; then
   log "Pulling Hugging Face chat model $OLLAMA_CHAT_MODEL"
   ollama pull "$OLLAMA_CHAT_MODEL" >>"$LOG_DIR/ollama.log" 2>&1
 elif [[ "$RECREATE_OLLAMA_MODEL" == "1" ]] || ! ollama_has_model "$OLLAMA_CHAT_MODEL"; then
@@ -147,6 +170,8 @@ if ! ollama_has_model "$OLLAMA_EMBEDDING_MODEL"; then
 else
   log "Embedding model already exists: $OLLAMA_EMBEDDING_MODEL"
 fi
+
+warm_models_once
 
 prepare_kaggle_chroma
 
@@ -183,6 +208,5 @@ for service in ollama backend frontend nginx; do
   pid="$(cat "$RUNTIME_DIR/$service.pid" 2>/dev/null || true)"
   printf '%-10s PID=%s status=%s\n' "$service" "${pid:-unknown}" "$([[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && echo running || echo unknown)"
 done
-curl --silent "http://127.0.0.1:$PUBLIC_PORT/api/health"; printf '\n'
 ollama list
 nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader 2>/dev/null || log "GPU is not available"
