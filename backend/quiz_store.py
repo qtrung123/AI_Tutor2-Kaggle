@@ -62,6 +62,18 @@ def initialize_quiz_store() -> None:
                 value TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS assessment_plan_cache (
+                owner_id TEXT NOT NULL,
+                document_id TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                topic_schema_version INTEGER NOT NULL,
+                planner_version TEXT NOT NULL,
+                document_hash TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (owner_id, document_id, scope_key)
+            );
+
             CREATE TABLE IF NOT EXISTS quizzes (
                 quiz_id TEXT PRIMARY KEY,
                 document_id TEXT NOT NULL,
@@ -300,6 +312,44 @@ def initialize_quiz_store() -> None:
 
 def quiz_cache_key(document_id: str, difficulty: str, topic_id: str = LEGACY_TOPIC_ID, owner_id: str = LEGACY_USER_ID) -> str:
     return f"{owner_id}::{document_id}::{topic_id}::{difficulty}"
+
+
+def get_assessment_plan_cache(
+    owner_id: str, document_id: str, scope_key: str, topic_schema_version: int,
+    planner_version: str, document_hash: str,
+) -> dict | None:
+    initialize_quiz_store()
+    with _connect() as connection:
+        row = connection.execute(
+            """SELECT payload_json FROM assessment_plan_cache
+               WHERE owner_id=? AND document_id=? AND scope_key=?
+                 AND topic_schema_version=? AND planner_version=? AND document_hash=?""",
+            (owner_id, document_id, scope_key, topic_schema_version, planner_version, document_hash),
+        ).fetchone()
+        return json.loads(row["payload_json"]) if row else None
+
+
+def save_assessment_plan_cache(
+    owner_id: str, document_id: str, scope_key: str, topic_schema_version: int,
+    planner_version: str, document_hash: str, payload: dict,
+) -> dict:
+    initialize_quiz_store()
+    with _connect() as connection:
+        connection.execute(
+            """INSERT INTO assessment_plan_cache
+               (owner_id, document_id, scope_key, topic_schema_version, planner_version,
+                document_hash, payload_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(owner_id, document_id, scope_key) DO UPDATE SET
+                 topic_schema_version=excluded.topic_schema_version,
+                 planner_version=excluded.planner_version,
+                 document_hash=excluded.document_hash,
+                 payload_json=excluded.payload_json,
+                 created_at=excluded.created_at""",
+            (owner_id, document_id, scope_key, topic_schema_version, planner_version,
+             document_hash, json.dumps(payload, ensure_ascii=False), utc_now_iso()),
+        )
+    return payload
 
 
 def _normalize_options(options) -> list[str]:

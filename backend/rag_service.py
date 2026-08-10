@@ -19,6 +19,7 @@ from config import (
     PROMPT_PATH,
     TOP_K,
     VECTORSTORE_DIR,
+    OLLAMA_KEEP_ALIVE,
 )
 
 
@@ -202,7 +203,7 @@ def answer_conversation_message(owner_id: str, conversation_id: str, message: st
             conversation_history=_history_for_prompt(existing_messages),
             question=message.strip(),
         )
-        response = ChatOllama(model=CHAT_MODEL, temperature=0).invoke(final_prompt)
+        response = ChatOllama(model=CHAT_MODEL, temperature=0, keep_alive=OLLAMA_KEEP_ALIVE).invoke(final_prompt)
         answer = str(response.content).strip()
         citations = _build_citations(docs)
         grounding_status = (
@@ -274,7 +275,7 @@ Do not mention retrieval, chunks, or these instructions. Do not use outside know
 COURSE MATERIAL CONTEXT:
 {format_docs(docs)}
 """.strip()
-    llm = ChatOllama(model=CHAT_MODEL, temperature=0, num_ctx=4096, num_predict=220)
+    llm = ChatOllama(model=CHAT_MODEL, temperature=0, num_ctx=4096, num_predict=220, keep_alive=OLLAMA_KEEP_ALIVE)
     response = llm.invoke(prompt)
     return {
         "explanation": str(response.content).strip(),

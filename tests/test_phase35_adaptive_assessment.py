@@ -160,16 +160,17 @@ class AdaptiveAssessmentTests(unittest.TestCase):
                 concept["source_chunk_ids"] = [f"{topic['topic_id']}_1"]
             return plan
 
-        def generated(**kwargs):
-            return [{
-                "id": kwargs["start_id"], "question": f"Question for {kwargs['concept_name']}?",
+        def generated(document_id, difficulty, items, start_id, avoid_questions, *_args):
+            questions = [{
+                "id": start_id + index, "question": f"Question for {item['concept']['name']}?",
                 "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
-                "topic_id": kwargs["topic_id"], "topic_name": kwargs["topic_name"],
-                "concept_id": kwargs["concept_id"], "concept_name": kwargs["concept_name"],
-                "assessment_capacity": kwargs["assessment_capacity"], "difficulty": kwargs["difficulty"],
-                "explanation": "Supported.", "source_chunk_ids": [kwargs["chunks"][0]["metadata"]["chunk_id"]],
+                "topic_id": item["topic_id"], "topic_name": item["topic_name"],
+                "concept_id": item["concept"]["concept_id"], "concept_name": item["concept"]["name"],
+                "assessment_capacity": item["assessment_capacity"], "difficulty": difficulty,
+                "explanation": "Supported.", "source_chunk_ids": [item["evidence_chunks"][0]["metadata"]["chunk_id"]],
                 "validation_outcome": "accepted",
-            }]
+            } for index, item in enumerate(items)]
+            return questions, []
 
         def chunks(document_id, topic_id, owner_id):
             return [{"content": topic_id, "metadata": {"chunk_id": f"{topic_id}_1", "topic_id": topic_id}}]
@@ -178,12 +179,12 @@ class AdaptiveAssessmentTests(unittest.TestCase):
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
              patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
              patch.object(quiz_service, "build_topic_plan", side_effect=planned), \
-             patch.object(quiz_service, "_generate_quiz_batch", side_effect=generated) as generator, \
+             patch.object(quiz_service, "_generate_concept_batch", side_effect=generated) as generator, \
              patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _owner: quiz):
             result = quiz_service.generate_quiz("doc.pdf", "easy", "document")
 
         self.assertEqual(result["question_count"], 3)
-        self.assertEqual(generator.call_count, 3)
+        self.assertEqual(generator.call_count, 1)
         self.assertEqual({question["topic_id"] for question in result["questions"]}, {"topic_a", "topic_b"})
         self.assertTrue(all(question["concept_id"] for question in result["questions"]))
 
@@ -209,23 +210,22 @@ class AdaptiveAssessmentTests(unittest.TestCase):
             ],
         }
 
-        def generated(**kwargs):
-            if kwargs["concept_id"] == "concept_001":
-                raise ValueError("grounding failed")
+        def generated(document_id, difficulty, items, start_id, avoid_questions, *_args):
+            good = next(item for item in items if item["concept"]["concept_id"] == "concept_002")
             return [{
-                "id": kwargs["start_id"], "question": "Why is this grounded concept important?",
+                "id": start_id, "question": "Why is this grounded concept important?",
                 "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
                 "topic_id": "topic_a", "topic_name": "A", "concept_id": "concept_002",
-                "concept_name": "Good", "assessment_capacity": 2, "difficulty": "easy",
+                "concept_name": "Good", "assessment_capacity": 2, "difficulty": difficulty,
                 "explanation": "Supported.", "source_chunk_ids": ["hash_1"],
                 "validation_outcome": "accepted",
-            }]
+            }], ["concept_001: grounding failed"]
 
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
              patch.object(quiz_service, "get_topic_chunks", return_value=[{"content": "Evidence", "metadata": {"chunk_id": "hash_1"}}]), \
              patch.object(quiz_service, "build_topic_plan", return_value=plan), \
-             patch.object(quiz_service, "_generate_quiz_batch", side_effect=generated), \
+             patch.object(quiz_service, "_generate_concept_batch", side_effect=generated), \
              patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _owner: quiz):
             result = quiz_service.generate_quiz("doc.pdf", "easy", "topic", "topic_a")
 

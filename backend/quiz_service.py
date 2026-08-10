@@ -2,6 +2,7 @@ import difflib
 import json
 import math
 import re
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ from backend.quiz_store import (
     get_latest_attempt,
     get_quiz,
     get_quiz_explanation,
+    get_assessment_plan_cache,
     list_document_quizzes,
     list_completed_answer_snapshots,
     list_quiz_history as load_quiz_history,
@@ -21,12 +23,13 @@ from backend.quiz_store import (
     quiz_cache_key,
     save_quiz,
     save_quiz_explanation,
+    save_assessment_plan_cache,
     save_quiz_progress,
     reset_quiz_progress,
     save_quiz_validation_event,
     utc_now_iso,
 )
-from backend.quiz_validation import validate_question_semantics
+from backend.quiz_validation import validate_question_semantics, validate_questions_semantics
 from backend.assessment_planner import (
     PLANNER_VERSION,
     allocate_document_topics,
@@ -44,6 +47,10 @@ from config import (
     INDEXED_FILES_PATH,
     QUIZ_PROMPT_PATH,
     QUIZ_GENERATION_RETRY_LIMIT,
+    QUIZ_GENERATION_CONCEPT_BATCH_SIZE,
+    QUIZ_VALIDATION_BATCH_SIZE,
+    OLLAMA_KEEP_ALIVE,
+    ASSESSMENT_PLANNER_CHUNKS_PER_BATCH,
     QUIZ_QUALITY_RETRY_LIMIT,
     VECTORSTORE_DIR,
 )
@@ -659,6 +666,7 @@ def _generate_quiz_batch(
             format="json",
             num_ctx=num_ctx,
             num_predict=num_predict,
+            keep_alive=OLLAMA_KEEP_ALIVE,
         )
         print(
             f"[quiz-llm] attempt={attempt_index + 1}, difficulty={difficulty}, "
@@ -765,6 +773,144 @@ def _generate_quiz_batch(
     return accepted_questions
 
 
+def _concept_generation_prompt(
+    document_id: str, difficulty: str, items: list[dict], avoid_questions: list[str],
+    errors: dict[str, str],
+) -> str:
+    concepts = [{
+        "concept_id": item["concept"]["concept_id"],
+        "concept_name": item["concept"]["name"],
+        "exact_evidence": [chunk["content"] for chunk in item["evidence_chunks"]],
+    } for item in items]
+    return f"""
+Generate exactly one independent multiple-choice question for every requested concept.
+Use only that concept's exact_evidence. Do not return chunk IDs.
+Difficulty: {difficulty}
+Difficulty contract: {_difficulty_instructions(difficulty)}
+Document: {document_id}
+Concepts: {json.dumps(concepts, ensure_ascii=False)}
+Previously used questions: {json.dumps(avoid_questions, ensure_ascii=False)}
+Previous per-concept errors to repair: {json.dumps(errors, ensure_ascii=False)}
+
+Each question needs four distinct plausible same-domain options, exactly one supported answer,
+and an explanation whose every factual claim is supported by its evidence. Avoid generic stems,
+raw copied chunks, outside facts, duplicate questions, and unsupported distractor claims.
+Return JSON only: {{"questions":[{{"concept_id":"exact requested id","question":"...",
+"options":["A. ...","B. ...","C. ...","D. ..."],"correct_answer":"A","explanation":"..."}}]}}
+""".strip()
+
+
+def _generate_concept_batch(
+    document_id: str, difficulty: str, items: list[dict], start_id: int,
+    avoid_questions: list[str], generation_run_id: str, batch_index: int,
+    document_hash: str, topic_schema_version: int, owner_id: str, metrics: dict,
+) -> tuple[list[dict], list[str]]:
+    pending = {item["concept"]["concept_id"]: item for item in items}
+    accepted: list[dict] = []
+    errors: dict[str, str] = {}
+    quality_retries: dict[str, int] = {}
+    retry_limit = max(1, QUIZ_GENERATION_RETRY_LIMIT)
+    for attempt in range(retry_limit):
+        if not pending:
+            break
+        request_items = list(pending.values())
+        prompt = _concept_generation_prompt(document_id, difficulty, request_items, avoid_questions + [q["question"] for q in accepted], errors)
+        num_predict = _quiz_output_budget(len(request_items), attempt)
+        estimated = math.ceil(len(prompt) / 3) + num_predict + 512
+        num_ctx = next((window for window in QUIZ_CONTEXT_WINDOWS if window >= estimated), None)
+        if num_ctx is None:
+            raise ValueError("Concept generation prompt exceeds the 32768-token context window.")
+        started = time.perf_counter()
+        metrics["llm_calls"] += 1
+        if attempt:
+            metrics["retry_llm_calls"] += 1
+        response = ChatOllama(
+            model=CHAT_MODEL, temperature=(0.1, 0.45, 0.6)[min(attempt, 2)],
+            format="json", num_ctx=num_ctx, num_predict=num_predict,
+            keep_alive=OLLAMA_KEEP_ALIVE,
+        ).invoke(prompt)
+        metrics["generation_ms"] += round((time.perf_counter() - started) * 1000)
+        try:
+            raw_items = _parse_quiz_response(response.content, attempt).get("questions")
+            if not isinstance(raw_items, list):
+                raise ValueError("Quiz JSON does not contain a questions list.")
+        except Exception as error:
+            for concept_id in pending:
+                errors[concept_id] = str(error)
+            continue
+
+        normalized: list[tuple[str, dict, list[dict], dict]] = []
+        returned_ids = set()
+        for raw in raw_items:
+            concept_id = str(raw.get("concept_id") or "")
+            if concept_id not in pending or concept_id in returned_ids:
+                continue
+            returned_ids.add(concept_id)
+            item = pending[concept_id]
+            try:
+                evidence_ids = [str(c["metadata"]["chunk_id"]) for c in item["evidence_chunks"]]
+                question = _validate_quiz_batch(
+                    {"questions": [raw]}, 1, start_id + len(accepted) + len(normalized), difficulty,
+                    item["topic_id"], evidence_ids, item["topic_name"], concept_id,
+                    item["concept"]["name"], item["assessment_capacity"],
+                )[0]
+                prior = avoid_questions + [q["question"] for q in accepted] + [q[1]["question"] for q in normalized]
+                if _is_duplicate_question(question["question"], prior):
+                    raise ValueError("Question duplicates an existing question.")
+                normalized.append((concept_id, question, item["evidence_chunks"], item))
+            except Exception as error:
+                errors[concept_id] = str(error)
+        for concept_id in pending:
+            if concept_id not in returned_ids:
+                errors[concept_id] = "Model omitted this concept."
+
+        validation_size = max(1, QUIZ_VALIDATION_BATCH_SIZE)
+        for offset in range(0, len(normalized), validation_size):
+            group = normalized[offset:offset + validation_size]
+            started = time.perf_counter()
+            metrics["llm_calls"] += 1
+            metrics["validation_llm_calls"] += 1
+            verdicts = validate_questions_semantics([
+                (question, chunks, difficulty, item["topic_name"])
+                for _cid, question, chunks, item in group
+            ])
+            metrics["validation_ms"] += round((time.perf_counter() - started) * 1000)
+            for candidate_index, ((concept_id, question, _chunks, item), semantic) in enumerate(zip(group, verdicts)):
+                failures = semantic.hard_failures + semantic.quality_failures
+                retry_quality = (not semantic.quality_passed and
+                    quality_retries.get(concept_id, 0) < max(0, QUIZ_QUALITY_RETRY_LIMIT))
+                accepted_item = semantic.hard_passed and not retry_quality
+                outcome = "accepted" if semantic.quality_passed else (
+                    "rejected_quality_retry" if retry_quality else "accepted_quality_warning")
+                event = {
+                    "generation_run_id": generation_run_id, "owner_id": owner_id,
+                    "document_id": document_id, "document_hash": document_hash,
+                    "topic_id": item["topic_id"], "topic_schema_version": topic_schema_version,
+                    "difficulty": difficulty, "batch_index": batch_index,
+                    "generation_attempt": attempt + 1, "candidate_index": candidate_index,
+                    "generator_model": CHAT_MODEL, "generation_prompt_version": GENERATION_PROMPT_VERSION,
+                    "validator_model": semantic.validator_model,
+                    "validator_prompt_version": semantic.validator_prompt_version,
+                    "candidate_question": question, "cited_chunk_ids": question["source_chunk_ids"],
+                    "evidence_chunk_ids": semantic.evidence_chunk_ids,
+                    "hard_passed": semantic.hard_passed, "quality_passed": semantic.quality_passed,
+                    "verdict": semantic.verdict, "rejection_reasons": failures,
+                    "latency_ms": semantic.latency_ms, "accepted": accepted_item,
+                    "outcome": "rejected_hard" if not semantic.hard_passed else outcome,
+                }
+                save_quiz_validation_event(event)
+                if accepted_item:
+                    question["validation_outcome"] = outcome
+                    accepted.append(question)
+                    pending.pop(concept_id, None)
+                    errors.pop(concept_id, None)
+                else:
+                    if retry_quality:
+                        quality_retries[concept_id] = quality_retries.get(concept_id, 0) + 1
+                    errors[concept_id] = "Semantic validation failed: " + ", ".join(failures)
+    return accepted, [f"{concept_id}: {error}" for concept_id, error in errors.items()]
+
+
 def generate_quiz(
     document_id: str,
     difficulty: str,
@@ -780,6 +926,14 @@ def generate_quiz(
     not create a different quiz. Passing regenerate=True intentionally replaces
     the saved quiz.
     """
+    request_started = time.perf_counter()
+    metrics = {
+        "retrieval_ms": 0, "assessment_planning_ms": 0, "generation_ms": 0,
+        "semantic_validation_ms": 0, "retry_ms": 0, "total_request_ms": 0,
+        "llm_calls": 0, "planner_llm_calls": 0, "generation_llm_calls": 0,
+        "validation_llm_calls": 0, "retry_llm_calls": 0, "assessment_plan_cache_hit": False,
+        "validation_ms": 0,
+    }
     known_documents = _document_lookup(owner_id)
     if document_id not in known_documents:
         raise ValueError("document_id was not found in indexed documents.")
@@ -803,34 +957,57 @@ def generate_quiz(
         saved_quiz = get_quiz(document_id, difficulty, scope_topic_id, owner_id)
         if saved_quiz:
             print(f"[quiz-cache] key={cache_key} HIT")
+            metrics["total_request_ms"] = round((time.perf_counter() - request_started) * 1000)
+            saved_quiz["performance_metrics"] = metrics
             return saved_quiz
         print(f"[quiz-cache] key={cache_key} MISS")
     else:
         print(f"[quiz-cache] key={cache_key} MISS (regenerate)")
 
-    topics_to_plan = [topic_lookup[topic_id]] if assessment_scope == "topic" else list(document.get("topics") or [])
-    topic_plans = []
-    topic_chunks = {}
-    for topic in topics_to_plan:
-        current_chunks = get_topic_chunks(document_id, str(topic["topic_id"]), owner_id)
-        if not current_chunks:
-            continue
-        topic_chunks[str(topic["topic_id"])] = current_chunks
-        topic_plans.append(build_topic_plan(topic, current_chunks))
-    if assessment_scope == "document":
-        allocation = allocate_document_topics(topic_plans)
-        planned_topics = allocation["topics"]
-        excluded_topic_ids = allocation["excluded_topic_ids"]
+    plan_cache = get_assessment_plan_cache(
+        owner_id, document_id, scope_topic_id, topic_schema_version,
+        PLANNER_VERSION, str(document.get("hash", "")),
+    )
+    if plan_cache:
+        metrics["assessment_plan_cache_hit"] = True
+        planned_topics = plan_cache["planned_topics"]
+        excluded_topic_ids = plan_cache["excluded_topic_ids"]
+        topic_chunks = plan_cache["topic_chunks"]
+        print(f"[assessment-plan-cache] key={owner_id}::{document_id}::{scope_topic_id} HIT")
     else:
-        planned_topics = []
-        for plan in topic_plans:
-            capacity = int(plan["assessment_capacity"])
-            planned_topics.append({
-                **plan,
-                "allocated_questions": capacity,
+        print(f"[assessment-plan-cache] key={owner_id}::{document_id}::{scope_topic_id} MISS")
+        topics_to_plan = [topic_lookup[topic_id]] if assessment_scope == "topic" else list(document.get("topics") or [])
+        topic_plans = []
+        topic_chunks = {}
+        for topic in topics_to_plan:
+            started = time.perf_counter()
+            current_chunks = get_topic_chunks(document_id, str(topic["topic_id"]), owner_id)
+            metrics["retrieval_ms"] += round((time.perf_counter() - started) * 1000)
+            if not current_chunks:
+                continue
+            topic_chunks[str(topic["topic_id"])] = current_chunks
+            started = time.perf_counter()
+            topic_plans.append(build_topic_plan(topic, current_chunks))
+            elapsed = round((time.perf_counter() - started) * 1000)
+            metrics["assessment_planning_ms"] += elapsed
+            calls = math.ceil(len(current_chunks) / max(1, ASSESSMENT_PLANNER_CHUNKS_PER_BATCH))
+            metrics["planner_llm_calls"] += calls
+            metrics["llm_calls"] += calls
+        if assessment_scope == "document":
+            allocation = allocate_document_topics(topic_plans)
+            planned_topics = allocation["topics"]
+            excluded_topic_ids = allocation["excluded_topic_ids"]
+        else:
+            planned_topics = [{
+                **plan, "allocated_questions": int(plan["assessment_capacity"]),
                 "selected_concepts": list(plan["concepts"]),
-            })
-        excluded_topic_ids = []
+            } for plan in topic_plans]
+            excluded_topic_ids = []
+        save_assessment_plan_cache(
+            owner_id, document_id, scope_topic_id, topic_schema_version, PLANNER_VERSION,
+            str(document.get("hash", "")), {"planned_topics": planned_topics,
+            "excluded_topic_ids": excluded_topic_ids, "topic_chunks": topic_chunks},
+        )
     if not any(plan["allocated_questions"] for plan in planned_topics):
         raise ValueError("No grounded assessable concepts were found for the selected assessment scope.")
 
@@ -840,6 +1017,7 @@ def generate_quiz(
     next_id = 1
     avoid_questions: list[str] = []
     batch_index = 0
+    generation_items = []
     for topic_plan in planned_topics:
         chunks_by_id = {
             str(chunk["metadata"]["chunk_id"]): chunk
@@ -852,35 +1030,28 @@ def generate_quiz(
             ]
             if not evidence_chunks:
                 continue
-            batch_index += 1
-            concept_label = str(concept["name"])
-            try:
-                batch_questions = _generate_quiz_batch(
-                    document_id=document_id,
-                    num_questions=1,
-                    difficulty=difficulty,
-                    chunks=evidence_chunks,
-                    start_id=next_id,
-                    topic_id=topic_plan["topic_id"],
-                    topic_name=topic_plan["topic_name"],
-                    avoid_questions=avoid_questions,
-                    generation_run_id=generation_run_id,
-                    batch_index=batch_index,
-                    document_hash=document.get("hash", ""),
-                    topic_schema_version=topic_schema_version,
-                    concept_id=concept["concept_id"],
-                    concept_name=concept_label,
-                    assessment_capacity=topic_plan["assessment_capacity"],
-                    owner_id=owner_id,
-                )
-            except Exception as error:
-                warning = f"Skipped concept {concept['concept_id']} ({concept_label}): {error}"
-                generation_warnings.append(warning)
-                print(f"[quiz-generation-warning] {warning}")
-                continue
-            questions.extend(batch_questions)
-            avoid_questions.extend(question["question"] for question in batch_questions)
-            next_id += 1
+            generation_items.append({
+                "concept": concept, "evidence_chunks": evidence_chunks,
+                "topic_id": topic_plan["topic_id"], "topic_name": topic_plan["topic_name"],
+                "assessment_capacity": topic_plan["assessment_capacity"],
+            })
+
+    concept_batch_size = max(1, QUIZ_GENERATION_CONCEPT_BATCH_SIZE)
+    for offset in range(0, len(generation_items), concept_batch_size):
+        batch_index += 1
+        before_generation = metrics["generation_ms"]
+        before_validation = metrics["validation_ms"]
+        batch_questions, errors = _generate_concept_batch(
+            document_id, difficulty, generation_items[offset:offset + concept_batch_size], next_id,
+            avoid_questions, generation_run_id, batch_index, document.get("hash", ""),
+            topic_schema_version, owner_id, metrics,
+        )
+        metrics["semantic_validation_ms"] += metrics["validation_ms"] - before_validation
+        metrics["retry_ms"] += max(0, (metrics["generation_ms"] - before_generation) if errors else 0)
+        questions.extend(batch_questions)
+        avoid_questions.extend(question["question"] for question in batch_questions)
+        next_id += len(batch_questions)
+        generation_warnings.extend(f"Skipped concept {error}" for error in errors)
 
     if not questions:
         detail = generation_warnings[-1] if generation_warnings else "No concept produced a grounded question."
@@ -902,6 +1073,7 @@ def generate_quiz(
             "excluded_topic_ids": excluded_topic_ids,
             "total_questions": len(questions),
             "generation_warnings": generation_warnings,
+            "performance_metrics": metrics,
         },
         "topic_schema_version": topic_schema_version,
         "question_count": len(questions),
@@ -910,6 +1082,12 @@ def generate_quiz(
     }
     if regenerate:
         delete_document_attempts(document_id, difficulty, scope_topic_id, owner_id)
+    metrics.pop("validation_ms", None)
+    metrics["generation_llm_calls"] = metrics["llm_calls"] - metrics["planner_llm_calls"] - metrics["validation_llm_calls"]
+    metrics["total_request_ms"] = round((time.perf_counter() - request_started) * 1000)
+    quiz["performance_metrics"] = metrics
+    quiz["assessment_plan"]["performance_metrics"] = metrics
+    print(f"[quiz-timing] {json.dumps(metrics, sort_keys=True)}")
     print(f"[quiz-save] cache_key={cache_key}")
     return save_quiz(document_id, difficulty, quiz, owner_id)
 

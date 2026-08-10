@@ -254,6 +254,7 @@ class TopicExtractor:
 def ollama_heading_refiner(model: str):
     """Create a refiner that sends heading candidates—not PDF contents—to Ollama."""
     from langchain_ollama import ChatOllama
+    from config import OLLAMA_KEEP_ALIVE
 
     def refine(payload: dict) -> list[dict]:
         prompt = (
@@ -262,7 +263,7 @@ def ollama_heading_refiner(model: str):
             "Return JSON only as an array of objects with name and 1-based page fields.\n"
             + json.dumps(payload, ensure_ascii=False)
         )
-        response = ChatOllama(model=model, temperature=0, num_predict=800).invoke(prompt)
+        response = ChatOllama(model=model, temperature=0, num_predict=800, keep_alive=OLLAMA_KEEP_ALIVE).invoke(prompt)
         text = str(response.content).strip()
         match = re.search(r"\[[\s\S]*\]", text)
         parsed = json.loads(match.group(0) if match else text)
