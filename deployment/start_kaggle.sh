@@ -8,14 +8,18 @@ BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 PUBLIC_PORT="${PUBLIC_PORT:-7860}"
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
-OLLAMA_CHAT_MODEL="${OLLAMA_CHAT_MODEL:-hf.co/unsloth/GLM-4.7-Flash-REAP-23B-A3B-GGUF:UD-Q4_K_XL}"
+OLLAMA_CHAT_MODEL="${OLLAMA_CHAT_MODEL:-hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M}"
+OLLAMA_GENERATION_MODELS="${OLLAMA_GENERATION_MODELS:-$OLLAMA_CHAT_MODEL}"
+DEFAULT_MODEL="${OLLAMA_DEFAULT_GENERATION_MODEL:-qwen-2.5-7b}"
+AVAILABLE_MODELS="${AVAILABLE_MODELS:-$OLLAMA_GENERATION_MODELS}"
+PRELOAD_ALL_MODELS="${PRELOAD_ALL_MODELS:-false}"
 OLLAMA_EMBEDDING_MODEL="${OLLAMA_EMBEDDING_MODEL:-bge-m3}"
 GGUF_MODEL_PATH="${GGUF_MODEL_PATH:-}"
 RECREATE_OLLAMA_MODEL="${RECREATE_OLLAMA_MODEL:-0}"
 REBUILD_CHROMA_ON_EMBEDDING_CHANGE="${REBUILD_CHROMA_ON_EMBEDDING_CHANGE:-1}"
 
 export PROJECT_ROOT BACKEND_PORT FRONTEND_PORT PUBLIC_PORT OLLAMA_HOST
-export OLLAMA_CHAT_MODEL OLLAMA_EMBEDDING_MODEL
+export OLLAMA_CHAT_MODEL OLLAMA_GENERATION_MODELS OLLAMA_DEFAULT_GENERATION_MODEL="$DEFAULT_MODEL" OLLAMA_EMBEDDING_MODEL
 export AI_TUTOR_DATA_DIR="${AI_TUTOR_DATA_DIR:-$PROJECT_ROOT/data}"
 export AI_TUTOR_VECTORSTORE_DIR="${AI_TUTOR_VECTORSTORE_DIR:-$PROJECT_ROOT/vectorstore}"
 export AI_TUTOR_DATABASE_PATH="${AI_TUTOR_DATABASE_PATH:-$AI_TUTOR_DATA_DIR/conversations.db}"
@@ -34,6 +38,13 @@ on_error() {
   exit "$exit_code"
 }
 trap 'on_error $LINENO' ERR
+
+if ! command -v ollama >/dev/null 2>&1; then
+  log "Ollama is missing; installing it once"
+  curl -fsSL https://ollama.com/install.sh | sh
+else
+  log "Ollama is already installed"
+fi
 
 stop_pid() {
   local name="$1" pid_file="$RUNTIME_DIR/$1.pid"
@@ -129,7 +140,7 @@ warm_models_once() {
   log "Warming chat model"
   curl --fail --silent --show-error --max-time 600 \
     -H 'Content-Type: application/json' "$OLLAMA_HOST/api/generate" \
-    -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_CHAT_MODEL"], "prompt": "Reply with OK.", "stream": False, "keep_alive": "10m"}))')" >/dev/null
+    -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_CHAT_MODEL"], "prompt": "Reply with OK.", "stream": False, "keep_alive": 0}))')" >/dev/null
   log "Warming embedding model"
   curl --fail --silent --show-error --max-time 180 \
     -H 'Content-Type: application/json' "$OLLAMA_HOST/api/embed" \
@@ -162,6 +173,20 @@ elif [[ "$RECREATE_OLLAMA_MODEL" == "1" ]] || ! ollama_has_model "$OLLAMA_CHAT_M
   printf 'FROM "%s"\n\nPARAMETER temperature 0.1\nPARAMETER num_ctx 4096\n' "$GGUF_MODEL_PATH" >"$MODELFILE"
   log "Creating Ollama model $OLLAMA_CHAT_MODEL from the configured GGUF"
   ollama create "$OLLAMA_CHAT_MODEL" -f "$MODELFILE" >>"$LOG_DIR/ollama.log" 2>&1
+fi
+
+if [[ "$PRELOAD_ALL_MODELS" == "true" || "$PRELOAD_ALL_MODELS" == "1" ]]; then
+  IFS=',' read -r -a generation_models <<< "$AVAILABLE_MODELS"
+  for generation_model in "${generation_models[@]}"; do
+    generation_model="${generation_model//[[:space:]]/}"
+    [[ -z "$generation_model" || "$generation_model" == "$OLLAMA_CHAT_MODEL" ]] && continue
+    if ollama_has_model "$generation_model"; then log "Generation model already exists: $generation_model"
+    elif [[ "$generation_model" == hf.co/* ]]; then log "Preloading optional generation model $generation_model"; ollama pull "$generation_model" >>"$LOG_DIR/ollama.log" 2>&1
+    else fail "Optional model '$generation_model' is absent and cannot be pulled automatically."
+    fi
+  done
+else
+  log "Optional generation models are lazy; set PRELOAD_ALL_MODELS=true only for benchmarking."
 fi
 
 if ! ollama_has_model "$OLLAMA_EMBEDDING_MODEL"; then

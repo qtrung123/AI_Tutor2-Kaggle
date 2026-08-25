@@ -20,6 +20,7 @@ from config import (
     TOP_K,
     VECTORSTORE_DIR,
 )
+from backend.model_registry import resolve_generation_model
 
 
 def load_vectorstore() -> Chroma:
@@ -163,8 +164,9 @@ def _history_for_prompt(messages: list[dict], limit: int = 8) -> str:
     )
 
 
-def answer_conversation_message(owner_id: str, conversation_id: str, message: str) -> dict:
+def answer_conversation_message(owner_id: str, conversation_id: str, message: str, model_id: str | None = None) -> dict:
     """Answer and persist one message in a source-isolated conversation."""
+    model = resolve_generation_model(model_id)
     conversation = get_conversation(owner_id, conversation_id, include_messages=True)
     user_message = add_message(owner_id, conversation_id, "user", message.strip())
 
@@ -182,7 +184,7 @@ def answer_conversation_message(owner_id: str, conversation_id: str, message: st
             "user_message": user_message,
             "assistant_message": assistant_message,
             "answer": answer,
-            "model": CHAT_MODEL,
+            "model": model,
             "grounding_status": "insufficient_context",
             "citations": [],
         }
@@ -202,7 +204,7 @@ def answer_conversation_message(owner_id: str, conversation_id: str, message: st
             conversation_history=_history_for_prompt(existing_messages),
             question=message.strip(),
         )
-        response = ChatOllama(model=CHAT_MODEL, temperature=0).invoke(final_prompt)
+        response = ChatOllama(model=model, temperature=0).invoke(final_prompt)
         answer = str(response.content).strip()
         citations = _build_citations(docs)
         grounding_status = (
@@ -231,7 +233,7 @@ def answer_conversation_message(owner_id: str, conversation_id: str, message: st
         "user_message": user_message,
         "assistant_message": assistant_message,
         "answer": answer,
-        "model": CHAT_MODEL,
+        "model": model,
         "grounding_status": grounding_status,
         "citations": citations,
     }

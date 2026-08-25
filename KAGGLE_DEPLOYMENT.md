@@ -47,6 +47,9 @@ Local Windows tiếp tục dùng các mặc định trong `config.py`. Kaggle đ
 | Biến | Giá trị Kaggle mặc định |
 | --- | --- |
 | `OLLAMA_CHAT_MODEL` | `qwen-tutor` |
+| `OLLAMA_GENERATION_MODELS` | Comma-separated UI allowlist; include `qwen-tutor` first |
+| `OLLAMA_DEFAULT_GENERATION_MODEL` | `qwen-tutor` (the only required generation model at startup) |
+| `PRELOAD_ALL_MODELS` | `false` (set `true` only for benchmarking all allowed models) |
 | `OLLAMA_EMBEDDING_MODEL` | `bge-m3` |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` |
 | `AI_TUTOR_DATA_DIR` | `<PROJECT_ROOT>/data` |
@@ -54,6 +57,8 @@ Local Windows tiếp tục dùng các mặc định trong `config.py`. Kaggle đ
 | `AI_TUTOR_DATABASE_PATH` | `<PROJECT_ROOT>/data/conversations.db` |
 
 Local và Kaggle phải sử dụng cùng embedding model `bge-m3`. Không được tái sử dụng ChromaDB được tạo bằng embedding model khác.
+
+Khi `PRELOAD_ALL_MODELS=false`, startup chỉ cài/kiểm tra default generation model và `bge-m3`; các model còn lại trong allowlist chỉ được tải khi người dùng chọn từ UI. Nếu Ollama đã được cài hoặc model đã cache, script sẽ bỏ qua cài đặt/tải lại.
 
 Kaggle ghi model vào marker `<AI_TUTOR_VECTORSTORE_DIR>/.embedding_model`. Nếu marker khác `bge-m3`, hoặc database có dữ liệu nhưng thiếu marker, script sẽ đổi tên ChromaDB cũ thành backup có timestamp, backup `indexed_files.json`, tạo database mới và index lại tài liệu. Cơ chế này từ chối chạy ngoài `/kaggle/working`, vì vậy không xóa hoặc đổi tên ChromaDB local trên Windows hay dữ liệu read-only trong `/kaggle/input`. Có thể đặt `REBUILD_CHROMA_ON_EMBEDDING_CHANGE=0` để dừng với lỗi thay vì tự backup/rebuild.
 

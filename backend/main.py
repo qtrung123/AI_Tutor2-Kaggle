@@ -4,6 +4,7 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 import httpx
 from pydantic import BaseModel, Field
 
@@ -34,6 +35,7 @@ from backend.conversation_store import (
     update_conversation_title,
 )
 from backend.rag_service import answer_conversation_message, list_uploaded_sources
+from backend.model_registry import list_generation_models, prepare_generation_model, resolve_generation_model
 from config import AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE, AUTH_SESSION_DAYS, CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL
 from backend.auth_store import (
     authenticate_user,
@@ -59,6 +61,7 @@ class ConversationSourcesRequest(BaseModel):
 
 class ConversationMessageRequest(BaseModel):
     message: str = Field(min_length=1)
+    model_id: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
@@ -140,6 +143,8 @@ class QuizGenerateRequest(BaseModel):
 class QuizRegenerateRequest(BaseModel):
     """Request body for POST /api/quiz/{document_id}/regenerate."""
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
+    model_id: Optional[str] = None
+    model_id: Optional[str] = None
     assessment_scope: str = Field(pattern="^(topic|document)$")
     topic_id: Optional[str] = None
 
@@ -348,6 +353,21 @@ def service_health() -> ServiceHealthResponse:
         )
 
 
+@app.get("/api/models")
+def models(current_user: dict = Depends(require_current_user)) -> dict:
+    return {"models": list_generation_models()}
+
+
+@app.post("/api/models/{model_id}/prepare")
+def prepare_model(model_id: str, current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        return prepare_generation_model(model_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=503, detail=f"Could not prepare model: {error}") from error
+
+
 @app.get("/api/sources", response_model=list[SourceSummary])
 def sources(current_user: dict = Depends(require_current_user)) -> list[SourceSummary]:
     """
@@ -362,6 +382,20 @@ def sources(current_user: dict = Depends(require_current_user)) -> list[SourceSu
             status_code=500,
             detail=f"Could not load uploaded sources. Original error: {error}",
         ) from error
+
+
+@app.get("/api/sources/{document_id}/content")
+def source_content(document_id: str, current_user: dict = Depends(require_current_user)) -> FileResponse:
+    """Serve one owned original upload for the Study Session document viewer."""
+    source = next((item for item in list_uploaded_sources(current_user["id"]) if item["title"] == document_id), None)
+    if not source:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    path = Path(source["path"]).resolve()
+    owner_dir = (DATA_DIR / "users" / current_user["id"]).resolve()
+    if owner_dir not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail="Original upload is unavailable.")
+    media_type = "application/pdf" if path.suffix.lower() == ".pdf" else "text/plain; charset=utf-8"
+    return FileResponse(path, media_type=media_type, filename=path.name, content_disposition_type="inline")
 
 
 @app.post("/api/sources/upload", response_model=UploadResponse)
@@ -548,6 +582,7 @@ def quiz_generate(request: QuizGenerateRequest, current_user: dict = Depends(req
             assessment_scope=request.assessment_scope,
             topic_id=request.topic_id,
             owner_id=current_user["id"],
+            model_id=resolve_generation_model(request.model_id),
         )
         return QuizGenerateResponse(**result)
     except ValueError as error:
@@ -626,6 +661,7 @@ def quiz_regenerate(document_id: str, request: QuizRegenerateRequest, current_us
             topic_id=request.topic_id,
             regenerate=True,
             owner_id=current_user["id"],
+            model_id=resolve_generation_model(getattr(request, "model_id", None)),
         )
         return QuizGenerateResponse(**result)
     except ValueError as error:
@@ -761,7 +797,7 @@ def conversation_message(conversation_id: str, request: ConversationMessageReque
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message is required.")
     try:
-        return answer_conversation_message(current_user["id"], conversation_id, request.message)
+        return answer_conversation_message(current_user["id"], conversation_id, request.message, request.model_id)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except Exception as error:

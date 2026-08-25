@@ -1,9 +1,6 @@
 const pageTitles = {
-  overview: "Learning dashboard",
-  tutor: "Learn with your AI tutor",
-  materials: "Course Materials",
-  practice: "Practice",
-  plan: "Study Plan"
+  overview: "Study sessions",
+  session: "Study Session"
 };
 
 const API_BASE_URL = (
@@ -30,6 +27,7 @@ const QUIZ_HISTORY_API_URL = apiUrl("/api/quiz-history");
 const DASHBOARD_API_URL = apiUrl("/api/dashboard");
 const KNOWLEDGE_GAPS_API_URL = apiUrl("/api/knowledge-gaps");
 const RECOMMENDATIONS_API_URL = apiUrl("/api/recommendations");
+const MODELS_API_URL = apiUrl("/api/models");
 const RECOMMENDATIONS_OVERVIEW_LIMIT = Number(window.APP_CONFIG?.RECOMMENDATIONS_OVERVIEW_LIMIT || 4);
 
 const initialState = {
@@ -57,6 +55,9 @@ let recommendations = [];
 let currentUser = null;
 let authMode = "login";
 let activeConversation = null;
+let generationModels = [];
+let selectedModelId = localStorage.getItem("aiTutorModelId") || "";
+let activeDocumentId = "";
 
 const navItems = document.querySelectorAll(".nav-item");
 const views = document.querySelectorAll(".view");
@@ -97,7 +98,7 @@ const conversationSourceList = document.getElementById("conversation-source-list
 const applyConversationSourcesButton = document.getElementById("apply-conversation-sources-button");
 const chatConversationTitle = document.getElementById("chat-conversation-title");
 const chatSourceSummary = document.getElementById("chat-source-summary");
-const tutorLayout = document.querySelector(".tutor-layout");
+const tutorLayout = document.getElementById("persistent-tutor");
 const toggleConversationSourcesButton = document.getElementById("toggle-conversation-sources-button");
 const closeConversationSourcesButton = document.getElementById("close-conversation-sources-button");
 const sourcesDrawerBackdrop = document.getElementById("sources-drawer-backdrop");
@@ -116,6 +117,20 @@ const sidebarTopicProgress = document.getElementById("sidebar-topic-progress");
 const sidebarTopicStatus = document.getElementById("sidebar-topic-status");
 const practiceMasteryPanel = document.getElementById("practice-mastery-panel");
 const practiceMasteryList = document.getElementById("practice-mastery-list");
+const sessionDocumentName = document.getElementById("session-document-name");
+const sessionDocumentStatus = document.getElementById("session-document-status");
+const sessionMaterialDetails = document.getElementById("session-material-details");
+const sessionTopicList = document.getElementById("session-topic-list");
+const sessionMasteryList = document.getElementById("session-mastery-list");
+const sessionCoverageList = document.getElementById("session-coverage-list");
+const sessionKnowledgeGapsList = document.getElementById("session-knowledge-gaps-list");
+const sessionRecommendationsList = document.getElementById("session-recommendations-list");
+const assessmentControl = document.querySelector('[data-session-pane="quiz"] .assessment-control');
+let quizCreateDialog = null;
+const originalContentFrame = document.getElementById("original-content-frame");
+const originalContentFileName = document.getElementById("original-content-file-name");
+const originalContentOpen = document.getElementById("original-content-open");
+const originalContentEmpty = document.getElementById("original-content-empty");
 const authScreen = document.getElementById("auth-screen");
 const appShell = document.getElementById("app-shell");
 const authForm = document.getElementById("auth-form");
@@ -132,6 +147,10 @@ const logoutButton = document.getElementById("logout-button");
 const profileDisplayName = document.getElementById("profile-display-name");
 const profileEmail = document.getElementById("profile-email");
 const profileAvatar = document.getElementById("profile-avatar");
+const homeGreeting = document.getElementById("home-greeting");
+const sessionSearchInput = document.getElementById("session-search-input");
+const sessionSortSelect = document.getElementById("session-sort-select");
+const sidebarRecentDocuments = document.getElementById("sidebar-recent-documents");
 
 function setAuthMode(mode) {
   authMode = mode;
@@ -155,6 +174,7 @@ function showAuthenticatedShell(user) {
   profileDisplayName.textContent = user.display_name;
   profileEmail.textContent = user.email;
   profileAvatar.textContent = (user.display_name || user.email || "U").trim().charAt(0).toUpperCase();
+  if (homeGreeting) homeGreeting.textContent = `Hello, ${user.display_name || "there"}!`;
 }
 
 function showAuthentication() {
@@ -216,13 +236,109 @@ function showToast(message) {
 }
 
 function setPage(page) {
-  if (page !== "tutor") closeSourcesDrawer();
+  if (page !== "session") closeSourcesDrawer();
   state.page = page;
   document.body.dataset.page = page;
-  navItems.forEach((item) => item.classList.toggle("active", item.dataset.page === page));
+  navItems.forEach((item, index) => item.classList.toggle("active", item.dataset.page === page && (page !== "overview" || index === 0)));
   views.forEach((view) => view.classList.toggle("active", view.id === `${page}-view`));
   pageTitle.textContent = pageTitles[page];
-  showToast(`Opened ${pageTitles[page]}`);
+  if (pageTitles[page]) showToast(`Opened ${pageTitles[page]}`);
+}
+
+async function loadGenerationModels() {
+  try {
+    const data = await fetchJson(MODELS_API_URL);
+    generationModels = data.models || [];
+    if (!generationModels.some((model) => model.id === selectedModelId)) selectedModelId = generationModels.find((model) => model.default)?.id || generationModels[0]?.id || "";
+    renderModelSelector();
+  } catch (error) { generationModels = []; }
+}
+
+function renderModelSelector() {
+  const header = document.querySelector(".session-header");
+  if (!header || !generationModels.length) return;
+  let select = document.getElementById("generation-model-select");
+  if (!select) {
+    const label = document.createElement("label"); label.className = "generation-model-control"; label.textContent = "Model:";
+    select = document.createElement("select"); select.id = "generation-model-select"; label.appendChild(select); header.appendChild(label);
+    select.addEventListener("change", async () => {
+      selectedModelId = select.value; localStorage.setItem("aiTutorModelId", selectedModelId);
+      select.disabled = true;
+      try { await fetchJson(`${MODELS_API_URL}/${encodeURIComponent(selectedModelId)}/prepare`, { method: "POST" }); showToast("Model ready"); }
+      catch (error) { showToast(error.message || "Model is still preparing"); }
+      finally { select.disabled = false; }
+    });
+  }
+  select.innerHTML = "";
+  generationModels.forEach((model) => select.add(new Option(model.label, model.id, false, model.id === selectedModelId)));
+}
+
+function setSessionTab(tab) {
+  document.querySelectorAll(".session-tab").forEach((button) => button.classList.toggle("active", button.dataset.sessionTab === tab));
+  document.querySelectorAll(".session-pane").forEach((pane) => pane.classList.toggle("active", pane.dataset.sessionPane === tab));
+  document.getElementById("persistent-tutor").hidden = false;
+}
+
+async function openStudySession(documentId, tab = "material", topicId = "") {
+  const documentItem = indexedDocuments.find((item) => item.id === documentId);
+  if (!documentItem) return;
+  activeDocumentId = documentId;
+  const sessionBreadcrumb = document.getElementById("session-home-button");
+  if (sessionBreadcrumb) sessionBreadcrumb.textContent = `Home > ${documentItem.title}`;
+  if (activeConversation && !activeConversation.document_ids?.includes(documentId)) {
+    try {
+      activeConversation = await fetchJson(`${CONVERSATIONS_API_URL}/${activeConversation.id}/sources`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_ids: [documentId] })
+      });
+      conversations = conversations.map((conversation) => conversation.id === activeConversation.id ? activeConversation : conversation);
+      renderConversationList();
+      renderConversationSources();
+      updateConversationHeader();
+    } catch (error) {
+      showToast(error.message || "Could not scope the tutor to this document");
+    }
+  }
+  sessionDocumentName.textContent = documentItem.title;
+  const matchingMaterial = (dashboardData?.materials || []).find((item) => item.document_id === documentId);
+  const assessed = matchingMaterial?.assessed_topic_count || 0;
+  sessionDocumentStatus.textContent = `${documentItem.topics?.length || 0} extracted topics · ${assessed} assessed`;
+  const contentUrl = apiUrl(`/api/sources/${encodeURIComponent(documentId)}/content`);
+  originalContentFileName.textContent = documentItem.title;
+  originalContentOpen.href = contentUrl;
+  originalContentFrame.src = `${contentUrl}#view=FitH`;
+  originalContentFrame.hidden = false;
+  originalContentEmpty.hidden = true;
+  sessionMaterialDetails.innerHTML = `<dl><div><dt>Document</dt><dd>${documentItem.title}</dd></div><div><dt>Indexed content</dt><dd>${documentItem.chunks || 0} chunks available for AI Tutor and quizzes</dd></div></dl>`;
+  sessionTopicList.innerHTML = "";
+  (documentItem.topics || []).forEach((topic) => { const item = document.createElement("div"); item.className = "mastery-card"; item.innerHTML = `<strong>${topic.name}</strong><span>Ready for assessment</span>`; sessionTopicList.appendChild(item); });
+  if (!documentItem.topics?.length) sessionTopicList.innerHTML = '<div class="empty-state">No extracted topics are available yet.</div>';
+  if (quizDocumentSelect) quizDocumentSelect.value = documentId;
+  updateTopicOptions();
+  if (topicId && topicId !== "document") { quizScopeSelect.value = "topic"; quizTopicSelect.value = topicId; }
+  else quizScopeSelect.value = "document";
+  updateAssessmentScope();
+  await loadSelectedQuiz();
+  renderSessionProgress(documentId);
+  setPage("session");
+  setSessionTab(tab);
+}
+
+function renderSessionProgress(documentId) {
+  const assessed = (dashboardData?.mastery || []).filter((item) => item.document_id === documentId && item.mastery_level !== "Not assessed");
+  renderMasteryList(sessionMasteryList, assessed, { emptyText: "No assessed topics yet. Use Quiz to begin building mastery." });
+  sessionCoverageList.innerHTML = "";
+  if (!assessed.length) sessionCoverageList.innerHTML = '<div class="empty-state">Concept coverage appears after an assessment.</div>';
+  assessed.forEach((item) => { const card = document.createElement("div"); card.className = "mastery-card"; card.innerHTML = `<strong>${item.topic_name || item.topic_id}</strong><span>${item.concept_coverage || "Coverage is pending"}</span>`; sessionCoverageList.appendChild(card); });
+  const gaps = knowledgeGaps.filter((item) => item.document_id === documentId);
+  sessionKnowledgeGapsList.innerHTML = "";
+  if (!gaps.length) sessionKnowledgeGapsList.innerHTML = '<div class="empty-state">No reliable knowledge gaps detected.</div>';
+  gaps.forEach((gap) => { const item = document.createElement("div"); item.className = "knowledge-gap-row"; item.textContent = `${gap.topic_name || gap.topic_id} · ${gap.reason || "Needs more practice"}`; sessionKnowledgeGapsList.appendChild(item); });
+  const next = recommendations.filter((item) => item.document_id === documentId);
+  sessionRecommendationsList.innerHTML = "";
+  if (!next.length) sessionRecommendationsList.innerHTML = '<div class="empty-state">Recommendations will appear as learning evidence grows.</div>';
+  next.forEach((recommendation) => { const button = document.createElement("button"); button.className = "continue-item"; button.type = "button"; button.textContent = recommendation.action || recommendation.topic_name; button.addEventListener("click", () => openStudySession(documentId, "quiz", recommendation.topic_id)); sessionRecommendationsList.appendChild(button); });
 }
 
 function setSourcesDrawerOpen(isOpen) {
@@ -487,7 +603,8 @@ async function requestTutorAnswer(userText) {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      message: userText
+      message: userText,
+      model_id: selectedModelId || null
     })
   });
 
@@ -895,14 +1012,47 @@ function dashboardAction(label, page, className = "continue-item", onClick = nul
   return button;
 }
 
+function applySessionLibraryFilters() {
+  const query = (sessionSearchInput?.value || "").trim().toLowerCase();
+  const rows = [...overviewMaterialsList.querySelectorAll(".study-session-card")];
+  rows.forEach((row) => { row.hidden = Boolean(query && !row.dataset.title.includes(query)); });
+  const sortMode = sessionSortSelect?.value || "name";
+  rows.sort((a, b) => sortMode === "topics"
+    ? Number(b.dataset.topicCount || 0) - Number(a.dataset.topicCount || 0)
+    : a.dataset.title.localeCompare(b.dataset.title)
+  ).forEach((row) => overviewMaterialsList.appendChild(row));
+}
+
+function renderSidebarRecentDocuments(materials) {
+  if (!sidebarRecentDocuments) return;
+  sidebarRecentDocuments.innerHTML = "";
+  if (!materials.length) {
+    sidebarRecentDocuments.innerHTML = '<span class="sidebar-empty">No documents yet</span>';
+    return;
+  }
+  materials.slice(0, 5).forEach((material) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "sidebar-recent-item";
+    button.textContent = material.document_name;
+    button.addEventListener("click", () => openStudySession(material.document_id));
+    sidebarRecentDocuments.appendChild(button);
+  });
+}
+
 function renderDashboard() {
   if (!dashboardData) return;
   const metrics = dashboardData.metrics || {};
+  const documentCount = Number(metrics.documents || 0);
+  const totalTopics = Number(metrics.total_topics || 0);
+  const assessedTopics = Number(metrics.topics_assessed || 0);
+  const masteredTopics = Number(metrics.topics_mastered || 0);
+  const completedAnswers = Number(metrics.answered_questions || 0);
   const kpis = [
-    ["Documents", String(metrics.documents || 0), metrics.documents ? "Indexed and available" : "No indexed materials"],
-    ["Topics assessed", `${metrics.topics_assessed || 0} / ${metrics.total_topics || 0}`, metrics.total_topics ? "Based on completed answers" : "No extracted topics"],
-    ["Quiz accuracy", metrics.quiz_accuracy == null ? "—" : `${Math.round(metrics.quiz_accuracy)}%`, metrics.answered_questions ? `${metrics.answered_questions} completed answers` : "No completed answers"],
-    ["Topics mastered", String(metrics.topics_mastered || 0), metrics.topics_assessed ? "Mastery evidence available" : "No assessed topics"],
+    ["Learning materials", String(documentCount), `${documentCount} active learning material${documentCount === 1 ? "" : "s"}`],
+    ["Topics assessed", `${assessedTopics} / ${totalTopics}`, totalTopics ? "Across all learning materials" : "No extracted topics yet"],
+    ["Overall accuracy", metrics.quiz_accuracy == null ? "—" : `${Math.round(metrics.quiz_accuracy)}%`, `${completedAnswers} completed answer${completedAnswers === 1 ? "" : "s"}`],
+    ["Topics mastered", `${masteredTopics} / ${totalTopics}`, totalTopics ? "Across all learning materials" : "No extracted topics yet"],
   ];
   overviewKpis.innerHTML = "";
   kpis.forEach(([label, value, note]) => {
@@ -919,7 +1069,13 @@ function renderDashboard() {
   const topicPercent = metrics.total_topics ? Math.round(100 * metrics.topics_assessed / metrics.total_topics) : 0;
   sidebarTopicProgress.style.width = `${topicPercent}%`;
   sidebarTopicStatus.textContent = metrics.total_topics ? `${metrics.topics_assessed} of ${metrics.total_topics} topics assessed` : "Add a document to begin";
-  renderMasteryList(overviewMasteryList, (dashboardData.mastery || []).slice(0, 8), { showDocument: true });
+  const overviewMasteries = (dashboardData.mastery || [])
+    .filter((mastery) => mastery.mastery_level !== "Not assessed")
+    .slice(0, 8);
+  renderMasteryList(overviewMasteryList, overviewMasteries, {
+    showDocument: true,
+    emptyText: "No assessed topics yet. Complete a quiz to see mastery progress.",
+  });
 
   const latest = dashboardData.latest_attempt;
   if (latest) {
@@ -960,14 +1116,22 @@ function renderDashboard() {
   if (!materials.length) {
     const empty = document.createElement("div"); empty.className = "empty-state"; empty.textContent = "No indexed documents yet."; overviewMaterialsList.appendChild(empty);
   } else {
-    materials.slice(0, 5).forEach((material) => {
-      const row = document.createElement("article"); row.className = "overview-material-row";
+    materials.forEach((material) => {
+      const row = document.createElement("article"); row.className = "study-session-card";
+      row.dataset.title = (material.document_name || "").toLowerCase();
+      row.dataset.topicCount = String(material.topic_count || 0);
       const copy = document.createElement("div"); const title = document.createElement("strong"); title.textContent = material.document_name;
-      const meta = document.createElement("span"); meta.textContent = `${material.topic_count} topics · ${material.assessed_topic_count} assessed · Indexed`;
-      copy.append(title, meta); const action = document.createElement("button"); action.className = "text-button"; action.type = "button"; action.textContent = "Practice";
-      action.addEventListener("click", () => openPracticeContext(material.document_id)); row.append(copy, action); overviewMaterialsList.appendChild(row);
+      const meta = document.createElement("span"); meta.textContent = `${material.topic_count} topics · ${material.assessed_topic_count} assessed`;
+      const gapCount = knowledgeGaps.filter((gap) => gap.document_id === material.document_id).length;
+      const gap = document.createElement("small"); gap.textContent = `${gapCount} knowledge gap${gapCount === 1 ? "" : "s"}`;
+      copy.append(title, meta, gap); const action = document.createElement("button"); action.className = "text-button"; action.type = "button"; action.textContent = "Open session →";
+      action.addEventListener("click", () => openStudySession(material.document_id));
+      row.addEventListener("click", (event) => { if (!event.target.closest("button")) openStudySession(material.document_id); });
+      row.append(copy, action); overviewMaterialsList.appendChild(row);
     });
   }
+  renderSidebarRecentDocuments(materials);
+  applySessionLibraryFilters();
   renderRecommendations();
 }
 
@@ -1018,6 +1182,8 @@ async function loadKnowledgeGaps() {
     knowledgeGaps = [];
   }
   renderKnowledgeGaps();
+  renderDashboard();
+  if (activeDocumentId) renderSessionProgress(activeDocumentId);
 }
 
 function renderRecommendations() {
@@ -1054,6 +1220,7 @@ async function loadRecommendations() {
   try { recommendations = await fetchJson(RECOMMENDATIONS_API_URL); }
   catch (error) { recommendations = []; }
   renderRecommendations();
+  if (activeDocumentId) renderSessionProgress(activeDocumentId);
 }
 
 function selectedAssessmentScope() {
@@ -1200,7 +1367,8 @@ async function requestGeneratedQuiz() {
       document_id: quizDocumentSelect.value,
       assessment_scope: selectedAssessmentScope(),
       topic_id: selectedAssessmentScope() === "topic" ? selectedTopicId() : null,
-      difficulty: selectedDifficulty()
+      difficulty: selectedDifficulty(),
+      model_id: selectedModelId || null
     })
   });
 
@@ -1243,7 +1411,8 @@ async function requestQuizRegeneration(documentId) {
     body: JSON.stringify({
       difficulty: selectedDifficulty(),
       assessment_scope: selectedAssessmentScope(),
-      topic_id: selectedAssessmentScope() === "topic" ? selectedTopicId() : null
+      topic_id: selectedAssessmentScope() === "topic" ? selectedTopicId() : null,
+      model_id: selectedModelId || null
     })
   });
   if (!response.ok) {
@@ -1367,7 +1536,10 @@ function renderQuizHistory() {
     date.textContent = attempt.completed_at
       ? new Date(attempt.completed_at).toLocaleString()
       : "Completion time unavailable";
-    info.append(title, date);
+    const scope = document.createElement("span");
+    scope.className = "quiz-history-scope";
+    scope.textContent = attempt.topic_name || (attempt.topic_id && attempt.topic_id !== "document" ? attempt.topic_id : "Entire document");
+    info.append(title, scope, date);
 
     const score = document.createElement("div");
     score.className = "quiz-history-score";
@@ -1491,6 +1663,7 @@ async function generateAssessmentQuiz() {
     quizQuestionIndex = 0;
     await loadQuizStatuses();
     updateDifficultyOptions();
+    closeQuizCreateDialog();
     renderAssessmentQuiz();
     showToast("Quiz ready");
   } catch (error) {
@@ -1566,6 +1739,10 @@ function renderPracticeMastery() {
 }
 
 function renderAssessmentQuiz() {
+  const quizPane = document.querySelector('[data-session-pane="quiz"]');
+  quizPane?.classList.toggle("quiz-active", Boolean(currentQuiz?.questions?.length));
+  quizPane?.classList.toggle("quiz-landing", !currentQuiz?.questions?.length);
+  updateQuizLandingLayout();
   quizList.innerHTML = "";
   assessmentTitle.textContent = currentQuiz
     ? `${currentQuiz.questions.length} ${currentQuiz.difficulty} questions from ${currentQuiz.document_id}`
@@ -1788,7 +1965,19 @@ function resetApp() {
 }
 
 navItems.forEach((item) => {
-  item.addEventListener("click", () => setPage(item.dataset.page));
+  item.addEventListener("click", () => {
+    if (item.dataset.page) setPage(item.dataset.page);
+  });
+});
+
+document.getElementById("session-home-button")?.addEventListener("click", () => setPage("overview"));
+document.querySelectorAll(".session-tab, [data-session-tab]").forEach((button) => {
+  button.addEventListener("click", () => setSessionTab(button.dataset.sessionTab));
+});
+document.getElementById("session-tutor-toggle")?.addEventListener("click", () => {
+  const panel = document.getElementById("persistent-tutor");
+  panel.hidden = !panel.hidden;
+  document.getElementById("session-tutor-toggle").setAttribute("aria-expanded", String(!panel.hidden));
 });
 
 document.querySelectorAll("[data-page-target]").forEach((button) => {
@@ -1799,6 +1988,8 @@ chatForm.addEventListener("submit", handleChatSubmit);
 resetButton.addEventListener("click", resetApp);
 uploadSourceButton.addEventListener("click", () => sourceFileInput.click());
 sourceFileInput.addEventListener("change", () => uploadSourceFiles(sourceFileInput.files));
+sessionSearchInput?.addEventListener("input", applySessionLibraryFilters);
+sessionSortSelect?.addEventListener("change", applySessionLibraryFilters);
 newConversationButton.addEventListener("click", createChatConversation);
 applyConversationSourcesButton.addEventListener("click", applyConversationSources);
 toggleConversationSourcesButton.addEventListener("click", () => {
@@ -1865,9 +2056,54 @@ async function initializeChatWorkspace() {
   }
 }
 
+function updateQuizLandingLayout() {
+  const pane = document.querySelector('[data-session-pane="quiz"]');
+  if (!pane) return;
+  let header = pane.querySelector(".quiz-landing-header");
+  if (!header) {
+    header = document.createElement("div");
+    header.className = "quiz-landing-header";
+    header.innerHTML = '<div><h2>Quiz</h2><p>Test your understanding of this material.</p></div>';
+    const create = document.createElement("button");
+    create.className = "primary-button";
+    create.type = "button";
+    create.textContent = "+ Create Quiz";
+    create.addEventListener("click", openQuizCreateDialog);
+    header.appendChild(create);
+    pane.insertBefore(header, pane.firstChild);
+  }
+  header.hidden = Boolean(currentQuiz?.questions?.length);
+  const historyTitle = pane.querySelector(".quiz-history-panel h2");
+  if (historyTitle) historyTitle.textContent = "Your Quizzes";
+  if (assessmentControl) assessmentControl.hidden = !currentQuiz?.questions?.length;
+}
+
+function openQuizCreateDialog() {
+  if (!assessmentControl) return;
+  if (!quizCreateDialog) {
+    quizCreateDialog = document.createElement("div");
+    quizCreateDialog.className = "quiz-create-dialog";
+    quizCreateDialog.innerHTML = '<div class="quiz-create-dialog-card" role="dialog" aria-modal="true" aria-labelledby="quiz-create-title"><div class="quiz-dialog-heading"><div><h2 id="quiz-create-title">Create a Quiz</h2><p>Choose how you want to assess this material.</p></div><button class="text-button quiz-dialog-cancel" type="button">Cancel</button></div><div class="quiz-dialog-fields"></div></div>';
+    quizCreateDialog.querySelector(".quiz-dialog-cancel").addEventListener("click", closeQuizCreateDialog);
+    quizCreateDialog.addEventListener("click", (event) => { if (event.target === quizCreateDialog) closeQuizCreateDialog(); });
+    document.body.appendChild(quizCreateDialog);
+  }
+  quizCreateDialog.querySelector(".quiz-dialog-fields").appendChild(assessmentControl);
+  assessmentControl.hidden = false;
+  quizCreateDialog.classList.add("open");
+}
+
+function closeQuizCreateDialog() {
+  if (!quizCreateDialog || !assessmentControl) return;
+  const shell = document.querySelector('[data-session-pane="quiz"] .assessment-shell');
+  shell?.insertBefore(assessmentControl, shell.firstChild);
+  assessmentControl.hidden = true;
+  quizCreateDialog.classList.remove("open");
+}
+
 async function initializeApplication() {
   await initializeChatWorkspace();
-  await Promise.all([loadIndexedDocuments(), loadQuizHistory(), loadDashboard(), loadKnowledgeGaps(), loadRecommendations()]);
+  await Promise.all([loadIndexedDocuments(), loadQuizHistory(), loadDashboard(), loadKnowledgeGaps(), loadRecommendations(), loadGenerationModels()]);
 }
 
 async function bootstrapAuthentication() {

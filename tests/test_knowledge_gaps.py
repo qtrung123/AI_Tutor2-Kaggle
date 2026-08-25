@@ -130,8 +130,9 @@ class KnowledgeGapTests(unittest.TestCase):
         script = Path("frontend/app.js").read_text(encoding="utf-8")
         self.assertIn('id="overview-knowledge-gaps-list"', markup)
         self.assertIn('/api/knowledge-gaps', script)
-        gap_panel = markup.split('class="panel knowledge-gaps-panel"', 1)[1].split("</article>", 1)[0]
-        self.assertNotIn("recommendation", gap_panel.lower())
+        # Knowledge gaps are now presented per Study Session Progress view, not
+        # as a standalone Overview panel; API wiring remains the contract here.
+        self.assertNotIn('class="panel knowledge-gaps-panel"', markup)
 
 
 if __name__ == "__main__":

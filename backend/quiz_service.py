@@ -585,6 +585,7 @@ def _generate_quiz_batch(
     concept_name: str = "",
     assessment_capacity: int = 0,
     owner_id: str = LEGACY_USER_ID,
+    model_id: str = CHAT_MODEL,
 ) -> list[dict]:
     accepted_questions: list[dict] = []
     generation_errors: list[str] = []
@@ -654,7 +655,7 @@ def _generate_quiz_batch(
             {"easy": 0.6, "medium": 0.75, "difficult": 0.85},
         )
         llm = ChatOllama(
-            model=CHAT_MODEL,
+            model=model_id,
             temperature=temperatures[min(attempt_index, len(temperatures) - 1)][difficulty],
             format="json",
             num_ctx=num_ctx,
@@ -772,6 +773,7 @@ def generate_quiz(
     topic_id: str | None = None,
     regenerate: bool = False,
     owner_id: str = LEGACY_USER_ID,
+    model_id: str = CHAT_MODEL,
 ) -> dict:
     """
     Generate or load the persistent quiz for one indexed document.
@@ -872,6 +874,7 @@ def generate_quiz(
                     concept_name=concept_label,
                     assessment_capacity=topic_plan["assessment_capacity"],
                     owner_id=owner_id,
+                    model_id=model_id,
                 )
             except Exception as error:
                 warning = f"Skipped concept {concept['concept_id']} ({concept_label}): {error}"
