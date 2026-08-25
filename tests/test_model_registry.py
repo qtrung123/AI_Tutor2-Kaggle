@@ -11,6 +11,21 @@ class ModelRegistryTests(unittest.TestCase):
             "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M",
         )
 
+    def test_local_qwen_3b_public_id_resolves_to_installed_runtime_reference(self):
+        with patch.object(model_registry, "GENERATION_MODELS", ("qwen-2.5-3b",)):
+            self.assertEqual(
+                model_registry.resolve_generation_model("qwen-2.5-3b"),
+                "hf.co/Qwen/Qwen2.5-3B-Instruct-GGUF:Q4_K_M",
+            )
+
+    @patch("backend.model_registry._is_installed", return_value=True)
+    def test_local_qwen_3b_model_list_exposes_only_public_data(self, _installed):
+        with patch.object(model_registry, "GENERATION_MODELS", ("qwen-2.5-3b",)), patch.object(
+            model_registry, "DEFAULT_GENERATION_MODEL", "qwen-2.5-3b"
+        ):
+            model = model_registry.list_generation_models()[0]
+        self.assertEqual(model, {"id": "qwen-2.5-3b", "label": "Qwen 2.5 3B", "default": True, "ready": True})
+
     @patch("backend.model_registry._is_installed", return_value=True)
     def test_models_return_only_public_data(self, _installed):
         model = model_registry.list_generation_models()[0]
@@ -33,4 +48,3 @@ class ModelRegistryTests(unittest.TestCase):
             "http://127.0.0.1:11434/api/pull",
             json={"name": "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M", "stream": False},
         )
-

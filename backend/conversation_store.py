@@ -75,6 +75,19 @@ def initialize_conversation_store() -> None:
             connection.execute(
                 f"ALTER TABLE conversations ADD COLUMN owner_id TEXT NOT NULL DEFAULT '{LEGACY_USER_ID}'"
             )
+        if "document_id" not in columns:
+            connection.execute("ALTER TABLE conversations ADD COLUMN document_id TEXT")
+        connection.execute(
+            """
+            UPDATE conversations
+            SET document_id = (
+                SELECT cs.document_id FROM conversation_sources cs
+                WHERE cs.conversation_id = conversations.id
+                ORDER BY cs.document_id LIMIT 1
+            )
+            WHERE document_id IS NULL
+            """
+        )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_conversations_owner ON conversations(owner_id, updated_at)"
         )
@@ -88,20 +101,33 @@ def _source_ids(connection: sqlite3.Connection, conversation_id: str) -> list[st
     return [row["document_id"] for row in rows]
 
 
+def _conversation_result(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
+    item = dict(row)
+    document_id = item.get("document_id")
+    item["document_ids"] = [document_id] if document_id else _source_ids(connection, row["id"])
+    return item
+
+
 def create_conversation(owner_id: str, title: str = "New conversation", document_ids: list[str] | None = None) -> dict:
     initialize_conversation_store()
+    unique_document_ids = list(dict.fromkeys(document_ids or []))
+    if len(unique_document_ids) != 1:
+        raise ValueError("A Study Session conversation requires exactly one document.")
+    document_id = unique_document_ids[0]
+    existing = get_conversation_for_document(owner_id, document_id)
+    if existing:
+        return get_conversation(owner_id, existing["id"], include_messages=True)
     conversation_id = str(uuid4())
     timestamp = _now()
     with _connect() as connection:
         connection.execute(
-            "INSERT INTO conversations (id, title, created_at, updated_at, owner_id) VALUES (?, ?, ?, ?, ?)",
-            (conversation_id, title.strip() or "New conversation", timestamp, timestamp, owner_id),
+            "INSERT INTO conversations (id, title, created_at, updated_at, owner_id, document_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (conversation_id, title.strip() or "New conversation", timestamp, timestamp, owner_id, document_id),
         )
-        for document_id in dict.fromkeys(document_ids or []):
-            connection.execute(
-                "INSERT INTO conversation_sources (conversation_id, document_id) VALUES (?, ?)",
-                (conversation_id, document_id),
-            )
+        connection.execute(
+            "INSERT INTO conversation_sources (conversation_id, document_id) VALUES (?, ?)",
+            (conversation_id, document_id),
+        )
     return get_conversation(owner_id, conversation_id, include_messages=True)
 
 
@@ -112,9 +138,19 @@ def list_conversations(owner_id: str) -> list[dict]:
             "SELECT * FROM conversations WHERE owner_id = ? ORDER BY updated_at DESC", (owner_id,)
         ).fetchall()
         return [
-            {**dict(row), "document_ids": _source_ids(connection, row["id"])}
+            _conversation_result(connection, row)
             for row in rows
         ]
+
+
+def get_conversation_for_document(owner_id: str, document_id: str) -> dict | None:
+    initialize_conversation_store()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM conversations WHERE owner_id = ? AND document_id = ? ORDER BY created_at LIMIT 1",
+            (owner_id, document_id),
+        ).fetchone()
+        return _conversation_result(connection, row) if row else None
 
 
 def get_conversation(owner_id: str, conversation_id: str, include_messages: bool = True) -> dict:
@@ -125,7 +161,7 @@ def get_conversation(owner_id: str, conversation_id: str, include_messages: bool
         ).fetchone()
         if row is None:
             raise ValueError("Conversation not found.")
-        result = {**dict(row), "document_ids": _source_ids(connection, conversation_id)}
+        result = _conversation_result(connection, row)
         if include_messages:
             messages = connection.execute(
                 "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at",
@@ -155,16 +191,22 @@ def update_conversation_title(owner_id: str, conversation_id: str, title: str) -
 
 
 def set_conversation_sources(owner_id: str, conversation_id: str, document_ids: list[str]) -> dict:
-    get_conversation(owner_id, conversation_id, include_messages=False)
+    unique_document_ids = list(dict.fromkeys(document_ids))
+    if len(unique_document_ids) != 1:
+        raise ValueError("A Study Session conversation requires exactly one document.")
+    current = get_conversation(owner_id, conversation_id, include_messages=False)
+    if current.get("document_id") and current["document_id"] != unique_document_ids[0]:
+        raise ValueError("A Study Session conversation cannot be reassigned to another document.")
+    document_id = unique_document_ids[0]
     with _connect() as connection:
         connection.execute("DELETE FROM conversation_sources WHERE conversation_id = ?", (conversation_id,))
-        for document_id in dict.fromkeys(document_ids):
-            connection.execute(
-                "INSERT INTO conversation_sources (conversation_id, document_id) VALUES (?, ?)",
-                (conversation_id, document_id),
-            )
         connection.execute(
-            "UPDATE conversations SET updated_at = ? WHERE id = ?", (_now(), conversation_id)
+            "INSERT INTO conversation_sources (conversation_id, document_id) VALUES (?, ?)",
+            (conversation_id, document_id),
+        )
+        connection.execute(
+            "UPDATE conversations SET document_id = ?, updated_at = ? WHERE id = ?",
+            (document_id, _now(), conversation_id),
         )
     return get_conversation(owner_id, conversation_id, include_messages=True)
 

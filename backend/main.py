@@ -738,6 +738,8 @@ def mastery_recompute(request: MasteryRecomputeRequest, current_user: dict = Dep
 
 
 def _validate_conversation_document_ids(owner_id: str, document_ids: list[str]) -> None:
+    if len(set(document_ids)) != 1:
+        raise HTTPException(status_code=400, detail="A Study Session conversation requires exactly one document.")
     available = {source["title"] for source in list_uploaded_sources(owner_id)}
     missing = sorted(set(document_ids) - available)
     if missing:

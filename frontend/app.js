@@ -67,6 +67,7 @@ const toast = document.getElementById("toast");
 const messageList = document.getElementById("message-list");
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
+chatInput.placeholder = "Ask AI assistant...";
 const confidenceLabel = document.getElementById("confidence-label");
 const confidenceBar = document.getElementById("confidence-bar");
 const confidencePill = document.getElementById("confidence-pill");
@@ -103,6 +104,9 @@ const toggleConversationSourcesButton = document.getElementById("toggle-conversa
 const closeConversationSourcesButton = document.getElementById("close-conversation-sources-button");
 const sourcesDrawerBackdrop = document.getElementById("sources-drawer-backdrop");
 const conversationSourcesPanel = document.getElementById("conversation-sources-panel");
+// Keep the source control in the Tutor footer while retaining the existing IDs/handlers.
+tutorLayout.insertBefore(toggleConversationSourcesButton, conversationSourcesPanel);
+setSourcesDrawerOpen(false);
 const overviewKpis = document.getElementById("overview-kpis");
 const overviewMasteryList = document.getElementById("overview-mastery-list");
 const continueLearningList = document.getElementById("continue-learning-list");
@@ -285,20 +289,11 @@ async function openStudySession(documentId, tab = "material", topicId = "") {
   activeDocumentId = documentId;
   const sessionBreadcrumb = document.getElementById("session-home-button");
   if (sessionBreadcrumb) sessionBreadcrumb.textContent = `Home > ${documentItem.title}`;
-  if (activeConversation && !activeConversation.document_ids?.includes(documentId)) {
-    try {
-      activeConversation = await fetchJson(`${CONVERSATIONS_API_URL}/${activeConversation.id}/sources`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ document_ids: [documentId] })
-      });
-      conversations = conversations.map((conversation) => conversation.id === activeConversation.id ? activeConversation : conversation);
-      renderConversationList();
-      renderConversationSources();
-      updateConversationHeader();
-    } catch (error) {
-      showToast(error.message || "Could not scope the tutor to this document");
-    }
+  try {
+    await ensureStudySessionConversation();
+  } catch (error) {
+    console.error("Could not prepare the Study Session conversation", error);
+    showToast(error.message || "Could not scope the tutor to this document");
   }
   sessionDocumentName.textContent = documentItem.title;
   const matchingMaterial = (dashboardData?.materials || []).find((item) => item.document_id === documentId);
@@ -347,7 +342,7 @@ function setSourcesDrawerOpen(isOpen) {
   conversationSourcesPanel.setAttribute("aria-hidden", String(!isOpen));
   if (isOpen) {
     renderConversationSources();
-    closeConversationSourcesButton.focus();
+    conversationSourcesPanel.querySelector("input, button")?.focus({ preventScroll: true });
   }
 }
 
@@ -455,12 +450,12 @@ function appendMessageMeta(messageElement, status, citations = []) {
     badge.textContent = status === "supported" ? "Grounded" : "Insufficient context";
     meta.appendChild(badge);
   }
-  citations.forEach((citation) => {
+  if (citations.length) {
     const cite = document.createElement("span");
-    const title = citation.title || citation.document_id || "Unknown source";
-    cite.textContent = `${title} · p.${citation.page || "?"}`;
+    cite.className = "citation-count";
+    cite.textContent = `${citations.length} citation${citations.length === 1 ? "" : "s"}`;
     meta.appendChild(cite);
-  });
+  }
   bubble.appendChild(meta);
 }
 
@@ -594,17 +589,19 @@ function getFallbackAnswer() {
 }
 
 async function requestTutorAnswer(userText) {
-  if (!activeConversation?.id) {
-    throw new Error("Create or select a conversation first.");
-  }
-  const response = await fetch(`${CONVERSATIONS_API_URL}/${activeConversation.id}/messages`, {
+  const conversation = await ensureStudySessionConversation();
+  const modelId = await ensureSelectedModelReady();
+
+  const response = await fetch(`${CONVERSATIONS_API_URL}/${conversation.id}/messages`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
       message: userText,
-      model_id: selectedModelId || null
+      // This is the registry's safe public ID (for example qwen-2.5-7b),
+      // never the Ollama/Hugging Face runtime reference.
+      model_id: modelId
     })
   });
 
@@ -644,6 +641,14 @@ function renderConversationSources() {
     return;
   }
   const selected = new Set(activeConversation?.document_ids || []);
+  const citationsByTitle = new Map();
+  (activeConversation?.messages || []).forEach((message) => {
+    (message.citations || []).forEach((citation) => {
+      const title = citation.title || citation.document_id || "Unknown source";
+      if (!citationsByTitle.has(title)) citationsByTitle.set(title, []);
+      citationsByTitle.get(title).push(citation);
+    });
+  });
   uploadedSources.forEach((source) => {
     const label = document.createElement("label");
     label.className = "conversation-source-option";
@@ -652,9 +657,17 @@ function renderConversationSources() {
     checkbox.value = source.title;
     checkbox.checked = selected.has(source.title);
     const text = document.createElement("span");
-    text.innerHTML = `<strong></strong><small></small>`;
+    text.innerHTML = `<strong></strong><small></small><span class="source-citation-details"></span>`;
     text.querySelector("strong").textContent = source.title;
     text.querySelector("small").textContent = `${source.chunks} chunks`;
+    const details = text.querySelector(".source-citation-details");
+    const citations = citationsByTitle.get(source.title) || [];
+    const unique = [...new Set(citations.map((citation) => {
+      const page = citation.page ? `Page ${citation.page}` : "Page unavailable";
+      const chunk = citation.chunk ?? citation.chunk_id;
+      return chunk !== undefined && chunk !== null ? `${page} · Chunk ${chunk}` : page;
+    }))];
+    details.textContent = unique.length ? unique.join(" · ") : "Available to this session";
     label.append(checkbox, text);
     conversationSourceList.appendChild(label);
   });
@@ -705,10 +718,10 @@ function renderConversationMessages() {
 }
 
 function updateConversationHeader() {
-  chatConversationTitle.textContent = activeConversation?.title || "New conversation";
+  chatConversationTitle.textContent = activeConversation?.title || "Current session";
   const count = activeConversation?.document_ids?.length || 0;
-  chatSourceSummary.textContent = count ? `Grounded in ${count} selected document(s)` : "No source selected";
-  toggleConversationSourcesButton.textContent = count ? `Sources (${count})` : "Choose sources";
+  chatSourceSummary.textContent = count ? "Grounded to selected material" : "Select material to ground answers";
+  toggleConversationSourcesButton.textContent = `Sources (${count})`;
 }
 
 async function openConversation(conversationId) {
@@ -726,7 +739,8 @@ async function openConversation(conversationId) {
 
 async function createChatConversation() {
   try {
-    const documentIds = uploadedSources.map((source) => source.title);
+    const documentItem = getActiveStudySessionDocument();
+    const documentIds = [documentItem.id];
     const created = await fetchJson(CONVERSATIONS_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -758,7 +772,10 @@ async function deleteChatConversation(conversationId) {
 async function loadConversations() {
   conversations = await fetchJson(CONVERSATIONS_API_URL);
   if (!conversations.length) {
-    await createChatConversation();
+    activeConversation = null;
+    renderConversationList();
+    renderConversationMessages();
+    updateConversationHeader();
     return;
   }
   const savedId = currentUser ? localStorage.getItem(`activeConversationId:${currentUser.id}`) : null;
@@ -797,7 +814,10 @@ async function handleChatSubmit(event) {
   addMessage(userText, "user");
   chatInput.value = "";
   chatInput.disabled = true;
-  chatForm.querySelector("button[type='submit']").disabled = true;
+  const submitButton = chatForm.querySelector("button");
+  submitButton.disabled = true;
+  chatForm.classList.add("is-sending");
+  submitButton.textContent = "Sending";
   const loadingRow = addMessage("Tutoring is retrieving your course materials and asking the local model...", "tutor", true);
 
   try {
@@ -813,11 +833,14 @@ async function handleChatSubmit(event) {
   } catch (error) {
     loadingRow.remove();
     const detail = error.message || "Backend request failed.";
+    console.error("AI Tutor message submission failed", error);
     addMessage(`I could not reach the RAG answer right now.\n\n${detail}\n\nCheck that FastAPI is running with the project virtual environment and Ollama is still running.`, "tutor");
     showToast("RAG request failed");
   } finally {
     chatInput.disabled = false;
-    chatForm.querySelector("button[type='submit']").disabled = false;
+    submitButton.disabled = false;
+    chatForm.classList.remove("is-sending");
+    submitButton.textContent = "Send";
     chatInput.focus();
   }
 }
@@ -934,6 +957,57 @@ function selectedDifficulty() {
 
 function selectedTopicId() {
   return selectedAssessmentScope() === "document" ? "document" : (quizTopicSelect?.value || "");
+}
+
+function getActiveStudySessionDocument() {
+  const documentItem = indexedDocuments.find((item) => item.id === activeDocumentId);
+  if (!documentItem) {
+    throw new Error("Open a Study Session before asking the AI Tutor.");
+  }
+  return documentItem;
+}
+
+async function ensureStudySessionConversation() {
+  const documentItem = getActiveStudySessionDocument();
+  const documentIds = [documentItem.id];
+  const existing = conversations.find((conversation) =>
+    conversation.document_id === documentItem.id ||
+    (conversation.document_ids?.length === 1 && conversation.document_ids[0] === documentItem.id)
+  );
+
+  if (existing) {
+    if (activeConversation?.id !== existing.id) await openConversation(existing.id);
+    return activeConversation;
+  }
+
+  if (!activeConversation?.id || activeConversation.document_id !== documentItem.id) {
+    const created = await fetchJson(CONVERSATIONS_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "New conversation", document_ids: documentIds })
+    });
+    conversations.unshift(created);
+    await openConversation(created.id);
+    return activeConversation;
+  }
+  return activeConversation;
+}
+
+async function ensureSelectedModelReady() {
+  if (!generationModels.length) await loadGenerationModels();
+  const model = generationModels.find((item) => item.id === selectedModelId);
+  if (!model || !selectedModelId) {
+    throw new Error("No available AI model is selected. Refresh the page and try again.");
+  }
+  if (!model.ready) {
+    try {
+      await fetchJson(`${MODELS_API_URL}/${encodeURIComponent(model.id)}/prepare`, { method: "POST" });
+      model.ready = true;
+    } catch (error) {
+      throw new Error(error.message || `The selected model (${model.label}) could not be prepared.`);
+    }
+  }
+  return model.id;
 }
 
 function masteryLevelClass(level) {

@@ -174,8 +174,8 @@ def answer_conversation_message(owner_id: str, conversation_id: str, message: st
     if conversation["title"] == "New conversation" and not existing_messages:
         update_conversation_title(owner_id, conversation_id, message.strip()[:64])
 
-    document_ids = conversation.get("document_ids", [])
-    if not document_ids:
+    document_id = conversation.get("document_id")
+    if not document_id:
         answer = "I don't know based on the provided documents. Select at least one material for this conversation."
         assistant_message = add_message(
             owner_id, conversation_id, "assistant", answer, "insufficient_context", []
@@ -193,7 +193,12 @@ def answer_conversation_message(owner_id: str, conversation_id: str, message: st
         item["content"] for item in existing_messages[-4:] if item["role"] == "user"
     )
     retrieval_query = f"{recent_user_text}\n{message}".strip()
-    docs = _retrieve_conversation_docs(owner_id, retrieval_query, document_ids)
+    docs = _retrieve_conversation_docs(owner_id, retrieval_query, [document_id])
+    docs = [
+        doc for doc in docs
+        if (getattr(doc, "metadata", {}) or {}).get("owner_id") == owner_id
+        and (getattr(doc, "metadata", {}) or {}).get("document_id") == document_id
+    ]
     if not docs:
         answer = "I don't know based on the provided documents."
         citations = []

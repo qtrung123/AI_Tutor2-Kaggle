@@ -30,7 +30,10 @@ function sendFile(response, filePath) {
 
     const extension = path.extname(filePath).toLowerCase();
     response.writeHead(200, {
-      "Content-Type": mimeTypes[extension] || "application/octet-stream"
+      "Content-Type": mimeTypes[extension] || "application/octet-stream",
+      // This server is used for the local development workspace. Do not let a
+      // browser keep an old app.js after a frontend fix has been made.
+      "Cache-Control": "no-store, max-age=0"
     });
     response.end(content);
   });

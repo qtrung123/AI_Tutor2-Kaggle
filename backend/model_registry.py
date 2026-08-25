@@ -1,10 +1,17 @@
 """Public model IDs mapped to allowlisted Ollama runtime references."""
+import os
+
 import httpx
 from config import CHAT_MODEL, DEFAULT_GENERATION_MODEL, GENERATION_MODELS, OLLAMA_BASE_URL
 
 QWEN_OLLAMA_MODEL = "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"
+QWEN_3B_OLLAMA_MODEL = os.getenv(
+    "OLLAMA_QWEN_3B_MODEL",
+    "hf.co/Qwen/Qwen2.5-3B-Instruct-GGUF:Q4_K_M",
+)
 _BUILT_INS = {
     "qwen-2.5-7b": {"id": "qwen-2.5-7b", "label": "Qwen 2.5 7B", "ollama_model": QWEN_OLLAMA_MODEL},
+    "qwen-2.5-3b": {"id": "qwen-2.5-3b", "label": "Qwen 2.5 3B", "ollama_model": QWEN_3B_OLLAMA_MODEL},
 }
 
 

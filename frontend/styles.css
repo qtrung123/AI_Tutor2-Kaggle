@@ -2154,6 +2154,172 @@ body[data-page="session"] .persistent-tutor.sources-open .conversation-sources-c
 body[data-page="session"] .persistent-tutor.sources-open .sources-drawer-backdrop { opacity: 1; pointer-events: auto; }
 body[data-page="session"] .persistent-tutor .conversation-source-list { min-width: 0; overflow-y: auto; overflow-x: hidden; }
 
+/* Compact Study Session AI Tutor, inspired by focused assistant workspaces. */
+body[data-page="session"] .persistent-tutor {
+  gap: 0;
+  padding: 0;
+  border: 1px solid #e5e8f2;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 10px 30px rgba(38, 46, 82, .07);
+}
+body[data-page="session"] .persistent-tutor .tutor-chat-header {
+  order: 1;
+  display: flex;
+  min-width: 0;
+  padding: 16px 18px 13px;
+  border-bottom: 1px solid #edf0f6;
+}
+body[data-page="session"] .persistent-tutor .tutor-chat-header > div { display: block; min-width: 0; }
+body[data-page="session"] .persistent-tutor .tutor-chat-header .eyebrow {
+  margin: 0 0 3px;
+  color: #252c43;
+  font-size: 17px;
+  font-weight: 750;
+  letter-spacing: -.01em;
+  text-transform: none;
+}
+body[data-page="session"] .persistent-tutor .tutor-chat-header h2 {
+  margin: 0;
+  overflow: hidden;
+  color: #65708a;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body[data-page="session"] .persistent-tutor #chat-source-summary {
+  display: block;
+  margin-top: 2px;
+  color: #9299aa;
+  font-size: 11px;
+}
+body[data-page="session"] .persistent-tutor .message-list {
+  order: 2;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 14px;
+  padding: 18px 16px 12px;
+  border-radius: 0;
+  background: #fbfbfd;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd0e8 transparent;
+}
+body[data-page="session"] .persistent-tutor .agent-row {
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 9px;
+}
+body[data-page="session"] .persistent-tutor .agent-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  background: #6875ed;
+  font-size: 9px;
+}
+body[data-page="session"] .persistent-tutor .message {
+  width: fit-content;
+  max-width: 88%;
+  padding: 10px 12px;
+  border-radius: 14px;
+  font-size: 14px;
+  line-height: 1.58;
+}
+body[data-page="session"] .persistent-tutor .agent-row .message { max-width: 100%; }
+body[data-page="session"] .persistent-tutor .tutor-message { border-color: #e8eaf1; box-shadow: 0 2px 8px rgba(35, 43, 72, .035); }
+body[data-page="session"] .persistent-tutor .user-message { border-bottom-right-radius: 5px; background: #6977f3; }
+body[data-page="session"] .persistent-tutor .message-body p { margin-bottom: 9px; }
+body[data-page="session"] .persistent-tutor .message-body li { margin-bottom: 5px; }
+body[data-page="session"] .persistent-tutor .message-grounding {
+  gap: 5px;
+  margin-top: 8px;
+  padding-top: 7px;
+  border-color: #edf0f4;
+}
+body[data-page="session"] .persistent-tutor .message-grounding > span { padding: 2px 6px; font-size: 10px; }
+body[data-page="session"] .persistent-tutor .sources-toggle-button {
+  order: 3;
+  position: relative;
+  width: calc(100% - 32px);
+  margin: 8px 16px 0;
+  padding: 9px 34px 9px 12px;
+  border: 1px solid #e0e3ed;
+  border-radius: 11px;
+  background: #f7f8fc;
+  color: #5a6480;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: left;
+}
+body[data-page="session"] .persistent-tutor .sources-toggle-button::after {
+  content: "⌄";
+  position: absolute;
+  right: 12px;
+  transition: transform .18s ease;
+}
+body[data-page="session"] .persistent-tutor.sources-open .sources-toggle-button::after { transform: rotate(180deg); }
+body[data-page="session"] .persistent-tutor .conversation-sources-card {
+  order: 4;
+  position: static;
+  display: none;
+  width: auto;
+  max-height: 210px;
+  margin: 6px 16px 0;
+  padding: 10px;
+  border-radius: 11px;
+  box-shadow: none;
+  opacity: 1;
+  overflow: hidden;
+  pointer-events: auto;
+  transform: none;
+}
+body[data-page="session"] .persistent-tutor.sources-open .conversation-sources-card { display: flex; transform: none; }
+body[data-page="session"] .persistent-tutor .sources-drawer-header h2 { font-size: 13px; }
+body[data-page="session"] .persistent-tutor .sources-close-button { width: 25px; height: 25px; border-radius: 7px; font-size: 16px; }
+body[data-page="session"] .persistent-tutor .conversation-source-list { gap: 6px; margin: 8px 0; }
+body[data-page="session"] .persistent-tutor .conversation-source-option { gap: 8px; padding: 8px; border-radius: 9px; font-size: 11px; }
+body[data-page="session"] .persistent-tutor .conversation-source-option small { margin-top: 2px; }
+body[data-page="session"] .persistent-tutor .source-citation-details { display: block; margin-top: 3px; color: #7e879d; font-size: 10px; line-height: 1.35; }
+body[data-page="session"] .persistent-tutor #apply-conversation-sources-button { min-height: 30px; padding: 6px 10px; font-size: 11px; }
+body[data-page="session"] .persistent-tutor .sources-drawer-backdrop { display: none; }
+body[data-page="session"] .persistent-tutor .chat-form {
+  order: 5;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 16px 14px;
+  border: 0;
+  background: #fff;
+}
+body[data-page="session"] .persistent-tutor .chat-form input {
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 14px;
+  border: 1px solid #dfe3ee;
+  border-radius: 999px;
+  background: #f8f9fc;
+  color: #252c43;
+  font: inherit;
+  font-size: 13px;
+}
+body[data-page="session"] .persistent-tutor .chat-form input:focus { border-color: #7b86f4; box-shadow: 0 0 0 3px rgba(105,119,243,.12); }
+body[data-page="session"] .persistent-tutor .chat-form .primary-button {
+  width: 38px;
+  min-height: 38px;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 50%;
+  font-size: 0;
+}
+body[data-page="session"] .persistent-tutor .chat-form .primary-button::after { content: "↑"; font-size: 19px; line-height: 1; }
+body[data-page="session"] .persistent-tutor .chat-form.is-sending .primary-button::after { content: "…"; animation: loadingDots 1.2s steps(4,end) infinite; }
+
+@media (max-width: 1050px) {
+  body[data-page="session"] .persistent-tutor { width: 100%; max-width: 100%; }
+}
+
 /* Quiz tab: landing configuration or focused assessment, never both. */
 body[data-page="session"] [data-session-pane="quiz"] { max-width: 100%; }
 body[data-page="session"] [data-session-pane="quiz"] .assessment-shell { display: grid; gap: 14px; }
