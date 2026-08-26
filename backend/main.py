@@ -19,7 +19,9 @@ from backend.quiz_service import (
     list_quiz_statuses,
     load_quiz_with_attempt,
     load_completed_quiz_attempt,
+    load_quiz_for_retake,
     update_quiz_progress,
+    submit_quiz_attempt,
     build_learning_dashboard,
 )
 from backend.quiz_store import delete_document_quiz_data
@@ -183,6 +185,13 @@ class QuizQuestion(BaseModel):
     difficulty: str
     explanation: str
     source_chunk_ids: list[str]
+
+
+class QuizSubmitRequest(BaseModel):
+    quiz_id: Optional[str] = None
+    difficulty: str = Field(pattern="^(easy|medium|difficult)$")
+    topic_id: str
+    answers: dict[str, str]
 
 
 class QuizGenerateResponse(BaseModel):
@@ -545,6 +554,15 @@ def quiz_history_detail(attempt_id: str, current_user: dict = Depends(require_cu
         raise HTTPException(status_code=404, detail=str(error)) from error
 
 
+@app.get("/api/quiz-history/{attempt_id}/retake")
+def quiz_history_retake(attempt_id: str, current_user: dict = Depends(require_current_user)) -> dict:
+    """Load the exact persisted quiz, including inactive and migrated legacy quizzes."""
+    try:
+        return load_quiz_for_retake(attempt_id, current_user["id"])
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
 @app.get("/api/quiz/{document_id}")
 def quiz_detail(
     document_id: str, topic_id: str, difficulty: str = "easy",
@@ -620,6 +638,24 @@ def quiz_progress(document_id: str, request: QuizProgressRequest, current_user: 
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Could not save quiz progress: {error}") from error
+
+
+@app.post("/api/quiz/{document_id}/submit")
+def quiz_submit(document_id: str, request: QuizSubmitRequest, current_user: dict = Depends(require_current_user)) -> dict:
+    """Grade one complete set of answers and persist a new immutable attempt."""
+    try:
+        return submit_quiz_attempt(
+            document_id=document_id,
+            difficulty=request.difficulty,
+            topic_id=request.topic_id,
+            answers=request.answers,
+            student_id=current_user["id"],
+            quiz_id=request.quiz_id,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Could not submit quiz: {error}") from error
 
 
 @app.delete("/api/quiz/{document_id}/progress")

@@ -221,6 +221,8 @@ def initialize_quiz_store() -> None:
             "quiz_attempts": {
                 "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
                 "student_id": "TEXT NOT NULL DEFAULT 'local_student'",
+                "attempt_number": "INTEGER NOT NULL DEFAULT 0",
+                "percentage": "REAL NOT NULL DEFAULT 0",
             },
             "quiz_attempt_answers": {
                 "question_difficulty": "TEXT NOT NULL DEFAULT 'easy'",
@@ -230,6 +232,8 @@ def initialize_quiz_store() -> None:
                 "concept_id": "TEXT NOT NULL DEFAULT ''",
                 "assessment_capacity": "INTEGER NOT NULL DEFAULT 0",
                 "evidence_requirement_version": "TEXT NOT NULL DEFAULT 'question_count_v1'",
+                "explanation": "TEXT NOT NULL DEFAULT ''",
+                "source_chunk_ids_json": "TEXT NOT NULL DEFAULT '[]'",
             },
             "topic_mastery": {
                 "assessment_capacity": "INTEGER NOT NULL DEFAULT 0",
@@ -273,6 +277,28 @@ def initialize_quiz_store() -> None:
                     'document'
                 )
                 """
+            )
+        if ("quiz_attempts", "attempt_number") in added_columns:
+            connection.execute(
+                """
+                UPDATE quiz_attempts AS current
+                SET attempt_number = (
+                    SELECT COUNT(*) FROM quiz_attempts AS earlier
+                    WHERE earlier.student_id = current.student_id
+                      AND earlier.quiz_id = current.quiz_id
+                      AND earlier.completed = 1
+                      AND (COALESCE(earlier.completed_at, earlier.submitted_at, earlier.updated_at) <
+                           COALESCE(current.completed_at, current.submitted_at, current.updated_at)
+                           OR (COALESCE(earlier.completed_at, earlier.submitted_at, earlier.updated_at) =
+                               COALESCE(current.completed_at, current.submitted_at, current.updated_at)
+                               AND earlier.attempt_id <= current.attempt_id))
+                )
+                WHERE current.completed = 1
+                """
+            )
+        if ("quiz_attempts", "percentage") in added_columns:
+            connection.execute(
+                "UPDATE quiz_attempts SET percentage = CASE WHEN total > 0 THEN ROUND(100.0 * score / total, 2) ELSE 0 END"
             )
         connection.executescript(
             """
@@ -460,6 +486,17 @@ def get_quiz(document_id: str, difficulty: str, topic_id: str = LEGACY_TOPIC_ID,
         return _row_to_quiz(connection, row) if row else None
 
 
+def get_quiz_by_id(quiz_id: str, owner_id: str = LEGACY_USER_ID) -> dict | None:
+    """Load an active or historical persisted quiz by its immutable id."""
+    initialize_quiz_store()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM quizzes WHERE quiz_id = ? AND owner_id = ?",
+            (quiz_id, owner_id),
+        ).fetchone()
+        return _row_to_quiz(connection, row) if row else None
+
+
 def save_quiz(document_id: str, difficulty: str, quiz: dict, owner_id: str = LEGACY_USER_ID) -> dict:
     initialize_quiz_store()
     with _connect() as connection:
@@ -503,6 +540,8 @@ def _row_to_attempt(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
             "concept_id": answer["concept_id"],
             "assessment_capacity": answer["assessment_capacity"],
             "evidence_requirement_version": answer["evidence_requirement_version"],
+            "explanation": answer["explanation"],
+            "source_chunk_ids": json.loads(answer["source_chunk_ids_json"] or "[]"),
         }
         for answer in answer_rows
     ]
@@ -520,6 +559,8 @@ def _row_to_attempt(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
         "answered": row["answered"],
         "total": row["total"],
         "completed": bool(row["completed"]),
+        "attempt_number": int(row["attempt_number"]),
+        "percentage": float(row["percentage"]),
         "answers": answers,
         "question_results": question_results,
     }
@@ -578,8 +619,8 @@ def _save_attempt_row(
         INSERT INTO quiz_attempts (
             attempt_id, quiz_id, document_id, difficulty, started_at,
             completed_at, submitted_at, updated_at, score, answered,
-            total, completed, is_latest, topic_id, student_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            total, completed, is_latest, topic_id, student_id, attempt_number, percentage
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(attempt_id) DO UPDATE SET
             quiz_id = excluded.quiz_id,
             completed_at = excluded.completed_at,
@@ -589,7 +630,9 @@ def _save_attempt_row(
             answered = excluded.answered,
             total = excluded.total,
             completed = excluded.completed,
-            is_latest = excluded.is_latest
+            is_latest = excluded.is_latest,
+            attempt_number = excluded.attempt_number,
+            percentage = excluded.percentage
         """,
         (
             attempt_id,
@@ -607,6 +650,8 @@ def _save_attempt_row(
             int(is_latest),
             topic_id,
             student_id,
+            int(progress.get("attempt_number", 0)),
+            float(progress.get("percentage", 0)),
         ),
     )
     connection.execute("DELETE FROM quiz_attempt_answers WHERE attempt_id = ?", (attempt_id,))
@@ -619,8 +664,9 @@ def _save_attempt_row(
                 attempt_id, question_id, question, options_json,
                 selected_answer, correct_answer, is_correct
                 , question_difficulty, validation_outcome, topic_id, topic_name,
-                concept_id, assessment_capacity, evidence_requirement_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                concept_id, assessment_capacity, evidence_requirement_version,
+                explanation, source_chunk_ids_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 attempt_id,
@@ -637,6 +683,8 @@ def _save_attempt_row(
                 str(result.get("concept_id") or ""),
                 int(result.get("assessment_capacity") or 0),
                 str(result.get("evidence_requirement_version") or "concept_coverage_v1"),
+                str(result.get("explanation") or ""),
+                json.dumps(result.get("source_chunk_ids") or [], ensure_ascii=False),
             ),
         )
     return attempt_id
@@ -850,19 +898,45 @@ def list_completed_answer_snapshots(
     with _connect() as connection:
         rows = connection.execute(
             """
-            SELECT a.attempt_id, a.question_id, a.is_correct,
-                   a.question_difficulty, a.validation_outcome, a.topic_id,
-                   a.topic_name, a.concept_id, a.assessment_capacity,
-                   a.evidence_requirement_version
-            FROM quiz_attempt_answers a
-            JOIN quiz_attempts t ON t.attempt_id = a.attempt_id
-            WHERE t.student_id = ? AND t.document_id = ? AND a.topic_id = ?
-              AND t.completed = 1 AND t.submitted_at IS NOT NULL
-            ORDER BY COALESCE(t.submitted_at, t.completed_at), a.question_id
+            WITH ranked AS (
+                SELECT a.attempt_id, t.quiz_id, a.question_id, a.is_correct,
+                       a.question_difficulty, a.validation_outcome, a.topic_id,
+                       a.topic_name, a.concept_id, a.assessment_capacity,
+                       a.evidence_requirement_version,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY t.quiz_id, a.question_id
+                           ORDER BY COALESCE(t.submitted_at, t.completed_at) DESC, t.attempt_id DESC
+                       ) AS response_rank
+                FROM quiz_attempt_answers a
+                JOIN quiz_attempts t ON t.attempt_id = a.attempt_id
+                WHERE t.student_id = ? AND t.document_id = ? AND a.topic_id = ?
+                  AND t.completed = 1 AND t.submitted_at IS NOT NULL
+            )
+            SELECT * FROM ranked WHERE response_rank = 1
+            ORDER BY quiz_id, question_id
             """,
             (student_id, document_id, topic_id),
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def get_quiz_attempt_summary(quiz_id: str, student_id: str) -> dict:
+    initialize_quiz_store()
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT COUNT(*) AS attempts,
+                   COALESCE((SELECT percentage FROM quiz_attempts latest
+                             WHERE latest.quiz_id = ? AND latest.student_id = ? AND latest.completed = 1
+                             ORDER BY COALESCE(latest.completed_at, latest.submitted_at) DESC, latest.attempt_id DESC LIMIT 1), 0) AS latest_score,
+                   COALESCE(MAX(percentage), 0) AS best_score,
+                   COALESCE(ROUND(AVG(CASE WHEN total > 0 THEN 100.0 * score / total ELSE 0 END), 2), 0) AS average_score
+            FROM quiz_attempts
+            WHERE quiz_id = ? AND student_id = ? AND completed = 1
+            """,
+            (quiz_id, student_id, quiz_id, student_id),
+        ).fetchone()
+        return dict(row)
 
 
 def save_topic_mastery(result: dict) -> dict:
@@ -1012,6 +1086,22 @@ def get_quiz_history_attempt(attempt_id: str, student_id: str = LEGACY_USER_ID) 
         row = connection.execute(
             "SELECT * FROM quiz_attempts WHERE attempt_id = ? AND student_id = ? AND completed = 1",
             (attempt_id, student_id),
+        ).fetchone()
+        return _row_to_attempt(connection, row) if row else None
+
+
+def get_latest_completed_attempt_for_quiz(quiz_id: str, student_id: str = LEGACY_USER_ID) -> dict | None:
+    """Return a persisted answer snapshot usable when a migrated quiz row is absent."""
+    initialize_quiz_store()
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM quiz_attempts
+            WHERE quiz_id = ? AND student_id = ? AND completed = 1
+            ORDER BY COALESCE(completed_at, submitted_at, updated_at) DESC, attempt_id DESC
+            LIMIT 1
+            """,
+            (quiz_id, student_id),
         ).fetchone()
         return _row_to_attempt(connection, row) if row else None
 

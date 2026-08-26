@@ -12,8 +12,11 @@ from langchain_ollama import ChatOllama, OllamaEmbeddings
 from backend.quiz_store import (
     delete_document_attempts,
     get_latest_attempt,
+    get_latest_completed_attempt_for_quiz,
     get_quiz,
+    get_quiz_by_id,
     get_quiz_explanation,
+    get_quiz_attempt_summary,
     list_document_quizzes,
     list_completed_answer_snapshots,
     list_quiz_history as load_quiz_history,
@@ -1380,13 +1383,58 @@ def load_quiz_with_attempt(
     if difficulty not in QUIZ_DIFFICULTIES:
         raise ValueError("difficulty must be easy, medium, or difficult.")
 
+    quiz = get_quiz(document_id, difficulty, topic_id, student_id)
     return {
         "document_id": document_id,
         "difficulty": difficulty,
         "topic_id": topic_id,
-        "quiz": get_quiz(document_id, difficulty, topic_id, student_id),
+        "quiz": quiz,
         "latest_attempt": get_latest_attempt(document_id, difficulty, topic_id, student_id),
+        "attempt_summary": get_quiz_attempt_summary(quiz["quiz_id"], student_id) if quiz else None,
     }
+
+
+def _quiz_from_attempt_snapshot(attempt: dict) -> dict | None:
+    results = list(attempt.get("question_results") or [])
+    if not results or any(len(result.get("options") or []) != 4 for result in results):
+        return None
+    topic_id = str(attempt.get("topic_id") or "document")
+    questions = [{
+        "id": int(result["question_id"]), "question": result.get("question", ""),
+        "options": list(result.get("options") or []), "correct_answer": result.get("correct_answer", ""),
+        "topic_id": result.get("topic_id") or topic_id, "topic_name": result.get("topic_name", ""),
+        "concept_id": result.get("concept_id", ""), "concept_name": "",
+        "assessment_capacity": int(result.get("assessment_capacity") or 0),
+        "difficulty": result.get("question_difficulty") or attempt.get("difficulty", "easy"),
+        "explanation": result.get("explanation", ""),
+        "source_chunk_ids": list(result.get("source_chunk_ids") or []),
+        "validation_outcome": result.get("validation_outcome", "accepted"),
+    } for result in results]
+    return {
+        "quiz_id": attempt.get("quiz_id"), "document_id": attempt.get("document_id"),
+        "title": attempt.get("document_id"), "difficulty": attempt.get("difficulty", "easy"),
+        "topic_id": topic_id,
+        "topic_name": next((question["topic_name"] for question in questions if question["topic_name"]), ""),
+        "assessment_scope": "document" if topic_id == "document" else "topic",
+        "assessment_plan": {"planner_version": "persisted_attempt_snapshot", "total_questions": len(questions)},
+        "question_count": len(questions),
+        "created_at": attempt.get("started_at") or attempt.get("completed_at") or utc_now_iso(),
+        "questions": questions,
+    }
+
+
+def load_quiz_for_retake(attempt_id: str, student_id: str = LEGACY_USER_ID) -> dict:
+    """Resolve the exact persisted quiz behind a completed attempt."""
+    attempt = get_quiz_history_attempt(attempt_id, student_id)
+    if not attempt:
+        raise ValueError("Completed quiz attempt was not found.")
+    quiz_id = str(attempt.get("quiz_id") or "")
+    quiz = get_quiz_by_id(quiz_id, student_id) if quiz_id else None
+    if not quiz or not quiz.get("questions"):
+        quiz = _quiz_from_attempt_snapshot(attempt)
+    if not quiz or not quiz.get("questions"):
+        raise ValueError("The persisted quiz questions are no longer available.")
+    return {"quiz": quiz, "source_attempt_id": attempt_id, "attempt_summary": get_quiz_attempt_summary(quiz["quiz_id"], student_id)}
 
 
 def list_quiz_statuses(owner_id: str = LEGACY_USER_ID) -> list[dict]:
@@ -1507,6 +1555,83 @@ def update_quiz_progress(
     return saved
 
 
+def submit_quiz_attempt(
+    document_id: str,
+    difficulty: str,
+    topic_id: str,
+    answers: dict[str, str],
+    student_id: str = LEGACY_USER_ID,
+    quiz_id: str | None = None,
+) -> dict:
+    """Grade a complete answer set once and append a new attempt for the saved quiz."""
+    difficulty = difficulty.lower().strip()
+    quiz = get_quiz_by_id(quiz_id, student_id) if quiz_id else get_quiz(document_id, difficulty, topic_id, student_id)
+    if not quiz and quiz_id:
+        source_attempt = get_latest_completed_attempt_for_quiz(quiz_id, student_id)
+        quiz = _quiz_from_attempt_snapshot(source_attempt) if source_attempt else None
+    if not quiz:
+        raise ValueError("The persisted quiz questions are no longer available.")
+    if quiz.get("document_id") != document_id or quiz.get("difficulty") != difficulty or quiz.get("topic_id") != topic_id:
+        raise ValueError("The submitted quiz identity does not match its persisted questions.")
+    normalized_answers = {str(key): str(value).strip().upper() for key, value in answers.items()}
+    questions = list(quiz.get("questions") or [])
+    expected_ids = {str(question.get("id")) for question in questions}
+    if set(normalized_answers) != expected_ids:
+        raise ValueError("Every quiz question must be answered exactly once before submission.")
+    if any(answer not in OPTION_LETTERS for answer in normalized_answers.values()):
+        raise ValueError("Every selected answer must be A, B, C, or D.")
+
+    results = []
+    for question in questions:
+        question_id = str(question.get("id"))
+        correct_answer = str(question.get("correct_answer", "")).upper()
+        results.append({
+            "question_id": int(question_id),
+            "question": question.get("question", ""),
+            "options": list(question.get("options", [])),
+            "selected_answer": normalized_answers[question_id],
+            "correct_answer": correct_answer,
+            "is_correct": normalized_answers[question_id] == correct_answer,
+            "question_difficulty": question.get("difficulty", difficulty),
+            "validation_outcome": question.get("validation_outcome", "accepted"),
+            "topic_id": question.get("topic_id", topic_id),
+            "topic_name": question.get("topic_name", ""),
+            "concept_id": question.get("concept_id", ""),
+            "assessment_capacity": int(question.get("assessment_capacity") or 0),
+            "evidence_requirement_version": "concept_coverage_v1",
+            "explanation": question.get("explanation", ""),
+            "source_chunk_ids": list(question.get("source_chunk_ids") or []),
+        })
+    score = sum(int(result["is_correct"]) for result in results)
+    total = len(results)
+    summary = get_quiz_attempt_summary(quiz["quiz_id"], student_id)
+    now = utc_now_iso()
+    saved = save_quiz_progress(document_id, difficulty, {
+        "attempt_id": str(uuid4()),
+        "quiz_id": quiz["quiz_id"],
+        "started_at": now,
+        "completed_at": now,
+        "submitted_at": now,
+        "score": score,
+        "answered": total,
+        "total": total,
+        "completed": True,
+        "attempt_number": int(summary["attempts"]) + 1,
+        "percentage": round(100.0 * score / total, 2) if total else 0,
+        "answers": normalized_answers,
+        "question_results": results,
+    }, topic_id, student_id)
+    represented_topics = sorted({str(result["topic_id"]) for result in results if result.get("topic_id")})
+    saved["mastery_by_topic"] = {
+        represented_topic: recompute_topic_mastery(student_id, document_id, represented_topic)
+        for represented_topic in represented_topics
+    }
+    if len(represented_topics) == 1:
+        saved["mastery"] = saved["mastery_by_topic"][represented_topics[0]]
+    saved["attempt_summary"] = get_quiz_attempt_summary(quiz["quiz_id"], student_id)
+    return saved
+
+
 def list_completed_quiz_attempts(
     document_id: str | None = None,
     difficulty: str | None = None,
@@ -1523,9 +1648,12 @@ def list_completed_quiz_attempts(
                 "quiz_id": attempt.get("quiz_id"),
                 "document_id": attempt.get("document_id"),
                 "difficulty": attempt.get("difficulty", "medium"),
+                "topic_id": attempt.get("topic_id") or "document",
+                "topic_name": next((result.get("topic_name") for result in attempt.get("question_results", []) if result.get("topic_name")), ""),
                 "score": score,
                 "total": total,
                 "percentage": round((score / total) * 100) if total else 0,
+                "attempt_number": attempt.get("attempt_number", 0),
                 "completed_at": attempt.get("completed_at") or attempt.get("submitted_at"),
             }
         )
@@ -1543,7 +1671,7 @@ def build_learning_dashboard(student_id: str = LEGACY_USER_ID) -> dict:
                 "student_id": student_id,
                 "document_id": document["id"],
                 "topic_id": topic["topic_id"],
-                **calculate_mastery(history, len({row["attempt_id"] for row in history})),
+                **calculate_mastery(history, len({row["quiz_id"] for row in history})),
             }
             mastery_rows.append({
                 **mastery,

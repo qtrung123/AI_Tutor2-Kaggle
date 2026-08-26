@@ -105,7 +105,7 @@ def calculate_mastery(answer_rows: list[dict], completed_attempts: int = 0) -> d
 
 def recompute_topic_mastery(student_id: str, document_id: str, topic_id: str) -> dict:
     history = list_completed_answer_snapshots(student_id, document_id, topic_id)
-    attempt_ids = {row["attempt_id"] for row in history}
+    attempt_ids = {row["quiz_id"] for row in history}
     result = {
         "student_id": student_id,
         "document_id": document_id,

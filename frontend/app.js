@@ -45,6 +45,7 @@ let quizStatuses = [];
 let currentQuiz = null;
 let quizAnswers = {};
 let currentAttempt = null;
+let quizAttemptSummary = null;
 let quizExplanations = {};
 let quizHistory = [];
 let quizQuestionIndex = 0;
@@ -83,7 +84,14 @@ const quizDifficultySelect = document.getElementById("quiz-difficulty-select");
 let quizQuestionCountSelect = document.getElementById("quiz-question-count-select");
 const generateQuizButton = document.getElementById("generate-quiz-button");
 const resetQuizButton = document.getElementById("reset-quiz-button");
+resetQuizButton.textContent = "Retake Quiz";
 const newQuizButton = document.getElementById("new-quiz-button");
+const reviewQuizButton = document.createElement("button");
+reviewQuizButton.className = "text-button";
+reviewQuizButton.type = "button";
+reviewQuizButton.textContent = "Review Answers";
+reviewQuizButton.hidden = true;
+resetQuizButton.before(reviewQuizButton);
 const quizProgressLabel = document.getElementById("quiz-progress-label");
 const quizAccuracyLabel = document.getElementById("quiz-accuracy-label");
 const quizProgressBar = document.getElementById("quiz-progress-bar");
@@ -925,11 +933,11 @@ async function uploadSourceFiles(files) {
 function updateAssessmentSummary() {
   const total = currentQuiz?.questions?.length || 0;
   const answered = Object.values(quizAnswers).filter(Boolean).length;
-  const score = currentAttempt?.score ?? 0;
-  const accuracy = answered ? Math.round((score / answered) * 100) : 0;
   const percentage = total ? Math.round((answered / total) * 100) : 0;
-  quizProgressLabel.textContent = `${answered} / ${total}`;
-  quizAccuracyLabel.textContent = answered ? `Score ${score}/${answered} · Accuracy ${accuracy}%` : "Not started";
+  quizProgressLabel.textContent = `${answered} / ${total} answered`;
+  quizAccuracyLabel.textContent = currentAttempt?.completed
+    ? `Attempt ${currentAttempt.attempt_number}: ${currentAttempt.score}/${currentAttempt.total} · ${Math.round(currentAttempt.percentage)}%`
+    : (answered ? `${answered} of ${total} selected` : "Not started");
   if (quizProgressBar) {
     quizProgressBar.style.width = `${percentage}%`;
     quizProgressBar.parentElement.setAttribute("aria-valuenow", String(percentage));
@@ -942,6 +950,7 @@ function updateAssessmentSummary() {
   if (resetQuizButton) {
     resetQuizButton.disabled = !hasQuiz;
   }
+  reviewQuizButton.hidden = !currentAttempt?.completed;
   if (newQuizButton) {
     newQuizButton.disabled = !hasQuiz;
   }
@@ -1541,6 +1550,25 @@ async function requestQuizProgress(questionId, selectedAnswer) {
   return response.json();
 }
 
+async function requestQuizSubmission() {
+  const response = await fetch(`${QUIZ_API_BASE_URL}/${encodeURIComponent(currentQuiz.document_id)}/submit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      difficulty: currentQuiz.difficulty,
+      topic_id: currentQuiz.topic_id,
+      quiz_id: currentQuiz.quiz_id,
+      answers: quizAnswers
+    })
+  });
+  if (!response.ok) {
+    let detail = `Submit API returned ${response.status}`;
+    try { detail = (await response.json()).detail || detail; } catch (error) { /* Keep HTTP status. */ }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
 async function requestQuizProgressReset() {
   const query = new URLSearchParams({ difficulty: currentQuiz.difficulty, topic_id: currentQuiz.topic_id });
   const response = await fetch(
@@ -1599,6 +1627,16 @@ async function requestQuizHistoryDetail(attemptId) {
   return response.json();
 }
 
+async function requestQuizForRetake(attemptId) {
+  const response = await fetch(`${QUIZ_HISTORY_API_URL}/${encodeURIComponent(attemptId)}/retake`);
+  if (!response.ok) {
+    let detail = `Retake API returned ${response.status}`;
+    try { detail = (await response.json()).detail || detail; } catch (error) { /* Keep HTTP status. */ }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
 function renderQuizHistory() {
   if (!quizHistoryList) {
     return;
@@ -1617,7 +1655,7 @@ function renderQuizHistory() {
     card.className = "quiz-history-card";
     const info = document.createElement("div");
     const title = document.createElement("strong");
-    title.textContent = `${attempt.document_id} · ${attempt.difficulty}`;
+    title.textContent = `${attempt.document_id} · ${attempt.difficulty} · Attempt ${attempt.attempt_number}`;
     const date = document.createElement("small");
     date.textContent = attempt.completed_at
       ? new Date(attempt.completed_at).toLocaleString()
@@ -1631,12 +1669,25 @@ function renderQuizHistory() {
     const score = document.createElement("div");
     score.className = "quiz-history-score";
     score.innerHTML = `<strong>${attempt.score}/${attempt.total}</strong><span>${attempt.percentage}%</span>`;
+    const actions = document.createElement("div");
+    actions.className = "quiz-history-actions";
+    const retake = document.createElement("button");
+    retake.className = "text-button";
+    retake.type = "button";
+    retake.textContent = "Retake Quiz";
+    retake.addEventListener("click", () => startHistoryQuizRetake(attempt));
     const review = document.createElement("button");
     review.className = "text-button";
     review.type = "button";
-    review.textContent = "Review";
+    review.textContent = "Review Answers";
     review.addEventListener("click", () => showQuizHistoryDetail(attempt.attempt_id));
-    card.append(info, score, review);
+    const regenerate = document.createElement("button");
+    regenerate.className = "text-button";
+    regenerate.type = "button";
+    regenerate.textContent = "Regenerate Quiz";
+    regenerate.addEventListener("click", () => regenerateHistoryQuiz(attempt));
+    actions.append(retake, review, regenerate);
+    card.append(info, score, actions);
     quizHistoryList.appendChild(card);
   });
 }
@@ -1651,22 +1702,50 @@ async function showQuizHistoryDetail(attemptId) {
     heading.className = "quiz-history-detail-heading";
     const title = document.createElement("h3");
     title.textContent = `${attempt.document_id} · ${attempt.difficulty} · ${attempt.score}/${attempt.total}`;
+    const actions = document.createElement("div");
+    actions.className = "quiz-history-detail-actions";
+    const retake = document.createElement("button");
+    retake.className = "primary-button";
+    retake.type = "button";
+    retake.textContent = "Retake Quiz";
+    retake.addEventListener("click", () => startHistoryQuizRetake(attempt));
     const close = document.createElement("button");
     close.className = "text-button";
     close.type = "button";
     close.textContent = "Close Review";
     close.addEventListener("click", () => { quizHistoryDetail.hidden = true; });
-    heading.append(title, close);
+    actions.append(retake, close);
+    heading.append(title, actions);
     quizHistoryDetail.appendChild(heading);
 
-    (attempt.question_results || []).forEach((result) => {
+    (attempt.question_results || []).forEach((result, index) => {
       const item = document.createElement("article");
       item.className = `quiz-history-question ${result.is_correct ? "correct" : "incorrect"}`;
       const question = document.createElement("strong");
-      question.textContent = result.question || `Question ${result.question_id}`;
-      const answer = document.createElement("p");
-      answer.textContent = `Your answer: ${result.selected_answer} · Correct answer: ${result.correct_answer}`;
-      item.append(question, answer);
+      question.textContent = `${index + 1}. ${result.question || `Question ${result.question_id}`}`;
+      const options = document.createElement("div");
+      options.className = "review-answer-list";
+      (result.options || []).forEach((option) => {
+        const letter = option.trim().charAt(0).toUpperCase();
+        const row = document.createElement("div");
+        row.className = "review-answer-option";
+        if (letter === result.correct_answer) row.classList.add("correct");
+        if (letter === result.selected_answer) row.classList.add("selected");
+        if (letter === result.selected_answer && !result.is_correct) row.classList.add("incorrect");
+        row.textContent = option;
+        if (letter === result.selected_answer) row.append(" — Your answer");
+        if (letter === result.correct_answer) row.append(" — Correct answer");
+        options.appendChild(row);
+      });
+      const explanation = document.createElement("p");
+      explanation.className = "review-explanation";
+      explanation.textContent = result.explanation ? `Explanation: ${result.explanation}` : "Explanation unavailable.";
+      const source = document.createElement("p");
+      source.className = "review-source";
+      source.textContent = result.source_chunk_ids?.length
+        ? `Source: ${result.source_chunk_ids.join(", ")}`
+        : "Source citation unavailable.";
+      item.append(question, options, explanation, source);
       quizHistoryDetail.appendChild(item);
     });
   } catch (error) {
@@ -1681,6 +1760,7 @@ async function loadSelectedQuiz() {
   if (!documentId || !selectedTopicId()) {
     currentQuiz = null;
     currentAttempt = null;
+    quizAttemptSummary = null;
     quizAnswers = {};
     quizExplanations = {};
     quizQuestionIndex = 0;
@@ -1695,8 +1775,9 @@ async function loadSelectedQuiz() {
     }
     currentQuiz = detail.quiz || null;
     currentAttempt = detail.latest_attempt || null;
+    quizAttemptSummary = detail.attempt_summary || null;
     quizExplanations = {};
-    quizAnswers = currentAttempt?.answers ? { ...currentAttempt.answers } : {};
+    quizAnswers = currentAttempt?.completed && currentAttempt.answers ? { ...currentAttempt.answers } : {};
     const firstUnansweredIndex = currentQuiz?.questions?.findIndex(
       (question) => !quizAnswers[String(question.id)]
     );
@@ -1705,6 +1786,7 @@ async function loadSelectedQuiz() {
   } catch (error) {
     currentQuiz = null;
     currentAttempt = null;
+    quizAttemptSummary = null;
     quizAnswers = {};
     quizExplanations = {};
     quizQuestionIndex = 0;
@@ -1715,6 +1797,7 @@ async function loadSelectedQuiz() {
 async function handleQuizDifficultyChange() {
   currentQuiz = null;
   currentAttempt = null;
+  quizAttemptSummary = null;
   quizAnswers = {};
   quizExplanations = {};
   quizQuestionIndex = 0;
@@ -1745,6 +1828,7 @@ async function generateAssessmentQuiz() {
   try {
     currentQuiz = await requestGeneratedQuiz();
     currentAttempt = null;
+    quizAttemptSummary = null;
     quizAnswers = {};
     quizExplanations = {};
     quizQuestionIndex = 0;
@@ -1788,6 +1872,7 @@ async function regenerateAssessmentQuiz() {
   try {
     currentQuiz = await requestQuizRegeneration(quizDocumentSelect.value);
     currentAttempt = null;
+    quizAttemptSummary = null;
     quizAnswers = {};
     quizExplanations = {};
     quizQuestionIndex = 0;
@@ -1827,7 +1912,50 @@ function renderPracticeMastery() {
   renderMasteryList(practiceMasteryList, masteries, { emptyText: "Mastery evidence is not available for this quiz." });
 }
 
-function renderAssessmentQuiz() {
+async function selectHistoryQuizVariant(attempt) {
+  const topicId = attempt.topic_id || "document";
+  quizDocumentSelect.value = attempt.document_id;
+  updateTopicOptions();
+  quizDifficultySelect.value = attempt.difficulty || "easy";
+  if (topicId === "document") {
+    quizScopeSelect.value = "document";
+  } else {
+    quizScopeSelect.value = "topic";
+    if ([...quizTopicSelect.options].some((option) => option.value === topicId)) quizTopicSelect.value = topicId;
+  }
+  updateAssessmentScope();
+  await loadSelectedQuiz();
+  if (!currentQuiz?.questions?.length) throw new Error("The saved quiz is no longer available. Regenerate it to create new questions.");
+}
+
+async function startHistoryQuizRetake(attempt) {
+  try {
+    const detail = await requestQuizForRetake(attempt.attempt_id);
+    currentQuiz = detail.quiz;
+    quizAttemptSummary = detail.attempt_summary || null;
+    currentAttempt = null;
+    quizAnswers = {};
+    quizExplanations = {};
+    quizQuestionIndex = 0;
+    quizHistoryDetail.hidden = true;
+    renderAssessmentQuiz();
+    showToast("Retake started with the same saved questions");
+  } catch (error) {
+    showToast(error.message || "Could not start this retake");
+  }
+}
+
+async function regenerateHistoryQuiz(attempt) {
+  try {
+    await selectHistoryQuizVariant(attempt);
+    quizHistoryDetail.hidden = true;
+    await regenerateAssessmentQuiz();
+  } catch (error) {
+    showToast(error.message || "Could not regenerate this quiz");
+  }
+}
+
+function renderAssessmentQuizLegacy() {
   const quizPane = document.querySelector('[data-session-pane="quiz"]');
   quizPane?.classList.toggle("quiz-active", Boolean(currentQuiz?.questions?.length));
   quizPane?.classList.toggle("quiz-landing", !currentQuiz?.questions?.length);
@@ -2034,6 +2162,195 @@ async function explainAssessmentQuestion(question, button) {
   }
 }
 
+function createAssessmentReviewCard(question, result, index) {
+  const card = document.createElement("article");
+  card.className = `quiz-question-card quiz-review-card ${result.is_correct ? "correct" : "incorrect"}`;
+  const heading = document.createElement("div");
+  heading.className = "quiz-question-heading";
+  const number = document.createElement("span");
+  number.textContent = `Question ${index + 1} of ${currentQuiz.questions.length}`;
+  const outcome = document.createElement("small");
+  outcome.textContent = result.is_correct ? "Correct" : "Incorrect";
+  heading.append(number, outcome);
+  const questionText = document.createElement("h3");
+  questionText.textContent = question.question;
+  const options = document.createElement("div");
+  options.className = "review-answer-list";
+  question.options.forEach((option) => {
+    const letter = option.trim().charAt(0).toUpperCase();
+    const row = document.createElement("div");
+    row.className = "review-answer-option";
+    if (letter === result.correct_answer) row.classList.add("correct");
+    if (letter === result.selected_answer) row.classList.add("selected");
+    if (letter === result.selected_answer && !result.is_correct) row.classList.add("incorrect");
+    row.textContent = option;
+    if (letter === result.selected_answer) row.append(" — Your answer");
+    if (letter === result.correct_answer) row.append(" — Correct answer");
+    options.appendChild(row);
+  });
+  const explanation = document.createElement("div");
+  explanation.className = "quiz-explanation";
+  explanation.textContent = result.explanation || question.explanation || "Explanation unavailable.";
+  const source = document.createElement("div");
+  source.className = "quiz-review-source";
+  const sourceIds = result.source_chunk_ids?.length ? result.source_chunk_ids : question.source_chunk_ids;
+  source.textContent = sourceIds?.length ? `Source: ${sourceIds.join(", ")}` : "Source citation unavailable.";
+  card.append(heading, questionText, options, explanation, source);
+  return card;
+}
+
+function renderAttemptSummary() {
+  if (!quizAttemptSummary?.attempts) return null;
+  const summary = document.createElement("div");
+  summary.className = "quiz-attempt-summary";
+  summary.innerHTML = `<strong>Attempts: ${quizAttemptSummary.attempts}</strong><span>Latest score: ${Math.round(quizAttemptSummary.latest_score)}%</span><span>Best score: ${Math.round(quizAttemptSummary.best_score)}%</span><span>Average score: ${Math.round(quizAttemptSummary.average_score)}%</span>`;
+  return summary;
+}
+
+function renderAssessmentQuiz() {
+  const quizPane = document.querySelector('[data-session-pane="quiz"]');
+  const hasQuiz = Boolean(currentQuiz?.questions?.length);
+  quizPane?.classList.toggle("quiz-active", hasQuiz);
+  quizPane?.classList.toggle("quiz-landing", !hasQuiz);
+  updateQuizLandingLayout();
+  quizList.innerHTML = "";
+  assessmentTitle.textContent = hasQuiz
+    ? `${currentQuiz.questions.length} ${currentQuiz.difficulty} questions from ${currentQuiz.document_id}`
+    : "Assessment Agent";
+  if (!hasQuiz) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "Choose a document, then generate or start its saved quiz.";
+    quizList.appendChild(empty);
+    renderPracticeMastery();
+    updateAssessmentSummary();
+    return;
+  }
+
+  const attemptSummary = renderAttemptSummary();
+  if (attemptSummary) quizList.appendChild(attemptSummary);
+  if (currentAttempt?.completed) {
+    const reviewHeading = document.createElement("div");
+    reviewHeading.className = "quiz-review-heading";
+    reviewHeading.innerHTML = `<h3>Review · Attempt ${currentAttempt.attempt_number}</h3><strong>${currentAttempt.score}/${currentAttempt.total} · ${Math.round(currentAttempt.percentage)}%</strong>`;
+    const retake = document.createElement("button");
+    retake.className = "primary-button";
+    retake.type = "button";
+    retake.textContent = "Retake Quiz";
+    retake.addEventListener("click", resetAssessmentQuiz);
+    reviewHeading.appendChild(retake);
+    quizList.appendChild(reviewHeading);
+    currentQuiz.questions.forEach((question, index) => {
+      const result = currentAttempt.question_results.find((item) => Number(item.question_id) === Number(question.id));
+      if (result) quizList.appendChild(createAssessmentReviewCard(question, result, index));
+    });
+    updateAssessmentSummary();
+    renderPracticeMastery();
+    return;
+  }
+
+  quizQuestionIndex = Math.max(0, Math.min(quizQuestionIndex, currentQuiz.questions.length - 1));
+  const question = currentQuiz.questions[quizQuestionIndex];
+  const card = document.createElement("article");
+  card.className = "quiz-question-card";
+  const heading = document.createElement("div");
+  heading.className = "quiz-question-heading";
+  const number = document.createElement("span");
+  number.textContent = `Question ${quizQuestionIndex + 1} of ${currentQuiz.questions.length}`;
+  const count = document.createElement("small");
+  count.textContent = `${Object.keys(quizAnswers).length} answered`;
+  heading.append(number, count);
+  const questionText = document.createElement("h3");
+  questionText.textContent = question.question;
+  const options = document.createElement("div");
+  options.className = "answer-list";
+  question.options.forEach((option) => {
+    const button = document.createElement("button");
+    button.className = "answer-option";
+    button.type = "button";
+    button.textContent = option;
+    const letter = option.trim().charAt(0).toUpperCase();
+    button.classList.toggle("selected", quizAnswers[String(question.id)] === letter);
+    button.addEventListener("click", () => selectAssessmentAnswer(question, option));
+    options.appendChild(button);
+  });
+  const navigator = document.createElement("div");
+  navigator.className = "quiz-question-navigator";
+  currentQuiz.questions.forEach((item, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = String(index + 1);
+    button.className = "quiz-navigator-button";
+    button.classList.toggle("current", index === quizQuestionIndex);
+    button.classList.toggle("answered", Boolean(quizAnswers[String(item.id)]));
+    button.addEventListener("click", () => { quizQuestionIndex = index; renderAssessmentQuiz(); });
+    navigator.appendChild(button);
+  });
+  const navigation = document.createElement("div");
+  navigation.className = "quiz-navigation";
+  const previous = document.createElement("button");
+  previous.className = "secondary-button quiz-nav-button";
+  previous.type = "button";
+  previous.textContent = "Previous";
+  previous.disabled = quizQuestionIndex === 0;
+  previous.addEventListener("click", () => moveQuizQuestion(-1));
+  const next = document.createElement("button");
+  next.className = "secondary-button quiz-nav-button";
+  next.type = "button";
+  next.textContent = "Next";
+  next.disabled = quizQuestionIndex === currentQuiz.questions.length - 1;
+  next.addEventListener("click", () => moveQuizQuestion(1));
+  const check = document.createElement("button");
+  check.className = "primary-button quiz-check-button";
+  check.type = "button";
+  check.textContent = "Check Answers";
+  check.disabled = Object.keys(quizAnswers).length !== currentQuiz.questions.length;
+  check.addEventListener("click", submitAssessmentQuiz);
+  navigation.append(previous, next, check);
+  card.append(heading, questionText, options, navigator, navigation);
+  quizList.appendChild(card);
+  updateAssessmentSummary();
+  renderPracticeMastery();
+}
+
+function moveQuizQuestionLegacy(direction) {
+  quizQuestionIndex = Math.max(0, Math.min(currentQuiz.questions.length - 1, quizQuestionIndex + direction));
+  renderAssessmentQuiz();
+}
+
+function selectAssessmentAnswer(question, option) {
+  if (currentAttempt?.completed) return;
+  quizAnswers[String(question.id)] = option.trim().charAt(0).toUpperCase();
+  renderAssessmentQuiz();
+}
+
+async function submitAssessmentQuiz(event) {
+  const button = event?.currentTarget;
+  if (Object.keys(quizAnswers).length !== currentQuiz.questions.length) return;
+  if (button) { button.disabled = true; button.textContent = "Checking..."; }
+  try {
+    currentAttempt = await requestQuizSubmission();
+    quizAttemptSummary = currentAttempt.attempt_summary;
+    await loadQuizHistory();
+    await loadDashboard();
+    renderAssessmentQuiz();
+    showToast(`Attempt ${currentAttempt.attempt_number}: ${currentAttempt.score}/${currentAttempt.total}`);
+  } catch (error) {
+    renderAssessmentQuiz();
+    showToast(error.message || "Could not submit quiz");
+  }
+}
+
+function resetAssessmentQuiz() {
+  if (!currentQuiz?.questions?.length) return;
+  currentAttempt = null;
+  quizAnswers = {};
+  quizExplanations = {};
+  quizQuestionIndex = 0;
+  renderAssessmentQuiz();
+  showToast("Retake started with the same questions");
+}
+
 function resetApp() {
   state.page = initialState.page;
   state.confidence = initialState.confidence;
@@ -2095,6 +2412,9 @@ document.addEventListener("keydown", (event) => {
 generateQuizButton.addEventListener("click", generateAssessmentQuiz);
 newQuizButton.addEventListener("click", regenerateAssessmentQuiz);
 resetQuizButton.addEventListener("click", resetAssessmentQuiz);
+reviewQuizButton.addEventListener("click", () => {
+  if (currentAttempt?.completed) renderAssessmentQuiz();
+});
 quizDocumentSelect.addEventListener("change", handleQuizDocumentChange);
 quizTopicSelect.addEventListener("change", loadSelectedQuiz);
 quizScopeSelect.addEventListener("change", async () => {
