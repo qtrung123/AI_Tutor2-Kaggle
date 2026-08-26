@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from backend.ingest import delete_indexed_file, index_files
 from backend.quiz_service import (
+    QuizGenerationError,
     clear_quiz_progress,
     explain_quiz_question,
     generate_quiz,
@@ -138,15 +139,17 @@ class QuizGenerateRequest(BaseModel):
     assessment_scope: str = Field(pattern="^(topic|document)$")
     topic_id: Optional[str] = None
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
+    question_count: Literal[3, 5, 10] = 5
+    model_id: Optional[str] = None
 
 
 class QuizRegenerateRequest(BaseModel):
     """Request body for POST /api/quiz/{document_id}/regenerate."""
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
     model_id: Optional[str] = None
-    model_id: Optional[str] = None
     assessment_scope: str = Field(pattern="^(topic|document)$")
     topic_id: Optional[str] = None
+    question_count: Literal[3, 5, 10] = 5
 
 
 class QuizProgressRequest(BaseModel):
@@ -581,10 +584,13 @@ def quiz_generate(request: QuizGenerateRequest, current_user: dict = Depends(req
             difficulty=request.difficulty,
             assessment_scope=request.assessment_scope,
             topic_id=request.topic_id,
+            question_count=request.question_count,
             owner_id=current_user["id"],
             model_id=resolve_generation_model(request.model_id),
         )
         return QuizGenerateResponse(**result)
+    except QuizGenerationError as error:
+        raise HTTPException(status_code=422, detail=error.detail) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:
@@ -659,11 +665,14 @@ def quiz_regenerate(document_id: str, request: QuizRegenerateRequest, current_us
             difficulty=request.difficulty,
             assessment_scope=request.assessment_scope,
             topic_id=request.topic_id,
+            question_count=request.question_count,
             regenerate=True,
             owner_id=current_user["id"],
             model_id=resolve_generation_model(getattr(request, "model_id", None)),
         )
         return QuizGenerateResponse(**result)
+    except QuizGenerationError as error:
+        raise HTTPException(status_code=422, detail=error.detail) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:

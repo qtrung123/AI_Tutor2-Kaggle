@@ -80,6 +80,7 @@ const quizTopicSelect = document.getElementById("quiz-topic-select");
 const quizScopeSelect = document.getElementById("quiz-scope-select");
 const quizTopicField = document.getElementById("quiz-topic-field");
 const quizDifficultySelect = document.getElementById("quiz-difficulty-select");
+let quizQuestionCountSelect = document.getElementById("quiz-question-count-select");
 const generateQuizButton = document.getElementById("generate-quiz-button");
 const resetQuizButton = document.getElementById("reset-quiz-button");
 const newQuizButton = document.getElementById("new-quiz-button");
@@ -955,6 +956,11 @@ function selectedDifficulty() {
   return quizDifficultySelect?.value || "easy";
 }
 
+function selectedQuestionCount() {
+  const value = Number(quizQuestionCountSelect?.value || 5);
+  return [3, 5, 10].includes(value) ? value : 5;
+}
+
 function selectedTopicId() {
   return selectedAssessmentScope() === "document" ? "document" : (quizTopicSelect?.value || "");
 }
@@ -1442,6 +1448,7 @@ async function requestGeneratedQuiz() {
       assessment_scope: selectedAssessmentScope(),
       topic_id: selectedAssessmentScope() === "topic" ? selectedTopicId() : null,
       difficulty: selectedDifficulty(),
+      question_count: selectedQuestionCount(),
       model_id: selectedModelId || null
     })
   });
@@ -1450,7 +1457,9 @@ async function requestGeneratedQuiz() {
     let detail = `Quiz API returned ${response.status}`;
     try {
       const errorData = await response.json();
-      detail = errorData.detail || detail;
+      detail = typeof errorData.detail === "object"
+        ? errorData.detail.message || JSON.stringify(errorData.detail)
+        : errorData.detail || detail;
     } catch (error) {
       // Keep the status message if the backend does not return JSON.
     }
@@ -1486,6 +1495,7 @@ async function requestQuizRegeneration(documentId) {
       difficulty: selectedDifficulty(),
       assessment_scope: selectedAssessmentScope(),
       topic_id: selectedAssessmentScope() === "topic" ? selectedTopicId() : null,
+      question_count: currentQuiz?.assessment_plan?.target_questions || selectedQuestionCount(),
       model_id: selectedModelId || null
     })
   });
@@ -1493,7 +1503,9 @@ async function requestQuizRegeneration(documentId) {
     let detail = `Regenerate API returned ${response.status}`;
     try {
       const errorData = await response.json();
-      detail = errorData.detail || detail;
+      detail = typeof errorData.detail === "object"
+        ? errorData.detail.message || JSON.stringify(errorData.detail)
+        : errorData.detail || detail;
     } catch (error) {
       // Keep the status message if the backend does not return JSON.
     }
@@ -1612,7 +1624,8 @@ function renderQuizHistory() {
       : "Completion time unavailable";
     const scope = document.createElement("span");
     scope.className = "quiz-history-scope";
-    scope.textContent = attempt.topic_name || (attempt.topic_id && attempt.topic_id !== "document" ? attempt.topic_id : "Entire document");
+    const scopeName = attempt.topic_name || (attempt.topic_id && attempt.topic_id !== "document" ? attempt.topic_id : "Entire document");
+    scope.textContent = `${scopeName} · ${attempt.total} questions`;
     info.append(title, scope, date);
 
     const score = document.createElement("div");
@@ -1739,7 +1752,9 @@ async function generateAssessmentQuiz() {
     updateDifficultyOptions();
     closeQuizCreateDialog();
     renderAssessmentQuiz();
-    showToast("Quiz ready");
+    showToast(currentQuiz.assessment_plan?.partial
+      ? `Quiz ready with ${currentQuiz.questions.length}/${currentQuiz.assessment_plan?.target_questions || selectedQuestionCount()} grounded questions`
+      : "Quiz ready");
   } catch (error) {
     currentQuiz = null;
     quizAnswers = {};
@@ -1749,7 +1764,7 @@ async function generateAssessmentQuiz() {
     empty.textContent = error.message || "Assessment Agent could not generate a quiz.";
     quizList.appendChild(empty);
     assessmentTitle.textContent = "Assessment Agent";
-    showToast("Quiz generation failed");
+    showToast(error.message || "Quiz generation failed");
   } finally {
     setAssessmentLoading(false);
     updateAssessmentSummary();
@@ -2149,11 +2164,30 @@ function updateQuizLandingLayout() {
   header.hidden = Boolean(currentQuiz?.questions?.length);
   const historyTitle = pane.querySelector(".quiz-history-panel h2");
   if (historyTitle) historyTitle.textContent = "Your Quizzes";
-  if (assessmentControl) assessmentControl.hidden = !currentQuiz?.questions?.length;
+  const createDialogOpen = Boolean(quizCreateDialog?.classList.contains("open"));
+  if (assessmentControl) {
+    assessmentControl.hidden = !currentQuiz?.questions?.length && !createDialogOpen;
+  }
 }
 
 function openQuizCreateDialog() {
   if (!assessmentControl) return;
+  if (!quizQuestionCountSelect) {
+    const label = document.createElement("label");
+    const caption = document.createElement("span");
+    caption.textContent = "Number of questions";
+    quizQuestionCountSelect = document.createElement("select");
+    quizQuestionCountSelect.id = "quiz-question-count-select";
+    [3, 5, 10].forEach((count) => {
+      const option = document.createElement("option");
+      option.value = String(count);
+      option.textContent = String(count);
+      option.selected = count === 5;
+      quizQuestionCountSelect.appendChild(option);
+    });
+    label.append(caption, quizQuestionCountSelect);
+    generateQuizButton.before(label);
+  }
   if (!quizCreateDialog) {
     quizCreateDialog = document.createElement("div");
     quizCreateDialog.className = "quiz-create-dialog";
@@ -2162,9 +2196,9 @@ function openQuizCreateDialog() {
     quizCreateDialog.addEventListener("click", (event) => { if (event.target === quizCreateDialog) closeQuizCreateDialog(); });
     document.body.appendChild(quizCreateDialog);
   }
+  quizCreateDialog.classList.add("open");
   quizCreateDialog.querySelector(".quiz-dialog-fields").appendChild(assessmentControl);
   assessmentControl.hidden = false;
-  quizCreateDialog.classList.add("open");
 }
 
 function closeQuizCreateDialog() {

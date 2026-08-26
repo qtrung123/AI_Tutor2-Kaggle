@@ -187,51 +187,34 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         self.assertEqual({question["topic_id"] for question in result["questions"]}, {"topic_a", "topic_b"})
         self.assertTrue(all(question["concept_id"] for question in result["questions"]))
 
-    def test_new_request_models_and_frontend_have_no_question_count(self):
-        self.assertNotIn("question_count", QuizGenerateRequest.model_fields)
-        self.assertNotIn("question_count", QuizRegenerateRequest.model_fields)
+    def test_request_models_and_frontend_support_allowed_question_counts(self):
+        self.assertIn("question_count", QuizGenerateRequest.model_fields)
+        self.assertIn("question_count", QuizRegenerateRequest.model_fields)
+        self.assertEqual(QuizGenerateRequest(
+            document_id="doc.pdf", assessment_scope="topic", topic_id="topic_a", difficulty="easy"
+        ).question_count, 5)
         frontend = (Path(__file__).parents[1] / "frontend" / "app.js").read_text(encoding="utf-8")
-        markup = (Path(__file__).parents[1] / "frontend" / "index.html").read_text(encoding="utf-8")
-        self.assertNotIn("quizQuestionCount", frontend)
-        self.assertNotIn("question_count:", frontend)
-        self.assertNotIn("quiz-question-count-select", markup)
+        self.assertIn("quizQuestionCountSelect", frontend)
+        self.assertIn("question_count:", frontend)
+        self.assertIn('quiz-question-count-select', frontend)
+        self.assertIn('quizCreateDialog?.classList.contains("open")', frontend)
+        self.assertIn("!currentQuiz?.questions?.length && !createDialogOpen", frontend)
 
-    def test_failed_concept_is_skipped_while_other_grounded_questions_survive(self):
+    def test_topic_generation_uses_v2_batch_pipeline(self):
         document = {
             "id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 2,
             "topics": [{"topic_id": "topic_a", "name": "A"}],
         }
-        plan = {
-            "topic_id": "topic_a", "topic_name": "A", "assessment_capacity": 2,
-            "allocated_questions": 0, "concepts": [
-                {"concept_id": "concept_001", "name": "Bad", "source_chunk_ids": ["hash_1"]},
-                {"concept_id": "concept_002", "name": "Good", "source_chunk_ids": ["hash_1"]},
-            ],
-        }
-
-        def generated(**kwargs):
-            if kwargs["concept_id"] == "concept_001":
-                raise ValueError("grounding failed")
-            return [{
-                "id": kwargs["start_id"], "question": "Why is this grounded concept important?",
-                "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
-                "topic_id": "topic_a", "topic_name": "A", "concept_id": "concept_002",
-                "concept_name": "Good", "assessment_capacity": 2, "difficulty": "easy",
-                "explanation": "Supported.", "source_chunk_ids": ["hash_1"],
-                "validation_outcome": "accepted",
-            }]
-
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
-             patch.object(quiz_service, "get_topic_chunks", return_value=[{"content": "Evidence", "metadata": {"chunk_id": "hash_1"}}]), \
-             patch.object(quiz_service, "build_topic_plan", return_value=plan), \
-             patch.object(quiz_service, "_generate_quiz_batch", side_effect=generated), \
-             patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _owner: quiz):
+             patch.object(quiz_service, "_generate_topic_quiz_v2", return_value={
+                 "question_count": 5, "questions": [{"concept_id": f"concept_{index:03d}"} for index in range(1, 6)]
+             }) as generator:
             result = quiz_service.generate_quiz("doc.pdf", "easy", "topic", "topic_a")
 
-        self.assertEqual(result["question_count"], 1)
-        self.assertEqual(result["questions"][0]["concept_id"], "concept_002")
-        self.assertEqual(len(result["assessment_plan"]["generation_warnings"]), 1)
+        self.assertEqual(result["question_count"], 5)
+        generator.assert_called_once()
+        self.assertEqual(generator.call_args.kwargs["model_id"], quiz_service.CHAT_MODEL)
 
     def test_dashboard_empty_state_contains_no_invented_metrics(self):
         with patch.object(quiz_service, "list_indexed_documents", return_value=[]):

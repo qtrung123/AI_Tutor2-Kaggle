@@ -2,6 +2,7 @@ import difflib
 import json
 import math
 import re
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -49,6 +50,24 @@ from config import (
 )
 
 GENERATION_PROMPT_VERSION = "topic_mcq_v2_backend_evidence"
+QUIZ_V2_PROMPT_VERSION = "topic_mcq_v2_compact_batch"
+QUIZ_V2_ALLOWED_QUESTION_COUNTS = {3, 5, 10}
+QUIZ_V2_MIN_QUESTIONS = {3: 3, 5: 4, 10: 8}
+QUIZ_V2_DISTINCT_CONCEPT_LIMIT = 5
+
+
+class QuizGenerationError(ValueError):
+    """Structured topic-quiz failure that is safe to expose through the API."""
+
+    def __init__(self, message: str, *, stage: str, valid_questions: int = 0, target_questions: int = 5):
+        super().__init__(message)
+        self.detail = {
+            "code": "quiz_v2_generation_failed",
+            "message": message,
+            "stage": stage,
+            "valid_questions": valid_questions,
+            "target_questions": target_questions,
+        }
 
 
 OPTION_LETTERS = {"A", "B", "C", "D"}
@@ -766,6 +785,420 @@ def _generate_quiz_batch(
     return accepted_questions
 
 
+def _v2_excerpt(content: str, slot: int, total_slots: int, limit: int = 420) -> str:
+    """Choose a deterministic local window without changing canonical chunk provenance."""
+    text = re.sub(r"\s+", " ", str(content or "")).strip()
+    if len(text) <= limit:
+        return text
+    max_start = max(0, len(text) - limit)
+    start = round(max_start * slot / max(1, total_slots - 1))
+    return text[start:start + limit].strip()
+
+
+def _select_v2_evidence_groups(
+    topic: dict, chunks: list[dict], target: int = QUIZ_V2_DISTINCT_CONCEPT_LIMIT
+) -> list[dict]:
+    """Create stable concept slots from already owner/document/topic-scoped chunks."""
+    usable = []
+    seen_ids = set()
+    for chunk in chunks:
+        chunk_id = str((chunk.get("metadata") or {}).get("chunk_id") or "").strip()
+        if not chunk_id or chunk_id in seen_ids or not str(chunk.get("content") or "").strip():
+            continue
+        seen_ids.add(chunk_id)
+        usable.append(chunk)
+    if not usable:
+        return []
+
+    topic_name = str(topic.get("name") or topic.get("topic_id") or "Topic")
+    candidates = []
+    for chunk in usable:
+        content = re.sub(r"\s+", " ", str(chunk.get("content") or "")).strip()
+        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\s*[;•]\s*", content) if len(part.split()) >= 3]
+        if not sentences:
+            sentences = [_v2_excerpt(content, 0, 1)]
+        candidates.extend((chunk, sentence[:420]) for sentence in sentences)
+    if len(candidates) < target:
+        # Add deterministic windows for compact chunks that contain several facts
+        # but little punctuation. Provenance remains the canonical parent chunk.
+        for chunk in usable:
+            words = re.sub(r"\s+", " ", str(chunk.get("content") or "")).strip().split()
+            window_size = max(12, min(45, math.ceil(len(words) / max(1, target))))
+            for start in range(0, len(words), window_size):
+                excerpt = " ".join(words[start:start + window_size]).strip()
+                if len(excerpt.split()) >= 5 and all(excerpt != item[1] for item in candidates):
+                    candidates.append((chunk, excerpt))
+                if len(candidates) >= target:
+                    break
+            if len(candidates) >= target:
+                break
+
+    group_count = min(max(1, target), len(candidates))
+    groups = []
+    for slot in range(group_count):
+        candidate_index = round((len(candidates) - 1) * slot / max(1, group_count - 1)) if len(candidates) > 1 else 0
+        chunk, excerpt = candidates[candidate_index]
+        chunk_id = str(chunk["metadata"]["chunk_id"])
+        label_words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'/-]*", excerpt)[:8]
+        label = " ".join(label_words) or f"focus {slot + 1}"
+        groups.append({
+            "concept_id": f"concept_{slot + 1:03d}",
+            "name": f"{topic_name}: {label}",
+            "source_chunk_ids": [chunk_id],
+            "evidence_excerpt": excerpt,
+        })
+    return groups
+
+
+def _build_v2_prompt(
+    document_id: str,
+    topic: dict,
+    difficulty: str,
+    groups: list[dict],
+    count: int,
+    accepted_stems: list[str],
+    repair: bool,
+) -> str:
+    allocation_counts = {
+        group["concept_id"]: sum(item["concept_id"] == group["concept_id"] for item in groups)
+        for group in groups
+    }
+    allowed = [
+        {
+            "concept_id": group["concept_id"],
+            "concept_name": group["name"],
+            "source_chunk_ids": group["source_chunk_ids"],
+            "evidence": group["evidence_excerpt"],
+            "question_slots": allocation_counts[group["concept_id"]],
+        }
+        for index, group in enumerate(groups)
+        if group["concept_id"] not in {item["concept_id"] for item in groups[:index]}
+    ]
+    return f"""
+Create exactly {count} grounded multiple-choice questions for a local study quiz.
+Return JSON only. Use this compact shape:
+{{"questions":[{{"question":"...","options":["...","...","...","..."],"correct_answer":0,"explanation":"...","concept_id":"concept_001","source_chunk_ids":["exact-id"]}}]}}
+
+Rules:
+- Use only the evidence groups below.
+- Produce no more than question_slots questions for each concept_id and copy only its listed source_chunk_ids.
+- Cover every listed concept once before producing an additional question for a repeated concept.
+- correct_answer is the zero-based integer option index 0, 1, 2, or 3.
+- Write four concise, distinct options without A/B/C/D prefixes.
+- Match {difficulty} difficulty when the evidence supports it; clarity and grounding matter more than complexity.
+- Do not repeat or paraphrase an accepted question.
+- Do not add markdown or fields outside the schema.
+
+Document: {document_id}
+Topic: {topic.get('name') or topic.get('topic_id')}
+Mode: {'repair only the missing slots' if repair else 'initial batch'}
+Accepted questions to avoid: {json.dumps(accepted_stems, ensure_ascii=False)}
+Allowed evidence groups: {json.dumps(allowed, ensure_ascii=False)}
+""".strip()
+
+
+def _validate_v2_question(
+    raw: dict,
+    groups_by_id: dict[str, dict],
+    remaining_concept_slots: dict[str, int],
+    accepted_stems: list[str],
+    difficulty: str,
+    question_id: int,
+    topic: dict,
+    assessment_capacity: int,
+) -> tuple[dict, list[str]]:
+    if not isinstance(raw, dict):
+        raise ValueError("Question must be a JSON object.")
+    stem = _clean_inline_text(raw.get("question", ""))
+    if len(stem.split()) < 4 or any(re.search(pattern, stem.lower()) for pattern in GENERIC_QUESTION_PATTERNS):
+        raise ValueError("Question stem is empty, generic, or unusable.")
+    candidate_key = _normalize_question_key(stem)
+    if any(
+        candidate_key == _normalize_question_key(existing)
+        or difflib.SequenceMatcher(None, candidate_key, _normalize_question_key(existing)).ratio() >= 0.94
+        for existing in accepted_stems
+    ):
+        raise ValueError("Question duplicates an accepted question.")
+
+    raw_options = raw.get("options")
+    if not isinstance(raw_options, list) or len(raw_options) != 4:
+        raise ValueError("Question must contain exactly 4 options.")
+    option_bodies = [_clean_inline_text(option) for option in raw_options]
+    if any(not option for option in option_bodies) or len({option.lower() for option in option_bodies}) != 4:
+        raise ValueError("Question options must be non-empty and distinct.")
+
+    answer_index = raw.get("correct_answer")
+    if isinstance(answer_index, bool) or not isinstance(answer_index, int) or answer_index not in range(4):
+        raise ValueError("correct_answer must be an integer from 0 to 3.")
+    concept_id = str(raw.get("concept_id") or "").strip()
+    if concept_id not in groups_by_id:
+        raise ValueError("Question has an unknown concept_id.")
+    source_ids = raw.get("source_chunk_ids")
+    if not isinstance(source_ids, list) or not source_ids:
+        raise ValueError("Question is missing evidence chunk IDs.")
+    source_ids = list(dict.fromkeys(str(value).strip() for value in source_ids if str(value).strip()))
+    known_evidence_ids = {
+        chunk_id for group in groups_by_id.values() for chunk_id in group["source_chunk_ids"]
+    }
+    if not source_ids or not set(source_ids).issubset(known_evidence_ids):
+        raise ValueError("Question contains missing or invented evidence chunk IDs.")
+    if remaining_concept_slots.get(concept_id, 0) <= 0:
+        raise ValueError("Question exceeds the planned slots for its concept_id.")
+    allowed_ids = set(groups_by_id[concept_id]["source_chunk_ids"])
+    if not set(source_ids).issubset(allowed_ids):
+        raise ValueError("Question evidence does not belong to its concept_id.")
+
+    warnings = []
+    explanation = _clean_inline_text(raw.get("explanation", ""))
+    if len(explanation.split()) < 4:
+        warnings.append("explanation_quality")
+    if len(stem.split()) < 6:
+        warnings.append("meaningful_concept_quality")
+    try:
+        _validate_difficulty_quality(stem, difficulty)
+    except ValueError:
+        warnings.append("difficulty_mismatch")
+    for option in option_bodies:
+        lowered = option.lower()
+        if (
+            any(re.search(pattern, lowered) for pattern in GENERIC_OPTION_PATTERNS)
+            or lowered in {"all of the above", "none of the above", "cannot be determined"}
+            or _looks_like_raw_chunk(option)
+        ):
+            warnings.append("mediocre_distractors")
+            break
+
+    normalized = {
+        "id": question_id,
+        "question": stem,
+        "options": [f"{'ABCD'[index]}. {option}" for index, option in enumerate(option_bodies)],
+        "correct_answer": "ABCD"[answer_index],
+        "topic_id": str(topic["topic_id"]),
+        "topic_name": str(topic.get("name") or topic["topic_id"]),
+        "concept_id": concept_id,
+        "concept_name": groups_by_id[concept_id]["name"],
+        "assessment_capacity": int(assessment_capacity),
+        "difficulty": difficulty,
+        "explanation": explanation,
+        "source_chunk_ids": source_ids,
+        "validation_outcome": "accepted_quality_warning" if warnings else "accepted",
+    }
+    return normalized, sorted(set(warnings))
+
+
+def _generate_topic_quiz_v2(
+    document: dict,
+    topic: dict,
+    difficulty: str,
+    owner_id: str,
+    model_id: str,
+    regenerate: bool,
+    question_count: int = 5,
+) -> dict:
+    total_started = time.perf_counter()
+    timings = {}
+    llm_calls = 0
+    generation_run_id = str(uuid4())
+
+    stage_started = time.perf_counter()
+    chunks = get_topic_chunks(document["id"], str(topic["topic_id"]), owner_id)
+    groups = _select_v2_evidence_groups(topic, chunks, QUIZ_V2_DISTINCT_CONCEPT_LIMIT)
+    timings["evidence_selection_ms"] = round((time.perf_counter() - stage_started) * 1000)
+    if not groups:
+        raise QuizGenerationError(
+            "The topic does not contain canonical evidence for a grounded quiz.",
+            stage="evidence_selection",
+            target_questions=question_count,
+        )
+
+    groups_by_id = {group["concept_id"]: group for group in groups}
+    planned_slots = [groups[index % len(groups)] for index in range(question_count)]
+    remaining_concept_slots = {
+        group["concept_id"]: sum(slot["concept_id"] == group["concept_id"] for slot in planned_slots)
+        for group in groups
+    }
+    accepted = []
+    accepted_stems = []
+    validation_results = {"accepted": 0, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}
+    generation_ms = 0
+    validation_ms = 0
+    retry_ms = 0
+
+    for attempt_index in range(2):
+        missing = question_count - len(accepted)
+        if missing <= 0:
+            break
+        available_groups = [
+            group for group in groups
+            for _slot in range(remaining_concept_slots.get(group["concept_id"], 0))
+        ]
+        prompt = _build_v2_prompt(
+            document["id"], topic, difficulty, available_groups, missing, accepted_stems, attempt_index == 1
+        )
+        stage_started = time.perf_counter()
+        llm_calls += 1
+        output_schema = {
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string"},
+                            "options": {"type": "array", "items": {"type": "string"}, "minItems": 4, "maxItems": 4},
+                            "correct_answer": {"type": "integer", "minimum": 0, "maximum": 3},
+                            "explanation": {"type": "string"},
+                            "concept_id": {"type": "string"},
+                            "source_chunk_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        },
+                        "required": ["question", "options", "correct_answer", "explanation", "concept_id", "source_chunk_ids"],
+                    },
+                }
+            },
+            "required": ["questions"],
+        }
+        llm = ChatOllama(
+            model=model_id,
+            temperature=0.1 if attempt_index == 0 else 0.25,
+            format=output_schema,
+            num_ctx=4096,
+            num_predict=max(500, missing * 180),
+            client_kwargs={"timeout": 180},
+        )
+        print(
+            f"[quiz-v2-llm] attempt={attempt_index + 1}, model={model_id}, "
+            f"requested={missing}, evidence_groups={len(available_groups)}"
+        )
+        try:
+            response = llm.invoke(prompt)
+            data = _extract_json(str(response.content))
+            candidates = data.get("questions") if isinstance(data, dict) else None
+            if not isinstance(candidates, list):
+                raise ValueError("Quiz JSON does not contain a questions list.")
+        except Exception as error:
+            candidates = []
+            validation_results["rejected"] += missing
+            validation_results["reasons"].append(f"response: {error}")
+        elapsed = round((time.perf_counter() - stage_started) * 1000)
+        generation_ms += elapsed
+        if attempt_index == 1:
+            retry_ms += elapsed
+
+        validation_started = time.perf_counter()
+        for candidate_index, raw in enumerate(candidates):
+            if len(accepted) >= question_count:
+                break
+            try:
+                normalized, warnings = _validate_v2_question(
+                    raw,
+                    groups_by_id,
+                    remaining_concept_slots,
+                    accepted_stems,
+                    difficulty,
+                    len(accepted) + 1,
+                    topic,
+                    len(groups),
+                )
+                accepted.append(normalized)
+                accepted_stems.append(normalized["question"])
+                remaining_concept_slots[normalized["concept_id"]] -= 1
+                key = "accepted_with_warnings" if warnings else "accepted"
+                validation_results[key] += 1
+                save_quiz_validation_event({
+                    "generation_run_id": generation_run_id,
+                    "owner_id": owner_id,
+                    "document_id": document["id"],
+                    "document_hash": document.get("hash", ""),
+                    "topic_id": topic["topic_id"],
+                    "topic_schema_version": int(document.get("topic_schema_version", 0)),
+                    "difficulty": difficulty,
+                    "batch_index": 1,
+                    "generation_attempt": attempt_index + 1,
+                    "candidate_index": candidate_index,
+                    "generator_model": model_id,
+                    "generation_prompt_version": QUIZ_V2_PROMPT_VERSION,
+                    "validator_model": "deterministic-v2",
+                    "validator_prompt_version": "no-semantic-llm-v2",
+                    "candidate_question": normalized,
+                    "cited_chunk_ids": normalized["source_chunk_ids"],
+                    "evidence_chunk_ids": normalized["source_chunk_ids"],
+                    "hard_passed": True,
+                    "quality_passed": not warnings,
+                    "accepted": True,
+                    "outcome": normalized["validation_outcome"],
+                    "verdict": {"mode": "deterministic", "warnings": warnings},
+                    "rejection_reasons": warnings,
+                    "latency_ms": 0,
+                })
+            except Exception as error:
+                validation_results["rejected"] += 1
+                validation_results["reasons"].append(str(error))
+                print(f"[quiz-v2-validation] discarded candidate: {error}")
+        validation_ms += round((time.perf_counter() - validation_started) * 1000)
+
+    timings["generation_ms"] = generation_ms
+    timings["validation_ms"] = validation_ms
+    timings["retry_ms"] = retry_ms
+    minimum_questions = QUIZ_V2_MIN_QUESTIONS[question_count]
+    if len(accepted) < minimum_questions:
+        timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
+        print(f"[quiz-v2-timing] {json.dumps({**timings, 'llm_calls': llm_calls})}")
+        raise QuizGenerationError(
+            f"Quiz V2 produced {len(accepted)}/{question_count} valid grounded questions after one repair attempt; "
+            f"at least {minimum_questions} are required.",
+            stage="validation",
+            valid_questions=len(accepted),
+            target_questions=question_count,
+        )
+
+    partial = len(accepted) < question_count
+    quiz = {
+        "quiz_id": str(uuid4()),
+        "document_id": document["id"],
+        "document_hash": document.get("hash", ""),
+        "title": document.get("title", document["id"]),
+        "difficulty": difficulty,
+        "topic_id": str(topic["topic_id"]),
+        "topic_name": str(topic.get("name") or topic["topic_id"]),
+        "assessment_scope": "topic",
+        "assessment_plan": {
+            "planner_version": "deterministic_topic_v2",
+            "scope": "topic",
+            "topics": [{
+                "topic_id": str(topic["topic_id"]),
+                "topic_name": str(topic.get("name") or topic["topic_id"]),
+                "assessment_capacity": len(groups),
+                "allocated_questions": question_count,
+                "selected_concepts": [
+                    {key: group[key] for key in ("concept_id", "name", "source_chunk_ids")}
+                    for group in groups
+                ],
+            }],
+            "excluded_topic_ids": [],
+            "target_questions": question_count,
+            "total_questions": len(accepted),
+            "partial": partial,
+            "generation_warnings": validation_results["reasons"],
+            "validation_results": validation_results,
+            "llm_calls": llm_calls,
+        },
+        "topic_schema_version": int(document.get("topic_schema_version", 0)),
+        "question_count": len(accepted),
+        "created_at": utc_now_iso(),
+        "questions": accepted,
+    }
+    if regenerate:
+        delete_document_attempts(document["id"], difficulty, str(topic["topic_id"]), owner_id)
+    persistence_started = time.perf_counter()
+    saved = save_quiz(document["id"], difficulty, quiz, owner_id)
+    timings["persistence_ms"] = round((time.perf_counter() - persistence_started) * 1000)
+    timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
+    saved["assessment_plan"]["timings_ms"] = timings
+    print(f"[quiz-v2-timing] {json.dumps({**timings, 'llm_calls': llm_calls, 'questions': len(accepted)})}")
+    return saved
+
+
 def generate_quiz(
     document_id: str,
     difficulty: str,
@@ -774,6 +1207,7 @@ def generate_quiz(
     regenerate: bool = False,
     owner_id: str = LEGACY_USER_ID,
     model_id: str = CHAT_MODEL,
+    question_count: int = 5,
 ) -> dict:
     """
     Generate or load the persistent quiz for one indexed document.
@@ -788,6 +1222,8 @@ def generate_quiz(
     difficulty = difficulty.lower().strip()
     if difficulty not in QUIZ_DIFFICULTIES:
         raise ValueError("difficulty must be easy, medium, or difficult.")
+    if question_count not in QUIZ_V2_ALLOWED_QUESTION_COUNTS:
+        raise ValueError("question_count must be one of 3, 5, or 10.")
     print(f"[quiz-service] difficulty={difficulty}")
     document = known_documents[document_id]
     assessment_scope = str(assessment_scope).lower().strip()
@@ -803,12 +1239,29 @@ def generate_quiz(
 
     if not regenerate:
         saved_quiz = get_quiz(document_id, difficulty, scope_topic_id, owner_id)
-        if saved_quiz:
+        saved_target = int((saved_quiz or {}).get("assessment_plan", {}).get(
+            "target_questions", (saved_quiz or {}).get("question_count", 5)
+        ))
+        if saved_quiz and saved_target == question_count:
             print(f"[quiz-cache] key={cache_key} HIT")
             return saved_quiz
-        print(f"[quiz-cache] key={cache_key} MISS")
+        if saved_quiz:
+            print(f"[quiz-cache] key={cache_key} MISS (question_count {saved_target} != {question_count})")
+        else:
+            print(f"[quiz-cache] key={cache_key} MISS")
     else:
         print(f"[quiz-cache] key={cache_key} MISS (regenerate)")
+
+    if assessment_scope == "topic":
+        return _generate_topic_quiz_v2(
+            document=document,
+            topic=topic_lookup[topic_id],
+            difficulty=difficulty,
+            owner_id=owner_id,
+            model_id=model_id,
+            regenerate=regenerate,
+            question_count=question_count,
+        )
 
     topics_to_plan = [topic_lookup[topic_id]] if assessment_scope == "topic" else list(document.get("topics") or [])
     topic_plans = []
