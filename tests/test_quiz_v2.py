@@ -49,26 +49,34 @@ def raw_question(index: int, source_id: str = "canonical_chunk_1") -> dict:
         ],
         "correct_answer": 0,
         "explanation": "The selected evidence directly supports the first option.",
-        "concept_id": f"concept_{index % 5 + 1:03d}",
-        "source_chunk_ids": [source_id],
+        "slot_id": f"S{index + 1}",
     }
 
 
 class FakeBatchModel:
     payloads = []
     models = []
+    configurations = []
+    prompts = []
 
     def __init__(self, **kwargs):
         self.__class__.models.append(kwargs.get("model"))
+        self.__class__.configurations.append(kwargs)
 
-    def invoke(self, _prompt):
-        return SimpleNamespace(content=json.dumps(self.__class__.payloads.pop(0)))
+    def invoke(self, prompt):
+        self.__class__.prompts.append(prompt)
+        return SimpleNamespace(content=json.dumps(self.__class__.payloads.pop(0)), response_metadata={
+            "load_duration": 2_000_000, "prompt_eval_duration": 3_000_000,
+            "eval_duration": 4_000_000, "prompt_eval_count": 500, "eval_count": 300,
+        })
 
 
 class QuizV2Tests(unittest.TestCase):
     def setUp(self):
         FakeBatchModel.payloads = []
         FakeBatchModel.models = []
+        FakeBatchModel.configurations = []
+        FakeBatchModel.prompts = []
 
     def run_v2(self, payloads, question_count=5):
         FakeBatchModel.payloads = list(payloads)
@@ -125,6 +133,16 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(FakeBatchModel.models, ["qwen-2.5-3b-runtime"])
         self.assertEqual(len(saved), 1)
         self.assertEqual({question["source_chunk_ids"][0] for question in result["questions"]}, {"canonical_chunk_1"})
+        self.assertEqual(FakeBatchModel.configurations[0]["keep_alive"], "10m")
+        self.assertEqual(FakeBatchModel.configurations[0]["num_ctx"], 4096)
+        self.assertEqual(FakeBatchModel.configurations[0]["num_predict"], 650)
+        self.assertNotIn("source_chunk_ids", FakeBatchModel.prompts[0])
+        self.assertIn('"slot_id":"S1"', FakeBatchModel.prompts[0])
+        self.assertLess(len(FakeBatchModel.prompts[0]), 3000)
+        timings = result["assessment_plan"]["timings_ms"]
+        self.assertEqual(timings["model_load_ms"], 2)
+        self.assertEqual(timings["prompt_eval_ms"], 3)
+        self.assertEqual(timings["token_generation_ms"], 4)
 
     def test_four_questions_are_saved_partial_after_one_repair(self):
         result, saved = self.run_v2([
@@ -190,20 +208,22 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(raised.exception.detail["valid_questions"], 7)
         save.assert_not_called()
 
-    def test_invented_evidence_ids_are_rejected(self):
-        FakeBatchModel.payloads = [
-            {"questions": [raw_question(index, "invented_chunk") for index in range(5)]},
-            {"questions": []},
-        ]
+    def test_invented_slot_is_rejected_and_only_missing_slot_is_repaired(self):
+        questions = [raw_question(index) for index in range(5)]
+        questions[0]["slot_id"] = "invented_slot"
+        FakeBatchModel.payloads = [{"questions": questions}, {"questions": []}]
         with (
             patch("backend.quiz_service.get_topic_chunks", return_value=[CHUNK]),
             patch("backend.quiz_service.ChatOllama", FakeBatchModel),
             patch("backend.quiz_service.save_quiz_validation_event"),
-            patch("backend.quiz_service.save_quiz") as save,
+            patch("backend.quiz_service.save_quiz", side_effect=lambda _d, _x, quiz, _o: quiz),
         ):
-            with self.assertRaises(QuizGenerationError):
-                _generate_topic_quiz_v2(DOCUMENT, TOPIC, "easy", "owner", "qwen-3b", False)
-        save.assert_not_called()
+            result = _generate_topic_quiz_v2(DOCUMENT, TOPIC, "easy", "owner", "qwen-3b", False)
+        self.assertEqual(len(result["questions"]), 4)
+        self.assertTrue(result["assessment_plan"]["partial"])
+        self.assertEqual(len(FakeBatchModel.configurations), 2)
+        self.assertEqual(FakeBatchModel.configurations[1]["num_predict"], 260)
+        self.assertIn("Write exactly 1", FakeBatchModel.prompts[1])
 
     def test_v2_questions_preserve_mastery_concept_coverage_fields(self):
         result, _saved = self.run_v2([{"questions": [raw_question(index) for index in range(5)]}])
