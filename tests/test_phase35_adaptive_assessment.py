@@ -156,20 +156,23 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         def planned(topic, chunks):
             capacity = 1 if topic["topic_id"] == "topic_a" else 2
             plan = concept_plan(topic["topic_id"], capacity) | {"topic_name": topic["name"]}
+            plan["concept_plan_id"] = f"plan-{topic['topic_id']}"
             for concept in plan["concepts"]:
                 concept["source_chunk_ids"] = [f"{topic['topic_id']}_1"]
             return plan
 
-        def generated(**kwargs):
-            return [{
-                "id": kwargs["start_id"], "question": f"Question for {kwargs['concept_name']}?",
+        def generated(_document, difficulty, slots, _owner, _model, requested, _run_id):
+            questions = [{
+                "id": index + 1, "question": f"Question for {slot['name']} case {index + 1}?",
                 "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
-                "topic_id": kwargs["topic_id"], "topic_name": kwargs["topic_name"],
-                "concept_id": kwargs["concept_id"], "concept_name": kwargs["concept_name"],
-                "assessment_capacity": kwargs["assessment_capacity"], "difficulty": kwargs["difficulty"],
-                "explanation": "Supported.", "source_chunk_ids": [kwargs["chunks"][0]["metadata"]["chunk_id"]],
+                "topic_id": slot["topic_id"], "topic_name": slot["topic_name"],
+                "concept_id": slot["concept_id"], "concept_name": slot["name"],
+                "concept_plan_id": slot["concept_plan_id"],
+                "assessment_capacity": slot["assessment_capacity"], "difficulty": difficulty,
+                "explanation": "Supported.", "source_chunk_ids": slot["source_chunk_ids"],
                 "validation_outcome": "accepted",
-            }]
+            } for index, slot in enumerate(slots)]
+            return questions, {"accepted": requested, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}, {"llm_calls": 1}
 
         def chunks(document_id, topic_id, owner_id):
             return [{"content": topic_id, "metadata": {"chunk_id": f"{topic_id}_1", "topic_id": topic_id}}]
@@ -178,12 +181,12 @@ class AdaptiveAssessmentTests(unittest.TestCase):
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
              patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
              patch.object(quiz_service, "build_topic_plan", side_effect=planned), \
-             patch.object(quiz_service, "_generate_quiz_batch", side_effect=generated) as generator, \
+             patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated) as generator, \
              patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _owner: quiz):
             result = quiz_service.generate_quiz("doc.pdf", "easy", "document")
 
         self.assertEqual(result["question_count"], 10)
-        self.assertEqual(generator.call_count, 10)
+        self.assertEqual(generator.call_count, 1)
         self.assertEqual({question["topic_id"] for question in result["questions"]}, {"topic_a", "topic_b"})
         self.assertTrue(all(question["concept_id"] for question in result["questions"]))
 

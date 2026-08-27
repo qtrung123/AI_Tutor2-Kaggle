@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from backend.main import QuizGenerateRequest, QuizRegenerateRequest
 from backend.mastery_service import calculate_mastery
-from backend.quiz_service import QuizGenerationError, _generate_topic_quiz_v2
+from backend.quiz_service import QuizGenerationError, _generate_topic_quiz_v2, _run_document_v2_batch
 
 
 CHUNK = {
@@ -104,6 +104,29 @@ class QuizV2Tests(unittest.TestCase):
             )
         semantic.assert_not_called()
         return result, saved
+
+    def run_document_batch(self, payloads, question_count=10):
+        FakeBatchModel.payloads = list(payloads)
+        slots = []
+        for index in range(question_count):
+            topic_number = index % 4 + 1
+            slots.append({
+                "slot_id": f"S{index + 1}", "topic_id": f"topic_{topic_number}",
+                "topic_name": f"Topic {topic_number}", "concept_id": f"aconcept_{index % 5}",
+                "name": f"Concept {index % 5}", "concept_plan_id": f"plan_{topic_number}",
+                "source_subtopic_ids": [f"sub_{topic_number}"], "concept_origin": "structural",
+                "source_chunk_ids": [f"chunk_{topic_number}"], "assessment_capacity": 5,
+                "evidence_excerpt": f"Grounded evidence for topic {topic_number} and slot {index + 1}.",
+            })
+        with (
+            patch("backend.quiz_service.ChatOllama", FakeBatchModel),
+            patch("backend.quiz_service.save_quiz_validation_event"),
+        ):
+            questions, validation, timings = _run_document_v2_batch(
+                {**DOCUMENT, "id": "lecture.pdf"}, "easy", slots, "owner",
+                "qwen-2.5-3b-runtime", question_count, "run-id",
+            )
+        return questions, validation, timings, slots
 
     def test_api_model_contract_has_one_optional_field_per_request(self):
         self.assertIn("model_id", QuizGenerateRequest.model_fields)
@@ -254,6 +277,45 @@ class QuizV2Tests(unittest.TestCase):
         mastery = calculate_mastery(answer_rows, completed_attempts=1)
         self.assertEqual(mastery["distinct_concepts_assessed"], 5)
         self.assertEqual(mastery["concept_coverage_ratio"], 1.0)
+
+    def test_document_supported_counts_use_one_initial_batch_call(self):
+        for count in (10, 15, 20, 25):
+            with self.subTest(question_count=count):
+                FakeBatchModel.models = []
+                FakeBatchModel.configurations = []
+                FakeBatchModel.prompts = []
+                questions, validation, timings, _slots = self.run_document_batch(
+                    [{"questions": [raw_question(index) for index in range(count)]}], count
+                )
+                self.assertEqual(len(questions), count)
+                self.assertEqual(validation["accepted"], count)
+                self.assertEqual(timings["llm_calls"], 1)
+                self.assertEqual(timings["prompt_tokens"], 500)
+                self.assertEqual(timings["output_tokens"], 300)
+                self.assertIn("Topic 1", FakeBatchModel.prompts[0])
+
+    def test_document_batch_repairs_only_invalid_slot_and_owns_metadata(self):
+        initial = [raw_question(index) for index in range(9)]
+        duplicate = raw_question(0)
+        duplicate["slot_id"] = "S10"
+        duplicate["topic_id"] = "invented-topic"
+        repaired = raw_question(9)
+        questions, validation, timings, slots = self.run_document_batch([
+            {"questions": initial + [duplicate]}, {"questions": [repaired]},
+        ])
+        self.assertEqual(len(questions), 10)
+        self.assertEqual(len({question["question"] for question in questions}), 10)
+        self.assertEqual(timings["llm_calls"], 2)
+        self.assertGreaterEqual(timings["repair_ms"], 0)
+        self.assertIn("Write exactly 1", FakeBatchModel.prompts[1])
+        self.assertIn("S10|Topic 2|", FakeBatchModel.prompts[1])
+        self.assertNotIn("S9|Topic 1|", FakeBatchModel.prompts[1])
+        repaired_question = questions[-1]
+        self.assertEqual(repaired_question["topic_id"], slots[-1]["topic_id"])
+        self.assertEqual(repaired_question["concept_id"], slots[-1]["concept_id"])
+        self.assertEqual(repaired_question["concept_plan_id"], slots[-1]["concept_plan_id"])
+        self.assertEqual(repaired_question["source_chunk_ids"], slots[-1]["source_chunk_ids"])
+        self.assertGreaterEqual(validation["rejected"], 1)
 
 
 if __name__ == "__main__":

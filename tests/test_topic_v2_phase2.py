@@ -133,14 +133,21 @@ class TopicV2Phase2Tests(unittest.TestCase):
             return {"topic_id": topic["topic_id"], "topic_name": topic["name"], "planner_version": PLANNER_VERSION,
                     "concept_plan_id": f"plan-{topic['topic_id']}", "assessment_capacity": 4,
                     "allocated_questions": 0, "concepts": concepts}
-        def generated(**kwargs):
-            return [{"id": kwargs["start_id"], "question": "Which supported concept applies?",
-                     "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
-                     "topic_id": kwargs["topic_id"], "topic_name": kwargs["topic_name"],
-                     "concept_id": kwargs["concept_id"], "concept_name": kwargs["concept_name"],
-                     "assessment_capacity": kwargs["assessment_capacity"], "difficulty": "easy",
-                     "explanation": "The evidence supports this.",
-                     "source_chunk_ids": [kwargs["chunks"][0]["metadata"]["chunk_id"]]}]
+        def generated(_document, _difficulty, slots, _owner, _model, requested, _run_id):
+            questions = [{
+                "id": index + 1, "question": f"Which supported concept applies in case {index + 1}?",
+                "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
+                "topic_id": slot["topic_id"], "topic_name": slot["topic_name"],
+                "concept_id": slot["concept_id"], "concept_name": slot["name"],
+                "concept_plan_id": slot["concept_plan_id"], "source_subtopic_ids": [],
+                "concept_origin": slot["concept_origin"], "assessment_capacity": slot["assessment_capacity"],
+                "difficulty": "easy", "explanation": "The evidence supports this.",
+                "source_chunk_ids": slot["source_chunk_ids"],
+            } for index, slot in enumerate(slots)]
+            return questions, {"accepted": requested, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}, {
+                "llm_calls": 1, "prompt_construction_ms": 1, "initial_batch_generation_ms": 2,
+                "validation_ms": 1, "repair_ms": 0, "prompt_tokens": 100, "output_tokens": 200,
+            }
         for requested in (10, 15, 20, 25):
             with self.subTest(question_count=requested), \
                  patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
@@ -148,13 +155,21 @@ class TopicV2Phase2Tests(unittest.TestCase):
                  patch.object(quiz_service, "get_quiz", return_value=None), \
                  patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
                  patch.object(quiz_service, "build_topic_plan", side_effect=plan), \
-                 patch.object(quiz_service, "_generate_quiz_batch", side_effect=generated), \
+                 patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated) as batch, \
                  patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, value, _o: value):
                 result = quiz_service.generate_quiz("doc.pdf", "easy", "document", question_count=requested)
             self.assertEqual(result["question_count"], requested)
             self.assertEqual(result["assessment_plan"]["target_questions"], requested)
             represented = {question["topic_id"] for question in result["questions"]}
             self.assertEqual(represented, {"a", "b", "c", "d"})
+            self.assertEqual(batch.call_count, 1)
+            timings = result["assessment_plan"]["timings_ms"]
+            for key in (
+                "concept_planning_ms", "allocation_ms", "prompt_construction_ms",
+                "initial_batch_generation_ms", "validation_ms", "repair_ms",
+                "persistence_ms", "total_request_ms", "prompt_tokens", "output_tokens",
+            ):
+                self.assertIn(key, timings)
             if requested > 16:
                 self.assertLess(len({question["concept_id"] for question in result["questions"]}), requested)
 
@@ -171,20 +186,10 @@ class TopicV2Phase2Tests(unittest.TestCase):
             "concept_plan_id": "plan-a", "assessment_capacity": 1,
             "allocated_questions": 0, "concepts": [concept],
         }
-        calls = 0
-
-        def generated(**kwargs):
-            nonlocal calls
-            calls += 1
-            if calls == 10:
-                raise ValueError("bounded repair exhausted")
-            return [{
-                "id": kwargs["start_id"], "question": f"Grounded question {calls}?",
-                "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
-                "topic_id": "a", "topic_name": "A", "concept_id": "aconcept_a",
-                "concept_name": "Concept A", "assessment_capacity": 1, "difficulty": "easy",
-                "explanation": "The evidence supports this.", "source_chunk_ids": ["a-chunk"],
-            }]
+        def generated(*_args):
+            return ([{"id": index + 1, "question": f"Grounded question {index + 1}?"} for index in range(9)],
+                    {"accepted": 9, "accepted_with_warnings": 0, "rejected": 1,
+                     "reasons": ["bounded repair exhausted"]}, {"llm_calls": 3})
 
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
@@ -192,7 +197,7 @@ class TopicV2Phase2Tests(unittest.TestCase):
              patch.object(quiz_service, "get_topic_chunks", return_value=[evidence]), \
              patch.object(quiz_service, "build_topic_plan", return_value=plan), \
              patch.object(quiz_service, "resolve_concept_evidence", return_value=[evidence]), \
-             patch.object(quiz_service, "_generate_quiz_batch", side_effect=generated), \
+             patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated), \
              patch.object(quiz_service, "save_quiz") as save:
             with self.assertRaises(quiz_service.QuizGenerationError) as raised:
                 quiz_service.generate_quiz("doc.pdf", "easy", "document", question_count=10)

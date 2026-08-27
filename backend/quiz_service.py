@@ -908,7 +908,9 @@ def _build_v2_prompt(
     repair: bool,
 ) -> str:
     evidence = "\n".join(
-        f"{group['slot_id']}|{group['evidence_excerpt']}" for group in groups
+        f"{group['slot_id']}|{group.get('topic_name', '')}|{group['evidence_excerpt']}"
+        if group.get("topic_name") else f"{group['slot_id']}|{group['evidence_excerpt']}"
+        for group in groups
     )
     avoid = " | ".join(stem[:100] for stem in accepted_stems) if repair else ""
     repair_line = f"Avoid: {avoid}\n" if avoid else ""
@@ -983,19 +985,22 @@ def _validate_v2_question(
             warnings.append("mediocre_distractors")
             break
 
+    authoritative_topic_id = str(group.get("topic_id") or topic["topic_id"])
+    authoritative_topic_name = str(group.get("topic_name") or topic.get("name") or authoritative_topic_id)
+    authoritative_capacity = int(group.get("assessment_capacity", assessment_capacity))
     normalized = {
         "id": question_id,
         "question": stem,
         "options": [f"{'ABCD'[index]}. {option}" for index, option in enumerate(option_bodies)],
         "correct_answer": "ABCD"[answer_index],
-        "topic_id": str(topic["topic_id"]),
-        "topic_name": str(topic.get("name") or topic["topic_id"]),
+        "topic_id": authoritative_topic_id,
+        "topic_name": authoritative_topic_name,
         "concept_id": concept_id,
         "concept_name": group["name"],
         "source_subtopic_ids": list(group.get("source_subtopic_ids") or []),
         "concept_origin": str(group.get("concept_origin") or ""),
         "concept_plan_id": str(group.get("concept_plan_id") or ""),
-        "assessment_capacity": int(assessment_capacity),
+        "assessment_capacity": authoritative_capacity,
         "difficulty": difficulty,
         "explanation": explanation,
         "source_chunk_ids": source_ids,
@@ -1057,7 +1062,7 @@ def _generate_topic_quiz_v2(
             break
         available_groups = [slot for slot in planned_slots if slot["slot_id"] in remaining_slot_ids]
         prompt = _build_v2_prompt(
-            document["id"], topic, difficulty, available_groups, missing, accepted_stems, attempt_index == 1
+            document["id"], topic, difficulty, available_groups, missing, accepted_stems, attempt_index > 0
         )
         stage_started = time.perf_counter()
         llm_calls += 1
@@ -1248,6 +1253,197 @@ def _generate_topic_quiz_v2(
     return saved
 
 
+def _document_v2_slots(
+    planned_topics: list[dict], topic_lookup: dict[str, dict], topic_chunks: dict[str, list[dict]],
+) -> list[dict]:
+    """Materialize allocated document slots with backend-owned hierarchy and evidence."""
+    slots = []
+    evidence_cache: dict[tuple[str, str], list[dict]] = {}
+    for topic_plan in planned_topics:
+        topic_id = str(topic_plan["topic_id"])
+        topic = topic_lookup[topic_id]
+        chunks = topic_chunks.get(topic_id, [])
+        for concept in topic_plan.get("selected_concepts") or []:
+            cache_key = (topic_id, str(concept["concept_id"]))
+            if cache_key not in evidence_cache:
+                evidence_cache[cache_key] = resolve_concept_evidence(topic, chunks, concept)
+            evidence_chunks = evidence_cache[cache_key]
+            if not evidence_chunks:
+                continue
+            excerpts = [
+                _v2_excerpt(chunk.get("content", ""), index, len(evidence_chunks))
+                for index, chunk in enumerate(evidence_chunks)
+            ]
+            slots.append({
+                **concept,
+                "slot_id": f"S{len(slots) + 1}",
+                "topic_id": topic_id,
+                "topic_name": str(topic_plan.get("topic_name") or topic.get("name") or topic_id),
+                "concept_plan_id": str(topic_plan["concept_plan_id"]),
+                "assessment_capacity": int(topic_plan["assessment_capacity"]),
+                "evidence_excerpt": " ".join(excerpts)[:560],
+            })
+    return slots
+
+
+def _document_batch_output_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "questions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string"},
+                        "options": {"type": "array", "items": {"type": "string"}, "minItems": 4, "maxItems": 4},
+                        "slot_id": {"type": "string"},
+                        "correct_answer": {"type": "integer", "minimum": 0, "maximum": 3},
+                        "explanation": {"type": "string"},
+                    },
+                    "required": ["slot_id", "question", "options", "correct_answer", "explanation"],
+                },
+            }
+        },
+        "required": ["questions"],
+    }
+
+
+def _run_document_v2_batch(
+    document: dict,
+    difficulty: str,
+    planned_slots: list[dict],
+    owner_id: str,
+    model_id: str,
+    question_count: int,
+    generation_run_id: str,
+) -> tuple[list[dict], dict, dict]:
+    """Generate all document slots together and repair only rejected/missing slots."""
+    groups_by_id = {slot["slot_id"]: slot for slot in planned_slots}
+    remaining_slot_ids = set(groups_by_id)
+    accepted: list[dict] = []
+    accepted_stems: list[str] = []
+    results = {"accepted": 0, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}
+    timings = {
+        "prompt_construction_ms": 0, "initial_batch_generation_ms": 0,
+        "validation_ms": 0, "repair_ms": 0, "model_load_ms": 0,
+        "prompt_eval_ms": 0, "token_generation_ms": 0,
+        "prompt_tokens": 0, "output_tokens": 0,
+    }
+    llm_calls = 0
+    document_scope = {"topic_id": "document", "name": "Entire document"}
+
+    for attempt_index in range(max(1, QUIZ_GENERATION_RETRY_LIMIT)):
+        attempt_started = time.perf_counter()
+        missing = question_count - len(accepted)
+        if missing <= 0:
+            break
+        available_slots = [slot for slot in planned_slots if slot["slot_id"] in remaining_slot_ids]
+        prompt_started = time.perf_counter()
+        prompt = _build_v2_prompt(
+            document["id"], document_scope, difficulty, available_slots, missing,
+            accepted_stems, attempt_index > 0,
+        )
+        timings["prompt_construction_ms"] += round((time.perf_counter() - prompt_started) * 1000)
+        generation_started = time.perf_counter()
+        llm_calls += 1
+        llm = ChatOllama(
+            model=model_id,
+            temperature=0.1 if attempt_index == 0 else 0.25,
+            format=_document_batch_output_schema(),
+            num_ctx=16384 if missing > 15 else 8192,
+            num_predict=min(4800, max(520, missing * 150)),
+            keep_alive="10m",
+            client_kwargs={"timeout": 270},
+        )
+        print(
+            f"[quiz-document-llm] attempt={attempt_index + 1}, model={model_id}, "
+            f"requested={missing}, slots={len(available_slots)}"
+        )
+        try:
+            response = llm.invoke(prompt)
+            metadata = getattr(response, "response_metadata", {}) or {}
+            model_load_ms = round(float(metadata.get("load_duration") or 0) / 1_000_000)
+            prompt_eval_ms = round(float(metadata.get("prompt_eval_duration") or 0) / 1_000_000)
+            token_generation_ms = round(float(metadata.get("eval_duration") or 0) / 1_000_000)
+            prompt_tokens = int(metadata.get("prompt_eval_count") or 0)
+            output_tokens = int(metadata.get("eval_count") or 0)
+            timings["model_load_ms"] += model_load_ms
+            timings["prompt_eval_ms"] += prompt_eval_ms
+            timings["token_generation_ms"] += token_generation_ms
+            timings["prompt_tokens"] += prompt_tokens
+            timings["output_tokens"] += output_tokens
+            data = _extract_json(str(response.content))
+            candidates = data.get("questions") if isinstance(data, dict) else None
+            if not isinstance(candidates, list):
+                raise ValueError("Quiz JSON does not contain a questions list.")
+            print(
+                f"[quiz-document-ollama] attempt={attempt_index + 1}, returned={len(candidates)}, "
+                f"model_load_ms={model_load_ms}, prompt_eval_ms={prompt_eval_ms}, "
+                f"token_generation_ms={token_generation_ms}, prompt_tokens={prompt_tokens}, "
+                f"output_tokens={output_tokens}"
+            )
+        except Exception as error:
+            candidates = []
+            results["rejected"] += missing
+            results["reasons"].append(f"response: {error}")
+        generation_elapsed = round((time.perf_counter() - generation_started) * 1000)
+        if attempt_index == 0:
+            timings["initial_batch_generation_ms"] += generation_elapsed
+
+        validation_started = time.perf_counter()
+        for candidate_index, raw in enumerate(candidates):
+            if len(accepted) >= question_count:
+                break
+            try:
+                slot_id = str(raw.get("slot_id") or raw.get("concept_id") or "").strip() if isinstance(raw, dict) else ""
+                slot = groups_by_id.get(slot_id) or {}
+                normalized, warnings = _validate_v2_question(
+                    raw, groups_by_id, remaining_slot_ids, accepted_stems, difficulty,
+                    len(accepted) + 1, document_scope, int(slot.get("assessment_capacity", 0)),
+                )
+                accepted.append(normalized)
+                accepted_stems.append(normalized["question"])
+                remaining_slot_ids.remove(slot_id)
+                results["accepted_with_warnings" if warnings else "accepted"] += 1
+                save_quiz_validation_event({
+                    "generation_run_id": generation_run_id,
+                    "owner_id": owner_id,
+                    "document_id": document["id"],
+                    "document_hash": document.get("hash", ""),
+                    "topic_id": normalized["topic_id"],
+                    "topic_schema_version": int(document.get("topic_schema_version", 0)),
+                    "difficulty": difficulty,
+                    "batch_index": 1,
+                    "generation_attempt": attempt_index + 1,
+                    "candidate_index": candidate_index,
+                    "generator_model": model_id,
+                    "generation_prompt_version": QUIZ_V2_PROMPT_VERSION,
+                    "validator_model": "deterministic-v2",
+                    "validator_prompt_version": "no-semantic-llm-v2",
+                    "candidate_question": normalized,
+                    "cited_chunk_ids": normalized["source_chunk_ids"],
+                    "evidence_chunk_ids": normalized["source_chunk_ids"],
+                    "hard_passed": True,
+                    "quality_passed": not warnings,
+                    "accepted": True,
+                    "outcome": normalized["validation_outcome"],
+                    "verdict": {"mode": "deterministic", "warnings": warnings},
+                    "rejection_reasons": warnings,
+                    "latency_ms": 0,
+                })
+            except Exception as error:
+                results["rejected"] += 1
+                results["reasons"].append(str(error))
+                print(f"[quiz-document-validation] discarded candidate: {error}")
+        timings["validation_ms"] += round((time.perf_counter() - validation_started) * 1000)
+        if attempt_index > 0:
+            timings["repair_ms"] += round((time.perf_counter() - attempt_started) * 1000)
+
+    timings["llm_calls"] = llm_calls
+    return accepted, results, timings
+
+
 def generate_quiz(
     document_id: str,
     difficulty: str,
@@ -1265,6 +1461,7 @@ def generate_quiz(
     not create a different quiz. Passing regenerate=True intentionally replaces
     the saved quiz.
     """
+    request_started = time.perf_counter()
     known_documents = _document_lookup(owner_id)
     if document_id not in known_documents:
         raise ValueError("document_id was not found in indexed documents.")
@@ -1315,93 +1512,62 @@ def generate_quiz(
             question_count=question_count,
         )
 
-    topics_to_plan = [topic_lookup[topic_id]] if assessment_scope == "topic" else list(document.get("topics") or [])
+    timings: dict[str, object] = {}
+    topics_to_plan = list(document.get("topics") or [])
     topic_plans = []
     topic_chunks = {}
     structural_document_chunks = None
+    retrieval_started = time.perf_counter()
     if any(isinstance(topic.get("boundary"), dict) for topic in topics_to_plan):
         structural_document_chunks = get_document_chunks(document_id, owner_id)
+    timings["topic_chunk_retrieval_ms"] = round((time.perf_counter() - retrieval_started) * 1000)
+    planning_by_topic = {}
     for topic in topics_to_plan:
+        retrieval_started = time.perf_counter()
         current_chunks = (
             structural_document_chunks
             if isinstance(topic.get("boundary"), dict)
             else get_topic_chunks(document_id, str(topic["topic_id"]), owner_id)
         )
+        if structural_document_chunks is None:
+            timings["topic_chunk_retrieval_ms"] += round((time.perf_counter() - retrieval_started) * 1000)
         if not current_chunks:
             continue
         topic_chunks[str(topic["topic_id"])] = current_chunks
+        planning_started = time.perf_counter()
         topic_plans.append(build_topic_plan(topic, current_chunks))
-    if assessment_scope == "document":
-        allocation = allocate_document_topics(topic_plans, cap=question_count)
-        planned_topics = allocation["topics"]
-        excluded_topic_ids = allocation["excluded_topic_ids"]
-    else:
-        planned_topics = []
-        for plan in topic_plans:
-            capacity = int(plan["assessment_capacity"])
-            planned_topics.append({
-                **plan,
-                "allocated_questions": capacity,
-                "selected_concepts": list(plan["concepts"]),
-            })
-        excluded_topic_ids = []
+        planning_by_topic[str(topic["topic_id"])] = round((time.perf_counter() - planning_started) * 1000)
+    timings["concept_planning_by_topic_ms"] = planning_by_topic
+    timings["concept_planning_ms"] = sum(planning_by_topic.values())
+
+    allocation_started = time.perf_counter()
+    allocation = allocate_document_topics(topic_plans, cap=question_count)
+    planned_topics = allocation["topics"]
+    excluded_topic_ids = allocation["excluded_topic_ids"]
+    timings["allocation_ms"] = round((time.perf_counter() - allocation_started) * 1000)
     if not any(plan["allocated_questions"] for plan in planned_topics):
         raise ValueError("No grounded assessable concepts were found for the selected assessment scope.")
 
     generation_run_id = str(uuid4())
-    questions = []
-    generation_warnings = []
-    next_id = 1
-    avoid_questions: list[str] = []
-    batch_index = 0
-    for topic_plan in planned_topics:
-        current_topic = topic_lookup[topic_plan["topic_id"]]
-        for concept in topic_plan.get("selected_concepts", []):
-            evidence_chunks = resolve_concept_evidence(
-                current_topic, topic_chunks.get(topic_plan["topic_id"], []), concept
-            )
-            if not evidence_chunks:
-                continue
-            batch_index += 1
-            concept_label = str(concept["name"])
-            try:
-                batch_questions = _generate_quiz_batch(
-                    document_id=document_id,
-                    num_questions=1,
-                    difficulty=difficulty,
-                    chunks=evidence_chunks,
-                    start_id=next_id,
-                    topic_id=topic_plan["topic_id"],
-                    topic_name=topic_plan["topic_name"],
-                    avoid_questions=avoid_questions,
-                    generation_run_id=generation_run_id,
-                    batch_index=batch_index,
-                    document_hash=document.get("hash", ""),
-                    topic_schema_version=topic_schema_version,
-                    concept_id=concept["concept_id"],
-                    concept_name=concept_label,
-                    assessment_capacity=topic_plan["assessment_capacity"],
-                    owner_id=owner_id,
-                    model_id=model_id,
-                )
-            except Exception as error:
-                warning = f"Skipped concept {concept['concept_id']} ({concept_label}): {error}"
-                generation_warnings.append(warning)
-                print(f"[quiz-generation-warning] {warning}")
-                continue
-            for question in batch_questions:
-                question["source_subtopic_ids"] = list(concept.get("source_subtopic_ids") or [])
-                question["concept_origin"] = str(concept.get("concept_origin") or "")
-                question["concept_plan_id"] = str(topic_plan.get("concept_plan_id") or "")
-            questions.extend(batch_questions)
-            avoid_questions.extend(question["question"] for question in batch_questions)
-            next_id += 1
+    slot_started = time.perf_counter()
+    planned_slots = _document_v2_slots(planned_topics, topic_lookup, topic_chunks)
+    timings["slot_build_ms"] = round((time.perf_counter() - slot_started) * 1000)
+    print(
+        f"[quiz-document-plan] requested={question_count}, planned_slots={len(planned_slots)}, "
+        f"topics={json.dumps({plan['topic_id']: plan['allocated_questions'] for plan in planned_topics})}"
+    )
+    questions, validation_results, batch_timings = _run_document_v2_batch(
+        document, difficulty, planned_slots, owner_id, model_id, question_count, generation_run_id,
+    )
+    timings.update(batch_timings)
 
     if len(questions) != question_count:
         missing = question_count - len(questions)
-        summary = list(dict.fromkeys(generation_warnings))[-10:]
+        summary = list(dict.fromkeys(validation_results["reasons"]))[-10:]
         if not summary:
             summary = [f"No grounded evidence or valid question was available for {missing} remaining slots."]
+        timings["total_request_ms"] = round((time.perf_counter() - request_started) * 1000)
+        print(f"[quiz-document-timing] {json.dumps({**timings, 'valid_questions': len(questions)})}")
         raise QuizGenerationError(
             f"Quiz generation requested {question_count} questions but produced {len(questions)} valid questions; "
             f"{missing} questions are still missing after bounded targeted repair.",
@@ -1418,16 +1584,18 @@ def generate_quiz(
         "title": document.get("title", document_id),
         "difficulty": difficulty,
         "topic_id": scope_topic_id,
-        "topic_name": topic_lookup[topic_id].get("name", topic_id) if assessment_scope == "topic" else "Entire document",
-        "assessment_scope": assessment_scope,
+        "topic_name": "Entire document",
+        "assessment_scope": "document",
         "assessment_plan": {
             "planner_version": PLANNER_VERSION,
-            "scope": assessment_scope,
+            "scope": "document",
             "topics": planned_topics,
             "excluded_topic_ids": excluded_topic_ids,
             "target_questions": question_count,
             "total_questions": len(questions),
-            "generation_warnings": generation_warnings,
+            "generation_warnings": validation_results["reasons"],
+            "validation_results": validation_results,
+            "llm_calls": timings["llm_calls"],
         },
         "topic_schema_version": topic_schema_version,
         "question_count": len(questions),
@@ -1437,7 +1605,13 @@ def generate_quiz(
     if regenerate:
         delete_document_attempts(document_id, difficulty, scope_topic_id, owner_id)
     print(f"[quiz-save] cache_key={cache_key}")
-    return save_quiz(document_id, difficulty, quiz, owner_id)
+    persistence_started = time.perf_counter()
+    saved = save_quiz(document_id, difficulty, quiz, owner_id)
+    timings["persistence_ms"] = round((time.perf_counter() - persistence_started) * 1000)
+    timings["total_request_ms"] = round((time.perf_counter() - request_started) * 1000)
+    saved["assessment_plan"]["timings_ms"] = timings
+    print(f"[quiz-document-timing] {json.dumps({**timings, 'valid_questions': len(questions)})}")
+    return saved
 
 
 def load_quiz_with_attempt(
