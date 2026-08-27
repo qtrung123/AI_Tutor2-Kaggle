@@ -37,6 +37,7 @@ from backend.assessment_planner import (
     build_topic_plan,
     resolve_concept_evidence,
 )
+from backend.quiz_options import canonicalize_option, strip_leading_option_label
 from backend.mastery_service import calculate_mastery, recompute_topic_mastery
 from backend.rag_service import explain_quiz_answer
 from backend.auth_store import LEGACY_USER_ID
@@ -441,17 +442,14 @@ def _normalize_options(raw_options) -> list[str]:
             value = str(raw_options.get(letter, "")).strip()
             if not value:
                 raise ValueError("missing option text")
-            options.append(f"{letter}. {value}")
+            options.append(canonicalize_option(value, letter))
         return options
 
     if isinstance(raw_options, list):
         options = []
         for index, option in enumerate(raw_options[:4]):
-            value = str(option).strip()
             letter = "ABCD"[index]
-            if not re.match(r"^[ABCD][\.\)]\s*", value, flags=re.IGNORECASE):
-                value = f"{letter}. {value}"
-            options.append(value)
+            options.append(canonicalize_option(option, letter))
         return options
 
     raise ValueError("options must be a list or object")
@@ -463,7 +461,7 @@ def _clean_inline_text(value: str) -> str:
 
 
 def _option_text(option: str) -> str:
-    return re.sub(r"^[ABCD][\.\)]\s*", "", str(option).strip(), flags=re.IGNORECASE)
+    return strip_leading_option_label(option)
 
 
 def _looks_like_raw_chunk(option: str) -> bool:
@@ -949,7 +947,7 @@ def _validate_v2_question(
     raw_options = raw.get("options")
     if not isinstance(raw_options, list) or len(raw_options) != 4:
         raise ValueError("Question must contain exactly 4 options.")
-    option_bodies = [_clean_inline_text(option) for option in raw_options]
+    option_bodies = [strip_leading_option_label(_clean_inline_text(option)) for option in raw_options]
     if any(not option for option in option_bodies) or len({option.lower() for option in option_bodies}) != 4:
         raise ValueError("Question options must be non-empty and distinct.")
 
@@ -991,7 +989,7 @@ def _validate_v2_question(
     normalized = {
         "id": question_id,
         "question": stem,
-        "options": [f"{'ABCD'[index]}. {option}" for index, option in enumerate(option_bodies)],
+        "options": [canonicalize_option(option, "ABCD"[index]) for index, option in enumerate(option_bodies)],
         "correct_answer": "ABCD"[answer_index],
         "topic_id": authoritative_topic_id,
         "topic_name": authoritative_topic_name,

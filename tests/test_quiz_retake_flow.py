@@ -156,6 +156,9 @@ class QuizRetakeFlowTests(unittest.TestCase):
                 for index in range(1, 11)
             ],
         })
+        quiz["questions"][0]["options"] = [
+            "A. Alpha", "b) Beta", "C: Gamma", "d - Delta",
+        ]
         document = {
             "id": "Embedded Systems.pdf", "title": "Embedded Systems", "hash": "embedded-hash",
             "topic_schema_version": 2,
@@ -215,6 +218,9 @@ class QuizRetakeFlowTests(unittest.TestCase):
         self.assertIsNone(quiz_store.get_quiz("Embedded Systems.pdf", "easy", "document", LEGACY_USER_ID))
         persisted = quiz_store.get_quiz_by_id("document-batch-10", LEGACY_USER_ID)
         self.assertEqual(len(persisted["questions"]), 10)
+        self.assertEqual(persisted["questions"][0]["options"], [
+            "A. Alpha", "B. Beta", "C. Gamma", "D. Delta",
+        ])
 
         answers = {str(index): "A" for index in range(1, 11)}
         completed = submit_quiz_attempt(
@@ -227,9 +233,11 @@ class QuizRetakeFlowTests(unittest.TestCase):
 
         review = quiz_store.get_quiz_history_attempt(completed["attempt_id"], LEGACY_USER_ID)
         self.assertEqual(len(review["question_results"]), 10)
+        self.assertEqual(review["question_results"][0]["options"], persisted["questions"][0]["options"])
         retake = load_quiz_for_retake(completed["attempt_id"], LEGACY_USER_ID)
         self.assertEqual(retake["quiz"]["quiz_id"], completed["quiz_id"])
         self.assertEqual(len(retake["quiz"]["questions"]), 10)
+        self.assertEqual(retake["quiz"]["questions"][0]["options"], persisted["questions"][0]["options"])
         second = submit_quiz_attempt(
             "Embedded Systems.pdf", "easy", "document", answers,
             LEGACY_USER_ID, quiz_id=retake["quiz"]["quiz_id"],

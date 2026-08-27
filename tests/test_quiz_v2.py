@@ -6,7 +6,10 @@ from unittest.mock import patch
 
 from backend.main import QuizGenerateRequest, QuizRegenerateRequest
 from backend.mastery_service import calculate_mastery
-from backend.quiz_service import QuizGenerationError, _generate_topic_quiz_v2, _run_document_v2_batch
+from backend.quiz_options import strip_leading_option_label
+from backend.quiz_service import (
+    QuizGenerationError, _generate_topic_quiz_v2, _run_document_v2_batch, _validate_quiz_batch,
+)
 
 
 CHUNK = {
@@ -181,6 +184,45 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(timings["model_load_ms"], 2)
         self.assertEqual(timings["prompt_eval_ms"], 3)
         self.assertEqual(timings["token_generation_ms"], 4)
+
+    def test_option_prefixes_are_stripped_once_without_damaging_normal_words(self):
+        cases = {
+            "A. Real-time operation": "Real-time operation",
+            "B) No kernel": "No kernel",
+            "C: No processes": "No processes",
+            "D- Deterministic timing": "Deterministic timing",
+            "A real-time operation": "real-time operation",
+            "b. lowercase label": "lowercase label",
+            "c) lowercase parenthesis": "lowercase parenthesis",
+            "d - lowercase dash": "lowercase dash",
+            "Application software": "Application software",
+            "Database transaction": "Database transaction",
+        }
+        self.assertEqual({value: strip_leading_option_label(value) for value in cases}, cases)
+
+    def test_topic_document_and_legacy_generation_canonicalize_model_option_labels(self):
+        expected = ["A. Real-time operation", "B. No kernel", "C. No processes", "D. Application software"]
+        prefixed = ["A. Real-time operation", "b) No kernel", "C: No processes", "Application software"]
+        topic_questions = [raw_question(index) for index in range(10)]
+        topic_questions[0]["options"] = prefixed
+        topic, _saved = self.run_v2([{"questions": topic_questions}])
+        self.assertEqual(topic["questions"][0]["options"], expected)
+
+        document_questions = [raw_question(index) for index in range(10)]
+        document_questions[0]["options"] = ["A Real-time operation", "B - No kernel", "c. No processes", "Application software"]
+        document, _validation, _timings, _slots = self.run_document_batch([{"questions": document_questions}])
+        self.assertEqual(document[0]["options"], expected)
+
+        legacy = _validate_quiz_batch(
+            {"questions": [{
+                "question": "Which option describes supported real-time system behavior?",
+                "options": prefixed,
+                "correct_answer": "A",
+                "explanation": "The evidence supports real-time operation in this system.",
+            }]},
+            1, 1, source_chunk_ids=["canonical_chunk_1"],
+        )
+        self.assertEqual(legacy[0]["options"], expected)
 
     def test_partial_initial_generation_repairs_only_missing_slot(self):
         result, saved = self.run_v2([

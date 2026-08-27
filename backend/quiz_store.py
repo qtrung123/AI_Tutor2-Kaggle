@@ -13,6 +13,7 @@ from config import (
     LEGACY_QUIZ_EXPLANATIONS_PATH,
 )
 from backend.auth_store import LEGACY_USER_ID, initialize_auth_store
+from backend.quiz_options import canonicalize_option
 
 LEGACY_TOPIC_ID = "document"
 
@@ -336,8 +337,8 @@ def quiz_cache_key(document_id: str, difficulty: str, topic_id: str = LEGACY_TOP
 
 def _normalize_options(options) -> list[str]:
     if isinstance(options, dict):
-        return [f"{letter}. {options.get(letter, '')}" for letter in "ABCD"]
-    return [str(option) for option in (options or [])][:4]
+        return [canonicalize_option(options.get(letter, ""), letter) for letter in "ABCD"]
+    return [canonicalize_option(option, "ABCD"[index]) for index, option in enumerate((options or [])[:4])]
 
 
 def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: str, quiz: dict, owner_id: str = LEGACY_USER_ID) -> dict:
