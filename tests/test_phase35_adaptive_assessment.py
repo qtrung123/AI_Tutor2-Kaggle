@@ -182,8 +182,8 @@ class AdaptiveAssessmentTests(unittest.TestCase):
              patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _owner: quiz):
             result = quiz_service.generate_quiz("doc.pdf", "easy", "document")
 
-        self.assertEqual(result["question_count"], 3)
-        self.assertEqual(generator.call_count, 3)
+        self.assertEqual(result["question_count"], 10)
+        self.assertEqual(generator.call_count, 10)
         self.assertEqual({question["topic_id"] for question in result["questions"]}, {"topic_a", "topic_b"})
         self.assertTrue(all(question["concept_id"] for question in result["questions"]))
 
@@ -192,7 +192,7 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         self.assertIn("question_count", QuizRegenerateRequest.model_fields)
         self.assertEqual(QuizGenerateRequest(
             document_id="doc.pdf", assessment_scope="topic", topic_id="topic_a", difficulty="easy"
-        ).question_count, 5)
+        ).question_count, 10)
         frontend = (Path(__file__).parents[1] / "frontend" / "app.js").read_text(encoding="utf-8")
         self.assertIn("quizQuestionCountSelect", frontend)
         self.assertIn("question_count:", frontend)
@@ -208,11 +208,11 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
              patch.object(quiz_service, "_generate_topic_quiz_v2", return_value={
-                 "question_count": 5, "questions": [{"concept_id": f"concept_{index:03d}"} for index in range(1, 6)]
+                 "question_count": 10, "questions": [{"concept_id": f"concept_{index:03d}"} for index in range(1, 11)]
              }) as generator:
             result = quiz_service.generate_quiz("doc.pdf", "easy", "topic", "topic_a")
 
-        self.assertEqual(result["question_count"], 5)
+        self.assertEqual(result["question_count"], 10)
         generator.assert_called_once()
         self.assertEqual(generator.call_args.kwargs["model_id"], quiz_service.CHAT_MODEL)
 

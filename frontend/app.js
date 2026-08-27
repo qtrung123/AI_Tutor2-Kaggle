@@ -966,8 +966,8 @@ function selectedDifficulty() {
 }
 
 function selectedQuestionCount() {
-  const value = Number(quizQuestionCountSelect?.value || 5);
-  return [3, 5, 10].includes(value) ? value : 5;
+  const value = Number(quizQuestionCountSelect?.value || 10);
+  return [10, 15, 20, 25].includes(value) ? value : 10;
 }
 
 function selectedTopicId() {
@@ -2498,11 +2498,11 @@ function openQuizCreateDialog() {
     caption.textContent = "Number of questions";
     quizQuestionCountSelect = document.createElement("select");
     quizQuestionCountSelect.id = "quiz-question-count-select";
-    [3, 5, 10].forEach((count) => {
+    [10, 15, 20, 25].forEach((count) => {
       const option = document.createElement("option");
       option.value = String(count);
       option.textContent = String(count);
-      option.selected = count === 5;
+      option.selected = count === 10;
       quizQuestionCountSelect.appendChild(option);
     });
     label.append(caption, quizQuestionCountSelect);

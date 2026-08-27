@@ -1,5 +1,6 @@
 import json
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -39,8 +40,18 @@ def raw_question(index: int, source_id: str = "canonical_chunk_1") -> dict:
         "When packet loss occurs, how does retransmission help?",
         "How can checksums reveal corruption during transport?",
     ]
+    mechanisms = [
+        "congestion recovery", "window scaling", "selective acknowledgement", "timeout estimation",
+        "connection establishment", "receiver buffering", "segment framing", "duplicate detection",
+        "loss recovery", "delivery confirmation", "sequence wraparound", "delayed acknowledgement",
+        "adaptive retransmission", "ordered reassembly", "corruption detection", "flow regulation",
+        "sender throttling", "round trip sampling", "state synchronization", "endpoint negotiation",
+        "payload verification", "stream reconstruction", "failure recovery", "packet accounting",
+        "transport coordination",
+    ]
+    stem = stems[index] if index < len(stems) else f"How does {mechanisms[index]} contribute to reliable communication?"
     return {
-        "question": stems[index % len(stems)] + (f" Consider case {index + 1}." if index >= len(stems) else ""),
+        "question": stem,
         "options": [
             f"It provides supported behavior {index + 1}",
             f"It disables receiver behavior {index + 1}",
@@ -78,7 +89,7 @@ class QuizV2Tests(unittest.TestCase):
         FakeBatchModel.configurations = []
         FakeBatchModel.prompts = []
 
-    def run_v2(self, payloads, question_count=5):
+    def run_v2(self, payloads, question_count=10):
         FakeBatchModel.payloads = list(payloads)
         saved = []
         with (
@@ -102,8 +113,8 @@ class QuizV2Tests(unittest.TestCase):
             difficulty="easy", model_id="qwen-2.5-3b",
         )
         self.assertEqual(request.model_id, "qwen-2.5-3b")
-        self.assertEqual(request.question_count, 5)
-        for count in (3, 5, 10):
+        self.assertEqual(request.question_count, 10)
+        for count in (10, 15, 20, 25):
             self.assertEqual(QuizGenerateRequest(
                 document_id="lecture.pdf", assessment_scope="topic", topic_id="topic_001",
                 difficulty="easy", question_count=count,
@@ -111,11 +122,15 @@ class QuizV2Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             QuizGenerateRequest(
                 document_id="lecture.pdf", assessment_scope="topic", topic_id="topic_001",
-                difficulty="easy", question_count=4,
+                difficulty="easy", question_count=5,
             )
+        frontend = Path("frontend/app.js").read_text(encoding="utf-8")
+        self.assertIn("[10, 15, 20, 25].includes(value)", frontend)
+        self.assertIn("[10, 15, 20, 25].forEach((count)", frontend)
+        self.assertNotIn("[3, 5, 10]", frontend)
 
-    def test_requested_counts_generate_three_five_and_ten_slots(self):
-        for count in (3, 5, 10):
+    def test_requested_counts_generate_exact_supported_slots(self):
+        for count in (10, 15, 20, 25):
             with self.subTest(question_count=count):
                 result, saved = self.run_v2(
                     [{"questions": [raw_question(index) for index in range(count)]}], count
@@ -125,17 +140,17 @@ class QuizV2Tests(unittest.TestCase):
                 self.assertEqual(result["assessment_plan"]["llm_calls"], 1)
                 self.assertEqual(len(saved), 1)
 
-    def test_five_questions_use_one_selected_model_call_and_no_semantic_llm(self):
-        result, saved = self.run_v2([{"questions": [raw_question(index) for index in range(5)]}])
-        self.assertEqual(len(result["questions"]), 5)
+    def test_ten_questions_use_one_selected_model_call_and_no_semantic_llm(self):
+        result, saved = self.run_v2([{"questions": [raw_question(index) for index in range(10)]}])
+        self.assertEqual(len(result["questions"]), 10)
         self.assertEqual(result["assessment_plan"]["llm_calls"], 1)
         self.assertFalse(result["assessment_plan"]["partial"])
         self.assertEqual(FakeBatchModel.models, ["qwen-2.5-3b-runtime"])
         self.assertEqual(len(saved), 1)
         self.assertEqual({question["source_chunk_ids"][0] for question in result["questions"]}, {"canonical_chunk_1"})
         self.assertEqual(FakeBatchModel.configurations[0]["keep_alive"], "10m")
-        self.assertEqual(FakeBatchModel.configurations[0]["num_ctx"], 4096)
-        self.assertEqual(FakeBatchModel.configurations[0]["num_predict"], 650)
+        self.assertEqual(FakeBatchModel.configurations[0]["num_ctx"], 8192)
+        self.assertEqual(FakeBatchModel.configurations[0]["num_predict"], 1500)
         self.assertNotIn("source_chunk_ids", FakeBatchModel.prompts[0])
         self.assertIn('"slot_id":"S1"', FakeBatchModel.prompts[0])
         self.assertLess(len(FakeBatchModel.prompts[0]), 3000)
@@ -144,19 +159,23 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(timings["prompt_eval_ms"], 3)
         self.assertEqual(timings["token_generation_ms"], 4)
 
-    def test_four_questions_are_saved_partial_after_one_repair(self):
+    def test_partial_initial_generation_repairs_only_missing_slot(self):
         result, saved = self.run_v2([
-            {"questions": [raw_question(index) for index in range(4)]},
-            {"questions": []},
+            {"questions": [raw_question(index) for index in range(9)]},
+            {"questions": [raw_question(9)]},
         ])
-        self.assertEqual(len(result["questions"]), 4)
-        self.assertTrue(result["assessment_plan"]["partial"])
+        self.assertEqual(len(result["questions"]), 10)
+        self.assertFalse(result["assessment_plan"]["partial"])
         self.assertEqual(result["assessment_plan"]["llm_calls"], 2)
         self.assertEqual(len(saved), 1)
+        self.assertIn("Write exactly 1", FakeBatchModel.prompts[1])
+        self.assertIn("S10|", FakeBatchModel.prompts[1])
+        self.assertNotIn("S9|", FakeBatchModel.prompts[1])
 
-    def test_fewer_than_four_questions_fail_without_persistence(self):
+    def test_repair_failure_reports_counts_and_does_not_persist(self):
         FakeBatchModel.payloads = [
-            {"questions": [raw_question(index) for index in range(3)]},
+            {"questions": [raw_question(index) for index in range(8)]},
+            {"questions": []},
             {"questions": []},
         ]
         with (
@@ -167,51 +186,16 @@ class QuizV2Tests(unittest.TestCase):
         ):
             with self.assertRaises(QuizGenerationError) as raised:
                 _generate_topic_quiz_v2(DOCUMENT, TOPIC, "easy", "owner", "qwen-3b", False)
-        self.assertEqual(raised.exception.detail["valid_questions"], 3)
-        save.assert_not_called()
-
-    def test_three_question_request_requires_all_three(self):
-        FakeBatchModel.payloads = [
-            {"questions": [raw_question(index) for index in range(2)]},
-            {"questions": []},
-        ]
-        with (
-            patch("backend.quiz_service.get_topic_chunks", return_value=[CHUNK]),
-            patch("backend.quiz_service.ChatOllama", FakeBatchModel),
-            patch("backend.quiz_service.save_quiz_validation_event"),
-            patch("backend.quiz_service.save_quiz") as save,
-        ):
-            with self.assertRaises(QuizGenerationError) as raised:
-                _generate_topic_quiz_v2(
-                    DOCUMENT, TOPIC, "easy", "owner", "qwen-3b", False, 3
-                )
-        self.assertEqual(raised.exception.detail["target_questions"], 3)
-        self.assertEqual(raised.exception.detail["valid_questions"], 2)
-        save.assert_not_called()
-
-    def test_ten_question_request_requires_at_least_eight(self):
-        FakeBatchModel.payloads = [
-            {"questions": [raw_question(index) for index in range(7)]},
-            {"questions": []},
-        ]
-        with (
-            patch("backend.quiz_service.get_topic_chunks", return_value=[CHUNK]),
-            patch("backend.quiz_service.ChatOllama", FakeBatchModel),
-            patch("backend.quiz_service.save_quiz_validation_event"),
-            patch("backend.quiz_service.save_quiz") as save,
-        ):
-            with self.assertRaises(QuizGenerationError) as raised:
-                _generate_topic_quiz_v2(
-                    DOCUMENT, TOPIC, "easy", "owner", "qwen-3b", False, 10
-                )
-        self.assertEqual(raised.exception.detail["target_questions"], 10)
-        self.assertEqual(raised.exception.detail["valid_questions"], 7)
+        self.assertEqual(raised.exception.detail["requested_count"], 10)
+        self.assertEqual(raised.exception.detail["valid_count"], 8)
+        self.assertEqual(raised.exception.detail["missing_count"], 2)
+        self.assertTrue(raised.exception.detail["failure_summary"])
         save.assert_not_called()
 
     def test_invented_slot_is_rejected_and_only_missing_slot_is_repaired(self):
-        questions = [raw_question(index) for index in range(5)]
+        questions = [raw_question(index) for index in range(10)]
         questions[0]["slot_id"] = "invented_slot"
-        FakeBatchModel.payloads = [{"questions": questions}, {"questions": []}]
+        FakeBatchModel.payloads = [{"questions": questions}, {"questions": [raw_question(0)]}]
         with (
             patch("backend.quiz_service.get_topic_chunks", return_value=[CHUNK]),
             patch("backend.quiz_service.ChatOllama", FakeBatchModel),
@@ -219,14 +203,28 @@ class QuizV2Tests(unittest.TestCase):
             patch("backend.quiz_service.save_quiz", side_effect=lambda _d, _x, quiz, _o: quiz),
         ):
             result = _generate_topic_quiz_v2(DOCUMENT, TOPIC, "easy", "owner", "qwen-3b", False)
-        self.assertEqual(len(result["questions"]), 4)
-        self.assertTrue(result["assessment_plan"]["partial"])
+        self.assertEqual(len(result["questions"]), 10)
+        self.assertFalse(result["assessment_plan"]["partial"])
         self.assertEqual(len(FakeBatchModel.configurations), 2)
-        self.assertEqual(FakeBatchModel.configurations[1]["num_predict"], 260)
+        self.assertEqual(FakeBatchModel.configurations[1]["num_predict"], 520)
         self.assertIn("Write exactly 1", FakeBatchModel.prompts[1])
 
+    def test_duplicate_repair_is_rejected_then_only_missing_slot_is_retried(self):
+        first = [raw_question(index) for index in range(9)]
+        duplicate = raw_question(0)
+        duplicate["slot_id"] = "S10"
+        repaired = raw_question(9)
+        FakeBatchModel.payloads = [
+            {"questions": first}, {"questions": [duplicate]}, {"questions": [repaired]},
+        ]
+        result, saved = self.run_v2(FakeBatchModel.payloads)
+        self.assertEqual(len(result["questions"]), 10)
+        self.assertEqual(len({question["question"] for question in result["questions"]}), 10)
+        self.assertEqual(result["assessment_plan"]["llm_calls"], 3)
+        self.assertEqual(len(saved), 1)
+
     def test_v2_questions_preserve_mastery_concept_coverage_fields(self):
-        result, _saved = self.run_v2([{"questions": [raw_question(index) for index in range(5)]}])
+        result, _saved = self.run_v2([{"questions": [raw_question(index) for index in range(10)]}])
         answer_rows = [
             {
                 "is_correct": True,

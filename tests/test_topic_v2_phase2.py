@@ -141,17 +141,66 @@ class TopicV2Phase2Tests(unittest.TestCase):
                      "assessment_capacity": kwargs["assessment_capacity"], "difficulty": "easy",
                      "explanation": "The evidence supports this.",
                      "source_chunk_ids": [kwargs["chunks"][0]["metadata"]["chunk_id"]]}]
+        for requested in (10, 15, 20, 25):
+            with self.subTest(question_count=requested), \
+                 patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
+                 patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
+                 patch.object(quiz_service, "get_quiz", return_value=None), \
+                 patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
+                 patch.object(quiz_service, "build_topic_plan", side_effect=plan), \
+                 patch.object(quiz_service, "_generate_quiz_batch", side_effect=generated), \
+                 patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, value, _o: value):
+                result = quiz_service.generate_quiz("doc.pdf", "easy", "document", question_count=requested)
+            self.assertEqual(result["question_count"], requested)
+            self.assertEqual(result["assessment_plan"]["target_questions"], requested)
+            represented = {question["topic_id"] for question in result["questions"]}
+            self.assertEqual(represented, {"a", "b", "c", "d"})
+            if requested > 16:
+                self.assertLess(len({question["concept_id"] for question in result["questions"]}), requested)
+
+    def test_document_partial_generation_fails_without_persistence(self):
+        topic = {"topic_id": "a", "name": "A", "subtopics": []}
+        document = {"id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 3, "topics": [topic]}
+        evidence = chunk("a-chunk", "", "Grounded evidence for A", "a")
+        concept = {
+            "concept_id": "aconcept_a", "name": "Concept A", "source_subtopic_ids": [],
+            "source_chunk_ids": ["a-chunk"], "concept_origin": "derived",
+        }
+        plan = {
+            "topic_id": "a", "topic_name": "A", "planner_version": PLANNER_VERSION,
+            "concept_plan_id": "plan-a", "assessment_capacity": 1,
+            "allocated_questions": 0, "concepts": [concept],
+        }
+        calls = 0
+
+        def generated(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 10:
+                raise ValueError("bounded repair exhausted")
+            return [{
+                "id": kwargs["start_id"], "question": f"Grounded question {calls}?",
+                "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
+                "topic_id": "a", "topic_name": "A", "concept_id": "aconcept_a",
+                "concept_name": "Concept A", "assessment_capacity": 1, "difficulty": "easy",
+                "explanation": "The evidence supports this.", "source_chunk_ids": ["a-chunk"],
+            }]
+
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
              patch.object(quiz_service, "get_quiz", return_value=None), \
-             patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
-             patch.object(quiz_service, "build_topic_plan", side_effect=plan), \
+             patch.object(quiz_service, "get_topic_chunks", return_value=[evidence]), \
+             patch.object(quiz_service, "build_topic_plan", return_value=plan), \
+             patch.object(quiz_service, "resolve_concept_evidence", return_value=[evidence]), \
              patch.object(quiz_service, "_generate_quiz_batch", side_effect=generated), \
-             patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, value, _o: value):
-            result = quiz_service.generate_quiz("doc.pdf", "easy", "document", question_count=10)
-        self.assertEqual(result["question_count"], 10)
-        represented = {question["topic_id"] for question in result["questions"]}
-        self.assertEqual(represented, {"a", "b", "c", "d"})
+             patch.object(quiz_service, "save_quiz") as save:
+            with self.assertRaises(quiz_service.QuizGenerationError) as raised:
+                quiz_service.generate_quiz("doc.pdf", "easy", "document", question_count=10)
+        self.assertEqual(raised.exception.detail["requested_count"], 10)
+        self.assertEqual(raised.exception.detail["valid_count"], 9)
+        self.assertEqual(raised.exception.detail["missing_count"], 1)
+        self.assertTrue(raised.exception.detail["failure_summary"])
+        save.assert_not_called()
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

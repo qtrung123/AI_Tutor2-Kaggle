@@ -55,22 +55,29 @@ from config import (
 
 GENERATION_PROMPT_VERSION = "topic_mcq_v2_backend_evidence"
 QUIZ_V2_PROMPT_VERSION = "topic_mcq_v2_slot_batch_fast"
-QUIZ_V2_ALLOWED_QUESTION_COUNTS = {3, 5, 10}
-QUIZ_V2_MIN_QUESTIONS = {3: 3, 5: 4, 10: 8}
+QUIZ_V2_ALLOWED_QUESTION_COUNTS = {10, 15, 20, 25}
 QUIZ_V2_DISTINCT_CONCEPT_LIMIT = 5
 
 
 class QuizGenerationError(ValueError):
     """Structured topic-quiz failure that is safe to expose through the API."""
 
-    def __init__(self, message: str, *, stage: str, valid_questions: int = 0, target_questions: int = 5):
+    def __init__(
+        self, message: str, *, stage: str, valid_questions: int = 0,
+        target_questions: int = 10, failure_summary: list[str] | None = None,
+    ):
         super().__init__(message)
+        missing_questions = max(0, target_questions - valid_questions)
         self.detail = {
             "code": "quiz_v2_generation_failed",
             "message": message,
             "stage": stage,
             "valid_questions": valid_questions,
             "target_questions": target_questions,
+            "requested_count": target_questions,
+            "valid_count": valid_questions,
+            "missing_count": missing_questions,
+            "failure_summary": list(failure_summary or []),
         }
 
 
@@ -1004,7 +1011,7 @@ def _generate_topic_quiz_v2(
     owner_id: str,
     model_id: str,
     regenerate: bool,
-    question_count: int = 5,
+    question_count: int = 10,
 ) -> dict:
     total_started = time.perf_counter()
     timings = {}
@@ -1043,7 +1050,7 @@ def _generate_topic_quiz_v2(
     prompt_eval_ms = 0
     token_generation_ms = 0
 
-    for attempt_index in range(2):
+    for attempt_index in range(max(1, QUIZ_GENERATION_RETRY_LIMIT)):
         call_started = time.perf_counter()
         missing = question_count - len(accepted)
         if missing <= 0:
@@ -1078,8 +1085,8 @@ def _generate_topic_quiz_v2(
             model=model_id,
             temperature=0.1 if attempt_index == 0 else 0.25,
             format=output_schema,
-            num_ctx=4096,
-            num_predict=min(1400, max(260, missing * 130)),
+            num_ctx=16384 if missing > 15 else 8192,
+            num_predict=min(4800, max(520, missing * 150)),
             keep_alive="10m",
             client_kwargs={"timeout": 270},
         )
@@ -1163,7 +1170,7 @@ def _generate_topic_quiz_v2(
                 validation_results["reasons"].append(str(error))
                 print(f"[quiz-v2-validation] discarded candidate: {error}")
         validation_ms += round((time.perf_counter() - validation_started) * 1000)
-        if attempt_index == 1:
+        if attempt_index > 0:
             repair_ms += round((time.perf_counter() - call_started) * 1000)
 
     timings["generation_ms"] = generation_ms
@@ -1172,20 +1179,24 @@ def _generate_topic_quiz_v2(
     timings["token_generation_ms"] = token_generation_ms
     timings["validation_ms"] = validation_ms
     timings["repair_ms"] = repair_ms
-    minimum_questions = QUIZ_V2_MIN_QUESTIONS[question_count]
-    if len(accepted) < minimum_questions:
+    if len(accepted) != question_count:
         timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
         timings["total_request_ms"] = timings["total_ms"]
         print(f"[quiz-v2-timing] {json.dumps({**timings, 'llm_calls': llm_calls})}")
+        missing = question_count - len(accepted)
+        summary = list(dict.fromkeys(validation_results["reasons"]))[-10:]
+        if not summary:
+            summary = [f"No valid candidate was returned for {missing} remaining question slots."]
         raise QuizGenerationError(
-            f"Quiz V2 produced {len(accepted)}/{question_count} valid grounded questions after one repair attempt; "
-            f"at least {minimum_questions} are required.",
+            f"Quiz generation requested {question_count} questions but produced {len(accepted)} valid questions; "
+            f"{missing} questions are still missing after bounded targeted repair.",
             stage="validation",
             valid_questions=len(accepted),
             target_questions=question_count,
+            failure_summary=summary,
         )
 
-    partial = len(accepted) < question_count
+    partial = False
     quiz = {
         "quiz_id": str(uuid4()),
         "document_id": document["id"],
@@ -1245,7 +1256,7 @@ def generate_quiz(
     regenerate: bool = False,
     owner_id: str = LEGACY_USER_ID,
     model_id: str = CHAT_MODEL,
-    question_count: int = 5,
+    question_count: int = 10,
 ) -> dict:
     """
     Generate or load the persistent quiz for one indexed document.
@@ -1261,7 +1272,7 @@ def generate_quiz(
     if difficulty not in QUIZ_DIFFICULTIES:
         raise ValueError("difficulty must be easy, medium, or difficult.")
     if question_count not in QUIZ_V2_ALLOWED_QUESTION_COUNTS:
-        raise ValueError("question_count must be one of 3, 5, or 10.")
+        raise ValueError("question_count must be one of 10, 15, 20, or 25.")
     print(f"[quiz-service] difficulty={difficulty}")
     document = known_documents[document_id]
     assessment_scope = str(assessment_scope).lower().strip()
@@ -1278,10 +1289,12 @@ def generate_quiz(
     if not regenerate:
         saved_quiz = get_quiz(document_id, difficulty, scope_topic_id, owner_id)
         saved_target = int((saved_quiz or {}).get("assessment_plan", {}).get(
-            "target_questions", (saved_quiz or {}).get("question_count", 5)
+            "target_questions", (saved_quiz or {}).get("question_count", 10)
         ))
         saved_planner = str((saved_quiz or {}).get("assessment_plan", {}).get("planner_version") or "legacy")
-        if saved_quiz and saved_target == question_count and saved_planner == PLANNER_VERSION:
+        saved_questions = list((saved_quiz or {}).get("questions") or [])
+        saved_exact = int((saved_quiz or {}).get("question_count", 0)) == question_count == len(saved_questions)
+        if saved_quiz and saved_exact and saved_target == question_count and saved_planner == PLANNER_VERSION:
             print(f"[quiz-cache] key={cache_key} HIT")
             return saved_quiz
         if saved_quiz:
@@ -1384,9 +1397,19 @@ def generate_quiz(
             avoid_questions.extend(question["question"] for question in batch_questions)
             next_id += 1
 
-    if not questions:
-        detail = generation_warnings[-1] if generation_warnings else "No concept produced a grounded question."
-        raise ValueError(f"No valid grounded questions were generated. {detail}")
+    if len(questions) != question_count:
+        missing = question_count - len(questions)
+        summary = list(dict.fromkeys(generation_warnings))[-10:]
+        if not summary:
+            summary = [f"No grounded evidence or valid question was available for {missing} remaining slots."]
+        raise QuizGenerationError(
+            f"Quiz generation requested {question_count} questions but produced {len(questions)} valid questions; "
+            f"{missing} questions are still missing after bounded targeted repair.",
+            stage="generation",
+            valid_questions=len(questions),
+            target_questions=question_count,
+            failure_summary=summary,
+        )
 
     quiz = {
         "quiz_id": str(uuid4()),
@@ -1402,6 +1425,7 @@ def generate_quiz(
             "scope": assessment_scope,
             "topics": planned_topics,
             "excluded_topic_ids": excluded_topic_ids,
+            "target_questions": question_count,
             "total_questions": len(questions),
             "generation_warnings": generation_warnings,
         },

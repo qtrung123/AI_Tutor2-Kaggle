@@ -402,8 +402,17 @@ def allocate_document_topics(topic_plans: list[dict], cap: int = AUTO_QUIZ_MAX_D
         candidates.sort(key=lambda plan: (-(int(plan["assessment_capacity"]) - allocations[plan["topic_id"]]), str(plan["topic_id"])))
         allocations[candidates[0]["topic_id"]] += 1
         remaining -= 1
+    repeat_order = sorted(included, key=lambda plan: (-int(plan["assessment_capacity"]), str(plan["topic_id"])))
+    repeat_index = 0
+    while remaining > 0 and repeat_order:
+        plan = repeat_order[repeat_index % len(repeat_order)]
+        allocations[plan["topic_id"]] += 1
+        remaining -= 1
+        repeat_index += 1
     planned = []
     for plan in topic_plans:
         allocation = allocations.get(plan["topic_id"], 0)
-        planned.append({**plan, "allocated_questions": allocation, "selected_concepts": list(plan.get("concepts") or [])[:allocation]})
+        concepts = list(plan.get("concepts") or [])
+        selected = [concepts[index % len(concepts)] for index in range(allocation)] if concepts else []
+        planned.append({**plan, "allocated_questions": allocation, "selected_concepts": selected})
     return {"topics": planned, "total_questions": sum(allocations.values()), "excluded_topic_ids": excluded}
