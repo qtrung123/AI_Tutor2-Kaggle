@@ -9,6 +9,7 @@ from backend.mastery_service import calculate_mastery
 from backend.quiz_options import strip_leading_option_label
 from backend.quiz_service import (
     QuizGenerationError, _generate_topic_quiz_v2, _run_document_v2_batch, _validate_quiz_batch,
+    _validate_v2_question,
 )
 
 
@@ -56,7 +57,7 @@ def raw_question(index: int, source_id: str = "canonical_chunk_1") -> dict:
     return {
         "question": stem,
         "options": [
-            f"It provides supported behavior {index + 1}",
+            f"It supports reliable communication {index + 1}",
             f"It disables receiver behavior {index + 1}",
             f"It removes ordering behavior {index + 1}",
             f"It prevents delivery behavior {index + 1}",
@@ -119,7 +120,7 @@ class QuizV2Tests(unittest.TestCase):
                 "name": f"Concept {index % 5}", "concept_plan_id": f"plan_{topic_number}",
                 "source_subtopic_ids": [f"sub_{topic_number}"], "concept_origin": "structural",
                 "source_chunk_ids": [f"chunk_{topic_number}"], "assessment_capacity": 5,
-                "evidence_excerpt": f"Grounded evidence for topic {topic_number} and slot {index + 1}.",
+                "evidence_excerpt": f"Grounded evidence supports reliable communication for topic {topic_number} and slot {index + 1}.",
             })
         with (
             patch("backend.quiz_service.ChatOllama", FakeBatchModel),
@@ -130,6 +131,19 @@ class QuizV2Tests(unittest.TestCase):
                 "qwen-2.5-3b-runtime", question_count, "run-id",
             )
         return questions, validation, timings, slots
+
+    def validate_easy_candidate(self, stem, options, correct_answer, explanation, evidence):
+        group = {
+            "slot_id": "S1", "topic_id": "topic_001", "topic_name": "Scheduling",
+            "concept_id": "concept_scheduler", "name": "Scheduler", "concept_plan_id": "plan_1",
+            "source_subtopic_ids": [], "concept_origin": "structural", "source_chunk_ids": ["chunk_1"],
+            "assessment_capacity": 1, "evidence_excerpt": evidence,
+        }
+        return _validate_v2_question(
+            {"slot_id": "S1", "question": stem, "options": options,
+             "correct_answer": correct_answer, "explanation": explanation},
+            {"S1": group}, {"S1"}, [], "easy", 1, TOPIC, 1,
+        )
 
     def test_api_model_contract_has_one_optional_field_per_request(self):
         self.assertIn("model_id", QuizGenerateRequest.model_fields)
@@ -179,7 +193,7 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(FakeBatchModel.configurations[0]["num_predict"], 1500)
         self.assertNotIn("source_chunk_ids", FakeBatchModel.prompts[0])
         self.assertIn('"slot_id":"S1"', FakeBatchModel.prompts[0])
-        self.assertLess(len(FakeBatchModel.prompts[0]), 3000)
+        self.assertLess(len(FakeBatchModel.prompts[0]), 3400)
         timings = result["assessment_plan"]["timings_ms"]
         self.assertEqual(timings["model_load_ms"], 2)
         self.assertEqual(timings["prompt_eval_ms"], 3)
@@ -201,17 +215,17 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual({value: strip_leading_option_label(value) for value in cases}, cases)
 
     def test_topic_document_and_legacy_generation_canonicalize_model_option_labels(self):
-        expected = ["A. Real-time operation", "B. No kernel", "C. No processes", "D. Application software"]
-        prefixed = ["A. Real-time operation", "b) No kernel", "C: No processes", "Application software"]
+        expected = ["A. Reliable delivery", "B. No kernel", "C. No processes", "D. Application software"]
+        prefixed = ["A. Reliable delivery", "b) No kernel", "C: No processes", "Application software"]
         topic_questions = [raw_question(index) for index in range(10)]
         topic_questions[0]["options"] = prefixed
         topic, _saved = self.run_v2([{"questions": topic_questions}])
         self.assertEqual(topic["questions"][0]["options"], expected)
 
         document_questions = [raw_question(index) for index in range(10)]
-        document_questions[0]["options"] = ["A Real-time operation", "B - No kernel", "c. No processes", "Application software"]
+        document_questions[0]["options"] = ["A Reliable communication", "B - No kernel", "c. No processes", "Application software"]
         document, _validation, _timings, _slots = self.run_document_batch([{"questions": document_questions}])
-        self.assertEqual(document[0]["options"], expected)
+        self.assertEqual(document[0]["options"], ["A. Reliable communication", *expected[1:]])
 
         legacy = _validate_quiz_batch(
             {"questions": [{
@@ -223,6 +237,61 @@ class QuizV2Tests(unittest.TestCase):
             1, 1, source_chunk_ids=["canonical_chunk_1"],
         )
         self.assertEqual(legacy[0]["options"], expected)
+
+    def test_easy_quality_rejects_two_tinyos_scheduler_answers(self):
+        with self.assertRaisesRegex(ValueError, "distractor is too similar"):
+            self.validate_easy_candidate(
+                "How does the TinyOS scheduler run queued tasks?",
+                ["Runs tasks in FIFO order", "Does not preempt running tasks", "Uses timed priorities", "Runs every task concurrently"],
+                0, "TinyOS runs queued tasks in FIFO order.",
+                "The TinyOS scheduler runs queued tasks in FIFO order and does not preempt a running task.",
+            )
+
+    def test_easy_quality_rejects_negative_partial_and_outside_world_patterns(self):
+        cases = [
+            (
+                "Which scheduler behavior is NOT used by TinyOS?",
+                ["Runs queued tasks", "Uses FIFO order", "Avoids task preemption", "Runs one task"], 1,
+                "TinyOS uses FIFO order for queued tasks.",
+                "TinyOS runs queued tasks in FIFO order without task preemption.", "negative or trick",
+            ),
+            (
+                "What are the four objectives of the scheduler?",
+                ["Low latency", "High throughput", "Fair execution", "Small memory use"], 0,
+                "The objectives include low latency, throughput, fairness, and small memory use.",
+                "The four objectives are low latency, high throughput, fair execution, and small memory use.", "partial answer",
+            ),
+            (
+                "How does the TinyOS scheduler order queued tasks?",
+                ["Uses FIFO order", "Linux uses round-robin scheduling", "Uses random ordering", "Uses deadline ordering"], 0,
+                "TinyOS uses FIFO order for queued tasks.",
+                "The TinyOS scheduler orders queued tasks using FIFO order.", "outside-world distractor",
+            ),
+        ]
+        for stem, options, answer, explanation, evidence, error in cases:
+            with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
+                self.validate_easy_candidate(stem, options, answer, explanation, evidence)
+
+    def test_clean_easy_recall_question_is_accepted(self):
+        question, warnings = self.validate_easy_candidate(
+            "How does the TinyOS scheduler order queued tasks?",
+            ["Uses FIFO order", "Uses random ordering", "Uses deadline ordering", "Uses reverse arrival order"], 0,
+            "TinyOS uses FIFO order for queued tasks.",
+            "The TinyOS scheduler orders queued tasks using FIFO order.",
+        )
+        self.assertEqual(question["correct_answer"], "A")
+        self.assertNotIn("difficulty_mismatch", warnings)
+
+    def test_easy_quality_rejection_tracks_one_targeted_repair_call(self):
+        initial = [raw_question(index) for index in range(10)]
+        initial[0]["question"] = "Which behavior is NOT supported by the evidence?"
+        questions, validation, timings, _slots = self.run_document_batch([
+            {"questions": initial}, {"questions": [raw_question(0)]},
+        ])
+        self.assertEqual(len(questions), 10)
+        self.assertEqual(validation["easy_quality_rejections"], 1)
+        self.assertEqual(timings["repair_llm_calls"], 1)
+        self.assertIn("EASY QUALITY:", FakeBatchModel.prompts[1])
 
     def test_partial_initial_generation_repairs_only_missing_slot(self):
         result, saved = self.run_v2([

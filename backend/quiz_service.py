@@ -912,13 +912,98 @@ def _build_v2_prompt(
     )
     avoid = " | ".join(stem[:100] for stem in accepted_stems) if repair else ""
     repair_line = f"Avoid: {avoid}\n" if avoid else ""
+    easy_contract = (
+        "EASY QUALITY: Ask direct recall/comprehension about one explicit evidence fact. "
+        "Exactly one option must fully answer the stem; every distractor must conflict with or be unsupported by this slot evidence. "
+        "Do not rely on outside-world plausibility. Do not use NOT, EXCEPT, false, incorrect, least, or double negatives. "
+        "If several evidence facts are true, do not make them competing options; the correct option must contain the complete requested set. "
+        "The correct option must match the stem in scope and grammar.\n"
+        if difficulty == "easy" else ""
+    )
     return (
         f"Write exactly {count} {difficulty} MCQs for {topic.get('name') or topic.get('topic_id')}.\n"
         'JSON only: {"questions":[{"slot_id":"S1","question":"...","options":["...","...","...","..."],"correct_answer":0,"explanation":"..."}]}\n'
         "Use each evidence slot exactly once. Use only its evidence. Four distinct options; correct_answer is 0-3. "
         "Question <=18 words, each option <=10 words, explanation <=16 words. No markdown or extra fields.\n"
-        f"{repair_line}EVIDENCE:\n{evidence}"
+        f"{easy_contract}{repair_line}EVIDENCE:\n{evidence}"
     )
+
+
+_EASY_NEGATIVE_STEM = re.compile(
+    r"\b(?:not|except|false|incorrect|least|never)\b|\b(?:no|not|never)\b.{0,28}\b(?:without|not|never)\b",
+    flags=re.IGNORECASE,
+)
+_EASY_TEMPLATE_STEM = re.compile(r"\.{3}|\b(?:tbd|placeholder|insert|option|answer)\b|[_]{2,}", flags=re.IGNORECASE)
+_EASY_ABSOLUTES = {"always", "never", "only", "all"}
+_EASY_EXTERNAL_ENTITIES = {"linux", "windows", "freertos", "vxworks", "zephyr", "unix", "android", "macos"}
+_EASY_STOPWORDS = {
+    "the", "and", "for", "with", "from", "that", "this", "which", "what", "when", "where", "does",
+    "are", "is", "was", "were", "into", "than", "then", "its", "their", "one", "option", "answer",
+    "evidence", "context", "because", "directly", "selected",
+}
+
+
+def _easy_token(value: str) -> str:
+    token = value.lower()
+    for suffix in ("ing", "ed", "es", "s"):
+        if len(token) > len(suffix) + 3 and token.endswith(suffix):
+            return token[:-len(suffix)]
+    return token
+
+
+def _easy_content_tokens(value: str) -> set[str]:
+    return {
+        _easy_token(token) for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9'/-]*", str(value))
+        if len(token) >= 3 and token.lower() not in _EASY_STOPWORDS
+    }
+
+
+def _validate_easy_v2_quality(stem: str, options: list[str], answer_index: int, explanation: str, evidence: str) -> None:
+    """Reject cheap-to-detect Easy ambiguity without another model call."""
+    lowered_stem = stem.lower().strip()
+    if _EASY_NEGATIVE_STEM.search(lowered_stem):
+        raise ValueError("Easy quality: negative or trick stem.")
+    if (
+        not stem.endswith("?") or _EASY_TEMPLATE_STEM.search(stem)
+        or re.search(r"\b(?:of|for|and|or|the|a|an|to|is|are)\s*\?$", lowered_stem)
+    ):
+        raise ValueError("Easy quality: incomplete or template-like stem.")
+
+    correct = options[answer_index]
+    explicit_count = re.search(r"\b(two|three|four|five|six|seven|eight|nine|ten|\d+)\b", lowered_stem)
+    asks_for_set = bool(re.search(r"\b(?:objectives|components|steps|goals|features|elements|requirements)\b", lowered_stem))
+    answer_parts = [part for part in re.split(r"\s*(?:,|;|/|\band\b)\s*", correct, flags=re.IGNORECASE) if part]
+    number_words = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+    if explicit_count and asks_for_set:
+        requested = number_words.get(explicit_count.group(1), int(explicit_count.group(1)) if explicit_count.group(1).isdigit() else 0)
+        if requested > 1 and len(answer_parts) < requested:
+            raise ValueError("Easy quality: partial answer for an explicit multi-part stem.")
+    elif asks_for_set and re.search(r"\b(?:what|which)\b.*\b(?:are|include)\b", lowered_stem) and len(answer_parts) < 2:
+        raise ValueError("Easy quality: singular answer for a plural/set stem.")
+
+    evidence_lower = evidence.lower()
+    evidence_tokens = _easy_content_tokens(evidence)
+    correct_tokens = _easy_content_tokens(correct)
+    explanation_tokens = _easy_content_tokens(explanation)
+    if not (correct_tokens & evidence_tokens) and not (
+        correct_tokens & explanation_tokens and explanation_tokens & evidence_tokens
+    ):
+        raise ValueError("Easy quality: correct answer/explanation lacks lexical evidence support.")
+
+    for index, option in enumerate(options):
+        option_lower = option.lower()
+        raw_option_tokens = set(re.findall(r"[a-z0-9]+", option_lower))
+        unsupported_absolute = next((term for term in _EASY_ABSOLUTES if term in raw_option_tokens and term not in evidence_lower), None)
+        if unsupported_absolute:
+            raise ValueError(f"Easy quality: unsupported absolute term '{unsupported_absolute}'.")
+        unsupported_entity = next((term for term in _EASY_EXTERNAL_ENTITIES if term in option_lower and term not in evidence_lower), None)
+        if unsupported_entity:
+            raise ValueError(f"Easy quality: outside-world distractor '{unsupported_entity}'.")
+        if index == answer_index:
+            continue
+        option_tokens = _easy_content_tokens(option)
+        if len(option_tokens) >= 2 and len(option_tokens & evidence_tokens) / len(option_tokens) >= 0.8:
+            raise ValueError("Easy quality: distractor is too similar to an evidence fact.")
 
 
 def _validate_v2_question(
@@ -965,6 +1050,10 @@ def _validate_v2_question(
 
     warnings = []
     explanation = _clean_inline_text(raw.get("explanation", ""))
+    if difficulty == "easy":
+        _validate_easy_v2_quality(
+            stem, option_bodies, answer_index, explanation, str(group.get("evidence_excerpt") or "")
+        )
     if len(explanation.split()) < 4:
         warnings.append("explanation_quality")
     if len(stem.split()) < 6:
@@ -1045,7 +1134,10 @@ def _generate_topic_quiz_v2(
     remaining_slot_ids = set(groups_by_id)
     accepted = []
     accepted_stems = []
-    validation_results = {"accepted": 0, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}
+    validation_results = {
+        "accepted": 0, "accepted_with_warnings": 0, "rejected": 0,
+        "easy_quality_rejections": 0, "reasons": [],
+    }
     generation_ms = 0
     validation_ms = 0
     repair_ms = 0
@@ -1171,6 +1263,8 @@ def _generate_topic_quiz_v2(
             except Exception as error:
                 validation_results["rejected"] += 1
                 validation_results["reasons"].append(str(error))
+                if str(error).startswith("Easy quality:"):
+                    validation_results["easy_quality_rejections"] += 1
                 print(f"[quiz-v2-validation] discarded candidate: {error}")
         validation_ms += round((time.perf_counter() - validation_started) * 1000)
         if attempt_index > 0:
@@ -1182,6 +1276,7 @@ def _generate_topic_quiz_v2(
     timings["token_generation_ms"] = token_generation_ms
     timings["validation_ms"] = validation_ms
     timings["repair_ms"] = repair_ms
+    timings["repair_llm_calls"] = max(0, llm_calls - 1)
     if len(accepted) != question_count:
         timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
         timings["total_request_ms"] = timings["total_ms"]
@@ -1321,7 +1416,10 @@ def _run_document_v2_batch(
     remaining_slot_ids = set(groups_by_id)
     accepted: list[dict] = []
     accepted_stems: list[str] = []
-    results = {"accepted": 0, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}
+    results = {
+        "accepted": 0, "accepted_with_warnings": 0, "rejected": 0,
+        "easy_quality_rejections": 0, "reasons": [],
+    }
     timings = {
         "prompt_construction_ms": 0, "initial_batch_generation_ms": 0,
         "validation_ms": 0, "repair_ms": 0, "model_load_ms": 0,
@@ -1433,12 +1531,15 @@ def _run_document_v2_batch(
             except Exception as error:
                 results["rejected"] += 1
                 results["reasons"].append(str(error))
+                if str(error).startswith("Easy quality:"):
+                    results["easy_quality_rejections"] += 1
                 print(f"[quiz-document-validation] discarded candidate: {error}")
         timings["validation_ms"] += round((time.perf_counter() - validation_started) * 1000)
         if attempt_index > 0:
             timings["repair_ms"] += round((time.perf_counter() - attempt_started) * 1000)
 
     timings["llm_calls"] = llm_calls
+    timings["repair_llm_calls"] = max(0, llm_calls - 1)
     return accepted, results, timings
 
 
