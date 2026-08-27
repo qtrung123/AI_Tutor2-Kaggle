@@ -181,6 +181,9 @@ class QuizQuestion(BaseModel):
     topic_name: str = ""
     concept_id: str = ""
     concept_name: str = ""
+    source_subtopic_ids: list[str] = Field(default_factory=list)
+    concept_origin: str = ""
+    concept_plan_id: str = ""
     assessment_capacity: int = 0
     difficulty: str
     explanation: str

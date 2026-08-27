@@ -1,5 +1,6 @@
 import unittest
 import gc
+from pathlib import Path
 from uuid import uuid4
 
 from langchain_chroma import Chroma
@@ -8,7 +9,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from backend.topic_extractor import TopicExtractor, normalize_heading
-from backend.ingest import add_topic_metadata, delete_stale_source_vectors, split_documents
+from backend.ingest import add_topic_metadata, clean_documents, delete_stale_source_vectors, load_single_file, split_documents
 from backend.rag_service import _chroma_filter
 from backend.quiz_service import _result_to_chunks
 from config import CHUNK_OVERLAP, CHUNK_SIZE
@@ -23,6 +24,66 @@ class DeterministicEmbeddings(Embeddings):
 
 
 class TopicExtractorTests(unittest.TestCase):
+    def _extract_text(self, text):
+        return TopicExtractor().extract([Document(page_content=text, metadata={"page": 0})])[0]
+
+    def test_embedded_systems_golden_hierarchy(self):
+        path = Path(__file__).parents[1] / "data" / "Embedded Systems.pdf"
+        documents = clean_documents(load_single_file(path))
+        topics, _ = TopicExtractor().extract(documents)
+        self.assertEqual([topic["name"] for topic in topics], [
+            "Section 1: Embedded Systems",
+            "Section 2: Characteristics of Embedded Operating Systems",
+            "Section 3: eCos: Embedded Configurable Operating System",
+            "Section 4: TinyOS",
+        ])
+        self.assertIn("Examples of Embedded Devices", [sub["name"] for sub in topics[0]["subtopics"]])
+        self.assertIn("Wireless Sensor Network Topology", [sub["name"] for sub in topics[3]["subtopics"]])
+
+    def test_chapter_section_family_uses_chapters_as_topics(self):
+        topics = self._extract_text(
+            "Chapter 1: Foundations\n" + "intro body " * 20 + "\nSection 1: Terms\n" + "terms " * 20
+            + "\nChapter 2: Design\n" + "design " * 20 + "\nSection 2: Patterns\n" + "patterns " * 20
+        )
+        self.assertEqual([topic["name"] for topic in topics], ["Chapter 1: Foundations", "Chapter 2: Design"])
+        self.assertEqual([sub["name"] for topic in topics for sub in topic["subtopics"]], ["Section 1: Terms", "Section 2: Patterns"])
+
+    def test_unit_module_family_uses_units_as_topics(self):
+        topics = self._extract_text(
+            "Unit 1: Basics\n" + "body " * 30 + "\nModule 1: Vocabulary\n" + "body " * 30
+            + "\nUnit 2: Practice\n" + "body " * 30 + "\nModule 2: Exercises\n" + "body " * 30
+        )
+        self.assertEqual([topic["name"] for topic in topics], ["Unit 1: Basics", "Unit 2: Practice"])
+
+    def test_dotted_numbering_infers_depth_one_topics(self):
+        topics = self._extract_text(
+            "1 Overview\n" + "body " * 30 + "\n1.1 Definitions\n" + "body " * 30
+            + "\n2 Architecture\n" + "body " * 30 + "\n2.1 Components\n" + "body " * 30
+        )
+        self.assertEqual([topic["name"] for topic in topics], ["1 Overview", "2 Architecture"])
+        self.assertEqual([len(topic["subtopics"]) for topic in topics], [1, 1])
+
+    def test_unnumbered_headings_use_content_span(self):
+        topics = self._extract_text(
+            "Course Overview\n" + "overview content " * 20 + "\nCore Principles\n" + "principle content " * 20
+        )
+        self.assertEqual([topic["name"] for topic in topics], ["Course Overview", "Core Principles"])
+
+    def test_structural_ids_are_stable_when_unrelated_heading_is_appended(self):
+        first = self._extract_text("1 Alpha\n" + "a " * 80 + "\n2 Beta\n" + "b " * 80)
+        second = self._extract_text("1 Alpha\n" + "a " * 80 + "\n2 Beta\n" + "b " * 80 + "\n3 Gamma\n" + "c " * 80)
+        self.assertEqual([topic["topic_id"] for topic in first], [topic["topic_id"] for topic in second[:2]])
+
+    def test_boundaries_are_half_open_and_chunk_metadata_has_hierarchy(self):
+        document = Document(page_content="1 Alpha\n" + "a " * 100 + "\n1.1 Detail\n" + "d " * 100 + "\n2 Beta\n" + "b " * 100, metadata={"page": 0})
+        chunks = RecursiveCharacterTextSplitter(chunk_size=100, chunk_overlap=0, add_start_index=True).split_documents([document])
+        topics = add_topic_metadata([document], chunks, [f"id_{i}" for i in range(len(chunks))], TopicExtractor())
+        self.assertEqual(topics[0]["boundary"]["end"], topics[1]["boundary"]["start"])
+        self.assertEqual(topics[0]["boundary"]["interval"], "half-open")
+        detail = next(chunk for chunk in chunks if "d d d" in chunk.page_content)
+        self.assertEqual(detail.metadata["topic_id"], topics[0]["topic_id"])
+        self.assertTrue(detail.metadata["subtopic_id"].startswith("subtopic_"))
+        self.assertTrue({"subtopic_name", "heading_path", "structure_confidence"} <= detail.metadata.keys())
     def test_owner_vector_id_is_distinct_from_canonical_provenance_id(self):
         chunks = _result_to_chunks({
             "ids": ["user-123_hash_0"], "documents": ["Grounded content"],
@@ -90,8 +151,8 @@ class TopicExtractorTests(unittest.TestCase):
 
         self.assertEqual([topic["name"] for topic in topics], ["1. Networking Basics", "2. Transport Protocols"])
         self.assertTrue(all(chunk.metadata["page"] == 0 for chunk in chunks))
-        self.assertIn("topic_001", {chunk.metadata["topic_id"] for chunk in chunks})
-        self.assertIn("topic_002", {chunk.metadata["topic_id"] for chunk in chunks})
+        self.assertEqual({chunk.metadata["topic_id"] for chunk in chunks}, {topic["topic_id"] for topic in topics})
+        self.assertTrue(all(topic["topic_id"].startswith("topic_") for topic in topics))
         self.assertEqual([chunk.metadata["chunk_id"] for chunk in chunks], ids)
         transport_chunks = [chunk for chunk in chunks if "TCP provides" in chunk.page_content]
         self.assertTrue(transport_chunks)
@@ -114,7 +175,7 @@ class TopicExtractorTests(unittest.TestCase):
         pages = [Document(page_content="ordinary prose ending with a period.", metadata={"page": 0})]
         topics, headings = TopicExtractor().extract(pages)
         self.assertEqual(headings, [])
-        self.assertEqual(topics[0]["topic_id"], "topic_001")
+        self.assertEqual(topics[0]["topic_id"], "topic_document_overview")
         self.assertEqual(topics[0]["start_page"], 1)
 
     def test_topic_metadata_is_stored_and_filterable_in_chroma(self):

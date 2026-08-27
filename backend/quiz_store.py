@@ -217,6 +217,9 @@ def initialize_quiz_store() -> None:
                 "concept_id": "TEXT NOT NULL DEFAULT ''",
                 "concept_name": "TEXT NOT NULL DEFAULT ''",
                 "assessment_capacity": "INTEGER NOT NULL DEFAULT 0",
+                "source_subtopic_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+                "concept_origin": "TEXT NOT NULL DEFAULT ''",
+                "concept_plan_id": "TEXT NOT NULL DEFAULT ''",
             },
             "quiz_attempts": {
                 "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
@@ -234,6 +237,9 @@ def initialize_quiz_store() -> None:
                 "evidence_requirement_version": "TEXT NOT NULL DEFAULT 'question_count_v1'",
                 "explanation": "TEXT NOT NULL DEFAULT ''",
                 "source_chunk_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+                "source_subtopic_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+                "concept_origin": "TEXT NOT NULL DEFAULT ''",
+                "concept_plan_id": "TEXT NOT NULL DEFAULT ''",
             },
             "topic_mastery": {
                 "assessment_capacity": "INTEGER NOT NULL DEFAULT 0",
@@ -384,8 +390,9 @@ def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: s
             INSERT INTO quiz_questions (
                 quiz_id, question_id, position, question, correct_answer,
                 topic_id, difficulty, explanation, source_chunk_ids_json, validation_outcome
-                , topic_name, concept_id, concept_name, assessment_capacity
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , topic_name, concept_id, concept_name, assessment_capacity,
+                source_subtopic_ids_json, concept_origin, concept_plan_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 quiz_id,
@@ -402,6 +409,9 @@ def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: s
                 str(question.get("concept_id") or ""),
                 str(question.get("concept_name") or ""),
                 int(question.get("assessment_capacity") or 0),
+                json.dumps(question.get("source_subtopic_ids") or [], ensure_ascii=False),
+                str(question.get("concept_origin") or ""),
+                str(question.get("concept_plan_id") or ""),
             ),
         )
         for option_index, option in enumerate(_normalize_options(question.get("options")), start=0):
@@ -421,7 +431,8 @@ def _row_to_quiz(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
         """
         SELECT question_id, question, correct_answer, topic_id, difficulty,
                explanation, source_chunk_ids_json, validation_outcome,
-               topic_name, concept_id, concept_name, assessment_capacity
+               topic_name, concept_id, concept_name, assessment_capacity,
+               source_subtopic_ids_json, concept_origin, concept_plan_id
         FROM quiz_questions WHERE quiz_id = ? ORDER BY position
         """,
         (row["quiz_id"],),
@@ -450,6 +461,9 @@ def _row_to_quiz(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
                 "concept_id": question_row["concept_id"],
                 "concept_name": question_row["concept_name"],
                 "assessment_capacity": question_row["assessment_capacity"],
+                "source_subtopic_ids": json.loads(question_row["source_subtopic_ids_json"] or "[]"),
+                "concept_origin": question_row["concept_origin"],
+                "concept_plan_id": question_row["concept_plan_id"],
             }
         )
     return {
@@ -539,6 +553,9 @@ def _row_to_attempt(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
             "topic_name": answer["topic_name"],
             "concept_id": answer["concept_id"],
             "assessment_capacity": answer["assessment_capacity"],
+            "source_subtopic_ids": json.loads(answer["source_subtopic_ids_json"] or "[]"),
+            "concept_origin": answer["concept_origin"],
+            "concept_plan_id": answer["concept_plan_id"],
             "evidence_requirement_version": answer["evidence_requirement_version"],
             "explanation": answer["explanation"],
             "source_chunk_ids": json.loads(answer["source_chunk_ids_json"] or "[]"),
@@ -665,8 +682,9 @@ def _save_attempt_row(
                 selected_answer, correct_answer, is_correct
                 , question_difficulty, validation_outcome, topic_id, topic_name,
                 concept_id, assessment_capacity, evidence_requirement_version,
-                explanation, source_chunk_ids_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                explanation, source_chunk_ids_json, source_subtopic_ids_json,
+                concept_origin, concept_plan_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 attempt_id,
@@ -685,6 +703,9 @@ def _save_attempt_row(
                 str(result.get("evidence_requirement_version") or "concept_coverage_v1"),
                 str(result.get("explanation") or ""),
                 json.dumps(result.get("source_chunk_ids") or [], ensure_ascii=False),
+                json.dumps(result.get("source_subtopic_ids") or [], ensure_ascii=False),
+                str(result.get("concept_origin") or ""),
+                str(result.get("concept_plan_id") or ""),
             ),
         )
     return attempt_id
@@ -902,7 +923,8 @@ def list_completed_answer_snapshots(
                 SELECT a.attempt_id, t.quiz_id, a.question_id, a.is_correct,
                        a.question_difficulty, a.validation_outcome, a.topic_id,
                        a.topic_name, a.concept_id, a.assessment_capacity,
-                       a.evidence_requirement_version,
+                       a.evidence_requirement_version, a.concept_plan_id,
+                       COALESCE(t.submitted_at, t.completed_at) AS evidence_at,
                        ROW_NUMBER() OVER (
                            PARTITION BY t.quiz_id, a.question_id
                            ORDER BY COALESCE(t.submitted_at, t.completed_at) DESC, t.attempt_id DESC
@@ -917,7 +939,12 @@ def list_completed_answer_snapshots(
             """,
             (student_id, document_id, topic_id),
         ).fetchall()
-        return [dict(row) for row in rows]
+        snapshots = [dict(row) for row in rows]
+        planned = [row for row in snapshots if str(row.get("concept_plan_id") or "").strip()]
+        if not planned:
+            return snapshots
+        latest_plan_id = max(planned, key=lambda row: (str(row.get("evidence_at") or ""), str(row.get("attempt_id") or "")))["concept_plan_id"]
+        return [row for row in snapshots if row.get("concept_plan_id") == latest_plan_id]
 
 
 def get_quiz_attempt_summary(quiz_id: str, student_id: str) -> dict:

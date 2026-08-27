@@ -80,6 +80,9 @@ You are a cautious reviewer of one multiple-choice question. Your judgment is a 
 Use only the cited context. Do not repair the question and do not use outside knowledge.
 
 Selected topic: {topic_name}
+Assessment concept: {question.get('concept_name') or question.get('concept_id') or 'legacy'}
+Structural lineage: {json.dumps(question.get('source_subtopic_ids') or [], ensure_ascii=False)}
+Concept origin: {question.get('concept_origin') or 'legacy'}
 Requested difficulty: {requested_difficulty}
 Candidate: {json.dumps(candidate, ensure_ascii=False)}
 Cited context: {json.dumps(context, ensure_ascii=False)}

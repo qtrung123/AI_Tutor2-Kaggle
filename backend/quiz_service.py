@@ -35,6 +35,7 @@ from backend.assessment_planner import (
     PLANNER_VERSION,
     allocate_document_topics,
     build_topic_plan,
+    resolve_concept_evidence,
 )
 from backend.mastery_service import calculate_mastery, recompute_topic_mastery
 from backend.rag_service import explain_quiz_answer
@@ -208,6 +209,24 @@ def get_topic_chunks(document_id: str, topic_id: str, owner_id: str = LEGACY_USE
         if chunk["metadata"].get("owner_id") == owner_id
         and chunk["metadata"].get("document_id", chunk["metadata"].get("source")) == document_id
         and chunk["metadata"].get("topic_id") == topic_id
+    ]
+
+
+def get_document_chunks(document_id: str, owner_id: str = LEGACY_USER_ID) -> list[dict]:
+    """Load ordered document chunks for boundary-overlap evidence membership."""
+    vectorstore = _load_vectorstore()
+    try:
+        result = vectorstore.get(where={"$and": [{"owner_id": owner_id}, {"document_id": document_id}]})
+        chunks = _result_to_chunks(result, document_id, filter_source=False)
+        if chunks:
+            return chunks
+    except Exception:
+        pass
+    result = vectorstore.get(where={"owner_id": owner_id}, limit=10000)
+    return [
+        chunk for chunk in _result_to_chunks(result, document_id, filter_source=True)
+        if chunk["metadata"].get("owner_id") == owner_id
+        and chunk["metadata"].get("document_id", chunk["metadata"].get("source")) == document_id
     ]
 
 
@@ -799,7 +818,8 @@ def _v2_excerpt(content: str, slot: int, total_slots: int, limit: int = 280) -> 
 
 
 def _select_v2_evidence_groups(
-    topic: dict, chunks: list[dict], target: int = QUIZ_V2_DISTINCT_CONCEPT_LIMIT
+    topic: dict, chunks: list[dict], target: int = QUIZ_V2_DISTINCT_CONCEPT_LIMIT,
+    topic_plan: dict | None = None,
 ) -> list[dict]:
     """Create stable concept slots from already owner/document/topic-scoped chunks."""
     usable = []
@@ -812,6 +832,23 @@ def _select_v2_evidence_groups(
         usable.append(chunk)
     if not usable:
         return []
+
+    topic_plan = topic_plan or build_topic_plan(topic, usable)
+    planned_groups = []
+    for slot, concept in enumerate(list(topic_plan.get("concepts") or [])[:max(1, target)]):
+        evidence_chunks = resolve_concept_evidence(topic, usable, concept)
+        if not evidence_chunks:
+            continue
+        excerpts = [
+            _v2_excerpt(chunk.get("content", ""), index, len(evidence_chunks))
+            for index, chunk in enumerate(evidence_chunks)
+        ]
+        planned_groups.append({
+            "slot_id": f"S{slot + 1}", **concept,
+            "concept_plan_id": topic_plan["concept_plan_id"],
+            "evidence_excerpt": " ".join(excerpts)[:560],
+        })
+    return planned_groups
 
     topic_name = str(topic.get("name") or topic.get("topic_id") or "Topic")
     candidates = []
@@ -948,6 +985,9 @@ def _validate_v2_question(
         "topic_name": str(topic.get("name") or topic["topic_id"]),
         "concept_id": concept_id,
         "concept_name": group["name"],
+        "source_subtopic_ids": list(group.get("source_subtopic_ids") or []),
+        "concept_origin": str(group.get("concept_origin") or ""),
+        "concept_plan_id": str(group.get("concept_plan_id") or ""),
         "assessment_capacity": int(assessment_capacity),
         "difficulty": difficulty,
         "explanation": explanation,
@@ -972,8 +1012,13 @@ def _generate_topic_quiz_v2(
     generation_run_id = str(uuid4())
 
     stage_started = time.perf_counter()
-    chunks = get_topic_chunks(document["id"], str(topic["topic_id"]), owner_id)
-    groups = _select_v2_evidence_groups(topic, chunks, QUIZ_V2_DISTINCT_CONCEPT_LIMIT)
+    chunks = (
+        get_document_chunks(document["id"], owner_id)
+        if isinstance(topic.get("boundary"), dict)
+        else get_topic_chunks(document["id"], str(topic["topic_id"]), owner_id)
+    )
+    topic_plan = build_topic_plan(topic, chunks)
+    groups = _select_v2_evidence_groups(topic, chunks, QUIZ_V2_DISTINCT_CONCEPT_LIMIT, topic_plan)
     timings["evidence_selection_ms"] = round((time.perf_counter() - stage_started) * 1000)
     if not groups:
         raise QuizGenerationError(
@@ -1080,7 +1125,7 @@ def _generate_topic_quiz_v2(
                     difficulty,
                     len(accepted) + 1,
                     topic,
-                    len(groups),
+                    int(topic_plan["assessment_capacity"]),
                 )
                 accepted.append(normalized)
                 accepted_stems.append(normalized["question"])
@@ -1151,15 +1196,19 @@ def _generate_topic_quiz_v2(
         "topic_name": str(topic.get("name") or topic["topic_id"]),
         "assessment_scope": "topic",
         "assessment_plan": {
-            "planner_version": "deterministic_topic_v2",
+            "planner_version": PLANNER_VERSION,
             "scope": "topic",
             "topics": [{
                 "topic_id": str(topic["topic_id"]),
                 "topic_name": str(topic.get("name") or topic["topic_id"]),
-                "assessment_capacity": len(groups),
+                "concept_plan_id": topic_plan["concept_plan_id"],
+                "assessment_capacity": int(topic_plan["assessment_capacity"]),
                 "allocated_questions": question_count,
                 "selected_concepts": [
-                    {key: group[key] for key in ("concept_id", "name", "source_chunk_ids")}
+                    {key: group[key] for key in (
+                        "concept_id", "name", "source_subtopic_ids", "source_chunk_ids",
+                        "concept_origin", "concept_plan_id",
+                    )}
                     for group in groups
                 ],
             }],
@@ -1231,11 +1280,12 @@ def generate_quiz(
         saved_target = int((saved_quiz or {}).get("assessment_plan", {}).get(
             "target_questions", (saved_quiz or {}).get("question_count", 5)
         ))
-        if saved_quiz and saved_target == question_count:
+        saved_planner = str((saved_quiz or {}).get("assessment_plan", {}).get("planner_version") or "legacy")
+        if saved_quiz and saved_target == question_count and saved_planner == PLANNER_VERSION:
             print(f"[quiz-cache] key={cache_key} HIT")
             return saved_quiz
         if saved_quiz:
-            print(f"[quiz-cache] key={cache_key} MISS (question_count {saved_target} != {question_count})")
+            print(f"[quiz-cache] key={cache_key} MISS (planner/count compatibility)")
         else:
             print(f"[quiz-cache] key={cache_key} MISS")
     else:
@@ -1255,14 +1305,21 @@ def generate_quiz(
     topics_to_plan = [topic_lookup[topic_id]] if assessment_scope == "topic" else list(document.get("topics") or [])
     topic_plans = []
     topic_chunks = {}
+    structural_document_chunks = None
+    if any(isinstance(topic.get("boundary"), dict) for topic in topics_to_plan):
+        structural_document_chunks = get_document_chunks(document_id, owner_id)
     for topic in topics_to_plan:
-        current_chunks = get_topic_chunks(document_id, str(topic["topic_id"]), owner_id)
+        current_chunks = (
+            structural_document_chunks
+            if isinstance(topic.get("boundary"), dict)
+            else get_topic_chunks(document_id, str(topic["topic_id"]), owner_id)
+        )
         if not current_chunks:
             continue
         topic_chunks[str(topic["topic_id"])] = current_chunks
         topic_plans.append(build_topic_plan(topic, current_chunks))
     if assessment_scope == "document":
-        allocation = allocate_document_topics(topic_plans)
+        allocation = allocate_document_topics(topic_plans, cap=question_count)
         planned_topics = allocation["topics"]
         excluded_topic_ids = allocation["excluded_topic_ids"]
     else:
@@ -1285,15 +1342,11 @@ def generate_quiz(
     avoid_questions: list[str] = []
     batch_index = 0
     for topic_plan in planned_topics:
-        chunks_by_id = {
-            str(chunk["metadata"]["chunk_id"]): chunk
-            for chunk in topic_chunks.get(topic_plan["topic_id"], [])
-        }
+        current_topic = topic_lookup[topic_plan["topic_id"]]
         for concept in topic_plan.get("selected_concepts", []):
-            evidence_chunks = [
-                chunks_by_id[chunk_id] for chunk_id in concept["source_chunk_ids"]
-                if chunk_id in chunks_by_id
-            ]
+            evidence_chunks = resolve_concept_evidence(
+                current_topic, topic_chunks.get(topic_plan["topic_id"], []), concept
+            )
             if not evidence_chunks:
                 continue
             batch_index += 1
@@ -1323,6 +1376,10 @@ def generate_quiz(
                 generation_warnings.append(warning)
                 print(f"[quiz-generation-warning] {warning}")
                 continue
+            for question in batch_questions:
+                question["source_subtopic_ids"] = list(concept.get("source_subtopic_ids") or [])
+                question["concept_origin"] = str(concept.get("concept_origin") or "")
+                question["concept_plan_id"] = str(topic_plan.get("concept_plan_id") or "")
             questions.extend(batch_questions)
             avoid_questions.extend(question["question"] for question in batch_questions)
             next_id += 1
@@ -1390,6 +1447,9 @@ def _quiz_from_attempt_snapshot(attempt: dict) -> dict | None:
         "options": list(result.get("options") or []), "correct_answer": result.get("correct_answer", ""),
         "topic_id": result.get("topic_id") or topic_id, "topic_name": result.get("topic_name", ""),
         "concept_id": result.get("concept_id", ""), "concept_name": "",
+        "source_subtopic_ids": list(result.get("source_subtopic_ids") or []),
+        "concept_origin": result.get("concept_origin", ""),
+        "concept_plan_id": result.get("concept_plan_id", ""),
         "assessment_capacity": int(result.get("assessment_capacity") or 0),
         "difficulty": result.get("question_difficulty") or attempt.get("difficulty", "easy"),
         "explanation": result.get("explanation", ""),
@@ -1502,8 +1562,13 @@ def update_quiz_progress(
                 "topic_id": question.get("topic_id", topic_id),
                 "topic_name": question.get("topic_name", ""),
                 "concept_id": question.get("concept_id", ""),
+                "source_subtopic_ids": list(question.get("source_subtopic_ids") or []),
+                "concept_origin": question.get("concept_origin", ""),
+                "concept_plan_id": question.get("concept_plan_id", ""),
                 "assessment_capacity": int(question.get("assessment_capacity") or 0),
                 "evidence_requirement_version": "concept_coverage_v1",
+                "explanation": question.get("explanation", ""),
+                "source_chunk_ids": list(question.get("source_chunk_ids") or []),
             }
         )
 
@@ -1583,6 +1648,9 @@ def submit_quiz_attempt(
             "topic_id": question.get("topic_id", topic_id),
             "topic_name": question.get("topic_name", ""),
             "concept_id": question.get("concept_id", ""),
+            "source_subtopic_ids": list(question.get("source_subtopic_ids") or []),
+            "concept_origin": question.get("concept_origin", ""),
+            "concept_plan_id": question.get("concept_plan_id", ""),
             "assessment_capacity": int(question.get("assessment_capacity") or 0),
             "evidence_requirement_version": "concept_coverage_v1",
             "explanation": question.get("explanation", ""),
