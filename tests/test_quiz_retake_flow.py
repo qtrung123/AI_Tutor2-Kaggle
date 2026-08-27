@@ -258,6 +258,17 @@ class QuizRetakeFlowTests(unittest.TestCase):
         self.assertIn("startHistoryQuizRetake(attempt)", script)
         self.assertIn('actions.append(retake, close)', script)
         self.assertIn("requestQuizRegeneration", script)
+        self.assertIn('backToQuizzesButton.textContent = "← Back to Quizzes"', script)
+        self.assertIn('close.textContent = "← Back to Quizzes"', script)
+        self.assertIn("const groups = Object.values(quizHistory.reduce", script)
+        self.assertIn('historySummary.textContent = `Attempt history (${group.attempts.length})`', script)
+        self.assertIn('makeFilter("Difficulty"', script)
+        self.assertIn('makeFilter("Scope"', script)
+        self.assertIn("group.average", script)
+        self.assertNotIn("— Your answer", script)
+        self.assertNotIn("— Correct answer", script)
+        self.assertNotIn("Source citation unavailable.", script)
+        self.assertNotIn("source_chunk_ids.join", script)
         deferred_selector = script[script.rfind("function selectAssessmentAnswer") :]
         self.assertNotIn("requestQuizProgress(", deferred_selector.split("function submitAssessmentQuiz", 1)[0])
 
