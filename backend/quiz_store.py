@@ -817,7 +817,14 @@ def delete_document_attempts(
 def invalidate_document_quizzes_for_topic_schema(
     document_id: str, topic_schema_version: int, owner_id: str = LEGACY_USER_ID
 ) -> int:
-    """Remove quizzes created for an older topic map of this document."""
+    """Deactivate quizzes created for an older topic map without erasing history.
+
+    Quiz ids are immutable references held by an open browser and by completed
+    attempts.  Physically deleting a stale quiz cascades into ``quiz_questions``
+    and makes those references impossible to submit, review, or retake.  An
+    inactive row is excluded from variant/cache lookups while remaining
+    available through the exact-id historical path.
+    """
     initialize_quiz_store()
     with _connect() as connection:
         quiz_ids = [
@@ -847,7 +854,7 @@ def invalidate_document_quizzes_for_topic_schema(
             (owner_id, document_id, owner_id, document_id, int(topic_schema_version)),
         )
         connection.execute(
-            "DELETE FROM quizzes WHERE owner_id = ? AND document_id = ? AND topic_schema_version != ?",
+            "UPDATE quizzes SET is_active = 0 WHERE owner_id = ? AND document_id = ? AND topic_schema_version != ?",
             (owner_id, document_id, int(topic_schema_version)),
         )
         connection.execute("DELETE FROM topic_mastery WHERE student_id = ? AND document_id = ?", (owner_id, document_id))

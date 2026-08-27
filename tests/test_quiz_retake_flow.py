@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from backend import quiz_store
+from backend import quiz_service, quiz_store
 from backend.auth_store import LEGACY_USER_ID
 from backend.mastery_service import recompute_topic_mastery
 from backend.quiz_service import load_quiz_for_retake, submit_quiz_attempt
@@ -117,6 +117,125 @@ class QuizRetakeFlowTests(unittest.TestCase):
         )
         self.assertEqual(second["quiz_id"], first["quiz_id"])
         self.assertEqual(second["attempt_number"], 2)
+
+    def test_document_batch_quiz_survives_invalidation_submit_reload_review_and_retake(self):
+        quiz = saved_quiz()
+        quiz.update({
+            "quiz_id": "document-batch-10",
+            "document_id": "Embedded Systems.pdf",
+            "title": "Embedded Systems",
+            "topic_id": "document",
+            "topic_name": "Entire document",
+            "assessment_scope": "document",
+            "topic_schema_version": 2,
+            "assessment_plan": {
+                "planner_version": "assessment_capacity_v1",
+                "scope": "document",
+                "target_questions": 10,
+                "total_questions": 10,
+            },
+            "questions": [
+                {
+                    "id": index,
+                    "question": f"Grounded embedded-systems question {index}?",
+                    "options": ["A. Alpha", "B. Beta", "C. Gamma", "D. Delta"],
+                    "correct_answer": "A",
+                    "difficulty": "easy",
+                    "topic_id": f"topic_{1 + (index - 1) // 5}",
+                    "topic_name": f"Topic {1 + (index - 1) // 5}",
+                    "concept_id": f"concept_{index}",
+                    "concept_name": f"Concept {index}",
+                    "concept_plan_id": f"plan_{1 + (index - 1) // 5}",
+                    "source_subtopic_ids": [f"subtopic_{index}"],
+                    "concept_origin": "structural",
+                    "assessment_capacity": 5,
+                    "explanation": f"Explanation {index}",
+                    "source_chunk_ids": [f"chunk_{index}"],
+                    "validation_outcome": "accepted",
+                }
+                for index in range(1, 11)
+            ],
+        })
+        document = {
+            "id": "Embedded Systems.pdf", "title": "Embedded Systems", "hash": "embedded-hash",
+            "topic_schema_version": 2,
+            "topics": [{"topic_id": "topic_1", "name": "Topic 1"}, {"topic_id": "topic_2", "name": "Topic 2"}],
+        }
+        topic_plans = {
+            topic_id: {
+                "topic_id": topic_id, "topic_name": f"Topic {topic_id[-1]}",
+                "planner_version": "assessment_capacity_v1", "concept_plan_id": f"plan_{topic_id[-1]}",
+                "assessment_capacity": 5,
+                "concepts": [{
+                    "concept_id": f"concept_{offset + index}", "name": f"Concept {offset + index}",
+                    "source_chunk_ids": [f"chunk_{offset + index}"], "source_subtopic_ids": [f"subtopic_{offset + index}"],
+                    "concept_origin": "structural",
+                } for index in range(1, 6)],
+            }
+            for topic_id, offset in (("topic_1", 0), ("topic_2", 5))
+        }
+
+        def generated_batch(_document, _difficulty, _slots, _owner, _model, _count, _run_id):
+            return quiz["questions"], {
+                "accepted": 10, "accepted_with_warnings": 0, "rejected": 0, "reasons": [],
+            }, {"llm_calls": 1}
+
+        with patch.object(quiz_service, "_document_lookup", return_value={document["id"]: document}), \
+             patch.object(quiz_service, "get_topic_chunks", return_value=[{
+                 "content": "Grounded embedded systems evidence", "metadata": {"chunk_id": "chunk_1"},
+             }]), \
+             patch.object(quiz_service, "build_topic_plan", side_effect=lambda topic, _chunks: topic_plans[topic["topic_id"]]), \
+             patch.object(quiz_service, "resolve_concept_evidence", return_value=[{
+                 "content": "Grounded embedded systems evidence", "metadata": {"chunk_id": "chunk_1"},
+             }]), \
+             patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated_batch), \
+             patch.object(quiz_service, "uuid4", return_value="document-batch-10"):
+            generated = quiz_service.generate_quiz(
+                "Embedded Systems.pdf", "easy", "document", owner_id=LEGACY_USER_ID, question_count=10,
+            )
+
+        with quiz_store._connect() as connection:
+            quiz_row = connection.execute(
+                "SELECT quiz_id, question_count FROM quizzes WHERE quiz_id = ?", (generated["quiz_id"],)
+            ).fetchone()
+            question_rows = connection.execute(
+                "SELECT COUNT(*) FROM quiz_questions WHERE quiz_id = ?", (generated["quiz_id"],)
+            ).fetchone()[0]
+        self.assertEqual((quiz_row["quiz_id"], quiz_row["question_count"]), ("document-batch-10", 10))
+        self.assertEqual(question_rows, 10)
+
+        # A topic-map refresh may happen after the slow batch response has
+        # rendered but before Check Answers. It must not erase that quiz id.
+        self.assertEqual(
+            quiz_store.invalidate_document_quizzes_for_topic_schema(
+                "Embedded Systems.pdf", 3, LEGACY_USER_ID
+            ),
+            1,
+        )
+        self.assertIsNone(quiz_store.get_quiz("Embedded Systems.pdf", "easy", "document", LEGACY_USER_ID))
+        persisted = quiz_store.get_quiz_by_id("document-batch-10", LEGACY_USER_ID)
+        self.assertEqual(len(persisted["questions"]), 10)
+
+        answers = {str(index): "A" for index in range(1, 11)}
+        completed = submit_quiz_attempt(
+            "Embedded Systems.pdf", "easy", "document", answers,
+            LEGACY_USER_ID, quiz_id="document-batch-10",
+        )
+        self.assertEqual(completed["quiz_id"], "document-batch-10")
+        self.assertEqual((completed["answered"], completed["total"]), (10, 10))
+        self.assertEqual(len(completed["question_results"]), 10)
+
+        review = quiz_store.get_quiz_history_attempt(completed["attempt_id"], LEGACY_USER_ID)
+        self.assertEqual(len(review["question_results"]), 10)
+        retake = load_quiz_for_retake(completed["attempt_id"], LEGACY_USER_ID)
+        self.assertEqual(retake["quiz"]["quiz_id"], completed["quiz_id"])
+        self.assertEqual(len(retake["quiz"]["questions"]), 10)
+        second = submit_quiz_attempt(
+            "Embedded Systems.pdf", "easy", "document", answers,
+            LEGACY_USER_ID, quiz_id=retake["quiz"]["quiz_id"],
+        )
+        self.assertEqual(second["attempt_number"], 2)
+        self.assertEqual(len(second["question_results"]), 10)
 
     def test_frontend_uses_deferred_submission_navigation_review_and_separate_regeneration(self):
         script = Path("frontend/app.js").read_text(encoding="utf-8")
