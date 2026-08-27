@@ -238,16 +238,16 @@ class QuizV2Tests(unittest.TestCase):
         )
         self.assertEqual(legacy[0]["options"], expected)
 
-    def test_easy_quality_rejects_two_tinyos_scheduler_answers(self):
-        with self.assertRaisesRegex(ValueError, "distractor is too similar"):
-            self.validate_easy_candidate(
-                "How does the TinyOS scheduler run queued tasks?",
-                ["Runs tasks in FIFO order", "Does not preempt running tasks", "Uses timed priorities", "Runs every task concurrently"],
-                0, "TinyOS runs queued tasks in FIFO order.",
-                "The TinyOS scheduler runs queued tasks in FIFO order and does not preempt a running task.",
-            )
+    def test_easy_quality_warns_for_two_tinyos_scheduler_answers(self):
+        _question, warnings = self.validate_easy_candidate(
+            "How does the TinyOS scheduler run queued tasks?",
+            ["Runs tasks in FIFO order", "Does not preempt running tasks", "Uses timed priorities", "Runs every task concurrently"],
+            0, "TinyOS runs queued tasks in FIFO order.",
+            "The TinyOS scheduler runs queued tasks in FIFO order and does not preempt a running task.",
+        )
+        self.assertIn("distractor_similar_to_evidence", warnings)
 
-    def test_easy_quality_rejects_negative_partial_and_outside_world_patterns(self):
+    def test_easy_quality_rejects_negative_and_partial_patterns(self):
         cases = [
             (
                 "Which scheduler behavior is NOT used by TinyOS?",
@@ -261,16 +261,21 @@ class QuizV2Tests(unittest.TestCase):
                 "The objectives include low latency, throughput, fairness, and small memory use.",
                 "The four objectives are low latency, high throughput, fair execution, and small memory use.", "partial answer",
             ),
-            (
-                "How does the TinyOS scheduler order queued tasks?",
-                ["Uses FIFO order", "Linux uses round-robin scheduling", "Uses random ordering", "Uses deadline ordering"], 0,
-                "TinyOS uses FIFO order for queued tasks.",
-                "The TinyOS scheduler orders queued tasks using FIFO order.", "outside-world distractor",
-            ),
         ]
         for stem, options, answer, explanation, evidence, error in cases:
             with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
                 self.validate_easy_candidate(stem, options, answer, explanation, evidence)
+
+    def test_easy_quality_heuristics_are_warnings_not_rejections(self):
+        _question, warnings = self.validate_easy_candidate(
+            "How does the TinyOS scheduler order queued tasks?",
+            ["Uses deterministic selection", "Linux always uses round-robin scheduling", "Uses random ordering", "Uses deadline ordering"], 0,
+            "The scheduler selects work predictably.",
+            "The TinyOS scheduler processes queued tasks using FIFO order.",
+        )
+        self.assertIn("insufficient_lexical_support", warnings)
+        self.assertIn("outside_world_distractor", warnings)
+        self.assertIn("unsupported_absolute_term", warnings)
 
     def test_clean_easy_recall_question_is_accepted(self):
         question, warnings = self.validate_easy_candidate(
@@ -289,9 +294,19 @@ class QuizV2Tests(unittest.TestCase):
             {"questions": initial}, {"questions": [raw_question(0)]},
         ])
         self.assertEqual(len(questions), 10)
-        self.assertEqual(validation["easy_quality_rejections"], 1)
+        self.assertEqual(validation["hard_rejections"], 1)
+        self.assertEqual(validation["quality_warnings"], 0)
         self.assertEqual(timings["repair_llm_calls"], 1)
         self.assertIn("EASY QUALITY:", FakeBatchModel.prompts[1])
+
+    def test_easy_quality_warnings_do_not_trigger_repair(self):
+        initial = [raw_question(index) for index in range(10)]
+        initial[0]["options"][1] = "Linux always uses round-robin scheduling"
+        questions, validation, timings, _slots = self.run_document_batch([{"questions": initial}])
+        self.assertEqual(len(questions), 10)
+        self.assertGreaterEqual(validation["quality_warnings"], 2)
+        self.assertEqual(validation["hard_rejections"], 0)
+        self.assertEqual(timings["repair_llm_calls"], 0)
 
     def test_partial_initial_generation_repairs_only_missing_slot(self):
         result, saved = self.run_v2([

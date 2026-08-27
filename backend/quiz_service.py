@@ -958,8 +958,11 @@ def _easy_content_tokens(value: str) -> set[str]:
     }
 
 
-def _validate_easy_v2_quality(stem: str, options: list[str], answer_index: int, explanation: str, evidence: str) -> None:
-    """Reject cheap-to-detect Easy ambiguity without another model call."""
+def _validate_easy_v2_quality(
+    stem: str, options: list[str], answer_index: int, explanation: str, evidence: str,
+) -> list[str]:
+    """Hard-reject structural Easy defects and warn on fallible heuristics."""
+    warnings: list[str] = []
     lowered_stem = stem.lower().strip()
     if _EASY_NEGATIVE_STEM.search(lowered_stem):
         raise ValueError("Easy quality: negative or trick stem.")
@@ -988,22 +991,23 @@ def _validate_easy_v2_quality(stem: str, options: list[str], answer_index: int, 
     if not (correct_tokens & evidence_tokens) and not (
         correct_tokens & explanation_tokens and explanation_tokens & evidence_tokens
     ):
-        raise ValueError("Easy quality: correct answer/explanation lacks lexical evidence support.")
+        warnings.append("insufficient_lexical_support")
 
     for index, option in enumerate(options):
         option_lower = option.lower()
         raw_option_tokens = set(re.findall(r"[a-z0-9]+", option_lower))
         unsupported_absolute = next((term for term in _EASY_ABSOLUTES if term in raw_option_tokens and term not in evidence_lower), None)
         if unsupported_absolute:
-            raise ValueError(f"Easy quality: unsupported absolute term '{unsupported_absolute}'.")
+            warnings.append("unsupported_absolute_term")
         unsupported_entity = next((term for term in _EASY_EXTERNAL_ENTITIES if term in option_lower and term not in evidence_lower), None)
         if unsupported_entity:
-            raise ValueError(f"Easy quality: outside-world distractor '{unsupported_entity}'.")
+            warnings.append("outside_world_distractor")
         if index == answer_index:
             continue
         option_tokens = _easy_content_tokens(option)
         if len(option_tokens) >= 2 and len(option_tokens & evidence_tokens) / len(option_tokens) >= 0.8:
-            raise ValueError("Easy quality: distractor is too similar to an evidence fact.")
+            warnings.append("distractor_similar_to_evidence")
+    return list(dict.fromkeys(warnings))
 
 
 def _validate_v2_question(
@@ -1022,12 +1026,12 @@ def _validate_v2_question(
     if len(stem.split()) < 4 or any(re.search(pattern, stem.lower()) for pattern in GENERIC_QUESTION_PATTERNS):
         raise ValueError("Question stem is empty, generic, or unusable.")
     candidate_key = _normalize_question_key(stem)
-    if any(
-        candidate_key == _normalize_question_key(existing)
-        or difflib.SequenceMatcher(None, candidate_key, _normalize_question_key(existing)).ratio() >= 0.94
-        for existing in accepted_stems
-    ):
+    if any(candidate_key == _normalize_question_key(existing) for existing in accepted_stems):
         raise ValueError("Question duplicates an accepted question.")
+    near_duplicate_stem = any(
+        difflib.SequenceMatcher(None, candidate_key, _normalize_question_key(existing)).ratio() >= 0.94
+        for existing in accepted_stems
+    )
 
     raw_options = raw.get("options")
     if not isinstance(raw_options, list) or len(raw_options) != 4:
@@ -1035,6 +1039,12 @@ def _validate_v2_question(
     option_bodies = [strip_leading_option_label(_clean_inline_text(option)) for option in raw_options]
     if any(not option for option in option_bodies) or len({option.lower() for option in option_bodies}) != 4:
         raise ValueError("Question options must be non-empty and distinct.")
+    normalized_options = [_normalize_question_key(option) for option in option_bodies]
+    if any(
+        difflib.SequenceMatcher(None, normalized_options[left], normalized_options[right]).ratio() >= 0.94
+        for left in range(4) for right in range(left + 1, 4)
+    ):
+        raise ValueError("Question options must not be near-duplicates.")
 
     answer_index = raw.get("correct_answer")
     if isinstance(answer_index, bool) or not isinstance(answer_index, int) or answer_index not in range(4):
@@ -1049,11 +1059,13 @@ def _validate_v2_question(
         raise ValueError("Question repeats or exceeds its planned slot_id.")
 
     warnings = []
+    if near_duplicate_stem:
+        warnings.append("near_duplicate_question")
     explanation = _clean_inline_text(raw.get("explanation", ""))
     if difficulty == "easy":
-        _validate_easy_v2_quality(
+        warnings.extend(_validate_easy_v2_quality(
             stem, option_bodies, answer_index, explanation, str(group.get("evidence_excerpt") or "")
-        )
+        ))
     if len(explanation.split()) < 4:
         warnings.append("explanation_quality")
     if len(stem.split()) < 6:
@@ -1136,7 +1148,7 @@ def _generate_topic_quiz_v2(
     accepted_stems = []
     validation_results = {
         "accepted": 0, "accepted_with_warnings": 0, "rejected": 0,
-        "easy_quality_rejections": 0, "reasons": [],
+        "hard_rejections": 0, "quality_warnings": 0, "reasons": [],
     }
     generation_ms = 0
     validation_ms = 0
@@ -1234,6 +1246,7 @@ def _generate_topic_quiz_v2(
                 remaining_slot_ids.remove(str(raw.get("slot_id") or raw.get("concept_id")))
                 key = "accepted_with_warnings" if warnings else "accepted"
                 validation_results[key] += 1
+                validation_results["quality_warnings"] += len(warnings)
                 save_quiz_validation_event({
                     "generation_run_id": generation_run_id,
                     "owner_id": owner_id,
@@ -1262,9 +1275,8 @@ def _generate_topic_quiz_v2(
                 })
             except Exception as error:
                 validation_results["rejected"] += 1
+                validation_results["hard_rejections"] += 1
                 validation_results["reasons"].append(str(error))
-                if str(error).startswith("Easy quality:"):
-                    validation_results["easy_quality_rejections"] += 1
                 print(f"[quiz-v2-validation] discarded candidate: {error}")
         validation_ms += round((time.perf_counter() - validation_started) * 1000)
         if attempt_index > 0:
@@ -1418,7 +1430,7 @@ def _run_document_v2_batch(
     accepted_stems: list[str] = []
     results = {
         "accepted": 0, "accepted_with_warnings": 0, "rejected": 0,
-        "easy_quality_rejections": 0, "reasons": [],
+        "hard_rejections": 0, "quality_warnings": 0, "reasons": [],
     }
     timings = {
         "prompt_construction_ms": 0, "initial_batch_generation_ms": 0,
@@ -1502,6 +1514,7 @@ def _run_document_v2_batch(
                 accepted_stems.append(normalized["question"])
                 remaining_slot_ids.remove(slot_id)
                 results["accepted_with_warnings" if warnings else "accepted"] += 1
+                results["quality_warnings"] += len(warnings)
                 save_quiz_validation_event({
                     "generation_run_id": generation_run_id,
                     "owner_id": owner_id,
@@ -1530,9 +1543,8 @@ def _run_document_v2_batch(
                 })
             except Exception as error:
                 results["rejected"] += 1
+                results["hard_rejections"] += 1
                 results["reasons"].append(str(error))
-                if str(error).startswith("Easy quality:"):
-                    results["easy_quality_rejections"] += 1
                 print(f"[quiz-document-validation] discarded candidate: {error}")
         timings["validation_ms"] += round((time.perf_counter() - validation_started) * 1000)
         if attempt_index > 0:
