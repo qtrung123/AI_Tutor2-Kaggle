@@ -251,14 +251,14 @@ class QuizV2Tests(unittest.TestCase):
         )
         self.assertIn("distractor_similar_to_evidence", warnings)
 
-    def test_easy_quality_rejects_negative_and_warns_for_partial_set_answer(self):
-        with self.assertRaisesRegex(ValueError, "negative or trick"):
-            self.validate_easy_candidate(
-                "Which scheduler behavior is NOT used by TinyOS?",
-                ["Runs queued tasks", "Uses FIFO order", "Avoids task preemption", "Runs one task"], 1,
-                "TinyOS uses FIFO order for queued tasks.",
-                "TinyOS runs queued tasks in FIFO order without task preemption.",
-            )
+    def test_easy_quality_warns_for_negative_and_partial_set_answer(self):
+        _question, warnings = self.validate_easy_candidate(
+            "Which scheduler behavior is NOT used by TinyOS?",
+            ["Runs queued tasks", "Uses FIFO order", "Avoids task preemption", "Runs one task"], 1,
+            "TinyOS uses FIFO order for queued tasks.",
+            "TinyOS runs queued tasks in FIFO order without task preemption.",
+        )
+        self.assertIn("negative_or_trick_stem", warnings)
         _question, warnings = self.validate_easy_candidate(
             "What are the four objectives of the scheduler?",
             ["Low latency", "High throughput", "Fair execution", "Small memory use"], 0,
@@ -288,21 +288,16 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(question["correct_answer"], "A")
         self.assertNotIn("difficulty_mismatch", warnings)
 
-    def test_easy_quality_rejection_tracks_one_targeted_repair_call(self):
+    def test_negative_easy_stem_keeps_its_slot_without_repair(self):
         initial = [raw_question(index) for index in range(10)]
         initial[0]["question"] = "Which behavior is NOT supported by the evidence?"
-        questions, validation, timings, _slots = self.run_document_batch([
-            {"questions": initial}, {"questions": [raw_question(0)]},
-            {"questions": [raw_question(0)]},
-        ])
+        questions, validation, timings, _slots = self.run_document_batch([{"questions": initial}])
         self.assertEqual(len(questions), 10)
-        self.assertEqual(validation["hard_rejections"], 1)
-        self.assertEqual(validation["quality_warnings"], 0)
-        self.assertEqual(timings["repair_llm_calls"], 1)
-        self.assertEqual(timings["repair_attempt_count"], 1)
+        self.assertEqual(validation["hard_rejections"], 0)
+        self.assertGreaterEqual(validation["quality_warnings"], 1)
+        self.assertEqual(timings["repair_llm_calls"], 0)
+        self.assertEqual(timings["repair_attempt_count"], 0)
         self.assertEqual(timings["fill_attempt_count"], 0)
-        self.assertEqual(len(FakeBatchModel.payloads), 1)
-        self.assertIn("EASY QUALITY:", FakeBatchModel.prompts[1])
 
     def test_easy_quality_warnings_do_not_trigger_repair(self):
         initial = [raw_question(index) for index in range(10)]
@@ -324,6 +319,21 @@ class QuizV2Tests(unittest.TestCase):
         self.assertGreaterEqual(validation["quality_warnings"], 8)
         self.assertEqual(validation["hard_rejections"], 0)
         self.assertEqual(timings["repair_llm_calls"], 0)
+
+    def test_topic_warning_heavy_twenty_question_batch_keeps_all_slots(self):
+        initial = [raw_question(index) for index in range(20)]
+        for index in (1, 5, 9, 13, 17):
+            initial[index]["question"] = f"Which behavior is NOT supported for mechanism {index}?"
+            initial[index]["options"][1] = f"Linux always uses outside behavior {index}"
+        result, saved = self.run_v2([{"questions": initial}], 20)
+        timings = result["assessment_plan"]["timings_ms"]
+        validation = result["assessment_plan"]["validation_results"]
+        self.assertEqual(len(result["questions"]), 20)
+        self.assertEqual(result["assessment_plan"]["llm_calls"], 1)
+        self.assertEqual(timings["repair_llm_calls"], 0)
+        self.assertEqual(validation["hard_rejections"], 0)
+        self.assertGreaterEqual(validation["quality_warnings"], 10)
+        self.assertEqual(len(saved), 1)
 
     def test_twenty_five_easy_questions_with_warnings_return_exact_count(self):
         initial = [raw_question(index) for index in range(25)]

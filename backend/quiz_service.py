@@ -1015,7 +1015,7 @@ def _validate_easy_v2_quality(
     warnings: list[str] = []
     lowered_stem = stem.lower().strip()
     if _EASY_NEGATIVE_STEM.search(lowered_stem):
-        raise ValueError("Easy quality: negative or trick stem.")
+        warnings.append("negative_or_trick_stem")
     if (
         not stem.endswith("?") or _EASY_TEMPLATE_STEM.search(stem)
         or re.search(r"\b(?:of|for|and|or|the|a|an|to|is|are)\s*\?$", lowered_stem)
