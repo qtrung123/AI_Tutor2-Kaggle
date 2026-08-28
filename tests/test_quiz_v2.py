@@ -444,10 +444,11 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(len(FakeBatchModel.configurations), 5)
         save.assert_not_called()
 
-    def test_invented_slot_is_rejected_and_only_missing_slot_is_repaired(self):
+    def test_wrong_model_slot_is_corrected_by_backend_order_for_full_topic_batch(self):
         questions = [raw_question(index) for index in range(10)]
-        questions[0]["slot_id"] = "invented_slot"
-        FakeBatchModel.payloads = [{"questions": questions}, {"questions": [raw_question(0)]}]
+        for question in questions:
+            question["slot_id"] = "invented_slot"
+        FakeBatchModel.payloads = [{"questions": questions}]
         with (
             patch("backend.quiz_service.get_topic_chunks", return_value=[CHUNK]),
             patch("backend.quiz_service.ChatOllama", FakeBatchModel),
@@ -457,9 +458,22 @@ class QuizV2Tests(unittest.TestCase):
             result = _generate_topic_quiz_v2(DOCUMENT, TOPIC, "easy", "owner", "qwen-3b", False)
         self.assertEqual(len(result["questions"]), 10)
         self.assertFalse(result["assessment_plan"]["partial"])
-        self.assertEqual(len(FakeBatchModel.configurations), 2)
-        self.assertEqual(FakeBatchModel.configurations[1]["num_predict"], 520)
-        self.assertIn("Write exactly 1", FakeBatchModel.prompts[1])
+        self.assertEqual(len(FakeBatchModel.configurations), 1)
+        self.assertEqual([question["slot_id"] for question in result["questions"]], [f"S{index}" for index in range(1, 11)])
+
+    def test_partial_repeated_slot_mapping_is_rejected_then_repaired(self):
+        partial = [raw_question(index) for index in range(9)]
+        repair = [raw_question(index) for index in range(1, 10)]
+        for question in partial + repair:
+            question["slot_id"] = "S1"
+        result, saved = self.run_v2([
+            {"questions": partial}, {"questions": repair},
+        ])
+        self.assertEqual(len(result["questions"]), 10)
+        self.assertEqual(result["assessment_plan"]["llm_calls"], 2)
+        self.assertGreaterEqual(result["assessment_plan"]["validation_results"]["hard_rejections"], 1)
+        self.assertEqual([question["slot_id"] for question in result["questions"]], [f"S{index}" for index in range(1, 11)])
+        self.assertEqual(len(saved), 1)
 
     def test_duplicate_repair_is_rejected_then_only_missing_slot_is_retried(self):
         first = [raw_question(index) for index in range(9)]
@@ -539,6 +553,19 @@ class QuizV2Tests(unittest.TestCase):
                     [max(520, size * 150) for size in expected_sizes],
                 )
                 self.assertIn("Topic 1", FakeBatchModel.prompts[0])
+
+    def test_repeated_model_slot_ids_in_full_document_batch_bind_by_order(self):
+        candidates = [raw_question(index) for index in range(10)]
+        for candidate in candidates:
+            candidate["slot_id"] = "S1"
+        questions, validation, timings, slots = self.run_document_batch([
+            {"questions": candidates},
+        ])
+        self.assertEqual(len(questions), 10)
+        self.assertEqual(timings["repair_llm_calls"], 0)
+        self.assertEqual(validation["hard_rejections"], 0)
+        self.assertEqual([question["slot_id"] for question in questions], [slot["slot_id"] for slot in slots])
+        self.assertEqual([question["concept_id"] for question in questions], [slot["concept_id"] for slot in slots])
 
     def test_partial_document_batch_repairs_only_missing_slot_and_owns_metadata(self):
         first_batch = [raw_question(index) for index in range(10)]

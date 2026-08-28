@@ -994,6 +994,19 @@ def _build_v2_prompt(
     )
 
 
+def _bind_full_v2_response_to_slots(candidates: list, requested_slots: list[dict]) -> list:
+    """Use backend order only when a complete response makes the mapping unambiguous."""
+    if len(candidates) != len(requested_slots):
+        return candidates
+    bound = []
+    for candidate, slot in zip(candidates, requested_slots):
+        if not isinstance(candidate, dict):
+            bound.append(candidate)
+            continue
+        bound.append({**candidate, "slot_id": str(slot["slot_id"])})
+    return bound
+
+
 _EASY_NEGATIVE_STEM = re.compile(
     r"\b(?:not|except|false|incorrect|least|never)\b|\b(?:no|not|never)\b.{0,28}\b(?:without|not|never)\b",
     flags=re.IGNORECASE,
@@ -1157,6 +1170,7 @@ def _validate_v2_question(
     authoritative_capacity = int(group.get("assessment_capacity", assessment_capacity))
     normalized = {
         "id": question_id,
+        "slot_id": slot_id,
         "question": stem,
         "options": [canonicalize_option(option, "ABCD"[index]) for index, option in enumerate(option_bodies)],
         "correct_answer": "ABCD"[answer_index],
@@ -1310,6 +1324,7 @@ def _generate_topic_quiz_v2(
             candidates = data.get("questions") if isinstance(data, dict) else None
             if not isinstance(candidates, list):
                 raise ValueError("Quiz JSON does not contain a questions list.")
+            candidates = _bind_full_v2_response_to_slots(candidates, available_groups)
         except Exception as error:
             candidates = []
             validation_results["rejected"] += missing
@@ -1334,7 +1349,7 @@ def _generate_topic_quiz_v2(
                 )
                 accepted.append(normalized)
                 accepted_stems.append(normalized["question"])
-                remaining_slot_ids.remove(str(raw.get("slot_id") or raw.get("concept_id")))
+                remaining_slot_ids.remove(normalized["slot_id"])
                 key = "accepted_with_warnings" if warnings else "accepted"
                 validation_results[key] += 1
                 validation_results["quality_warnings"] += len(warnings)
@@ -1597,6 +1612,7 @@ def _run_document_v2_batch(
             candidates = data.get("questions") if isinstance(data, dict) else None
             if not isinstance(candidates, list):
                 raise ValueError("Quiz JSON does not contain a questions list.")
+            candidates = _bind_full_v2_response_to_slots(candidates, call_slots)
             print(
                 f"[quiz-document-ollama] attempt={llm_calls}, phase={phase}, batch={batch_index}, "
                 f"returned={len(candidates)}, "
@@ -1627,9 +1643,9 @@ def _run_document_v2_batch(
                     slot_positions.get(slot_id, len(accepted_by_slot)) + 1,
                     document_scope, int(slot.get("assessment_capacity", 0)),
                 )
-                accepted_by_slot[slot_id] = normalized
+                accepted_by_slot[normalized["slot_id"]] = normalized
                 accepted_stems.append(normalized["question"])
-                remaining_slot_ids.remove(slot_id)
+                remaining_slot_ids.remove(normalized["slot_id"])
                 results["accepted_with_warnings" if warnings else "accepted"] += 1
                 results["quality_warnings"] += len(warnings)
                 save_quiz_validation_event({
