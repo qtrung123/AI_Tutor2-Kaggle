@@ -1213,21 +1213,36 @@ def _generate_topic_quiz_v2(
     prompt_eval_ms = 0
     token_generation_ms = 0
 
-    # One initial batch, one targeted repair, then one bounded final fill.
-    max_generation_calls = 3
+    # One initial batch, up to two targeted repairs, then up to two bounded fills.
+    generation_phases = ["initial", "repair", "repair", "fill", "fill"]
+    repair_attempt_count = 0
+    fill_attempt_count = 0
     final_fill_llm_calls = 0
-    for attempt_index in range(max_generation_calls):
+    missing_slots_before_each_retry = []
+    for attempt_index, phase in enumerate(generation_phases):
         call_started = time.perf_counter()
         missing = question_count - len(accepted)
         if missing <= 0:
             break
         available_groups = [slot for slot in planned_slots if slot["slot_id"] in remaining_slot_ids]
+        if phase != "initial":
+            retry_attempt = repair_attempt_count + 1 if phase == "repair" else fill_attempt_count + 1
+            retry_state = {
+                "phase": phase, "attempt": retry_attempt,
+                "missing_slots": [slot["slot_id"] for slot in available_groups],
+            }
+            missing_slots_before_each_retry.append(retry_state)
+            print(f"[quiz-v2-retry] {json.dumps(retry_state)}")
+        if phase == "repair":
+            repair_attempt_count += 1
+        elif phase == "fill":
+            fill_attempt_count += 1
         prompt = _build_v2_prompt(
-            document["id"], topic, difficulty, available_groups, missing, accepted_stems, attempt_index > 0
+            document["id"], topic, difficulty, available_groups, missing, accepted_stems, phase != "initial"
         )
         stage_started = time.perf_counter()
         llm_calls += 1
-        if attempt_index == 2:
+        if phase == "fill":
             final_fill_llm_calls += 1
         output_schema = {
             "type": "object",
@@ -1251,7 +1266,7 @@ def _generate_topic_quiz_v2(
         }
         llm = ChatOllama(
             model=model_id,
-            temperature=0.1 if attempt_index == 0 else 0.25,
+            temperature=0.1 if phase == "initial" else 0.25,
             format=output_schema,
             num_ctx=16384 if missing > 15 else 8192,
             num_predict=min(4800, max(520, missing * 150)),
@@ -1259,7 +1274,7 @@ def _generate_topic_quiz_v2(
             client_kwargs={"timeout": 270},
         )
         print(
-            f"[quiz-v2-llm] attempt={attempt_index + 1}, model={model_id}, "
+            f"[quiz-v2-llm] attempt={attempt_index + 1}, phase={phase}, model={model_id}, "
             f"requested={missing}, evidence_groups={len(available_groups)}"
         )
         try:
@@ -1340,7 +1355,7 @@ def _generate_topic_quiz_v2(
                 validation_results["reasons"].append(str(error))
                 print(f"[quiz-v2-validation] discarded candidate: {error}")
         validation_ms += round((time.perf_counter() - validation_started) * 1000)
-        if attempt_index > 0:
+        if phase != "initial":
             repair_ms += round((time.perf_counter() - call_started) * 1000)
 
     timings["generation_ms"] = generation_ms
@@ -1349,7 +1364,10 @@ def _generate_topic_quiz_v2(
     timings["token_generation_ms"] = token_generation_ms
     timings["validation_ms"] = validation_ms
     timings["repair_ms"] = repair_ms
-    timings["repair_llm_calls"] = max(0, llm_calls - 1)
+    timings["repair_llm_calls"] = repair_attempt_count + fill_attempt_count
+    timings["repair_attempt_count"] = repair_attempt_count
+    timings["fill_attempt_count"] = fill_attempt_count
+    timings["missing_slots_before_each_retry"] = missing_slots_before_each_retry
     timings["final_fill_llm_calls"] = final_fill_llm_calls
     if len(accepted) != question_count:
         timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
@@ -1505,11 +1523,14 @@ def _run_document_v2_batch(
     }
     llm_calls = 0
     repair_llm_calls = 0
+    repair_attempt_count = 0
+    fill_attempt_count = 0
     final_fill_llm_calls = 0
+    missing_slots_before_each_retry = []
     document_scope = {"topic_id": "document", "name": "Entire document"}
 
     def run_generation_call(call_slots: list[dict], phase: str, batch_index: int) -> None:
-        nonlocal llm_calls, repair_llm_calls, final_fill_llm_calls
+        nonlocal llm_calls, repair_llm_calls, repair_attempt_count, fill_attempt_count, final_fill_llm_calls
         attempt_started = time.perf_counter()
         requested = len(call_slots)
         call_slot_ids = {slot["slot_id"] for slot in call_slots}
@@ -1525,6 +1546,10 @@ def _run_document_v2_batch(
         llm_calls += 1
         if phase != "initial":
             repair_llm_calls += 1
+        if phase == "repair":
+            repair_attempt_count += 1
+        elif phase == "fill":
+            fill_attempt_count += 1
         if phase == "fill":
             final_fill_llm_calls += 1
         llm = ChatOllama(
@@ -1644,16 +1669,25 @@ def _run_document_v2_batch(
         run_generation_call(batch_slots, "initial", batch_index)
 
     next_batch_index = len(initial_batches) + 1
-    missing_slots = [slot for slot in authoritative_slots if slot["slot_id"] in remaining_slot_ids]
-    if missing_slots:
-        run_generation_call(missing_slots, "repair", next_batch_index)
-        next_batch_index += 1
-    missing_slots = [slot for slot in authoritative_slots if slot["slot_id"] in remaining_slot_ids]
-    if missing_slots:
-        run_generation_call(missing_slots, "fill", next_batch_index)
+    for phase, retry_limit in (("repair", 2), ("fill", 2)):
+        for retry_index in range(1, retry_limit + 1):
+            missing_slots = [slot for slot in authoritative_slots if slot["slot_id"] in remaining_slot_ids]
+            if not missing_slots:
+                break
+            retry_state = {
+                "phase": phase, "attempt": retry_index,
+                "missing_slots": [slot["slot_id"] for slot in missing_slots],
+            }
+            missing_slots_before_each_retry.append(retry_state)
+            print(f"[quiz-document-retry] {json.dumps(retry_state)}")
+            run_generation_call(missing_slots, phase, next_batch_index)
+            next_batch_index += 1
 
     timings["llm_calls"] = llm_calls
     timings["repair_llm_calls"] = repair_llm_calls
+    timings["repair_attempt_count"] = repair_attempt_count
+    timings["fill_attempt_count"] = fill_attempt_count
+    timings["missing_slots_before_each_retry"] = missing_slots_before_each_retry
     timings["final_fill_llm_calls"] = final_fill_llm_calls
     accepted = [accepted_by_slot[slot["slot_id"]] for slot in authoritative_slots if slot["slot_id"] in accepted_by_slot]
     for question_id, question in enumerate(accepted, start=1):
@@ -1665,6 +1699,9 @@ def _run_document_v2_batch(
         'repair_ms': timings['repair_ms'],
         'llm_calls': llm_calls,
         'repair_llm_calls': repair_llm_calls,
+        'repair_attempt_count': repair_attempt_count,
+        'fill_attempt_count': fill_attempt_count,
+        'missing_slots_before_each_retry': missing_slots_before_each_retry,
         'final_fill_llm_calls': final_fill_llm_calls,
         'accepted': len(accepted),
     })}")

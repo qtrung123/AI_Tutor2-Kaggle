@@ -293,11 +293,15 @@ class QuizV2Tests(unittest.TestCase):
         initial[0]["question"] = "Which behavior is NOT supported by the evidence?"
         questions, validation, timings, _slots = self.run_document_batch([
             {"questions": initial}, {"questions": [raw_question(0)]},
+            {"questions": [raw_question(0)]},
         ])
         self.assertEqual(len(questions), 10)
         self.assertEqual(validation["hard_rejections"], 1)
         self.assertEqual(validation["quality_warnings"], 0)
         self.assertEqual(timings["repair_llm_calls"], 1)
+        self.assertEqual(timings["repair_attempt_count"], 1)
+        self.assertEqual(timings["fill_attempt_count"], 0)
+        self.assertEqual(len(FakeBatchModel.payloads), 1)
         self.assertIn("EASY QUALITY:", FakeBatchModel.prompts[1])
 
     def test_easy_quality_warnings_do_not_trigger_repair(self):
@@ -358,23 +362,28 @@ class QuizV2Tests(unittest.TestCase):
 
     def test_final_fill_completes_slots_left_after_targeted_repair(self):
         initial = [raw_question(index) for index in range(9)]
-        malformed_repair = raw_question(9)
-        malformed_repair["question"] = "Still incomplete and?"
+        malformed_repair_1 = raw_question(9)
+        malformed_repair_1["question"] = "Still incomplete and?"
+        malformed_repair_2 = raw_question(9)
+        malformed_repair_2["question"] = "Still incomplete or?"
         result, saved = self.run_v2([
-            {"questions": initial}, {"questions": [malformed_repair]},
+            {"questions": initial}, {"questions": [malformed_repair_1]},
+            {"questions": [malformed_repair_2]},
             {"questions": [raw_question(9)]},
         ])
         self.assertEqual(len(result["questions"]), 10)
         timings = result["assessment_plan"]["timings_ms"]
-        self.assertEqual(timings["repair_llm_calls"], 2)
+        self.assertEqual(timings["repair_llm_calls"], 3)
+        self.assertEqual(timings["repair_attempt_count"], 2)
+        self.assertEqual(timings["fill_attempt_count"], 1)
         self.assertEqual(timings["final_fill_llm_calls"], 1)
         self.assertEqual(len(saved), 1)
 
     def test_repair_failure_reports_counts_and_does_not_persist(self):
         FakeBatchModel.payloads = [
             {"questions": [raw_question(index) for index in range(8)]},
-            {"questions": []},
-            {"questions": []},
+            {"questions": []}, {"questions": []},
+            {"questions": []}, {"questions": []},
         ]
         with (
             patch("backend.quiz_service.get_topic_chunks", return_value=[CHUNK]),
@@ -388,6 +397,7 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(raised.exception.detail["valid_count"], 8)
         self.assertEqual(raised.exception.detail["missing_count"], 2)
         self.assertTrue(raised.exception.detail["failure_summary"])
+        self.assertEqual(len(FakeBatchModel.configurations), 5)
         save.assert_not_called()
 
     def test_invented_slot_is_rejected_and_only_missing_slot_is_repaired(self):
@@ -472,6 +482,8 @@ class QuizV2Tests(unittest.TestCase):
                 self.assertEqual(validation["accepted"], count)
                 self.assertEqual(timings["llm_calls"], len(expected_sizes))
                 self.assertEqual(timings["repair_llm_calls"], 0)
+                self.assertEqual(timings["repair_attempt_count"], 0)
+                self.assertEqual(timings["fill_attempt_count"], 0)
                 self.assertEqual(timings["initial_batch_count"], len(expected_sizes))
                 self.assertEqual(
                     [batch["requested"] for batch in timings["initial_batches"]], expected_sizes
@@ -514,20 +526,65 @@ class QuizV2Tests(unittest.TestCase):
 
     def test_document_final_fill_runs_only_after_targeted_repair(self):
         initial = [raw_question(index) for index in range(9)]
-        malformed_repair = raw_question(9)
-        malformed_repair["question"] = "Still incomplete and?"
+        malformed_repair_1 = raw_question(9)
+        malformed_repair_1["question"] = "Still incomplete and?"
+        malformed_repair_2 = raw_question(9)
+        malformed_repair_2["question"] = "Still incomplete or?"
         questions, validation, timings, _slots = self.run_document_batch([
-            {"questions": initial}, {"questions": [malformed_repair]},
+            {"questions": initial}, {"questions": [malformed_repair_1]},
+            {"questions": [malformed_repair_2]},
             {"questions": [raw_question(9)]},
         ])
         self.assertEqual(len(questions), 10)
         self.assertEqual([question["id"] for question in questions], list(range(1, 11)))
-        self.assertEqual(timings["llm_calls"], 3)
-        self.assertEqual(timings["repair_llm_calls"], 2)
+        self.assertEqual(timings["llm_calls"], 4)
+        self.assertEqual(timings["repair_llm_calls"], 3)
+        self.assertEqual(timings["repair_attempt_count"], 2)
+        self.assertEqual(timings["fill_attempt_count"], 1)
         self.assertEqual(timings["final_fill_llm_calls"], 1)
         self.assertGreaterEqual(validation["hard_rejections"], 1)
         self.assertIn("Write exactly 1", FakeBatchModel.prompts[1])
         self.assertIn("Write exactly 1", FakeBatchModel.prompts[2])
+
+    def test_second_targeted_repair_completes_partial_first_repair(self):
+        initial = [raw_question(index) for index in range(8)]
+        questions, _validation, timings, _slots = self.run_document_batch([
+            {"questions": initial}, {"questions": [raw_question(8)]},
+            {"questions": [raw_question(9)]},
+        ])
+        self.assertEqual(len(questions), 10)
+        self.assertEqual(timings["repair_attempt_count"], 2)
+        self.assertEqual(timings["fill_attempt_count"], 0)
+        self.assertEqual(timings["llm_calls"], 3)
+        self.assertEqual(
+            [retry["missing_slots"] for retry in timings["missing_slots_before_each_retry"]],
+            [["S9", "S10"], ["S10"]],
+        )
+
+    def test_fill_can_use_two_attempts_and_stops_at_exact_count(self):
+        initial = [raw_question(index) for index in range(9)]
+        questions, _validation, timings, _slots = self.run_document_batch([
+            {"questions": initial}, {"questions": []}, {"questions": []},
+            {"questions": []}, {"questions": [raw_question(9)]},
+        ])
+        self.assertEqual(len(questions), 10)
+        self.assertEqual(timings["repair_attempt_count"], 2)
+        self.assertEqual(timings["fill_attempt_count"], 2)
+        self.assertEqual(timings["llm_calls"], 5)
+        self.assertEqual(len(FakeBatchModel.payloads), 0)
+
+    def test_document_retry_calls_never_exceed_two_repairs_and_two_fills(self):
+        initial = [raw_question(index) for index in range(8)]
+        questions, _validation, timings, _slots = self.run_document_batch([
+            {"questions": initial}, {"questions": []}, {"questions": []},
+            {"questions": []}, {"questions": []},
+            {"questions": [raw_question(8), raw_question(9)]},
+        ])
+        self.assertEqual(len(questions), 8)
+        self.assertEqual(timings["repair_attempt_count"], 2)
+        self.assertEqual(timings["fill_attempt_count"], 2)
+        self.assertEqual(timings["llm_calls"], 5)
+        self.assertEqual(len(FakeBatchModel.payloads), 1)
 
     def test_chunked_document_questions_persist_once_without_duplicates(self):
         questions, _validation, _timings, _slots = self.run_document_batch([
