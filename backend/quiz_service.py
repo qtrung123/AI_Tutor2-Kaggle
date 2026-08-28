@@ -980,9 +980,9 @@ def _validate_easy_v2_quality(
     if explicit_count and asks_for_set:
         requested = number_words.get(explicit_count.group(1), int(explicit_count.group(1)) if explicit_count.group(1).isdigit() else 0)
         if requested > 1 and len(answer_parts) < requested:
-            raise ValueError("Easy quality: partial answer for an explicit multi-part stem.")
+            warnings.append("partial_multi_part_answer")
     elif asks_for_set and re.search(r"\b(?:what|which)\b.*\b(?:are|include)\b", lowered_stem) and len(answer_parts) < 2:
-        raise ValueError("Easy quality: singular answer for a plural/set stem.")
+        warnings.append("singular_answer_for_set_stem")
 
     evidence_lower = evidence.lower()
     evidence_tokens = _easy_content_tokens(evidence)
@@ -1037,14 +1037,13 @@ def _validate_v2_question(
     if not isinstance(raw_options, list) or len(raw_options) != 4:
         raise ValueError("Question must contain exactly 4 options.")
     option_bodies = [strip_leading_option_label(_clean_inline_text(option)) for option in raw_options]
-    if any(not option for option in option_bodies) or len({option.lower() for option in option_bodies}) != 4:
-        raise ValueError("Question options must be non-empty and distinct.")
+    if len({option.lower() for option in option_bodies}) != 4:
+        raise ValueError("Question options must be distinct.")
     normalized_options = [_normalize_question_key(option) for option in option_bodies]
-    if any(
+    near_duplicate_options = any(
         difflib.SequenceMatcher(None, normalized_options[left], normalized_options[right]).ratio() >= 0.94
         for left in range(4) for right in range(left + 1, 4)
-    ):
-        raise ValueError("Question options must not be near-duplicates.")
+    )
 
     answer_index = raw.get("correct_answer")
     if isinstance(answer_index, bool) or not isinstance(answer_index, int) or answer_index not in range(4):
@@ -1061,6 +1060,10 @@ def _validate_v2_question(
     warnings = []
     if near_duplicate_stem:
         warnings.append("near_duplicate_question")
+    if near_duplicate_options:
+        warnings.append("near_duplicate_options")
+    if any(not option for option in option_bodies):
+        warnings.append("empty_option")
     explanation = _clean_inline_text(raw.get("explanation", ""))
     if difficulty == "easy":
         warnings.extend(_validate_easy_v2_quality(
@@ -1157,7 +1160,10 @@ def _generate_topic_quiz_v2(
     prompt_eval_ms = 0
     token_generation_ms = 0
 
-    for attempt_index in range(max(1, QUIZ_GENERATION_RETRY_LIMIT)):
+    # One initial batch, one targeted repair, then one bounded final fill.
+    max_generation_calls = 3
+    final_fill_llm_calls = 0
+    for attempt_index in range(max_generation_calls):
         call_started = time.perf_counter()
         missing = question_count - len(accepted)
         if missing <= 0:
@@ -1168,6 +1174,8 @@ def _generate_topic_quiz_v2(
         )
         stage_started = time.perf_counter()
         llm_calls += 1
+        if attempt_index == 2:
+            final_fill_llm_calls += 1
         output_schema = {
             "type": "object",
             "properties": {
@@ -1289,6 +1297,7 @@ def _generate_topic_quiz_v2(
     timings["validation_ms"] = validation_ms
     timings["repair_ms"] = repair_ms
     timings["repair_llm_calls"] = max(0, llm_calls - 1)
+    timings["final_fill_llm_calls"] = final_fill_llm_calls
     if len(accepted) != question_count:
         timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
         timings["total_request_ms"] = timings["total_ms"]
@@ -1441,7 +1450,10 @@ def _run_document_v2_batch(
     llm_calls = 0
     document_scope = {"topic_id": "document", "name": "Entire document"}
 
-    for attempt_index in range(max(1, QUIZ_GENERATION_RETRY_LIMIT)):
+    # One initial batch, one targeted repair, then one bounded final fill.
+    max_generation_calls = 3
+    final_fill_llm_calls = 0
+    for attempt_index in range(max_generation_calls):
         attempt_started = time.perf_counter()
         missing = question_count - len(accepted)
         if missing <= 0:
@@ -1455,6 +1467,8 @@ def _run_document_v2_batch(
         timings["prompt_construction_ms"] += round((time.perf_counter() - prompt_started) * 1000)
         generation_started = time.perf_counter()
         llm_calls += 1
+        if attempt_index == 2:
+            final_fill_llm_calls += 1
         llm = ChatOllama(
             model=model_id,
             temperature=0.1 if attempt_index == 0 else 0.25,
@@ -1552,6 +1566,7 @@ def _run_document_v2_batch(
 
     timings["llm_calls"] = llm_calls
     timings["repair_llm_calls"] = max(0, llm_calls - 1)
+    timings["final_fill_llm_calls"] = final_fill_llm_calls
     return accepted, results, timings
 
 

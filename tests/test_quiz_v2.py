@@ -247,24 +247,21 @@ class QuizV2Tests(unittest.TestCase):
         )
         self.assertIn("distractor_similar_to_evidence", warnings)
 
-    def test_easy_quality_rejects_negative_and_partial_patterns(self):
-        cases = [
-            (
+    def test_easy_quality_rejects_negative_and_warns_for_partial_set_answer(self):
+        with self.assertRaisesRegex(ValueError, "negative or trick"):
+            self.validate_easy_candidate(
                 "Which scheduler behavior is NOT used by TinyOS?",
                 ["Runs queued tasks", "Uses FIFO order", "Avoids task preemption", "Runs one task"], 1,
                 "TinyOS uses FIFO order for queued tasks.",
-                "TinyOS runs queued tasks in FIFO order without task preemption.", "negative or trick",
-            ),
-            (
-                "What are the four objectives of the scheduler?",
-                ["Low latency", "High throughput", "Fair execution", "Small memory use"], 0,
-                "The objectives include low latency, throughput, fairness, and small memory use.",
-                "The four objectives are low latency, high throughput, fair execution, and small memory use.", "partial answer",
-            ),
-        ]
-        for stem, options, answer, explanation, evidence, error in cases:
-            with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
-                self.validate_easy_candidate(stem, options, answer, explanation, evidence)
+                "TinyOS runs queued tasks in FIFO order without task preemption.",
+            )
+        _question, warnings = self.validate_easy_candidate(
+            "What are the four objectives of the scheduler?",
+            ["Low latency", "High throughput", "Fair execution", "Small memory use"], 0,
+            "The objectives include low latency, throughput, fairness, and small memory use.",
+            "The four objectives are low latency, high throughput, fair execution, and small memory use.",
+        )
+        self.assertIn("partial_multi_part_answer", warnings)
 
     def test_easy_quality_heuristics_are_warnings_not_rejections(self):
         _question, warnings = self.validate_easy_candidate(
@@ -308,6 +305,25 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(validation["hard_rejections"], 0)
         self.assertEqual(timings["repair_llm_calls"], 0)
 
+    def test_twenty_easy_questions_with_several_warnings_need_no_repair(self):
+        initial = [raw_question(index) for index in range(20)]
+        for index in (1, 7, 13, 19):
+            initial[index]["options"][1] = f"Linux always uses round-robin scheduling {index}"
+        questions, validation, timings, _slots = self.run_document_batch([{"questions": initial}], 20)
+        self.assertEqual(len(questions), 20)
+        self.assertGreaterEqual(validation["quality_warnings"], 8)
+        self.assertEqual(validation["hard_rejections"], 0)
+        self.assertEqual(timings["repair_llm_calls"], 0)
+
+    def test_twenty_five_easy_questions_with_warnings_return_exact_count(self):
+        initial = [raw_question(index) for index in range(25)]
+        for index in (2, 8, 14, 20, 24):
+            initial[index]["options"][1] = f"Linux only uses round-robin scheduling {index}"
+        questions, validation, timings, _slots = self.run_document_batch([{"questions": initial}], 25)
+        self.assertEqual(len(questions), 25)
+        self.assertGreater(validation["quality_warnings"], 0)
+        self.assertEqual(timings["repair_llm_calls"], 0)
+
     def test_partial_initial_generation_repairs_only_missing_slot(self):
         result, saved = self.run_v2([
             {"questions": [raw_question(index) for index in range(9)]},
@@ -320,6 +336,31 @@ class QuizV2Tests(unittest.TestCase):
         self.assertIn("Write exactly 1", FakeBatchModel.prompts[1])
         self.assertIn("S10|", FakeBatchModel.prompts[1])
         self.assertNotIn("S9|", FakeBatchModel.prompts[1])
+
+    def test_malformed_item_is_completed_by_targeted_repair(self):
+        initial = [raw_question(index) for index in range(10)]
+        initial[4]["question"] = "Incomplete and?"
+        result, saved = self.run_v2([
+            {"questions": initial}, {"questions": [raw_question(4)]},
+        ])
+        self.assertEqual(len(result["questions"]), 10)
+        self.assertEqual(result["assessment_plan"]["timings_ms"]["repair_llm_calls"], 1)
+        self.assertEqual(result["assessment_plan"]["timings_ms"]["final_fill_llm_calls"], 0)
+        self.assertEqual(len(saved), 1)
+
+    def test_final_fill_completes_slots_left_after_targeted_repair(self):
+        initial = [raw_question(index) for index in range(9)]
+        malformed_repair = raw_question(9)
+        malformed_repair["question"] = "Still incomplete and?"
+        result, saved = self.run_v2([
+            {"questions": initial}, {"questions": [malformed_repair]},
+            {"questions": [raw_question(9)]},
+        ])
+        self.assertEqual(len(result["questions"]), 10)
+        timings = result["assessment_plan"]["timings_ms"]
+        self.assertEqual(timings["repair_llm_calls"], 2)
+        self.assertEqual(timings["final_fill_llm_calls"], 1)
+        self.assertEqual(len(saved), 1)
 
     def test_repair_failure_reports_counts_and_does_not_persist(self):
         FakeBatchModel.payloads = [
