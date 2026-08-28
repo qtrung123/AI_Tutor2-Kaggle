@@ -10,7 +10,7 @@ from backend import quiz_store
 from backend.mastery_service import calculate_mastery
 from backend.quiz_options import strip_leading_option_label
 from backend.quiz_service import (
-    QuizGenerationError, _generate_topic_quiz_v2, _run_document_v2_batch, _validate_quiz_batch,
+    QuizGenerationError, _build_v2_prompt, _generate_topic_quiz_v2, _run_document_v2_batch, _validate_quiz_batch,
     _validate_v2_question,
 )
 
@@ -113,7 +113,7 @@ class QuizV2Tests(unittest.TestCase):
         semantic.assert_not_called()
         return result, saved
 
-    def run_document_batch(self, payloads, question_count=10):
+    def run_document_batch(self, payloads, question_count=10, difficulty="easy"):
         FakeBatchModel.payloads = list(payloads)
         slots = []
         for index in range(question_count):
@@ -131,7 +131,7 @@ class QuizV2Tests(unittest.TestCase):
             patch("backend.quiz_service.save_quiz_validation_event"),
         ):
             questions, validation, timings = _run_document_v2_batch(
-                {**DOCUMENT, "id": "lecture.pdf"}, "easy", slots, "owner",
+                {**DOCUMENT, "id": "lecture.pdf"}, difficulty, slots, "owner",
                 "qwen-2.5-3b-runtime", question_count, "run-id",
             )
         return questions, validation, timings, slots
@@ -202,6 +202,40 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(timings["model_load_ms"], 2)
         self.assertEqual(timings["prompt_eval_ms"], 3)
         self.assertEqual(timings["token_generation_ms"], 4)
+
+    def test_shared_v2_prompt_has_distinct_prompt_only_cognitive_contracts(self):
+        group = {
+            "slot_id": "S1", "topic_name": "Reliable transport", "concept_id": "concept_1",
+            "source_chunk_ids": ["canonical_chunk_1"],
+            "evidence_excerpt": "Acknowledgements confirm delivery and retransmission recovers loss.",
+        }
+        prompts = {
+            difficulty: _build_v2_prompt("lecture.pdf", TOPIC, difficulty, [group], 1, [], False)
+            for difficulty in ("easy", "medium", "difficult")
+        }
+        self.assertIn("direct recall/basic comprehension about one explicit evidence fact", prompts["easy"])
+        self.assertIn("cognitive_intent=recall", prompts["easy"])
+        self.assertIn("one reasoning step using comparison, cause/effect, interpretation, or application", prompts["medium"])
+        self.assertIn("cognitive_intent=relationship_application", prompts["medium"])
+        self.assertIn("combines at least two supported facts", prompts["difficult"])
+        self.assertIn("same concept slot evidence", prompts["difficult"])
+        self.assertIn("cognitive_intent=multi_fact_reasoning", prompts["difficult"])
+        self.assertNotIn("cognitive_intent", group)
+
+    def test_difficult_repair_and_fill_prompts_keep_the_same_contract(self):
+        initial = [raw_question(index) for index in range(9)]
+        malformed = raw_question(9)
+        malformed["question"] = "Still incomplete and?"
+        questions, _validation, timings, _slots = self.run_document_batch([
+            {"questions": initial}, {"questions": [malformed]},
+            {"questions": [malformed]}, {"questions": [raw_question(9)]},
+        ], difficulty="difficult")
+        self.assertEqual(len(questions), 10)
+        self.assertEqual(timings["repair_attempt_count"], 2)
+        self.assertEqual(timings["fill_attempt_count"], 1)
+        for prompt in FakeBatchModel.prompts:
+            self.assertIn("DIFFICULT QUALITY", prompt)
+            self.assertIn("cognitive_intent=multi_fact_reasoning", prompt)
 
     def test_option_prefixes_are_stripped_once_without_damaging_normal_words(self):
         cases = {

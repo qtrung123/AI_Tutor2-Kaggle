@@ -955,27 +955,42 @@ def _build_v2_prompt(
     accepted_stems: list[str],
     repair: bool,
 ) -> str:
+    cognitive_intent = {
+        "easy": "recall",
+        "medium": "relationship_application",
+        "difficult": "multi_fact_reasoning",
+    }[difficulty]
     evidence = "\n".join(
-        f"{group['slot_id']}|{group.get('topic_name', '')}|{group['evidence_excerpt']}"
-        if group.get("topic_name") else f"{group['slot_id']}|{group['evidence_excerpt']}"
+        f"{group['slot_id']}|{group.get('topic_name', '')}|{group['evidence_excerpt']}|cognitive_intent={cognitive_intent}"
+        if group.get("topic_name") else f"{group['slot_id']}|{group['evidence_excerpt']}|cognitive_intent={cognitive_intent}"
         for group in groups
     )
     avoid = " | ".join(stem[:100] for stem in accepted_stems) if repair else ""
     repair_line = f"Avoid: {avoid}\n" if avoid else ""
-    easy_contract = (
-        "EASY QUALITY: Ask direct recall/comprehension about one explicit evidence fact. "
-        "Exactly one option must fully answer the stem; every distractor must conflict with or be unsupported by this slot evidence. "
-        "Do not rely on outside-world plausibility. Do not use NOT, EXCEPT, false, incorrect, least, or double negatives. "
-        "If several evidence facts are true, do not make them competing options; the correct option must contain the complete requested set. "
-        "The correct option must match the stem in scope and grammar.\n"
-        if difficulty == "easy" else ""
-    )
+    difficulty_contracts = {
+        "easy": (
+            "EASY QUALITY: Ask direct recall/basic comprehension about one explicit evidence fact. "
+            "Exactly one option must fully answer the stem; every distractor must conflict with or be unsupported by this slot evidence. "
+            "Do not rely on outside-world plausibility. Do not use NOT, EXCEPT, false, incorrect, least, or double negatives. "
+            "If several evidence facts are true, do not make them competing options; the correct option must contain the complete requested set. "
+            "The correct option must match the stem in scope and grammar.\n"
+        ),
+        "medium": (
+            "MEDIUM QUALITY: Require one reasoning step using comparison, cause/effect, interpretation, or application "
+            "within this concept or its closely related slot evidence; do not ask direct recall alone.\n"
+        ),
+        "difficult": (
+            "DIFFICULT QUALITY: Require multi-fact reasoning that combines at least two supported facts already inside "
+            "this same concept slot evidence to diagnose, predict, justify, or select a consequence. "
+            "Do not combine separate concept slots and do not ask direct recall alone.\n"
+        ),
+    }
     return (
         f"Write exactly {count} {difficulty} MCQs for {topic.get('name') or topic.get('topic_id')}.\n"
         'JSON only: {"questions":[{"slot_id":"S1","question":"...","options":["...","...","...","..."],"correct_answer":0,"explanation":"..."}]}\n'
         "Use each evidence slot exactly once. Use only its evidence. Four distinct options; correct_answer is 0-3. "
         "Question <=18 words, each option <=10 words, explanation <=16 words. No markdown or extra fields.\n"
-        f"{easy_contract}{repair_line}EVIDENCE:\n{evidence}"
+        f"{difficulty_contracts[difficulty]}{repair_line}EVIDENCE:\n{evidence}"
     )
 
 
