@@ -1,6 +1,7 @@
 """SQLite persistence for generated quizzes, progress, history, and explanations."""
 
 import json
+import hashlib
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -176,6 +177,24 @@ def initialize_quiz_store() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_quiz_validation_run
                 ON quiz_validation_events(generation_run_id, batch_index, generation_attempt);
+
+            CREATE TABLE IF NOT EXISTS concept_plan_cache (
+                cache_key TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                document_id TEXT NOT NULL,
+                document_hash TEXT NOT NULL,
+                topic_schema_version INTEGER NOT NULL,
+                topic_id TEXT NOT NULL,
+                planner_version TEXT NOT NULL,
+                planner_input_fingerprint TEXT NOT NULL,
+                planner_prompt_version TEXT NOT NULL,
+                planner_model TEXT NOT NULL,
+                plan_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_concept_plan_cache_document
+                ON concept_plan_cache(owner_id, document_id, topic_id, created_at);
 
             CREATE TABLE IF NOT EXISTS topic_mastery (
                 student_id TEXT NOT NULL,
@@ -860,6 +879,57 @@ def invalidate_document_quizzes_for_topic_schema(
         )
         connection.execute("DELETE FROM topic_mastery WHERE student_id = ? AND document_id = ?", (owner_id, document_id))
         return len(quiz_ids)
+
+
+def concept_plan_cache_key(identity: dict) -> str:
+    canonical = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return f"concept-plan:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+def get_cached_concept_plan(identity: dict) -> dict | None:
+    initialize_quiz_store()
+    cache_key = concept_plan_cache_key(identity)
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT plan_json FROM concept_plan_cache WHERE cache_key = ?", (cache_key,),
+        ).fetchone()
+        if row:
+            connection.execute(
+                "UPDATE concept_plan_cache SET last_used_at = ? WHERE cache_key = ?",
+                (utc_now_iso(), cache_key),
+            )
+    if not row:
+        return None
+    try:
+        plan = json.loads(row["plan_json"])
+        return plan if isinstance(plan, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+def save_cached_concept_plan(identity: dict, plan: dict) -> dict:
+    initialize_quiz_store()
+    cache_key = concept_plan_cache_key(identity)
+    now = utc_now_iso()
+    with _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO concept_plan_cache (
+                cache_key, owner_id, document_id, document_hash, topic_schema_version,
+                topic_id, planner_version, planner_input_fingerprint,
+                planner_prompt_version, planner_model, plan_json, created_at, last_used_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cache_key) DO UPDATE SET
+                plan_json=excluded.plan_json, last_used_at=excluded.last_used_at
+            """,
+            (
+                cache_key, identity["owner_id"], identity["document_id"], identity["document_hash"],
+                int(identity["topic_schema_version"]), identity["topic_id"], identity["planner_version"],
+                identity["planner_input_fingerprint"], identity["planner_prompt_version"],
+                identity["planner_model"], json.dumps(plan, ensure_ascii=False), now, now,
+            ),
+        )
+    return plan
 
 
 def save_quiz_validation_event(event: dict) -> dict:

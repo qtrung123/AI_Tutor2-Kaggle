@@ -16,6 +16,7 @@ from config import (
 )
 
 PLANNER_VERSION = "hierarchy_concepts_v2"
+CONCEPT_PLANNER_PROMPT_VERSION = "concept_planner_v1"
 
 
 def _key(value: str) -> str:
@@ -24,6 +25,26 @@ def _key(value: str) -> str:
 
 def _chunk_id(chunk: dict) -> str:
     return str((chunk.get("metadata") or {}).get("chunk_id") or "").strip()
+
+
+def planner_input_fingerprint(topic: dict, chunks: list[dict]) -> str:
+    """Fingerprint topic structure and ordered canonical evidence inputs."""
+    ordered_chunks = []
+    for chunk in chunks:
+        metadata = chunk.get("metadata") or {}
+        content = str(chunk.get("content") or "")
+        ordered_chunks.append({
+            "chunk_id": _chunk_id(chunk),
+            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "topic_id": str(metadata.get("topic_id") or ""),
+            "subtopic_id": str(metadata.get("subtopic_id") or ""),
+            "heading_path": metadata.get("heading_path") or "",
+            "page": metadata.get("page"),
+            "start_index": metadata.get("start_index"),
+        })
+    payload = {"topic_structure": topic, "ordered_canonical_chunks": ordered_chunks}
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _subtopic_id(chunk: dict) -> str:
@@ -361,6 +382,36 @@ def validate_and_deduplicate_concepts(raw_concepts: list, chunks: list[dict], to
 def _concept_plan_id(topic_id: str, concepts: list[dict]) -> str:
     identity = json.dumps([PLANNER_VERSION, topic_id, [concept["concept_id"] for concept in concepts]])
     return f"conceptplan_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:16]}"
+
+
+def is_valid_concept_plan(plan: dict, topic: dict, chunks: list[dict]) -> bool:
+    """Verify cached plan identity and canonical provenance without an LLM call."""
+    if not isinstance(plan, dict) or plan.get("planner_version") != PLANNER_VERSION:
+        return False
+    topic_id = str(topic.get("topic_id") or "")
+    if str(plan.get("topic_id") or "") != topic_id:
+        return False
+    concepts = plan.get("concepts")
+    if not isinstance(concepts, list) or not concepts:
+        return False
+    allowed_chunks = {_chunk_id(chunk) for chunk in chunks if _chunk_id(chunk)}
+    allowed_subtopics = {
+        str(item.get("subtopic_id") or "") for item in topic.get("subtopics") or []
+        if str(item.get("subtopic_id") or "")
+    }
+    for concept in concepts:
+        if not isinstance(concept, dict):
+            return False
+        name = str(concept.get("name") or "").strip()
+        subtopic_ids = list(concept.get("source_subtopic_ids") or [])
+        chunk_ids = list(concept.get("source_chunk_ids") or [])
+        if not name or not chunk_ids or any(value not in allowed_chunks for value in chunk_ids):
+            return False
+        if any(value not in allowed_subtopics for value in subtopic_ids):
+            return False
+        if concept.get("concept_id") != _concept_id(topic_id, name, subtopic_ids, chunk_ids):
+            return False
+    return plan.get("concept_plan_id") == _concept_plan_id(topic_id, concepts)
 
 
 def build_topic_plan(topic: dict, chunks: list[dict]) -> dict:

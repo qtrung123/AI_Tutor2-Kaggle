@@ -25,6 +25,8 @@ from backend.quiz_store import (
     quiz_cache_key,
     save_quiz,
     save_quiz_explanation,
+    get_cached_concept_plan,
+    save_cached_concept_plan,
     save_quiz_progress,
     reset_quiz_progress,
     save_quiz_validation_event,
@@ -32,10 +34,13 @@ from backend.quiz_store import (
 )
 from backend.quiz_validation import validate_question_semantics
 from backend.assessment_planner import (
+    CONCEPT_PLANNER_PROMPT_VERSION,
     PLANNER_VERSION,
     allocate_document_topics,
     build_topic_plan,
+    is_valid_concept_plan,
     resolve_concept_evidence,
+    planner_input_fingerprint,
 )
 from backend.quiz_options import canonicalize_option, strip_leading_option_label
 from backend.mastery_service import calculate_mastery, recompute_topic_mastery
@@ -139,6 +144,51 @@ def list_indexed_documents(owner_id: str = LEGACY_USER_ID) -> list[dict]:
 
 def _document_lookup(owner_id: str) -> dict[str, dict]:
     return {document["id"]: document for document in list_indexed_documents(owner_id)}
+
+
+def _get_or_build_topic_plan(document: dict, topic: dict, chunks: list[dict], owner_id: str) -> tuple[dict, dict]:
+    """Return one validated plan using an exact persisted planning-input identity."""
+    fingerprint = planner_input_fingerprint(topic, chunks)
+    identity = {
+        "owner_id": owner_id,
+        "document_id": str(document["id"]),
+        "document_hash": str(document.get("hash") or ""),
+        "topic_schema_version": int(document.get("topic_schema_version", 0)),
+        "topic_id": str(topic["topic_id"]),
+        "planner_version": PLANNER_VERSION,
+        "planner_input_fingerprint": fingerprint,
+        "planner_prompt_version": CONCEPT_PLANNER_PROMPT_VERSION,
+        "planner_model": CHAT_MODEL,
+    }
+    lookup_started = time.perf_counter()
+    cached = get_cached_concept_plan(identity)
+    lookup_ms = round((time.perf_counter() - lookup_started) * 1000)
+    try:
+        cached_is_valid = bool(cached) and is_valid_concept_plan(cached, topic, chunks)
+    except (KeyError, TypeError, ValueError):
+        cached_is_valid = False
+    if cached_is_valid:
+        print(
+            f"[concept-plan-cache] HIT document={document['id']} topic={topic['topic_id']} "
+            f"fingerprint={fingerprint[:12]} lookup_ms={lookup_ms}"
+        )
+        return cached, {"cache_hit": True, "lookup_ms": lookup_ms, "build_ms": 0}
+
+    build_started = time.perf_counter()
+    plan = build_topic_plan(topic, chunks)
+    build_ms = round((time.perf_counter() - build_started) * 1000)
+    try:
+        cacheable = is_valid_concept_plan(plan, topic, chunks)
+    except (KeyError, TypeError, ValueError):
+        cacheable = False
+    if cacheable:
+        save_cached_concept_plan(identity, plan)
+    print(
+        f"[concept-plan-cache] MISS document={document['id']} topic={topic['topic_id']} "
+        f"fingerprint={fingerprint[:12]} lookup_ms={lookup_ms} build_ms={build_ms} "
+        f"stored={str(cacheable).lower()}"
+    )
+    return plan, {"cache_hit": False, "lookup_ms": lookup_ms, "build_ms": build_ms}
 
 
 def _load_vectorstore() -> Chroma:
@@ -1131,7 +1181,10 @@ def _generate_topic_quiz_v2(
         if isinstance(topic.get("boundary"), dict)
         else get_topic_chunks(document["id"], str(topic["topic_id"]), owner_id)
     )
-    topic_plan = build_topic_plan(topic, chunks)
+    topic_plan, plan_cache_timing = _get_or_build_topic_plan(document, topic, chunks, owner_id)
+    timings["concept_plan_cache_hit"] = plan_cache_timing["cache_hit"]
+    timings["concept_plan_cache_lookup_ms"] = plan_cache_timing["lookup_ms"]
+    timings["concept_planning_ms"] = plan_cache_timing["build_ms"]
     groups = _select_v2_evidence_groups(topic, chunks, QUIZ_V2_DISTINCT_CONCEPT_LIMIT, topic_plan)
     timings["evidence_selection_ms"] = round((time.perf_counter() - stage_started) * 1000)
     if not groups:
@@ -1648,6 +1701,9 @@ def generate_quiz(
         structural_document_chunks = get_document_chunks(document_id, owner_id)
     timings["topic_chunk_retrieval_ms"] = round((time.perf_counter() - retrieval_started) * 1000)
     planning_by_topic = {}
+    plan_cache_lookup_by_topic = {}
+    plan_cache_hits = 0
+    plan_cache_misses = 0
     for topic in topics_to_plan:
         retrieval_started = time.perf_counter()
         current_chunks = (
@@ -1660,11 +1716,21 @@ def generate_quiz(
         if not current_chunks:
             continue
         topic_chunks[str(topic["topic_id"])] = current_chunks
-        planning_started = time.perf_counter()
-        topic_plans.append(build_topic_plan(topic, current_chunks))
-        planning_by_topic[str(topic["topic_id"])] = round((time.perf_counter() - planning_started) * 1000)
+        plan, plan_cache_timing = _get_or_build_topic_plan(document, topic, current_chunks, owner_id)
+        topic_plans.append(plan)
+        topic_id_value = str(topic["topic_id"])
+        planning_by_topic[topic_id_value] = int(plan_cache_timing["build_ms"])
+        plan_cache_lookup_by_topic[topic_id_value] = int(plan_cache_timing["lookup_ms"])
+        if plan_cache_timing["cache_hit"]:
+            plan_cache_hits += 1
+        else:
+            plan_cache_misses += 1
     timings["concept_planning_by_topic_ms"] = planning_by_topic
     timings["concept_planning_ms"] = sum(planning_by_topic.values())
+    timings["concept_plan_cache_lookup_by_topic_ms"] = plan_cache_lookup_by_topic
+    timings["concept_plan_cache_lookup_ms"] = sum(plan_cache_lookup_by_topic.values())
+    timings["concept_plan_cache_hits"] = plan_cache_hits
+    timings["concept_plan_cache_misses"] = plan_cache_misses
 
     allocation_started = time.perf_counter()
     allocation = allocate_document_topics(topic_plans, cap=question_count)

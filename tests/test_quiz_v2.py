@@ -99,6 +99,8 @@ class QuizV2Tests(unittest.TestCase):
         with (
             patch("backend.quiz_service.get_topic_chunks", return_value=[CHUNK]),
             patch("backend.quiz_service.ChatOllama", FakeBatchModel),
+            patch("backend.quiz_service.get_cached_concept_plan", return_value=None),
+            patch("backend.quiz_service.save_cached_concept_plan"),
             patch("backend.quiz_service.validate_question_semantics") as semantic,
             patch("backend.quiz_service.save_quiz_validation_event"),
             patch("backend.quiz_service.save_quiz", side_effect=lambda _d, _x, quiz, _o: saved.append(quiz) or quiz),
