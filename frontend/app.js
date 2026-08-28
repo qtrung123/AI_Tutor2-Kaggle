@@ -51,6 +51,7 @@ let quizHistory = [];
 let quizHistoryDifficultyFilter = "all";
 let quizHistoryScopeFilter = "all";
 let quizQuestionIndex = 0;
+let quizExplanationPending = false;
 let conversations = [];
 let dashboardData = null;
 let knowledgeGaps = [];
@@ -137,6 +138,30 @@ const sidebarTopicProgress = document.getElementById("sidebar-topic-progress");
 const sidebarTopicStatus = document.getElementById("sidebar-topic-status");
 const practiceMasteryPanel = document.getElementById("practice-mastery-panel");
 const practiceMasteryList = document.getElementById("practice-mastery-list");
+const quizProgressTrigger = document.createElement("button");
+quizProgressTrigger.className = "quiz-progress-trigger";
+quizProgressTrigger.type = "button";
+quizProgressTrigger.textContent = "View Progress";
+quizProgressTrigger.setAttribute("aria-expanded", "false");
+quizProgressTrigger.hidden = true;
+const quizProgressBackdrop = document.createElement("button");
+quizProgressBackdrop.className = "quiz-progress-drawer-backdrop";
+quizProgressBackdrop.type = "button";
+quizProgressBackdrop.setAttribute("aria-label", "Close progress");
+const quizProgressDrawer = document.createElement("aside");
+quizProgressDrawer.className = "quiz-progress-drawer";
+quizProgressDrawer.setAttribute("aria-label", "Quiz progress and mastery");
+const quizProgressDrawerHeader = document.createElement("div");
+quizProgressDrawerHeader.className = "quiz-progress-drawer-header";
+quizProgressDrawerHeader.innerHTML = "<div><span>Learning progress</span><h2>Progress &amp; Mastery</h2></div>";
+const quizProgressClose = document.createElement("button");
+quizProgressClose.className = "quiz-progress-drawer-close";
+quizProgressClose.type = "button";
+quizProgressClose.textContent = "×";
+quizProgressClose.setAttribute("aria-label", "Close progress");
+quizProgressDrawerHeader.appendChild(quizProgressClose);
+quizProgressDrawer.append(quizProgressDrawerHeader, practiceMasteryPanel);
+document.body.append(quizProgressTrigger, quizProgressBackdrop, quizProgressDrawer);
 const sessionDocumentName = document.getElementById("session-document-name");
 const sessionDocumentStatus = document.getElementById("session-document-status");
 const sessionMaterialDetails = document.getElementById("session-material-details");
@@ -257,6 +282,7 @@ function showToast(message) {
 
 function setPage(page) {
   if (page !== "session") closeSourcesDrawer();
+  if (page !== "session") setQuizProgressDrawerOpen(false);
   state.page = page;
   document.body.dataset.page = page;
   navItems.forEach((item, index) => item.classList.toggle("active", item.dataset.page === page && (page !== "overview" || index === 0)));
@@ -294,6 +320,9 @@ function renderModelSelector() {
 }
 
 function setSessionTab(tab) {
+  document.body.dataset.sessionTab = tab;
+  quizProgressTrigger.hidden = tab !== "quiz" || !currentQuiz?.questions?.length;
+  if (tab !== "quiz") setQuizProgressDrawerOpen(false);
   document.querySelectorAll(".session-tab").forEach((button) => button.classList.toggle("active", button.dataset.sessionTab === tab));
   document.querySelectorAll(".session-pane").forEach((pane) => pane.classList.toggle("active", pane.dataset.sessionPane === tab));
   document.getElementById("persistent-tutor").hidden = false;
@@ -819,14 +848,7 @@ async function applyConversationSources() {
   }
 }
 
-async function handleChatSubmit(event) {
-  event.preventDefault();
-  const userText = chatInput.value.trim();
-  if (!userText) {
-    showToast("Type a question first");
-    return;
-  }
-
+async function sendTutorMessage(userText) {
   addMessage(userText, "user");
   chatInput.value = "";
   chatInput.disabled = true;
@@ -859,6 +881,17 @@ async function handleChatSubmit(event) {
     submitButton.textContent = "Send";
     chatInput.focus();
   }
+}
+
+async function handleChatSubmit(event) {
+  event.preventDefault();
+  const userText = chatInput.value.trim();
+  if (!userText) {
+    showToast("Type a question first");
+    return;
+  }
+  if (chatForm.classList.contains("is-sending")) return;
+  await sendTutorMessage(userText);
 }
 
 async function loadUploadedSources() {
@@ -1770,6 +1803,19 @@ async function showQuizHistoryDetail(attemptId) {
   quizHistoryDetail.textContent = "Loading attempt...";
   try {
     const attempt = await requestQuizHistoryDetail(attemptId);
+    quizQuestionIndex = 0;
+    const questions = (attempt.question_results || []).map((result) => ({
+      id: result.question_id,
+      question: result.question || `Question ${result.question_id}`,
+      options: result.options || [],
+      explanation: result.explanation || "",
+    }));
+    renderCompletedQuizReview(quizHistoryDetail, attempt, questions, {
+      back: backToQuizzes,
+      retake: () => startHistoryQuizRetake(attempt),
+      regenerate: () => regenerateHistoryQuiz(attempt),
+    });
+    return;
     quizHistoryDetail.innerHTML = "";
     const heading = document.createElement("div");
     heading.className = "quiz-history-detail-heading";
@@ -1959,9 +2005,16 @@ async function regenerateAssessmentQuiz() {
   }
 }
 
+function setQuizProgressDrawerOpen(open) {
+  const shouldOpen = Boolean(open && currentQuiz?.questions?.length);
+  document.body.classList.toggle("quiz-progress-open", shouldOpen);
+  quizProgressTrigger.setAttribute("aria-expanded", String(shouldOpen));
+  if (shouldOpen) quizProgressClose.focus();
+}
+
 function renderPracticeMastery() {
   if (!practiceMasteryPanel || !practiceMasteryList) return;
-  if (!currentAttempt?.completed) {
+  if (!currentQuiz?.questions?.length) {
     practiceMasteryPanel.hidden = true;
     practiceMasteryList.innerHTML = "";
     return;
@@ -1974,7 +2027,7 @@ function renderPracticeMastery() {
     masteries = (dashboardData.mastery || []).filter((mastery) => mastery.document_id === currentQuiz.document_id && represented.has(mastery.topic_id));
   }
   masteries = masteries.map((mastery) => ({ ...mastery, topic_name: mastery.topic_name || topicNames[mastery.topic_id] || mastery.topic_id }));
-  practiceMasteryPanel.hidden = !masteries.length;
+  practiceMasteryPanel.hidden = false;
   renderMasteryList(practiceMasteryList, masteries, { emptyText: "Mastery evidence is not available for this quiz." });
 }
 
@@ -2228,16 +2281,14 @@ async function explainAssessmentQuestion(question, button) {
   }
 }
 
-function createAssessmentReviewCard(question, result, index) {
+function createAssessmentReviewCard(question, result, index, total) {
   const card = document.createElement("article");
   card.className = `quiz-question-card quiz-review-card ${result.is_correct ? "correct" : "incorrect"}`;
   const heading = document.createElement("div");
   heading.className = "quiz-question-heading";
   const number = document.createElement("span");
-  number.textContent = `Question ${index + 1} of ${currentQuiz.questions.length}`;
-  const outcome = document.createElement("small");
-  outcome.textContent = result.is_correct ? "Correct" : "Incorrect";
-  heading.append(number, outcome);
+  number.textContent = `Question ${index + 1}/${total}`;
+  heading.appendChild(number);
   const questionText = document.createElement("h3");
   questionText.textContent = question.question;
   const options = document.createElement("div");
@@ -2252,14 +2303,134 @@ function createAssessmentReviewCard(question, result, index) {
     row.textContent = option;
     options.appendChild(row);
   });
-  const explanation = document.createElement("div");
-  explanation.className = "quiz-explanation";
-  explanation.textContent = result.explanation || question.explanation || "Explanation unavailable.";
-  card.append(heading, questionText, options, explanation);
+  card.append(heading, questionText, options);
   return card;
 }
 
+function reviewedAnswerText(question, answerLetter) {
+  if (!answerLetter) return "no answer";
+  const indexedOption = question.options[answerLetter.toUpperCase().charCodeAt(0) - 65];
+  return question.options.find((option) => option.trim().charAt(0).toUpperCase() === answerLetter) || indexedOption || answerLetter;
+}
+
+async function explainReviewedQuestion(question, result, button) {
+  if (quizExplanationPending || chatForm.classList.contains("is-sending")) return;
+  quizExplanationPending = true;
+  button.disabled = true;
+  button.textContent = "Explaining...";
+  tutorLayout.hidden = false;
+  tutorLayout.classList.add("quiz-explanation-open");
+  document.getElementById("session-tutor-toggle")?.setAttribute("aria-expanded", "true");
+  if (window.matchMedia("(max-width: 1050px)").matches) {
+    tutorLayout.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+  const correctAnswer = reviewedAnswerText(question, result.correct_answer);
+  const selectedContext = result.selected_answer ? ` I answered ${reviewedAnswerText(question, result.selected_answer)}.` : "";
+  const message = `Explain why the correct answer is ${correctAnswer} for this question: ${question.question}.${selectedContext} Give a concise explanation grounded in the current document.`;
+  try {
+    await sendTutorMessage(message);
+  } finally {
+    quizExplanationPending = false;
+    if (button.isConnected) {
+      button.disabled = false;
+      button.textContent = "Explain Answer";
+    }
+  }
+}
+
+function renderCompletedQuizReview(container, attempt, questions, callbacks) {
+  const results = attempt.question_results || [];
+  const total = questions.length;
+  quizQuestionIndex = Math.max(0, Math.min(quizQuestionIndex, total - 1));
+  const correctCount = results.filter((result) => result.is_correct).length;
+  const score = Number.isFinite(Number(attempt.score)) ? Number(attempt.score) : correctCount;
+  const percentage = Number.isFinite(Number(attempt.percentage))
+    ? Math.round(Number(attempt.percentage))
+    : Math.round((score / Math.max(total, 1)) * 100);
+
+  container.innerHTML = "";
+  const summary = document.createElement("section");
+  summary.className = "quiz-review-summary";
+  const metrics = document.createElement("div");
+  metrics.className = "quiz-review-summary-metrics";
+  metrics.innerHTML = `<strong>${score}/${total}</strong><span>${percentage}%</span><span>${correctCount} correct</span><span>${total - correctCount} incorrect</span>`;
+  const actions = document.createElement("div");
+  actions.className = "quiz-review-summary-actions";
+  [
+    ["← Back to Quizzes", "text-button", callbacks.back],
+    ["Retake Quiz", "primary-button", callbacks.retake],
+    ["Regenerate Quiz", "text-button", callbacks.regenerate],
+  ].forEach(([label, className, handler]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = className;
+    button.textContent = label;
+    button.addEventListener("click", handler);
+    actions.appendChild(button);
+  });
+  summary.append(metrics, actions);
+
+  const navigator = document.createElement("nav");
+  navigator.className = "quiz-review-navigator";
+  navigator.setAttribute("aria-label", "Reviewed questions");
+  questions.forEach((question, index) => {
+    const result = results.find((item) => Number(item.question_id) === Number(question.id));
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `quiz-review-nav-button ${result?.is_correct ? "correct" : "incorrect"}`;
+    button.classList.toggle("current", index === quizQuestionIndex);
+    button.textContent = String(index + 1);
+    button.setAttribute("aria-label", `Question ${index + 1}: ${result?.is_correct ? "correct" : "incorrect"}`);
+    button.setAttribute("aria-current", index === quizQuestionIndex ? "true" : "false");
+    button.addEventListener("click", () => {
+      quizQuestionIndex = index;
+      renderCompletedQuizReview(container, attempt, questions, callbacks);
+    });
+    navigator.appendChild(button);
+  });
+
+  const question = questions[quizQuestionIndex];
+  const result = results.find((item) => Number(item.question_id) === Number(question?.id));
+  const navigation = document.createElement("div");
+  navigation.className = "quiz-review-controls";
+  [["Previous", -1, quizQuestionIndex === 0]].forEach(([label, direction, disabled]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button quiz-nav-button";
+    button.textContent = label;
+    button.disabled = disabled;
+    button.addEventListener("click", () => {
+      quizQuestionIndex += direction;
+      renderCompletedQuizReview(container, attempt, questions, callbacks);
+    });
+    navigation.appendChild(button);
+  });
+  const explain = document.createElement("button");
+  explain.type = "button";
+  explain.className = "primary-button quiz-explain-answer";
+  explain.textContent = quizExplanationPending ? "Explaining..." : "Explain Answer";
+  explain.disabled = quizExplanationPending || !question || !result;
+  explain.addEventListener("click", () => explainReviewedQuestion(question, result, explain));
+  navigation.appendChild(explain);
+  [["Next", 1, quizQuestionIndex === total - 1]].forEach(([label, direction, disabled]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button quiz-nav-button";
+    button.textContent = label;
+    button.disabled = disabled;
+    button.addEventListener("click", () => {
+      quizQuestionIndex += direction;
+      renderCompletedQuizReview(container, attempt, questions, callbacks);
+    });
+    navigation.appendChild(button);
+  });
+  container.append(summary, navigator);
+  if (question && result) container.appendChild(createAssessmentReviewCard(question, result, quizQuestionIndex, total));
+  container.appendChild(navigation);
+}
+
 function backToQuizzes() {
+  setQuizProgressDrawerOpen(false);
   currentQuiz = null;
   currentAttempt = null;
   quizAttemptSummary = null;
@@ -2282,6 +2453,8 @@ function renderAttemptSummary() {
 function renderAssessmentQuiz() {
   const quizPane = document.querySelector('[data-session-pane="quiz"]');
   const hasQuiz = Boolean(currentQuiz?.questions?.length);
+  quizProgressTrigger.hidden = !hasQuiz;
+  if (!hasQuiz) setQuizProgressDrawerOpen(false);
   quizPane?.classList.toggle("quiz-active", hasQuiz);
   quizPane?.classList.toggle("quiz-landing", !hasQuiz);
   updateQuizLandingLayout();
@@ -2296,6 +2469,17 @@ function renderAssessmentQuiz() {
     quizList.appendChild(empty);
     renderPracticeMastery();
     updateAssessmentSummary();
+    return;
+  }
+
+  if (currentAttempt?.completed) {
+    renderCompletedQuizReview(quizList, currentAttempt, currentQuiz.questions, {
+      back: backToQuizzes,
+      retake: resetAssessmentQuiz,
+      regenerate: regenerateAssessmentQuiz,
+    });
+    updateAssessmentSummary();
+    renderPracticeMastery();
     return;
   }
 
@@ -2402,6 +2586,7 @@ async function submitAssessmentQuiz(event) {
   if (button) { button.disabled = true; button.textContent = "Checking..."; }
   try {
     currentAttempt = await requestQuizSubmission();
+    quizQuestionIndex = 0;
     quizAttemptSummary = currentAttempt.attempt_summary;
     await loadQuizHistory();
     await loadDashboard();
@@ -2419,6 +2604,7 @@ function resetAssessmentQuiz() {
   quizAnswers = {};
   quizExplanations = {};
   quizQuestionIndex = 0;
+  setQuizProgressDrawerOpen(false);
   renderAssessmentQuiz();
   showToast("Retake started with the same questions");
 }
@@ -2601,6 +2787,15 @@ function closeQuizCreateDialog() {
   assessmentControl.hidden = true;
   quizCreateDialog.classList.remove("open");
 }
+
+quizProgressTrigger.addEventListener("click", () => {
+  setQuizProgressDrawerOpen(!document.body.classList.contains("quiz-progress-open"));
+});
+quizProgressClose.addEventListener("click", () => setQuizProgressDrawerOpen(false));
+quizProgressBackdrop.addEventListener("click", () => setQuizProgressDrawerOpen(false));
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") setQuizProgressDrawerOpen(false);
+});
 
 async function initializeApplication() {
   await initializeChatWorkspace();

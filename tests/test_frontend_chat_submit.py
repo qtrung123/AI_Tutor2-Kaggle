@@ -41,13 +41,15 @@ class PersistentTutorSubmitTests(unittest.TestCase):
         self.assertIn("could not be prepared", body)
 
     def test_submit_surfaces_errors_after_the_user_message_renders(self):
-        body = function_body("handleChatSubmit")
+        body = function_body("sendTutorMessage")
         self.assertIn("addMessage(userText, \"user\")", body)
         self.assertIn('const submitButton = chatForm.querySelector("button")', body)
         self.assertIn("await requestTutorAnswer(userText)", body)
         self.assertIn("console.error", body)
         self.assertIn("RAG request failed", body)
         self.assertIn("addMessage(`I could not reach the RAG answer", body)
+        submit_body = function_body("handleChatSubmit")
+        self.assertIn("await sendTutorMessage(userText)", submit_body)
 
     def test_tab_switches_only_change_visible_panes(self):
         body = re.search(r"function setSessionTab\(tab\) \{([\s\S]*?)\n}\n", SCRIPT).group(1)
