@@ -1,10 +1,12 @@
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.main import QuizGenerateRequest, QuizRegenerateRequest
+from backend import quiz_store
 from backend.mastery_service import calculate_mastery
 from backend.quiz_options import strip_leading_option_label
 from backend.quiz_service import (
@@ -311,7 +313,9 @@ class QuizV2Tests(unittest.TestCase):
         initial = [raw_question(index) for index in range(20)]
         for index in (1, 7, 13, 19):
             initial[index]["options"][1] = f"Linux always uses round-robin scheduling {index}"
-        questions, validation, timings, _slots = self.run_document_batch([{"questions": initial}], 20)
+        questions, validation, timings, _slots = self.run_document_batch([
+            {"questions": initial[:10]}, {"questions": initial[10:]},
+        ], 20)
         self.assertEqual(len(questions), 20)
         self.assertGreaterEqual(validation["quality_warnings"], 8)
         self.assertEqual(validation["hard_rejections"], 0)
@@ -321,7 +325,9 @@ class QuizV2Tests(unittest.TestCase):
         initial = [raw_question(index) for index in range(25)]
         for index in (2, 8, 14, 20, 24):
             initial[index]["options"][1] = f"Linux only uses round-robin scheduling {index}"
-        questions, validation, timings, _slots = self.run_document_batch([{"questions": initial}], 25)
+        questions, validation, timings, _slots = self.run_document_batch([
+            {"questions": initial[:10]}, {"questions": initial[10:20]}, {"questions": initial[20:]},
+        ], 25)
         self.assertEqual(len(questions), 25)
         self.assertGreater(validation["quality_warnings"], 0)
         self.assertEqual(timings["repair_llm_calls"], 0)
@@ -447,44 +453,108 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(mastery["distinct_concepts_assessed"], 5)
         self.assertEqual(mastery["concept_coverage_ratio"], 1.0)
 
-    def test_document_supported_counts_use_one_initial_batch_call(self):
+    def test_document_supported_counts_use_bounded_initial_batches(self):
         for count in (10, 15, 20, 25):
             with self.subTest(question_count=count):
                 FakeBatchModel.models = []
                 FakeBatchModel.configurations = []
                 FakeBatchModel.prompts = []
+                payloads = [
+                    {"questions": [raw_question(index) for index in range(start, min(start + 10, count))]}
+                    for start in range(0, count, 10)
+                ]
                 questions, validation, timings, _slots = self.run_document_batch(
-                    [{"questions": [raw_question(index) for index in range(count)]}], count
+                    payloads, count
                 )
+                expected_sizes = [min(10, count - start) for start in range(0, count, 10)]
                 self.assertEqual(len(questions), count)
+                self.assertEqual([question["id"] for question in questions], list(range(1, count + 1)))
                 self.assertEqual(validation["accepted"], count)
-                self.assertEqual(timings["llm_calls"], 1)
-                self.assertEqual(timings["prompt_tokens"], 500)
-                self.assertEqual(timings["output_tokens"], 300)
+                self.assertEqual(timings["llm_calls"], len(expected_sizes))
+                self.assertEqual(timings["repair_llm_calls"], 0)
+                self.assertEqual(timings["initial_batch_count"], len(expected_sizes))
+                self.assertEqual(
+                    [batch["requested"] for batch in timings["initial_batches"]], expected_sizes
+                )
+                self.assertEqual(timings["prompt_tokens"], 500 * len(expected_sizes))
+                self.assertEqual(timings["output_tokens"], 300 * len(expected_sizes))
+                self.assertEqual(
+                    [configuration["num_predict"] for configuration in FakeBatchModel.configurations],
+                    [max(520, size * 150) for size in expected_sizes],
+                )
                 self.assertIn("Topic 1", FakeBatchModel.prompts[0])
 
-    def test_document_batch_repairs_only_invalid_slot_and_owns_metadata(self):
-        initial = [raw_question(index) for index in range(9)]
-        duplicate = raw_question(0)
-        duplicate["slot_id"] = "S10"
+    def test_partial_document_batch_repairs_only_missing_slot_and_owns_metadata(self):
+        first_batch = [raw_question(index) for index in range(10)]
+        second_batch = [raw_question(index) for index in range(10, 14)]
+        duplicate = raw_question(10)
+        duplicate["slot_id"] = "S15"
         duplicate["topic_id"] = "invented-topic"
-        repaired = raw_question(9)
+        repaired = raw_question(14)
         questions, validation, timings, slots = self.run_document_batch([
-            {"questions": initial + [duplicate]}, {"questions": [repaired]},
-        ])
-        self.assertEqual(len(questions), 10)
-        self.assertEqual(len({question["question"] for question in questions}), 10)
-        self.assertEqual(timings["llm_calls"], 2)
+            {"questions": first_batch}, {"questions": second_batch + [duplicate]},
+            {"questions": [repaired]},
+        ], 15)
+        self.assertEqual(len(questions), 15)
+        self.assertEqual([question["id"] for question in questions], list(range(1, 16)))
+        self.assertEqual(len({question["question"] for question in questions}), 15)
+        self.assertEqual(timings["llm_calls"], 3)
+        self.assertEqual(timings["repair_llm_calls"], 1)
+        self.assertEqual(timings["final_fill_llm_calls"], 0)
         self.assertGreaterEqual(timings["repair_ms"], 0)
-        self.assertIn("Write exactly 1", FakeBatchModel.prompts[1])
-        self.assertIn("S10|Topic 2|", FakeBatchModel.prompts[1])
-        self.assertNotIn("S9|Topic 1|", FakeBatchModel.prompts[1])
+        self.assertIn("Write exactly 1", FakeBatchModel.prompts[2])
+        self.assertIn("S15|Topic 3|", FakeBatchModel.prompts[2])
+        self.assertNotIn("S14|Topic 2|", FakeBatchModel.prompts[2])
         repaired_question = questions[-1]
         self.assertEqual(repaired_question["topic_id"], slots[-1]["topic_id"])
         self.assertEqual(repaired_question["concept_id"], slots[-1]["concept_id"])
         self.assertEqual(repaired_question["concept_plan_id"], slots[-1]["concept_plan_id"])
         self.assertEqual(repaired_question["source_chunk_ids"], slots[-1]["source_chunk_ids"])
         self.assertGreaterEqual(validation["rejected"], 1)
+
+    def test_document_final_fill_runs_only_after_targeted_repair(self):
+        initial = [raw_question(index) for index in range(9)]
+        malformed_repair = raw_question(9)
+        malformed_repair["question"] = "Still incomplete and?"
+        questions, validation, timings, _slots = self.run_document_batch([
+            {"questions": initial}, {"questions": [malformed_repair]},
+            {"questions": [raw_question(9)]},
+        ])
+        self.assertEqual(len(questions), 10)
+        self.assertEqual([question["id"] for question in questions], list(range(1, 11)))
+        self.assertEqual(timings["llm_calls"], 3)
+        self.assertEqual(timings["repair_llm_calls"], 2)
+        self.assertEqual(timings["final_fill_llm_calls"], 1)
+        self.assertGreaterEqual(validation["hard_rejections"], 1)
+        self.assertIn("Write exactly 1", FakeBatchModel.prompts[1])
+        self.assertIn("Write exactly 1", FakeBatchModel.prompts[2])
+
+    def test_chunked_document_questions_persist_once_without_duplicates(self):
+        questions, _validation, _timings, _slots = self.run_document_batch([
+            {"questions": [raw_question(index) for index in range(10)]},
+            {"questions": [raw_question(index) for index in range(10, 15)]},
+        ], 15)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            with (
+                patch.object(quiz_store, "DATABASE_PATH", temp_path / "quiz.db"),
+                patch.object(quiz_store, "LEGACY_GENERATED_QUIZZES_PATH", temp_path / "missing-quizzes.json"),
+                patch.object(quiz_store, "LEGACY_QUIZ_ATTEMPTS_PATH", temp_path / "missing-attempts.json"),
+                patch.object(quiz_store, "LEGACY_QUIZ_EXPLANATIONS_PATH", temp_path / "missing-explanations.json"),
+            ):
+                quiz_store.initialize_quiz_store()
+                quiz_store.save_quiz("lecture.pdf", "easy", {
+                    "quiz_id": "chunked-document-quiz", "document_id": "lecture.pdf",
+                    "document_hash": "hash", "title": "Lecture", "difficulty": "easy",
+                    "topic_id": "document", "topic_name": "Entire document",
+                    "assessment_scope": "document", "topic_schema_version": 2,
+                    "assessment_plan": {"planner_version": "hierarchy_concepts_v2"},
+                    "questions": questions,
+                }, "owner")
+                restored = quiz_store.get_quiz_by_id("chunked-document-quiz", "owner")
+        self.assertIsNotNone(restored)
+        self.assertEqual(len(restored["questions"]), 15)
+        self.assertEqual(len({question["id"] for question in restored["questions"]}), 15)
 
 
 if __name__ == "__main__":

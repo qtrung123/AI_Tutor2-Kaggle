@@ -1485,10 +1485,12 @@ def _run_document_v2_batch(
     question_count: int,
     generation_run_id: str,
 ) -> tuple[list[dict], dict, dict]:
-    """Generate all document slots together and repair only rejected/missing slots."""
-    groups_by_id = {slot["slot_id"]: slot for slot in planned_slots}
+    """Generate document slots in bounded batches, then repair only missing slots."""
+    authoritative_slots = planned_slots[:question_count]
+    groups_by_id = {slot["slot_id"]: slot for slot in authoritative_slots}
+    slot_positions = {slot["slot_id"]: index for index, slot in enumerate(authoritative_slots)}
     remaining_slot_ids = set(groups_by_id)
-    accepted: list[dict] = []
+    accepted_by_slot: dict[str, dict] = {}
     accepted_stems: list[str] = []
     results = {
         "accepted": 0, "accepted_with_warnings": 0, "rejected": 0,
@@ -1499,41 +1501,44 @@ def _run_document_v2_batch(
         "validation_ms": 0, "repair_ms": 0, "model_load_ms": 0,
         "prompt_eval_ms": 0, "token_generation_ms": 0,
         "prompt_tokens": 0, "output_tokens": 0,
+        "initial_batch_count": 0, "initial_batches": [],
     }
     llm_calls = 0
+    repair_llm_calls = 0
+    final_fill_llm_calls = 0
     document_scope = {"topic_id": "document", "name": "Entire document"}
 
-    # One initial batch, one targeted repair, then one bounded final fill.
-    max_generation_calls = 3
-    final_fill_llm_calls = 0
-    for attempt_index in range(max_generation_calls):
+    def run_generation_call(call_slots: list[dict], phase: str, batch_index: int) -> None:
+        nonlocal llm_calls, repair_llm_calls, final_fill_llm_calls
         attempt_started = time.perf_counter()
-        missing = question_count - len(accepted)
-        if missing <= 0:
-            break
-        available_slots = [slot for slot in planned_slots if slot["slot_id"] in remaining_slot_ids]
+        requested = len(call_slots)
+        call_slot_ids = {slot["slot_id"] for slot in call_slots}
+        if not requested:
+            return
         prompt_started = time.perf_counter()
         prompt = _build_v2_prompt(
-            document["id"], document_scope, difficulty, available_slots, missing,
-            accepted_stems, attempt_index > 0,
+            document["id"], document_scope, difficulty, call_slots, requested,
+            accepted_stems, phase != "initial",
         )
         timings["prompt_construction_ms"] += round((time.perf_counter() - prompt_started) * 1000)
         generation_started = time.perf_counter()
         llm_calls += 1
-        if attempt_index == 2:
+        if phase != "initial":
+            repair_llm_calls += 1
+        if phase == "fill":
             final_fill_llm_calls += 1
         llm = ChatOllama(
             model=model_id,
-            temperature=0.1 if attempt_index == 0 else 0.25,
+            temperature=0.1 if phase == "initial" else 0.25,
             format=_document_batch_output_schema(),
-            num_ctx=16384 if missing > 15 else 8192,
-            num_predict=min(4800, max(520, missing * 150)),
+            num_ctx=16384 if requested > 15 else 8192,
+            num_predict=min(4800, max(520, requested * 150)),
             keep_alive="10m",
             client_kwargs={"timeout": 270},
         )
         print(
-            f"[quiz-document-llm] attempt={attempt_index + 1}, model={model_id}, "
-            f"requested={missing}, slots={len(available_slots)}"
+            f"[quiz-document-llm] attempt={llm_calls}, phase={phase}, batch={batch_index}, "
+            f"model={model_id}, requested={requested}, slots={len(call_slots)}"
         )
         try:
             response = llm.invoke(prompt)
@@ -1553,31 +1558,36 @@ def _run_document_v2_batch(
             if not isinstance(candidates, list):
                 raise ValueError("Quiz JSON does not contain a questions list.")
             print(
-                f"[quiz-document-ollama] attempt={attempt_index + 1}, returned={len(candidates)}, "
+                f"[quiz-document-ollama] attempt={llm_calls}, phase={phase}, batch={batch_index}, "
+                f"returned={len(candidates)}, "
                 f"model_load_ms={model_load_ms}, prompt_eval_ms={prompt_eval_ms}, "
                 f"token_generation_ms={token_generation_ms}, prompt_tokens={prompt_tokens}, "
                 f"output_tokens={output_tokens}"
             )
         except Exception as error:
             candidates = []
-            results["rejected"] += missing
+            results["rejected"] += requested
             results["reasons"].append(f"response: {error}")
         generation_elapsed = round((time.perf_counter() - generation_started) * 1000)
-        if attempt_index == 0:
+        if phase == "initial":
             timings["initial_batch_generation_ms"] += generation_elapsed
 
         validation_started = time.perf_counter()
+        accepted_before = len(accepted_by_slot)
         for candidate_index, raw in enumerate(candidates):
-            if len(accepted) >= question_count:
+            if len(accepted_by_slot) >= question_count:
                 break
             try:
                 slot_id = str(raw.get("slot_id") or raw.get("concept_id") or "").strip() if isinstance(raw, dict) else ""
+                if slot_id not in call_slot_ids:
+                    raise ValueError("Question uses a slot_id outside its requested batch.")
                 slot = groups_by_id.get(slot_id) or {}
                 normalized, warnings = _validate_v2_question(
                     raw, groups_by_id, remaining_slot_ids, accepted_stems, difficulty,
-                    len(accepted) + 1, document_scope, int(slot.get("assessment_capacity", 0)),
+                    slot_positions.get(slot_id, len(accepted_by_slot)) + 1,
+                    document_scope, int(slot.get("assessment_capacity", 0)),
                 )
-                accepted.append(normalized)
+                accepted_by_slot[slot_id] = normalized
                 accepted_stems.append(normalized["question"])
                 remaining_slot_ids.remove(slot_id)
                 results["accepted_with_warnings" if warnings else "accepted"] += 1
@@ -1590,8 +1600,8 @@ def _run_document_v2_batch(
                     "topic_id": normalized["topic_id"],
                     "topic_schema_version": int(document.get("topic_schema_version", 0)),
                     "difficulty": difficulty,
-                    "batch_index": 1,
-                    "generation_attempt": attempt_index + 1,
+                    "batch_index": batch_index,
+                    "generation_attempt": llm_calls,
                     "candidate_index": candidate_index,
                     "generator_model": model_id,
                     "generation_prompt_version": QUIZ_V2_PROMPT_VERSION,
@@ -1613,13 +1623,51 @@ def _run_document_v2_batch(
                 results["hard_rejections"] += 1
                 results["reasons"].append(str(error))
                 print(f"[quiz-document-validation] discarded candidate: {error}")
-        timings["validation_ms"] += round((time.perf_counter() - validation_started) * 1000)
-        if attempt_index > 0:
+        validation_elapsed = round((time.perf_counter() - validation_started) * 1000)
+        timings["validation_ms"] += validation_elapsed
+        call_elapsed = round((time.perf_counter() - attempt_started) * 1000)
+        if phase != "initial":
             timings["repair_ms"] += round((time.perf_counter() - attempt_started) * 1000)
+        batch_timing = {
+            "batch_index": batch_index, "phase": phase, "requested": requested,
+            "returned": len(candidates), "accepted": len(accepted_by_slot) - accepted_before,
+            "generation_ms": generation_elapsed, "validation_ms": validation_elapsed,
+            "total_ms": call_elapsed,
+        }
+        if phase == "initial":
+            timings["initial_batches"].append(batch_timing)
+        print(f"[quiz-document-batch-timing] {json.dumps(batch_timing)}")
+
+    initial_batches = [authoritative_slots[index:index + 10] for index in range(0, len(authoritative_slots), 10)]
+    timings["initial_batch_count"] = len(initial_batches)
+    for batch_index, batch_slots in enumerate(initial_batches, start=1):
+        run_generation_call(batch_slots, "initial", batch_index)
+
+    next_batch_index = len(initial_batches) + 1
+    missing_slots = [slot for slot in authoritative_slots if slot["slot_id"] in remaining_slot_ids]
+    if missing_slots:
+        run_generation_call(missing_slots, "repair", next_batch_index)
+        next_batch_index += 1
+    missing_slots = [slot for slot in authoritative_slots if slot["slot_id"] in remaining_slot_ids]
+    if missing_slots:
+        run_generation_call(missing_slots, "fill", next_batch_index)
 
     timings["llm_calls"] = llm_calls
-    timings["repair_llm_calls"] = max(0, llm_calls - 1)
+    timings["repair_llm_calls"] = repair_llm_calls
     timings["final_fill_llm_calls"] = final_fill_llm_calls
+    accepted = [accepted_by_slot[slot["slot_id"]] for slot in authoritative_slots if slot["slot_id"] in accepted_by_slot]
+    for question_id, question in enumerate(accepted, start=1):
+        question["id"] = question_id
+    print(f"[quiz-document-generation-timing] {json.dumps({
+        'initial_batch_count': len(initial_batches),
+        'initial_batch_generation_ms': timings['initial_batch_generation_ms'],
+        'validation_ms': timings['validation_ms'],
+        'repair_ms': timings['repair_ms'],
+        'llm_calls': llm_calls,
+        'repair_llm_calls': repair_llm_calls,
+        'final_fill_llm_calls': final_fill_llm_calls,
+        'accepted': len(accepted),
+    })}")
     return accepted, results, timings
 
 
