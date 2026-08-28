@@ -972,10 +972,9 @@ def _build_v2_prompt(
     )
     return (
         f"Write exactly {count} {difficulty} MCQs for {topic.get('name') or topic.get('topic_id')}.\n"
-        'Compact JSON only, with no unnecessary whitespace: {"questions":[{"slot_id":"S1","question":"...","options":["...","...","...","..."],"correct_answer":0,"explanation":"..."}]}\n'
+        'JSON only: {"questions":[{"slot_id":"S1","question":"...","options":["...","...","...","..."],"correct_answer":0,"explanation":"..."}]}\n'
         "Use each evidence slot exactly once. Use only its evidence. Four distinct options; correct_answer is 0-3. "
-        "Question <=18 words and each option <=10 words. For Easy, explanation must be one grounded sentence of 8-10 words; "
-        "otherwise explanation <=16 words. No markdown or extra fields.\n"
+        "Question <=18 words, each option <=10 words, explanation <=16 words. No markdown or extra fields.\n"
         f"{easy_contract}{repair_line}EVIDENCE:\n{evidence}"
     )
 

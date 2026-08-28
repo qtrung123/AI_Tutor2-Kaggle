@@ -80,7 +80,7 @@ class FakeBatchModel:
 
     def invoke(self, prompt):
         self.__class__.prompts.append(prompt)
-        return SimpleNamespace(content=json.dumps(self.__class__.payloads.pop(0), separators=(",", ":")), response_metadata={
+        return SimpleNamespace(content=json.dumps(self.__class__.payloads.pop(0)), response_metadata={
             "load_duration": 2_000_000, "prompt_eval_duration": 3_000_000,
             "eval_duration": 4_000_000, "prompt_eval_count": 500, "eval_count": 300,
         })
@@ -181,11 +181,6 @@ class QuizV2Tests(unittest.TestCase):
                 self.assertEqual(result["assessment_plan"]["target_questions"], count)
                 self.assertEqual(result["assessment_plan"]["llm_calls"], 1)
                 self.assertEqual(len(saved), 1)
-                for question in result["questions"]:
-                    explanation = question["explanation"]
-                    self.assertGreaterEqual(len(explanation.split()), 8)
-                    self.assertLessEqual(len(explanation.split()), 10)
-                    self.assertEqual(explanation.count("."), 1)
 
     def test_ten_questions_use_one_selected_model_call_and_no_semantic_llm(self):
         result, saved = self.run_v2([{"questions": [raw_question(index) for index in range(10)]}])
@@ -200,8 +195,6 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(FakeBatchModel.configurations[0]["num_predict"], 1500)
         self.assertNotIn("source_chunk_ids", FakeBatchModel.prompts[0])
         self.assertIn('"slot_id":"S1"', FakeBatchModel.prompts[0])
-        self.assertIn("Compact JSON only, with no unnecessary whitespace", FakeBatchModel.prompts[0])
-        self.assertIn("one grounded sentence of 8-10 words", FakeBatchModel.prompts[0])
         self.assertLess(len(FakeBatchModel.prompts[0]), 3400)
         timings = result["assessment_plan"]["timings_ms"]
         self.assertEqual(timings["model_load_ms"], 2)
@@ -469,11 +462,6 @@ class QuizV2Tests(unittest.TestCase):
                 self.assertEqual(timings["prompt_tokens"], 500)
                 self.assertEqual(timings["output_tokens"], 300)
                 self.assertIn("Topic 1", FakeBatchModel.prompts[0])
-                for question in questions:
-                    explanation = question["explanation"]
-                    self.assertGreaterEqual(len(explanation.split()), 8)
-                    self.assertLessEqual(len(explanation.split()), 10)
-                    self.assertEqual(explanation.count("."), 1)
 
     def test_document_batch_repairs_only_invalid_slot_and_owns_metadata(self):
         initial = [raw_question(index) for index in range(9)]
