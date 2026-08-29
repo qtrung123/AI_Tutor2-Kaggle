@@ -525,6 +525,16 @@ async function openStudySession(documentId, tab = "material", topicId = "") {
   const documentItem = indexedDocuments.find((item) => item.id === documentId);
   if (!documentItem) return;
   activeDocumentId = documentId;
+  currentQuiz = null;
+  currentAttempt = null;
+  quizAttemptSummary = null;
+  quizAnswers = {};
+  quizExplanations = {};
+  quizQuestionIndex = 0;
+  quizHistory = [];
+  if (quizHistoryDetail) quizHistoryDetail.hidden = true;
+  renderAssessmentQuiz();
+  renderQuizHistory();
   loadedSummaryKey = "";
   loadedFlashcardKey = ""; flashcardSet = null; flashcards = []; flashcardIndex = 0; flashcardTopicFilter = "all";
   if (summaryContent) summaryContent.innerHTML = "";
@@ -555,7 +565,7 @@ async function openStudySession(documentId, tab = "material", topicId = "") {
   if (topicId && topicId !== "document") { quizScopeSelect.value = "topic"; quizTopicSelect.value = topicId; }
   else quizScopeSelect.value = "document";
   updateAssessmentScope();
-  await loadSelectedQuiz();
+  await Promise.all([loadSelectedQuiz(), loadQuizHistory(documentId)]);
   renderSessionProgress(documentId);
   setPage("session");
   setSessionTab(tab);
@@ -1670,9 +1680,19 @@ function updateAssessmentScope() {
 }
 
 async function handleQuizDocumentChange() {
+  const documentId = quizDocumentSelect?.value || "";
+  currentQuiz = null;
+  currentAttempt = null;
+  quizAttemptSummary = null;
+  quizAnswers = {};
+  quizExplanations = {};
+  quizQuestionIndex = 0;
+  quizHistory = [];
+  renderAssessmentQuiz();
+  renderQuizHistory();
   updateTopicOptions();
   updateAssessmentScope();
-  await loadSelectedQuiz();
+  await Promise.all([loadSelectedQuiz(), loadQuizHistory(documentId)]);
 }
 
 function setAssessmentLoading(isLoading) {
@@ -1842,14 +1862,22 @@ async function requestQuizExplanation(questionId) {
   return response.json();
 }
 
-async function loadQuizHistory() {
+async function loadQuizHistory(documentId = quizDocumentSelect?.value || activeDocumentId || "") {
+  const requestDocumentId = documentId;
+  quizHistory = [];
+  renderQuizHistory();
+  if (!requestDocumentId) return;
   try {
-    const response = await fetch(QUIZ_HISTORY_API_URL);
+    const query = new URLSearchParams({ document_id: requestDocumentId });
+    const response = await fetch(`${QUIZ_HISTORY_API_URL}?${query}`);
     if (!response.ok) {
       throw new Error(`Quiz history API returned ${response.status}`);
     }
-    quizHistory = await response.json();
+    const history = await response.json();
+    if ((quizDocumentSelect?.value || "") !== requestDocumentId) return;
+    quizHistory = history.filter((attempt) => attempt.document_id === requestDocumentId);
   } catch (error) {
+    if ((quizDocumentSelect?.value || "") !== requestDocumentId) return;
     quizHistory = [];
   }
   renderQuizHistory();
@@ -2065,14 +2093,14 @@ async function loadSelectedQuiz() {
   const documentId = quizDocumentSelect?.value;
   const requestedQuizKey = currentQuizKey();
   updateDifficultyOptions();
+  currentQuiz = null;
+  currentAttempt = null;
+  quizAttemptSummary = null;
+  quizAnswers = {};
+  quizExplanations = {};
+  quizQuestionIndex = 0;
+  renderAssessmentQuiz();
   if (!documentId || !selectedTopicId()) {
-    currentQuiz = null;
-    currentAttempt = null;
-    quizAttemptSummary = null;
-    quizAnswers = {};
-    quizExplanations = {};
-    quizQuestionIndex = 0;
-    renderAssessmentQuiz();
     return;
   }
 
