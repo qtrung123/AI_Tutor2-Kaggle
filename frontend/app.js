@@ -29,6 +29,7 @@ const KNOWLEDGE_GAPS_API_URL = apiUrl("/api/knowledge-gaps");
 const RECOMMENDATIONS_API_URL = apiUrl("/api/recommendations");
 const MODELS_API_URL = apiUrl("/api/models");
 const SUMMARY_API_BASE_URL = apiUrl("/api/summary");
+const FLASHCARDS_API_BASE_URL = apiUrl("/api/flashcards");
 const RECOMMENDATIONS_OVERVIEW_LIMIT = Number(window.APP_CONFIG?.RECOMMENDATIONS_OVERVIEW_LIMIT || 4);
 
 const initialState = {
@@ -64,6 +65,12 @@ let generationModels = [];
 let selectedModelId = localStorage.getItem("aiTutorModelId") || "";
 let activeDocumentId = "";
 let loadedSummaryKey = "";
+let flashcardSet = null;
+let flashcards = [];
+let flashcardIndex = 0;
+let flashcardFlipped = false;
+let flashcardTopicFilter = "all";
+let loadedFlashcardKey = "";
 
 const navItems = document.querySelectorAll(".nav-item");
 const views = document.querySelectorAll(".view");
@@ -185,6 +192,20 @@ const summaryLoading = document.getElementById("summary-loading");
 const summaryError = document.getElementById("summary-error");
 const summaryContent = document.getElementById("summary-content");
 const regenerateSummaryButton = document.getElementById("regenerate-summary-button");
+const flashcardsPane = document.querySelector('[data-session-pane="flashcards"]');
+flashcardsPane?.classList.remove("placeholder-pane");
+if (flashcardsPane) flashcardsPane.innerHTML = `<article class="panel flashcards-panel"><div class="flashcards-toolbar"><div><p class="eyebrow">Flashcards</p><h2>Study Cards</h2></div><div class="flashcards-actions"><label>Filter Topics<select id="flashcard-topic-filter"><option value="all">All topics</option></select></label><button class="secondary-button" id="shuffle-flashcards" type="button">Shuffle</button><button class="secondary-button" id="manage-flashcards" type="button">Manage Cards</button></div></div><div id="flashcards-loading" class="empty-state" hidden>Generating grounded flashcards…</div><div id="flashcards-error" class="empty-state" hidden></div><div id="flashcards-stage" hidden><div class="flashcard-topic-title" id="flashcard-topic-title"></div><button class="flashcard" id="flashcard" type="button" aria-label="Flip flashcard"><span class="flashcard-side-label" id="flashcard-side-label">Front</span><span class="flashcard-copy" id="flashcard-copy"></span><span class="flashcard-flip-hint">Click to flip</span></button><div class="flashcard-navigation"><button class="secondary-button" id="previous-flashcard" type="button">Previous</button><span id="flashcard-position">0 of 0</span><button class="secondary-button" id="next-flashcard" type="button">Next</button><button class="favorite-button" id="favorite-flashcard" type="button" aria-label="Favorite card">☆</button></div></div></article>`;
+const flashcardsLoading = document.getElementById("flashcards-loading");
+const flashcardsError = document.getElementById("flashcards-error");
+const flashcardsStage = document.getElementById("flashcards-stage");
+const flashcardTopicSelect = document.getElementById("flashcard-topic-filter");
+const flashcardElement = document.getElementById("flashcard");
+const flashcardCopy = document.getElementById("flashcard-copy");
+const flashcardSideLabel = document.getElementById("flashcard-side-label");
+const flashcardTopicTitle = document.getElementById("flashcard-topic-title");
+const flashcardPosition = document.getElementById("flashcard-position");
+const favoriteFlashcardButton = document.getElementById("favorite-flashcard");
+let flashcardManager = null;
 const authScreen = document.getElementById("auth-screen");
 const appShell = document.getElementById("app-shell");
 const authForm = document.getElementById("auth-form");
@@ -319,7 +340,7 @@ function renderModelSelector() {
     select.addEventListener("change", async () => {
       selectedModelId = select.value; localStorage.setItem("aiTutorModelId", selectedModelId);
       select.disabled = true;
-      try { await fetchJson(`${MODELS_API_URL}/${encodeURIComponent(selectedModelId)}/prepare`, { method: "POST" }); showToast("Model ready"); if (document.body.dataset.sessionTab === "summary") await loadDocumentSummary(); }
+      try { await fetchJson(`${MODELS_API_URL}/${encodeURIComponent(selectedModelId)}/prepare`, { method: "POST" }); showToast("Model ready"); if (document.body.dataset.sessionTab === "summary") await loadDocumentSummary(); if (document.body.dataset.sessionTab === "flashcards") { loadedFlashcardKey = ""; await loadDocumentFlashcards(); } }
       catch (error) { showToast(error.message || "Model is still preparing"); }
       finally { select.disabled = false; }
     });
@@ -336,6 +357,97 @@ function setSessionTab(tab) {
   document.querySelectorAll(".session-pane").forEach((pane) => pane.classList.toggle("active", pane.dataset.sessionPane === tab));
   document.getElementById("persistent-tutor").hidden = false;
   if (tab === "summary") loadDocumentSummary();
+  if (tab === "flashcards") loadDocumentFlashcards();
+}
+
+function visibleFlashcards() {
+  return flashcardTopicFilter === "all" ? flashcards : flashcards.filter((card) => card.topic_id === flashcardTopicFilter);
+}
+
+function renderCurrentFlashcard() {
+  const cards = visibleFlashcards();
+  if (!cards.length) { flashcardsStage.hidden = true; flashcardsError.hidden = false; flashcardsError.textContent = "No cards are available for this topic."; return; }
+  flashcardsError.hidden = true; flashcardsStage.hidden = false;
+  flashcardIndex = Math.min(flashcardIndex, cards.length - 1);
+  const card = cards[flashcardIndex];
+  flashcardElement.classList.toggle("flipped", flashcardFlipped);
+  flashcardSideLabel.textContent = flashcardFlipped ? "Back" : "Front";
+  flashcardCopy.textContent = flashcardFlipped ? card.back : card.front;
+  flashcardTopicTitle.textContent = card.subtopic_name ? `${card.topic_name} · ${card.subtopic_name}` : card.topic_name;
+  flashcardPosition.textContent = `${flashcardIndex + 1} of ${cards.length}`;
+  favoriteFlashcardButton.textContent = card.is_favorite ? "★" : "☆";
+  favoriteFlashcardButton.classList.toggle("active", card.is_favorite);
+}
+
+function renderFlashcardTopicFilter() {
+  const selected = flashcardTopicFilter;
+  flashcardTopicSelect.innerHTML = ""; flashcardTopicSelect.add(new Option("All topics", "all"));
+  const seen = new Set();
+  flashcards.forEach((card) => { if (!seen.has(card.topic_id)) { seen.add(card.topic_id); flashcardTopicSelect.add(new Option(card.topic_name, card.topic_id)); } });
+  flashcardTopicFilter = seen.has(selected) ? selected : "all"; flashcardTopicSelect.value = flashcardTopicFilter;
+}
+
+async function loadDocumentFlashcards() {
+  if (!activeDocumentId || !flashcardsPane) return;
+  const requestDocumentId = activeDocumentId, key = `${requestDocumentId}:${selectedModelId}`;
+  if (loadedFlashcardKey === key && flashcards.length) { renderCurrentFlashcard(); return; }
+  flashcardsLoading.hidden = false; flashcardsError.hidden = true; flashcardsStage.hidden = true;
+  try {
+    flashcardSet = await fetchJson(`${FLASHCARDS_API_BASE_URL}/${encodeURIComponent(requestDocumentId)}?model_id=${encodeURIComponent(selectedModelId)}`);
+    if (activeDocumentId !== requestDocumentId) return;
+    flashcards = flashcardSet.cards || []; flashcardIndex = 0; flashcardFlipped = false; loadedFlashcardKey = key;
+    renderFlashcardTopicFilter(); renderCurrentFlashcard();
+  } catch (error) {
+    if (activeDocumentId === requestDocumentId) { flashcardsError.textContent = error.message || "Could not load flashcards."; flashcardsError.hidden = false; }
+  } finally { if (activeDocumentId === requestDocumentId) flashcardsLoading.hidden = true; }
+}
+
+async function patchFlashcard(card, changes) {
+  const updated = await fetchJson(`${FLASHCARDS_API_BASE_URL}/${encodeURIComponent(activeDocumentId)}/cards/${encodeURIComponent(card.flashcard_id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes) });
+  const index = flashcards.findIndex((item) => item.flashcard_id === updated.flashcard_id); if (index >= 0) flashcards[index] = updated;
+  return updated;
+}
+
+function closeFlashcardManager() { flashcardManager?.classList.remove("open"); }
+
+function openFlashcardManager() {
+  if (!flashcardSet) return;
+  if (!flashcardManager) {
+    flashcardManager = document.createElement("div"); flashcardManager.className = "flashcard-manager";
+    flashcardManager.innerHTML = `<section class="flashcard-manager-card" role="dialog" aria-modal="true"><div class="flashcard-manager-heading"><div><p class="eyebrow">Flashcards</p><h2>Manage Cards</h2></div><button class="text-button flashcard-manager-close" type="button">Close</button></div><form id="add-flashcard-form" class="add-flashcard-form"><select id="add-flashcard-topic" required></select><input id="add-flashcard-front" placeholder="Front: question or term" required maxlength="1000"><textarea id="add-flashcard-back" placeholder="Back: answer or definition" required maxlength="4000"></textarea><button class="primary-button" type="submit">Add Card</button></form><div id="flashcard-manager-list" class="flashcard-manager-list"></div></section>`;
+    flashcardManager.querySelector(".flashcard-manager-close").addEventListener("click", closeFlashcardManager);
+    flashcardManager.addEventListener("click", (event) => { if (event.target === flashcardManager) closeFlashcardManager(); });
+    flashcardManager.querySelector("#add-flashcard-form").addEventListener("submit", addManagedFlashcard);
+    document.body.appendChild(flashcardManager);
+  }
+  const topicSelect = flashcardManager.querySelector("#add-flashcard-topic"); topicSelect.innerHTML = "";
+  const topics = indexedDocuments.find((item) => item.id === activeDocumentId)?.topics || [];
+  topics.forEach((topic) => topicSelect.add(new Option(topic.name, topic.topic_id)));
+  renderFlashcardManagerList(); flashcardManager.classList.add("open");
+}
+
+function renderFlashcardManagerList() {
+  const list = flashcardManager.querySelector("#flashcard-manager-list"); list.innerHTML = "";
+  flashcards.forEach((card) => {
+    const row = document.createElement("article"); row.className = "managed-flashcard";
+    const badge = document.createElement("span"); badge.className = "topic-badge"; badge.textContent = card.topic_name;
+    const front = document.createElement("input"); front.value = card.front; front.setAttribute("aria-label", "Card front");
+    const back = document.createElement("textarea"); back.value = card.back; back.setAttribute("aria-label", "Card back");
+    const actions = document.createElement("div"); actions.className = "managed-flashcard-actions";
+    const save = document.createElement("button"); save.className = "secondary-button"; save.type = "button"; save.textContent = "Save";
+    save.addEventListener("click", async () => { try { await patchFlashcard(card, { front: front.value, back: back.value }); showToast("Card saved"); renderCurrentFlashcard(); } catch (error) { showToast(error.message); } });
+    const remove = document.createElement("button"); remove.className = "text-button danger-button"; remove.type = "button"; remove.textContent = "Delete";
+    remove.addEventListener("click", async () => { try { await fetchJson(`${FLASHCARDS_API_BASE_URL}/${encodeURIComponent(activeDocumentId)}/cards/${encodeURIComponent(card.flashcard_id)}`, { method: "DELETE" }); flashcards = flashcards.filter((item) => item.flashcard_id !== card.flashcard_id); renderFlashcardManagerList(); renderFlashcardTopicFilter(); renderCurrentFlashcard(); } catch (error) { showToast(error.message); } });
+    actions.append(save, remove); row.append(badge, front, back, actions); list.appendChild(row);
+  });
+}
+
+async function addManagedFlashcard(event) {
+  event.preventDefault(); const form = event.currentTarget;
+  try {
+    const card = await fetchJson(`${FLASHCARDS_API_BASE_URL}/${encodeURIComponent(activeDocumentId)}/cards`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ set_id: flashcardSet.set_id, topic_id: form.querySelector("#add-flashcard-topic").value, front: form.querySelector("#add-flashcard-front").value, back: form.querySelector("#add-flashcard-back").value }) });
+    flashcards.push(card); form.reset(); renderFlashcardManagerList(); renderFlashcardTopicFilter(); renderCurrentFlashcard();
+  } catch (error) { showToast(error.message); }
 }
 
 function appendTakeaways(parent, takeaways, title = "Summary & Key Takeaways") {
@@ -414,6 +526,7 @@ async function openStudySession(documentId, tab = "material", topicId = "") {
   if (!documentItem) return;
   activeDocumentId = documentId;
   loadedSummaryKey = "";
+  loadedFlashcardKey = ""; flashcardSet = null; flashcards = []; flashcardIndex = 0; flashcardTopicFilter = "all";
   if (summaryContent) summaryContent.innerHTML = "";
   const sessionBreadcrumb = document.getElementById("session-home-button");
   if (sessionBreadcrumb) sessionBreadcrumb.textContent = `Home > ${documentItem.title}`;
@@ -2719,6 +2832,13 @@ navItems.forEach((item) => {
 
 document.getElementById("session-home-button")?.addEventListener("click", () => setPage("overview"));
 regenerateSummaryButton?.addEventListener("click", () => loadDocumentSummary(true));
+flashcardElement?.addEventListener("click", () => { flashcardFlipped = !flashcardFlipped; renderCurrentFlashcard(); });
+document.getElementById("previous-flashcard")?.addEventListener("click", () => { const cards = visibleFlashcards(); if (cards.length) { flashcardIndex = (flashcardIndex - 1 + cards.length) % cards.length; flashcardFlipped = false; renderCurrentFlashcard(); } });
+document.getElementById("next-flashcard")?.addEventListener("click", () => { const cards = visibleFlashcards(); if (cards.length) { flashcardIndex = (flashcardIndex + 1) % cards.length; flashcardFlipped = false; renderCurrentFlashcard(); } });
+flashcardTopicSelect?.addEventListener("change", () => { flashcardTopicFilter = flashcardTopicSelect.value; flashcardIndex = 0; flashcardFlipped = false; renderCurrentFlashcard(); });
+document.getElementById("shuffle-flashcards")?.addEventListener("click", () => { for (let index = flashcards.length - 1; index > 0; index -= 1) { const swap = Math.floor(Math.random() * (index + 1)); [flashcards[index], flashcards[swap]] = [flashcards[swap], flashcards[index]]; } flashcardIndex = 0; flashcardFlipped = false; renderCurrentFlashcard(); });
+document.getElementById("manage-flashcards")?.addEventListener("click", openFlashcardManager);
+favoriteFlashcardButton?.addEventListener("click", async () => { const card = visibleFlashcards()[flashcardIndex]; if (!card) return; try { await patchFlashcard(card, { is_favorite: !card.is_favorite }); renderCurrentFlashcard(); } catch (error) { showToast(error.message); } });
 document.querySelectorAll(".session-tab, [data-session-tab]").forEach((button) => {
   button.addEventListener("click", () => setSessionTab(button.dataset.sessionTab));
 });

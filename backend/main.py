@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import httpx
@@ -41,6 +41,8 @@ from backend.rag_service import answer_conversation_message, list_uploaded_sourc
 from backend.model_registry import list_generation_models, prepare_generation_model, resolve_generation_model
 from backend.summary_service import generate_document_summary
 from backend.summary_store import delete_document_summaries
+from backend.flashcard_service import authoritative_card_fields, generate_flashcards
+from backend.flashcard_store import add_flashcard, delete_document_flashcards, delete_flashcard, update_flashcard
 from config import AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE, AUTH_SESSION_DAYS, CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL
 from backend.auth_store import (
     authenticate_user,
@@ -139,6 +141,20 @@ class DocumentSummary(BaseModel):
 
 class SummaryGenerateRequest(BaseModel):
     model_id: Optional[str] = None
+
+
+class FlashcardCreateRequest(BaseModel):
+    set_id: str
+    topic_id: str
+    subtopic_id: Optional[str] = None
+    front: str = Field(min_length=1, max_length=1000)
+    back: str = Field(min_length=1, max_length=4000)
+
+
+class FlashcardUpdateRequest(BaseModel):
+    front: Optional[str] = Field(default=None, min_length=1, max_length=1000)
+    back: Optional[str] = Field(default=None, min_length=1, max_length=4000)
+    is_favorite: Optional[bool] = None
 
 
 class QuizGenerateRequest(BaseModel):
@@ -494,6 +510,7 @@ def delete_source(document_id: str, current_user: dict = Depends(require_current
         result = delete_indexed_file(document_id, current_user["id"])
         delete_document_quiz_data(result["deleted"], current_user["id"])
         delete_document_summaries(current_user["id"], result["deleted"])
+        delete_document_flashcards(current_user["id"], result["deleted"])
         remove_source_from_conversations(current_user["id"], result["deleted"])
         sources_result = [SourceSummary(**source) for source in list_uploaded_sources(current_user["id"])]
 
@@ -568,6 +585,49 @@ def summary_regenerate(document_id: str, request: SummaryGenerateRequest, curren
         raise HTTPException(status_code=404 if message == "Document not found." else 400, detail=message) from error
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Could not regenerate document summary: {error}") from error
+
+
+@app.get("/api/flashcards/{document_id}")
+def flashcards_detail(document_id: str, topic_ids: list[str] | None = Query(default=None),
+                      model_id: Optional[str] = None, current_user: dict = Depends(require_current_user)) -> dict:
+    """Reuse or generate grounded cards from existing owner-scoped indexed chunks."""
+    try:
+        return generate_flashcards(current_user["id"], document_id, topic_ids=topic_ids, model_id=model_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404 if str(error) == "Document not found." else 400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Could not load flashcards: {error}") from error
+
+
+@app.post("/api/flashcards/{document_id}/cards")
+def flashcard_create(document_id: str, request: FlashcardCreateRequest,
+                     current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        identity = authoritative_card_fields(current_user["id"], document_id, request.topic_id, request.subtopic_id)
+        return add_flashcard(current_user["id"], document_id, request.set_id, {
+            **identity, "front": request.front.strip(), "back": request.back.strip(), "source_chunk_ids": [],
+        })
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.patch("/api/flashcards/{document_id}/cards/{flashcard_id}")
+def flashcard_update(document_id: str, flashcard_id: str, request: FlashcardUpdateRequest,
+                     current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        return update_flashcard(current_user["id"], document_id, flashcard_id, request.model_dump(exclude_none=True))
+    except ValueError as error:
+        raise HTTPException(status_code=404 if str(error) == "Flashcard not found." else 400, detail=str(error)) from error
+
+
+@app.delete("/api/flashcards/{document_id}/cards/{flashcard_id}")
+def flashcard_delete(document_id: str, flashcard_id: str,
+                     current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        delete_flashcard(current_user["id"], document_id, flashcard_id)
+        return {"deleted": flashcard_id}
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @app.get("/api/quiz-history")
