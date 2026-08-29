@@ -2231,6 +2231,19 @@ body[data-page="session"] .session-pane.active[data-session-pane="material"] #or
 .summary-topic { padding:20px 0; border-top:1px solid var(--session-line); }
 .summary-topic h3 { margin:0 0 9px; }
 .summary-topic p { line-height:1.65; }
+.summary-topic-overview { margin:0 0 18px; color:#46516b; }
+.summary-subsection { margin:16px 0 0 14px; padding-left:18px; border-left:2px solid #e2e5f2; }
+.summary-subsection h4 { margin:0 0 8px; font-size:15px; color:var(--ink); }
+.summary-subsection p { margin:0; }
+.summary-subsection-bullets { margin:0; padding-left:20px; line-height:1.6; }
+.summary-table-wrap { max-width:100%; overflow-x:auto; border:1px solid var(--session-line); border-radius:10px; }
+.summary-table { width:100%; min-width:360px; border-collapse:collapse; font-size:13px; }
+.summary-table th,.summary-table td { padding:9px 11px; border-bottom:1px solid var(--session-line); text-align:left; vertical-align:top; }
+.summary-table th { background:#f5f6fb; font-weight:700; }
+.summary-table tbody tr:last-child td { border-bottom:0; }
+.summary-final-takeaways { margin-top:24px; padding:20px; border-radius:14px; background:#f5f6ff; }
+.summary-final-takeaways h3 { margin:0 0 10px; }
+@media (max-width:720px) { .summary-panel{padding:18px}.summary-heading{align-items:stretch;flex-direction:column}.summary-subsection{margin-left:4px;padding-left:12px}.summary-table{font-size:12px} }
 
 /* Minimal tutor: answers first, sources and composer at the bottom. */
 body[data-page="session"] .persistent-tutor .tutor-chat-header { order: 2; display: block; padding: 10px 0 8px; border: 0; }

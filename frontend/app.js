@@ -180,7 +180,7 @@ const originalContentOpen = document.getElementById("original-content-open");
 const originalContentEmpty = document.getElementById("original-content-empty");
 const summaryPane = document.querySelector('[data-session-pane="summary"]');
 summaryPane?.classList.remove("placeholder-pane");
-if (summaryPane) summaryPane.innerHTML = `<article class="panel summary-panel"><div class="summary-heading"><div><p class="eyebrow">Summary</p><h2>Document overview</h2></div><button class="secondary-button" id="regenerate-summary-button" type="button">Regenerate Summary</button></div><div id="summary-loading" class="empty-state" hidden>Generating a grounded summary…</div><div id="summary-error" class="empty-state" hidden></div><div id="summary-content"></div></article>`;
+if (summaryPane) summaryPane.innerHTML = `<article class="panel summary-panel"><div class="summary-heading"><div><p class="eyebrow">Summary</p><h2>Document Overview</h2></div><button class="secondary-button" id="regenerate-summary-button" type="button">Regenerate Summary</button></div><div id="summary-loading" class="empty-state" hidden>Generating a grounded summary…</div><div id="summary-error" class="empty-state" hidden></div><div id="summary-content"></div></article>`;
 const summaryLoading = document.getElementById("summary-loading");
 const summaryError = document.getElementById("summary-error");
 const summaryContent = document.getElementById("summary-content");
@@ -338,25 +338,54 @@ function setSessionTab(tab) {
   if (tab === "summary") loadDocumentSummary();
 }
 
-function appendTakeaways(parent, takeaways) {
+function appendTakeaways(parent, takeaways, title = "Summary & Key Takeaways") {
   if (!takeaways?.length) return;
-  const heading = document.createElement("h3"); heading.textContent = "Key takeaways"; parent.appendChild(heading);
+  const heading = document.createElement("h3"); heading.textContent = title; parent.appendChild(heading);
   const list = document.createElement("ul"); list.className = "summary-takeaways";
   takeaways.forEach((value) => { const item = document.createElement("li"); item.textContent = value; list.appendChild(item); });
   parent.appendChild(list);
+}
+
+function renderSummaryContent(content) {
+  if (!content) return null;
+  if (content.type === "paragraph") {
+    const paragraph = document.createElement("p"); paragraph.textContent = content.text || ""; return paragraph;
+  }
+  if (content.type === "bullets") {
+    const list = document.createElement("ul"); list.className = "summary-subsection-bullets";
+    (content.items || []).forEach((value) => { const item = document.createElement("li"); item.textContent = value; list.appendChild(item); });
+    return list;
+  }
+  if (content.type === "table") {
+    const wrapper = document.createElement("div"); wrapper.className = "summary-table-wrap";
+    const table = document.createElement("table"); table.className = "summary-table";
+    const head = document.createElement("thead"); const headRow = document.createElement("tr");
+    (content.headers || []).forEach((value) => { const cell = document.createElement("th"); cell.textContent = value; headRow.appendChild(cell); });
+    head.appendChild(headRow); table.appendChild(head);
+    const body = document.createElement("tbody");
+    (content.rows || []).forEach((row) => { const tableRow = document.createElement("tr"); row.forEach((value) => { const cell = document.createElement("td"); cell.textContent = value; tableRow.appendChild(cell); }); body.appendChild(tableRow); });
+    table.appendChild(body); wrapper.appendChild(table); return wrapper;
+  }
+  return null;
 }
 
 function renderDocumentSummary(summary) {
   summaryContent.innerHTML = "";
   const overview = document.createElement("p"); overview.className = "summary-overview";
   overview.textContent = summary.final_summary?.overview || "No overview was returned."; summaryContent.appendChild(overview);
-  appendTakeaways(summaryContent, summary.final_summary?.key_takeaways);
   (summary.topic_summaries || []).forEach((topic) => {
     const section = document.createElement("section"); section.className = "summary-topic";
     const heading = document.createElement("h3"); heading.textContent = topic.topic_name || topic.topic_id; section.appendChild(heading);
-    const copy = document.createElement("p"); copy.textContent = topic.summary; section.appendChild(copy);
-    appendTakeaways(section, topic.key_takeaways); summaryContent.appendChild(section);
+    const copy = document.createElement("p"); copy.className = "summary-topic-overview"; copy.textContent = topic.overview; section.appendChild(copy);
+    (topic.subsections || []).forEach((subtopic) => {
+      const subsection = document.createElement("section"); subsection.className = "summary-subsection";
+      const subheading = document.createElement("h4"); subheading.textContent = subtopic.subtopic_name || subtopic.subtopic_id; subsection.appendChild(subheading);
+      const content = renderSummaryContent(subtopic.content); if (content) subsection.appendChild(content); section.appendChild(subsection);
+    });
+    summaryContent.appendChild(section);
   });
+  const takeaways = document.createElement("section"); takeaways.className = "summary-final-takeaways";
+  appendTakeaways(takeaways, summary.final_summary?.key_takeaways); if (takeaways.children.length) summaryContent.appendChild(takeaways);
 }
 
 async function loadDocumentSummary(regenerate = false) {
