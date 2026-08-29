@@ -84,6 +84,9 @@ class SummaryFeatureTests(unittest.TestCase):
         self.assertEqual(prompts[0].count("\nEND_TOPIC"), 2)
         self.assertIn("using ONLY the evidence inside that topic's own block", prompts[0])
         self.assertIn("Never transfer facts", prompts[0])
+        self.assertIn("Cover all important ideas from the evidence", prompts[0])
+        self.assertIn("paraphrase freely when helpful", prompts[0])
+        self.assertIn("Preserve useful details, definitions, characteristics, mechanisms, and comparisons", prompts[0])
         self.assertIn("REQUIRED_SUBTOPICS_IN_ORDER", prompts[0])
         self.assertIn('"content_type":"paragraph|bullets|table"', prompts[0])
         self.assertIn("Do not return per-topic key takeaways", prompts[0])
@@ -122,7 +125,7 @@ class SummaryFeatureTests(unittest.TestCase):
         self.assertIn("statement_2_resembles_other_topic_evidence", validated[0]["grounding_warnings"])
         self.assertEqual(validated[1]["grounding_warnings"], [])
 
-    def test_backend_overwrites_wrong_or_repeated_ids_for_complete_ordered_response(self):
+    def test_duplicate_or_unknown_topic_ids_are_rejected(self):
         topics = [{"topic_id": "ecos", "name": "eCos"}, {"topic_id": "tinyos", "name": "TinyOS"}]
         evidence = [
             (topics[0], [{"content": "eCos configurable kernel synchronization mutex."}]),
@@ -132,10 +135,11 @@ class SummaryFeatureTests(unittest.TestCase):
             {"topic_id": "tinyos", "overview": "eCos configurable kernel synchronization.", "subsections": []},
             {"topic_id": "tinyos", "overview": "TinyOS event-driven nesC components.", "subsections": []},
         ]
-        validated = summary_service._validated_topic_summaries(raw, topics, evidence)
-        self.assertEqual([item["topic_id"] for item in validated], ["ecos", "tinyos"])
-        self.assertEqual(len({item["topic_id"] for item in validated}), len(topics))
-        self.assertTrue(all("model_topic_ids_overwritten_by_backend_order" in item["grounding_warnings"] for item in validated))
+        with self.assertRaisesRegex(ValueError, "duplicate topic summaries IDs"):
+            summary_service._validated_topic_summaries(raw, topics, evidence)
+        raw[0]["topic_id"] = "invented"
+        with self.assertRaisesRegex(ValueError, "unknown topic summaries IDs"):
+            summary_service._validated_topic_summaries(raw, topics, evidence)
 
     def test_valid_ids_are_mapped_then_returned_in_authoritative_order(self):
         topics = [{"topic_id": "ecos", "name": "eCos"}, {"topic_id": "tinyos", "name": "TinyOS"}]
@@ -151,17 +155,25 @@ class SummaryFeatureTests(unittest.TestCase):
         self.assertEqual([item["topic_id"] for item in validated], ["ecos", "tinyos"])
         self.assertTrue(validated[0]["overview"].startswith("eCos"))
 
-    def test_partial_or_unsupported_topic_responses_are_rejected_without_guessing(self):
+    def test_partial_schema_is_rejected_but_low_lexical_overlap_is_a_warning(self):
         topics = [{"topic_id": "ecos", "name": "eCos"}, {"topic_id": "tinyos", "name": "TinyOS"}]
         evidence = [(topic, [{"content": f"{topic['name']} distinct supported architecture concepts."}]) for topic in topics]
         with self.assertRaisesRegex(ValueError, "1 topic summaries for 2 requested"):
             summary_service._validated_topic_summaries(
                 [{"topic_id": "ecos", "overview": "eCos supported architecture.", "subsections": []}], topics, evidence
             )
-        with self.assertRaisesRegex(ValueError, "lacks meaningful lexical support"):
+        validated = summary_service._validated_topic_summaries([
+            {"topic_id": "ecos", "overview": "Coordinates concurrent work while remaining adaptable to constrained deployments.", "subsections": []},
+            {"topic_id": "tinyos", "overview": "Organizes reactive operations into lightweight deferred units.", "subsections": []},
+        ], topics, evidence)
+        self.assertTrue(all("low_lexical_support_from_topic_evidence" in item["grounding_warnings"] for item in validated))
+
+    def test_explicitly_unrelated_or_refusal_output_is_rejected(self):
+        topics = [{"topic_id": "ecos", "name": "eCos"}]
+        evidence = [(topics[0], [{"content": "eCos provides configurable kernel synchronization."}])]
+        with self.assertRaisesRegex(ValueError, "empty or obviously unrelated"):
             summary_service._validated_topic_summaries([
-                {"topic_id": "ecos", "overview": "Unrelated pineapple astronomy vocabulary.", "subsections": []},
-                {"topic_id": "tinyos", "overview": "TinyOS supported architecture.", "subsections": []},
+                {"topic_id": "ecos", "overview": "This output is unrelated to the supplied material.", "subsections": []}
             ], topics, evidence)
 
     def test_existing_subtopics_are_authoritative_and_content_formats_are_normalized(self):
@@ -171,16 +183,15 @@ class SummaryFeatureTests(unittest.TestCase):
             {"subtopic_id": "comparison", "name": "Kernel Comparison"},
         ]}]
         evidence = [(topics[0], [{"content": "RTOS scheduling uses priorities. Synchronization uses mutex locks. Kernel comparison covers latency and memory.", "metadata": {}}])]
-        raw = [{"topic_id": "wrong", "overview": "RTOS scheduling synchronization and kernel comparison concepts.", "subsections": [
-            {"subtopic_id": "wrong-1", "content_type": "paragraph", "paragraph": "Scheduling uses priorities.", "bullets": [], "table": {"headers": [], "rows": []}},
-            {"subtopic_id": "wrong-2", "content_type": "bullets", "paragraph": "", "bullets": ["Synchronization uses mutex locks."], "table": {"headers": [], "rows": []}},
-            {"subtopic_id": "wrong-3", "content_type": "table", "paragraph": "", "bullets": [], "table": {"headers": ["Kernel", "Latency"], "rows": [["Comparison", "Memory latency"]]}},
+        raw = [{"topic_id": "rtos", "overview": "RTOS scheduling synchronization and kernel comparison concepts.", "subsections": [
+            {"subtopic_id": "comparison", "content_type": "table", "paragraph": "", "bullets": [], "table": {"headers": ["Kernel", "Latency"], "rows": [["Comparison", "Memory latency"]]}},
+            {"subtopic_id": "scheduling", "content_type": "paragraph", "paragraph": "Scheduling uses priorities.", "bullets": [], "table": {"headers": [], "rows": []}},
+            {"subtopic_id": "sync", "content_type": "bullets", "paragraph": "", "bullets": ["Synchronization uses mutex locks."], "table": {"headers": [], "rows": []}},
         ]}]
         validated = summary_service._validated_topic_summaries(raw, topics, evidence)
         self.assertEqual([item["subtopic_id"] for item in validated[0]["subsections"]], ["scheduling", "sync", "comparison"])
         self.assertEqual([item["subtopic_name"] for item in validated[0]["subsections"]], ["Scheduling", "Synchronization", "Kernel Comparison"])
         self.assertEqual([item["content"]["type"] for item in validated[0]["subsections"]], ["paragraph", "bullets", "table"])
-        self.assertIn("model_subtopic_ids_overwritten_by_backend_order", validated[0]["grounding_warnings"])
 
     def test_subtopics_may_be_omitted_but_rendered_subset_keeps_backend_order(self):
         topics = [{"topic_id": "rtos", "name": "RTOS", "subtopics": [
@@ -195,7 +206,6 @@ class SummaryFeatureTests(unittest.TestCase):
         ]}]
         validated = summary_service._validated_topic_summaries(raw, topics, evidence)
         self.assertEqual([item["subtopic_id"] for item in validated[0]["subsections"]], ["scheduling", "memory"])
-        self.assertNotIn("model_subtopic_ids_overwritten_by_backend_order", validated[0]["grounding_warnings"])
 
     def test_incomplete_subtopic_set_with_wrong_ids_is_not_guessed(self):
         topics = [{"topic_id": "rtos", "name": "RTOS", "subtopics": [
@@ -206,7 +216,7 @@ class SummaryFeatureTests(unittest.TestCase):
         raw = [{"topic_id": "rtos", "overview": "RTOS scheduling priorities and synchronization.", "subsections": [
             {"subtopic_id": "invented", "content_type": "paragraph", "paragraph": "Scheduling priorities.", "bullets": [], "table": {"headers": [], "rows": []}},
         ]}]
-        with self.assertRaisesRegex(ValueError, "ambiguous subtopic identities"):
+        with self.assertRaisesRegex(ValueError, "unknown subsection IDs"):
             summary_service._validated_topic_summaries(raw, topics, evidence)
 
     def test_frontend_renders_structured_notes_and_one_final_takeaway_block(self):

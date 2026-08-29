@@ -12,7 +12,7 @@ from backend.quiz_service import get_topic_chunks
 from backend.summary_store import get_compatible_summary, save_summary
 from config import DEFAULT_GENERATION_MODEL
 
-SUMMARY_VERSION = "full_document_summary_v3_structured_study_notes"
+SUMMARY_VERSION = "full_document_summary_v3_structured_study_notes_relaxed_grounding"
 MAX_CHARS_PER_CHUNK = 1200
 _WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]{2,}")
 _STOP_WORDS = {
@@ -21,6 +21,10 @@ _STOP_WORDS = {
     "other", "over", "such", "summary", "than", "that", "the", "their", "these", "they",
     "this", "those", "through", "topic", "using", "was", "were", "which", "with", "within",
 }
+_OBVIOUSLY_UNRELATED_PATTERNS = (
+    "unrelated to the supplied", "unrelated to the provided", "cannot summarize the provided",
+    "cannot summarize the supplied", "no information was provided", "no evidence was provided",
+)
 
 
 def _json_object(content: str) -> dict:
@@ -72,7 +76,13 @@ def _topic_prompt(document_id: str, topic_evidence: list[tuple[dict, list[dict]]
             "END_TOPIC"
         )
     joined_sections = "\n\n".join(sections)
-    return f"""Summarize every requested topic using ONLY the evidence inside that topic's own block.
+    return f"""Create complete, easy-to-study notes for every requested topic using ONLY the evidence inside that topic's own block.
+Follow these priorities in order:
+1. Cover all important ideas from the evidence.
+2. Explain them in concise, easy-to-understand study language; paraphrase freely when helpful.
+3. Preserve useful details, definitions, characteristics, mechanisms, and comparisons.
+4. Avoid unnecessary repetition.
+5. Never introduce facts unsupported by that topic's evidence.
 Treat every TOPIC_ID ... END_TOPIC block as isolated. Never transfer facts, terminology, examples,
 properties, or conclusions between topics. If a fact is not supported inside the current topic block,
 omit it from that topic's overview and subsections. If evidence is limited, say so plainly.
@@ -112,10 +122,16 @@ def _bind_ordered_responses(raw_items, requested_ids: list[str], id_field: str, 
     if any(not isinstance(item, dict) for item in raw_items):
         raise ValueError(f"Summary model returned an incomplete or ambiguous {label} response.")
     returned_ids = [str(item.get(id_field) or "") for item in raw_items]
-    if len(set(returned_ids)) == len(returned_ids) and set(returned_ids) == set(requested_ids):
-        by_id = dict(zip(returned_ids, raw_items))
-        return [by_id[item_id] for item_id in requested_ids], False
-    return list(raw_items), True
+    if len(set(returned_ids)) != len(returned_ids):
+        raise ValueError(f"Summary model returned duplicate {label} IDs.")
+    unknown = sorted(set(returned_ids) - set(requested_ids))
+    if unknown:
+        raise ValueError(f"Summary model returned unknown {label} IDs: {', '.join(unknown)}.")
+    missing = sorted(set(requested_ids) - set(returned_ids))
+    if missing:
+        raise ValueError(f"Summary model omitted required {label} IDs: {', '.join(missing)}.")
+    by_id = dict(zip(returned_ids, raw_items))
+    return [by_id[item_id] for item_id in requested_ids], False
 
 
 def _bind_topic_responses(raw_topics, topics: list[dict]) -> tuple[list[dict], bool]:
@@ -157,12 +173,13 @@ def _bind_optional_subtopics(raw_items, expected_subtopics: list[dict]) -> tuple
         raise ValueError("Summary model returned an incomplete or ambiguous subsections response.")
     expected_ids = [str(item["subtopic_id"]) for item in expected_subtopics]
     returned_ids = [str(item.get("subtopic_id") or "") for item in raw_items]
-    if len(set(returned_ids)) == len(returned_ids) and set(returned_ids).issubset(set(expected_ids)):
-        by_id = dict(zip(returned_ids, raw_items))
-        return [(subtopic, by_id[subtopic_id]) for subtopic, subtopic_id in zip(expected_subtopics, expected_ids) if subtopic_id in by_id], False
-    if len(raw_items) == len(expected_subtopics):
-        return list(zip(expected_subtopics, raw_items)), True
-    raise ValueError("Summary model returned ambiguous subtopic identities for an incomplete subsection set.")
+    if len(set(returned_ids)) != len(returned_ids):
+        raise ValueError("Summary model returned duplicate subsection IDs.")
+    unknown = sorted(set(returned_ids) - set(expected_ids))
+    if unknown:
+        raise ValueError(f"Summary model returned unknown subsection IDs: {', '.join(unknown)}.")
+    by_id = dict(zip(returned_ids, raw_items))
+    return [(subtopic, by_id[subtopic_id]) for subtopic, subtopic_id in zip(expected_subtopics, expected_ids) if subtopic_id in by_id], False
 
 
 def _content_text(content: dict) -> str:
@@ -190,14 +207,14 @@ def _grounding_warnings(summary_text: str, takeaways: list[str], own_tokens: set
 
 
 def _validated_topic_summaries(raw_topics, topics: list[dict], evidence: list[tuple[dict, list[dict]]]) -> list[dict]:
-    bound, rebound_ids = _bind_topic_responses(raw_topics, topics)
+    bound, _ = _bind_topic_responses(raw_topics, topics)
     evidence_tokens = [_tokens(_evidence_text(chunks)) for _topic, chunks in evidence]
     validated = []
     for index, (topic, item) in enumerate(zip(topics, bound)):
         overview = str(item["overview"]).strip()
         expected_subtopics = list(topic.get("subtopics") or [])
         raw_subsections = item.get("subsections")
-        bound_subsections, rebound_subtopics = _bind_optional_subtopics(raw_subsections, expected_subtopics)
+        bound_subsections, _ = _bind_optional_subtopics(raw_subsections, expected_subtopics)
         normalized_subsections = []
         for subtopic, subsection in bound_subsections:
             content = _normalized_subsection_content(subsection)
@@ -208,19 +225,17 @@ def _validated_topic_summaries(raw_topics, topics: list[dict], evidence: list[tu
             })
         structured_text = " ".join([overview, *(_content_text(section["content"]) for section in normalized_subsections)])
         generated_tokens = _tokens(structured_text)
+        if not generated_tokens or any(pattern in structured_text.lower() for pattern in _OBVIOUSLY_UNRELATED_PATTERNS):
+            raise ValueError(f"Summary for topic {topic['topic_id']} is empty or obviously unrelated to its evidence.")
         own_tokens = evidence_tokens[index]
         overlap = generated_tokens & own_tokens
         required_overlap = 1 if len(generated_tokens) <= 4 else 2
-        if len(overlap) < required_overlap:
-            raise ValueError(f"Summary for topic {topic['topic_id']} lacks meaningful lexical support from its evidence.")
         other_tokens = set().union(*(tokens for other_index, tokens in enumerate(evidence_tokens) if other_index != index))
         warnings = _grounding_warnings(
             overview, [_content_text(section["content"]) for section in normalized_subsections], own_tokens, other_tokens
         )
-        if rebound_ids:
-            warnings.insert(0, "model_topic_ids_overwritten_by_backend_order")
-        if rebound_subtopics:
-            warnings.insert(0, "model_subtopic_ids_overwritten_by_backend_order")
+        if len(overlap) < required_overlap:
+            warnings.insert(0, "low_lexical_support_from_topic_evidence")
         validated.append({
             "topic_id": str(topic["topic_id"]),
             "topic_name": str(topic.get("name") or topic["topic_id"]),
