@@ -28,6 +28,7 @@ const DASHBOARD_API_URL = apiUrl("/api/dashboard");
 const KNOWLEDGE_GAPS_API_URL = apiUrl("/api/knowledge-gaps");
 const RECOMMENDATIONS_API_URL = apiUrl("/api/recommendations");
 const MODELS_API_URL = apiUrl("/api/models");
+const SUMMARY_API_BASE_URL = apiUrl("/api/summary");
 const RECOMMENDATIONS_OVERVIEW_LIMIT = Number(window.APP_CONFIG?.RECOMMENDATIONS_OVERVIEW_LIMIT || 4);
 
 const initialState = {
@@ -62,6 +63,7 @@ let activeConversation = null;
 let generationModels = [];
 let selectedModelId = localStorage.getItem("aiTutorModelId") || "";
 let activeDocumentId = "";
+let loadedSummaryKey = "";
 
 const navItems = document.querySelectorAll(".nav-item");
 const views = document.querySelectorAll(".view");
@@ -176,6 +178,13 @@ const originalContentFrame = document.getElementById("original-content-frame");
 const originalContentFileName = document.getElementById("original-content-file-name");
 const originalContentOpen = document.getElementById("original-content-open");
 const originalContentEmpty = document.getElementById("original-content-empty");
+const summaryPane = document.querySelector('[data-session-pane="summary"]');
+summaryPane?.classList.remove("placeholder-pane");
+if (summaryPane) summaryPane.innerHTML = `<article class="panel summary-panel"><div class="summary-heading"><div><p class="eyebrow">Summary</p><h2>Document overview</h2></div><button class="secondary-button" id="regenerate-summary-button" type="button">Regenerate Summary</button></div><div id="summary-loading" class="empty-state" hidden>Generating a grounded summary…</div><div id="summary-error" class="empty-state" hidden></div><div id="summary-content"></div></article>`;
+const summaryLoading = document.getElementById("summary-loading");
+const summaryError = document.getElementById("summary-error");
+const summaryContent = document.getElementById("summary-content");
+const regenerateSummaryButton = document.getElementById("regenerate-summary-button");
 const authScreen = document.getElementById("auth-screen");
 const appShell = document.getElementById("app-shell");
 const authForm = document.getElementById("auth-form");
@@ -310,7 +319,7 @@ function renderModelSelector() {
     select.addEventListener("change", async () => {
       selectedModelId = select.value; localStorage.setItem("aiTutorModelId", selectedModelId);
       select.disabled = true;
-      try { await fetchJson(`${MODELS_API_URL}/${encodeURIComponent(selectedModelId)}/prepare`, { method: "POST" }); showToast("Model ready"); }
+      try { await fetchJson(`${MODELS_API_URL}/${encodeURIComponent(selectedModelId)}/prepare`, { method: "POST" }); showToast("Model ready"); if (document.body.dataset.sessionTab === "summary") await loadDocumentSummary(); }
       catch (error) { showToast(error.message || "Model is still preparing"); }
       finally { select.disabled = false; }
     });
@@ -326,12 +335,57 @@ function setSessionTab(tab) {
   document.querySelectorAll(".session-tab").forEach((button) => button.classList.toggle("active", button.dataset.sessionTab === tab));
   document.querySelectorAll(".session-pane").forEach((pane) => pane.classList.toggle("active", pane.dataset.sessionPane === tab));
   document.getElementById("persistent-tutor").hidden = false;
+  if (tab === "summary") loadDocumentSummary();
+}
+
+function appendTakeaways(parent, takeaways) {
+  if (!takeaways?.length) return;
+  const heading = document.createElement("h3"); heading.textContent = "Key takeaways"; parent.appendChild(heading);
+  const list = document.createElement("ul"); list.className = "summary-takeaways";
+  takeaways.forEach((value) => { const item = document.createElement("li"); item.textContent = value; list.appendChild(item); });
+  parent.appendChild(list);
+}
+
+function renderDocumentSummary(summary) {
+  summaryContent.innerHTML = "";
+  const overview = document.createElement("p"); overview.className = "summary-overview";
+  overview.textContent = summary.final_summary?.overview || "No overview was returned."; summaryContent.appendChild(overview);
+  appendTakeaways(summaryContent, summary.final_summary?.key_takeaways);
+  (summary.topic_summaries || []).forEach((topic) => {
+    const section = document.createElement("section"); section.className = "summary-topic";
+    const heading = document.createElement("h3"); heading.textContent = topic.topic_name || topic.topic_id; section.appendChild(heading);
+    const copy = document.createElement("p"); copy.textContent = topic.summary; section.appendChild(copy);
+    appendTakeaways(section, topic.key_takeaways); summaryContent.appendChild(section);
+  });
+}
+
+async function loadDocumentSummary(regenerate = false) {
+  if (!activeDocumentId || !summaryContent) return;
+  const requestDocumentId = activeDocumentId;
+  const key = `${requestDocumentId}:${selectedModelId}`;
+  if (!regenerate && loadedSummaryKey === key && summaryContent.children.length) return;
+  summaryLoading.hidden = false; summaryError.hidden = true; summaryContent.hidden = true;
+  regenerateSummaryButton.disabled = true;
+  try {
+    const url = `${SUMMARY_API_BASE_URL}/${encodeURIComponent(requestDocumentId)}`;
+    const summary = await fetchJson(regenerate ? `${url}/regenerate` : `${url}?model_id=${encodeURIComponent(selectedModelId)}`, regenerate ? {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model_id: selectedModelId || null })
+    } : {});
+    if (activeDocumentId !== requestDocumentId) return;
+    renderDocumentSummary(summary); loadedSummaryKey = key;
+  } catch (error) {
+    if (activeDocumentId === requestDocumentId) { summaryError.textContent = error.message || "Could not load summary."; summaryError.hidden = false; }
+  } finally {
+    if (activeDocumentId === requestDocumentId) { summaryLoading.hidden = true; summaryContent.hidden = false; regenerateSummaryButton.disabled = false; }
+  }
 }
 
 async function openStudySession(documentId, tab = "material", topicId = "") {
   const documentItem = indexedDocuments.find((item) => item.id === documentId);
   if (!documentItem) return;
   activeDocumentId = documentId;
+  loadedSummaryKey = "";
+  if (summaryContent) summaryContent.innerHTML = "";
   const sessionBreadcrumb = document.getElementById("session-home-button");
   if (sessionBreadcrumb) sessionBreadcrumb.textContent = `Home > ${documentItem.title}`;
   try {
@@ -2635,6 +2689,7 @@ navItems.forEach((item) => {
 });
 
 document.getElementById("session-home-button")?.addEventListener("click", () => setPage("overview"));
+regenerateSummaryButton?.addEventListener("click", () => loadDocumentSummary(true));
 document.querySelectorAll(".session-tab, [data-session-tab]").forEach((button) => {
   button.addEventListener("click", () => setSessionTab(button.dataset.sessionTab));
 });

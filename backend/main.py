@@ -39,6 +39,8 @@ from backend.conversation_store import (
 )
 from backend.rag_service import answer_conversation_message, list_uploaded_sources
 from backend.model_registry import list_generation_models, prepare_generation_model, resolve_generation_model
+from backend.summary_service import generate_document_summary
+from backend.summary_store import delete_document_summaries
 from config import AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE, AUTH_SESSION_DAYS, CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL
 from backend.auth_store import (
     authenticate_user,
@@ -133,6 +135,10 @@ class DocumentSummary(BaseModel):
     title: str
     chunks: int
     topics: list[dict] = Field(default_factory=list)
+
+
+class SummaryGenerateRequest(BaseModel):
+    model_id: Optional[str] = None
 
 
 class QuizGenerateRequest(BaseModel):
@@ -487,6 +493,7 @@ def delete_source(document_id: str, current_user: dict = Depends(require_current
     try:
         result = delete_indexed_file(document_id, current_user["id"])
         delete_document_quiz_data(result["deleted"], current_user["id"])
+        delete_document_summaries(current_user["id"], result["deleted"])
         remove_source_from_conversations(current_user["id"], result["deleted"])
         sources_result = [SourceSummary(**source) for source in list_uploaded_sources(current_user["id"])]
 
@@ -537,6 +544,30 @@ def quizzes(current_user: dict = Depends(require_current_user)) -> list[dict]:
             status_code=500,
             detail=f"Could not load quiz statuses. Original error: {error}",
         ) from error
+
+
+@app.get("/api/summary/{document_id}")
+def summary_detail(document_id: str, model_id: Optional[str] = None, current_user: dict = Depends(require_current_user)) -> dict:
+    """Return a compatible persisted summary or generate it from existing indexed chunks."""
+    try:
+        return generate_document_summary(current_user["id"], document_id, model_id=model_id)
+    except ValueError as error:
+        message = str(error)
+        raise HTTPException(status_code=404 if message == "Document not found." else 400, detail=message) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Could not generate document summary: {error}") from error
+
+
+@app.post("/api/summary/{document_id}/regenerate")
+def summary_regenerate(document_id: str, request: SummaryGenerateRequest, current_user: dict = Depends(require_current_user)) -> dict:
+    """Explicitly generate and persist a fresh summary version."""
+    try:
+        return generate_document_summary(current_user["id"], document_id, model_id=request.model_id, regenerate=True)
+    except ValueError as error:
+        message = str(error)
+        raise HTTPException(status_code=404 if message == "Document not found." else 400, detail=message) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Could not regenerate document summary: {error}") from error
 
 
 @app.get("/api/quiz-history")

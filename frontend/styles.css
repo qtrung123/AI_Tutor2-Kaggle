@@ -2222,6 +2222,15 @@ body[data-page="session"] .session-content { display: flex; flex-direction: colu
 body[data-page="session"] .session-pane.active[data-session-pane="material"] { flex: 1 1 auto; height: 100%; min-height: 0; }
 body[data-page="session"] .session-pane.active[data-session-pane="material"] .original-content-panel { height: 100%; min-height: 0; }
 body[data-page="session"] .session-pane.active[data-session-pane="material"] #original-content-frame { height: 100%; min-height: 0; flex: 1 1 auto; }
+.summary-panel { padding:26px; }
+.summary-heading { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; margin-bottom:22px; }
+.summary-heading h2 { margin:3px 0 0; }
+.summary-heading button { width:auto; white-space:nowrap; }
+.summary-overview { font-size:16px; line-height:1.7; color:var(--ink); }
+.summary-takeaways { padding-left:22px; line-height:1.6; }
+.summary-topic { padding:20px 0; border-top:1px solid var(--session-line); }
+.summary-topic h3 { margin:0 0 9px; }
+.summary-topic p { line-height:1.65; }
 
 /* Minimal tutor: answers first, sources and composer at the bottom. */
 body[data-page="session"] .persistent-tutor .tutor-chat-header { order: 2; display: block; padding: 10px 0 8px; border: 0; }
