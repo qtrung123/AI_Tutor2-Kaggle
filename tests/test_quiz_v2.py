@@ -322,6 +322,52 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(question["correct_answer"], "A")
         self.assertNotIn("difficulty_mismatch", warnings)
 
+    def test_valid_direct_recall_easy_stems_are_not_hard_rejected(self):
+        cases = (
+            "What is the purpose of flow control?",
+            "Which of the following mechanisms protects a receiving endpoint?",
+            "What does a checksum detect during transport?",
+        )
+        for stem in cases:
+            with self.subTest(stem=stem):
+                question, warnings = self.validate_easy_candidate(
+                    stem,
+                    ["Receiver overload", "Packet corruption", "Ordered delivery", "Connection setup"],
+                    1,
+                    "A checksum detects packet corruption during transport.",
+                    "Checksums detect packet corruption during transport, while flow control protects receivers.",
+                )
+                self.assertEqual(question["question"], stem)
+                self.assertIn("template_like_stem", warnings)
+
+    def test_placeholder_and_incomplete_easy_stems_are_hard_rejected(self):
+        for stem in (
+            "What is [insert concept]?",
+            "What does the scheduler do... ?",
+            "Which mechanism is used for?",
+            "What does the checksum detect",
+        ):
+            with self.subTest(stem=stem), self.assertRaisesRegex(ValueError, "incomplete or placeholder stem"):
+                self.validate_easy_candidate(
+                    stem,
+                    ["Packet corruption", "Ordered delivery", "Flow regulation", "Connection setup"],
+                    0,
+                    "Checksums detect packet corruption during transport.",
+                    "Checksums detect packet corruption during transport.",
+                )
+
+    def test_direct_recall_easy_batch_does_not_waste_retries(self):
+        initial = [raw_question(index) for index in range(10)]
+        for index, question in enumerate(initial):
+            question["question"] = f"What is the role of transport mechanism {index + 1}?"
+        questions, validation, timings, _slots = self.run_document_batch([{"questions": initial}])
+        self.assertEqual(len(questions), 10)
+        self.assertEqual(validation["hard_rejections"], 0)
+        self.assertGreaterEqual(validation["quality_warnings"], 10)
+        self.assertEqual(timings["repair_llm_calls"], 0)
+        self.assertEqual(timings["repair_attempt_count"], 0)
+        self.assertEqual(timings["fill_attempt_count"], 0)
+
     def test_negative_easy_stem_keeps_its_slot_without_repair(self):
         initial = [raw_question(index) for index in range(10)]
         initial[0]["question"] = "Which behavior is NOT supported by the evidence?"

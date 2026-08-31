@@ -1011,7 +1011,16 @@ _EASY_NEGATIVE_STEM = re.compile(
     r"\b(?:not|except|false|incorrect|least|never)\b|\b(?:no|not|never)\b.{0,28}\b(?:without|not|never)\b",
     flags=re.IGNORECASE,
 )
-_EASY_TEMPLATE_STEM = re.compile(r"\.{3}|\b(?:tbd|placeholder|insert|option|answer)\b|[_]{2,}", flags=re.IGNORECASE)
+_EASY_PLACEHOLDER_STEM = re.compile(
+    r"\.{3}|\b(?:tbd|placeholder|insert(?:\s+(?:topic|concept|question|text))?)\b|[_]{2,}"
+    r"|\{[^{}]+\}|\[[^\[\]]*(?:topic|concept|insert|placeholder)[^\[\]]*\]"
+    r"|<[^<>]*(?:topic|concept|insert|placeholder)[^<>]*>",
+    flags=re.IGNORECASE,
+)
+_EASY_TEMPLATE_STYLE_STEM = re.compile(
+    r"^(?:what\s+(?:is|does|are)|which\s+of\s+the\s+following)\b",
+    flags=re.IGNORECASE,
+)
 _EASY_ABSOLUTES = {"always", "never", "only", "all"}
 _EASY_EXTERNAL_ENTITIES = {"linux", "windows", "freertos", "vxworks", "zephyr", "unix", "android", "macos"}
 _EASY_STOPWORDS = {
@@ -1045,10 +1054,12 @@ def _validate_easy_v2_quality(
     if _EASY_NEGATIVE_STEM.search(lowered_stem):
         warnings.append("negative_or_trick_stem")
     if (
-        not stem.endswith("?") or _EASY_TEMPLATE_STEM.search(stem)
+        not stem.endswith("?") or _EASY_PLACEHOLDER_STEM.search(stem)
         or re.search(r"\b(?:of|for|and|or|the|a|an|to|is|are)\s*\?$", lowered_stem)
     ):
-        raise ValueError("Easy quality: incomplete or template-like stem.")
+        raise ValueError("Easy quality: incomplete or placeholder stem.")
+    if _EASY_TEMPLATE_STYLE_STEM.search(stem):
+        warnings.append("template_like_stem")
 
     correct = options[answer_index]
     explicit_count = re.search(r"\b(two|three|four|five|six|seven|eight|nine|ten|\d+)\b", lowered_stem)
