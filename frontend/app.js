@@ -94,6 +94,7 @@ const quizScopeSelect = document.getElementById("quiz-scope-select");
 const quizTopicField = document.getElementById("quiz-topic-field");
 const quizDifficultySelect = document.getElementById("quiz-difficulty-select");
 let quizQuestionCountSelect = document.getElementById("quiz-question-count-select");
+let quizModelSelect = document.getElementById("quiz-model-select");
 const generateQuizButton = document.getElementById("generate-quiz-button");
 const resetQuizButton = document.getElementById("reset-quiz-button");
 resetQuizButton.textContent = "Retake Quiz";
@@ -1715,7 +1716,7 @@ async function requestGeneratedQuiz() {
       topic_id: selectedAssessmentScope() === "topic" ? selectedTopicId() : null,
       difficulty: selectedDifficulty(),
       question_count: selectedQuestionCount(),
-      model_id: selectedModelId || null
+      model_id: quizModelSelect?.value || "qwen3-4b"
     })
   });
 
@@ -1762,7 +1763,7 @@ async function requestQuizRegeneration(documentId) {
       assessment_scope: selectedAssessmentScope(),
       topic_id: selectedAssessmentScope() === "topic" ? selectedTopicId() : null,
       question_count: currentQuiz?.assessment_plan?.target_questions || selectedQuestionCount(),
-      model_id: selectedModelId || null
+      model_id: quizModelSelect?.value || "qwen3-4b"
     })
   });
   if (!response.ok) {
@@ -2988,6 +2989,17 @@ function updateQuizLandingLayout() {
 
 function openQuizCreateDialog() {
   if (!assessmentControl) return;
+  if (!quizModelSelect) {
+    const label = document.createElement("label");
+    const caption = document.createElement("span");
+    caption.textContent = "Quiz model";
+    quizModelSelect = document.createElement("select");
+    quizModelSelect.id = "quiz-model-select";
+    quizModelSelect.add(new Option("Qwen3-4B (Fast)", "qwen3-4b", true, true));
+    quizModelSelect.add(new Option("Qwen2.5-7B (Higher Quality)", "qwen-2.5-7b"));
+    label.append(caption, quizModelSelect);
+    generateQuizButton.before(label);
+  }
   if (!quizQuestionCountSelect) {
     const label = document.createElement("label");
     const caption = document.createElement("span");

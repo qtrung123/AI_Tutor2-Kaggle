@@ -43,7 +43,7 @@ from backend.summary_service import generate_document_summary
 from backend.summary_store import delete_document_summaries
 from backend.flashcard_service import authoritative_card_fields, generate_flashcards
 from backend.flashcard_store import add_flashcard, delete_document_flashcards, delete_flashcard, update_flashcard
-from config import AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE, AUTH_SESSION_DAYS, CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL
+from config import AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE, AUTH_SESSION_DAYS, CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL, QUIZ_DEFAULT_GENERATION_MODEL
 from backend.auth_store import (
     authenticate_user,
     create_session,
@@ -698,7 +698,7 @@ def quiz_generate(request: QuizGenerateRequest, current_user: dict = Depends(req
             topic_id=request.topic_id,
             question_count=request.question_count,
             owner_id=current_user["id"],
-            model_id=resolve_generation_model(request.model_id),
+            model_id=resolve_generation_model(request.model_id or QUIZ_DEFAULT_GENERATION_MODEL),
         )
         return QuizGenerateResponse(**result)
     except QuizGenerationError as error:
@@ -798,7 +798,7 @@ def quiz_regenerate(document_id: str, request: QuizRegenerateRequest, current_us
             question_count=request.question_count,
             regenerate=True,
             owner_id=current_user["id"],
-            model_id=resolve_generation_model(getattr(request, "model_id", None)),
+            model_id=resolve_generation_model(getattr(request, "model_id", None) or QUIZ_DEFAULT_GENERATION_MODEL),
         )
         return QuizGenerateResponse(**result)
     except QuizGenerationError as error:

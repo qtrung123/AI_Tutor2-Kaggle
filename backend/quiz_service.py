@@ -752,10 +752,12 @@ def _generate_quiz_batch(
         )
         llm = ChatOllama(
             model=model_id,
+            reasoning=False,
             temperature=temperatures[min(attempt_index, len(temperatures) - 1)][difficulty],
             format="json",
             num_ctx=num_ctx,
             num_predict=num_predict,
+            keep_alive=0,
         )
         print(
             f"[quiz-llm] attempt={attempt_index + 1}, difficulty={difficulty}, "
@@ -1306,11 +1308,12 @@ def _generate_topic_quiz_v2(
         }
         llm = ChatOllama(
             model=model_id,
+            reasoning=False,
             temperature=0.1 if phase == "initial" else 0.25,
             format=output_schema,
             num_ctx=16384 if missing > 15 else 8192,
             num_predict=min(4800, max(520, missing * 150)),
-            keep_alive="10m",
+            keep_alive=0,
             client_kwargs={"timeout": 270},
         )
         print(
@@ -1595,11 +1598,12 @@ def _run_document_v2_batch(
             final_fill_llm_calls += 1
         llm = ChatOllama(
             model=model_id,
+            reasoning=False,
             temperature=0.1 if phase == "initial" else 0.25,
             format=_document_batch_output_schema(),
             num_ctx=16384 if requested > 15 else 8192,
             num_predict=min(4800, max(520, requested * 150)),
-            keep_alive="10m",
+            keep_alive=0,
             client_kwargs={"timeout": 270},
         )
         print(

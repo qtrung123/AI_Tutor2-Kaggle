@@ -192,7 +192,7 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(FakeBatchModel.models, ["qwen-2.5-3b-runtime"])
         self.assertEqual(len(saved), 1)
         self.assertEqual({question["source_chunk_ids"][0] for question in result["questions"]}, {"canonical_chunk_1"})
-        self.assertEqual(FakeBatchModel.configurations[0]["keep_alive"], "10m")
+        self.assertEqual(FakeBatchModel.configurations[0]["keep_alive"], 0)
         self.assertEqual(FakeBatchModel.configurations[0]["num_ctx"], 8192)
         self.assertEqual(FakeBatchModel.configurations[0]["num_predict"], 1500)
         self.assertNotIn("source_chunk_ids", FakeBatchModel.prompts[0])

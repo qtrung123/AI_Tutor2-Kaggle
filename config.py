@@ -31,9 +31,10 @@ COLLECTION_NAME = "study_documents"
 CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M")
 # Comma-separated allowlist. Existing OLLAMA_CHAT_MODEL deployments continue to expose one model.
 GENERATION_MODELS = tuple(dict.fromkeys(
-    model.strip() for model in os.getenv("OLLAMA_GENERATION_MODELS", "qwen-2.5-7b").split(",") if model.strip()
-)) or ("qwen-2.5-7b",)
+    model.strip() for model in os.getenv("OLLAMA_GENERATION_MODELS", "qwen-2.5-7b,qwen3-4b").split(",") if model.strip()
+)) or ("qwen-2.5-7b", "qwen3-4b")
 DEFAULT_GENERATION_MODEL = os.getenv("OLLAMA_DEFAULT_GENERATION_MODEL", "qwen-2.5-7b")
+QUIZ_DEFAULT_GENERATION_MODEL = os.getenv("OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL", "qwen3-4b")
 QUIZ_VALIDATION_MODEL = os.getenv("QUIZ_VALIDATION_MODEL", CHAT_MODEL)
 QUIZ_SEMANTIC_VALIDATION_ENABLED = os.getenv(
     "QUIZ_SEMANTIC_VALIDATION_ENABLED", "true"
