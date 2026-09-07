@@ -192,7 +192,7 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(FakeBatchModel.models, ["qwen-2.5-3b-runtime"])
         self.assertEqual(len(saved), 1)
         self.assertEqual({question["source_chunk_ids"][0] for question in result["questions"]}, {"canonical_chunk_1"})
-        self.assertEqual(FakeBatchModel.configurations[0]["keep_alive"], 0)
+        self.assertEqual(FakeBatchModel.configurations[0]["keep_alive"], "5m")
         self.assertEqual(FakeBatchModel.configurations[0]["num_ctx"], 8192)
         self.assertEqual(FakeBatchModel.configurations[0]["num_predict"], 1500)
         self.assertNotIn("source_chunk_ids", FakeBatchModel.prompts[0])
@@ -202,6 +202,11 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(timings["model_load_ms"], 2)
         self.assertEqual(timings["prompt_eval_ms"], 3)
         self.assertEqual(timings["token_generation_ms"], 4)
+        self.assertGreaterEqual(timings["model_invocation_ms"], 0)
+        self.assertGreaterEqual(timings["initial_generation_ms"], 0)
+        self.assertEqual(timings["repair_generation_ms"], 0)
+        self.assertEqual(timings["fill_generation_ms"], 0)
+        self.assertGreaterEqual(timings["total_quiz_generation_ms"], 0)
 
     def test_shared_v2_prompt_has_distinct_prompt_only_cognitive_contracts(self):
         group = {

@@ -290,7 +290,9 @@ ALLOWED SUBTOPIC IDS: {json.dumps(seed_ids, ensure_ascii=False)}
 CONTEXT:
 {_planner_context(seeds)}
 """.strip()
-    response = ChatOllama(model=CHAT_MODEL, temperature=0, format="json", num_ctx=8192).invoke(prompt)
+    response = ChatOllama(
+        model=CHAT_MODEL, temperature=0, format="json", num_ctx=8192, keep_alive=0,
+    ).invoke(prompt)
     data = _parse_json(response.content)
     return data.get("concepts") if isinstance(data.get("concepts"), list) else []
 

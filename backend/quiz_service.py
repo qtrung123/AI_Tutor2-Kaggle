@@ -63,6 +63,7 @@ GENERATION_PROMPT_VERSION = "topic_mcq_v2_backend_evidence"
 QUIZ_V2_PROMPT_VERSION = "topic_mcq_v2_slot_batch_fast"
 QUIZ_V2_ALLOWED_QUESTION_COUNTS = {10, 15, 20, 25}
 QUIZ_V2_DISTINCT_CONCEPT_LIMIT = 5
+QUIZ_GENERATION_KEEP_ALIVE = "5m"
 
 
 class QuizGenerationError(ValueError):
@@ -764,7 +765,7 @@ def _generate_quiz_batch(
             format="json",
             num_ctx=num_ctx,
             num_predict=num_predict,
-            keep_alive=0,
+            keep_alive=QUIZ_GENERATION_KEEP_ALIVE,
         )
         print(
             f"[quiz-llm] attempt={attempt_index + 1}, difficulty={difficulty}, "
@@ -1290,6 +1291,10 @@ def _generate_topic_quiz_v2(
     model_load_ms = 0
     prompt_eval_ms = 0
     token_generation_ms = 0
+    model_invocation_ms = 0
+    initial_generation_ms = 0
+    repair_generation_ms = 0
+    fill_generation_ms = 0
 
     # One initial batch, up to two targeted repairs, then up to two bounded fills.
     generation_phases = ["initial", "repair", "repair", "fill", "fill"]
@@ -1359,15 +1364,18 @@ def _generate_topic_quiz_v2(
             format=output_schema,
             num_ctx=16384 if missing > 15 else 8192,
             num_predict=min(4800, max(520, missing * 150)),
-            keep_alive=0,
+            keep_alive=QUIZ_GENERATION_KEEP_ALIVE,
             client_kwargs={"timeout": 270},
         )
         print(
             f"[quiz-v2-llm] attempt={attempt_index + 1}, phase={phase}, model={model_id}, "
             f"requested={missing}, evidence_groups={len(available_groups)}"
         )
+        invocation_started = time.perf_counter()
+        call_invocation_ms = 0
         try:
             response = llm.invoke(prompt)
+            call_invocation_ms = round((time.perf_counter() - invocation_started) * 1000)
             metadata = getattr(response, "response_metadata", {}) or {}
             call_model_load_ms = round(float(metadata.get("load_duration") or 0) / 1_000_000)
             call_prompt_eval_ms = round(float(metadata.get("prompt_eval_duration") or 0) / 1_000_000)
@@ -1386,6 +1394,7 @@ def _generate_topic_quiz_v2(
                 raise ValueError("Quiz JSON does not contain a questions list.")
             candidates = _bind_full_v2_response_to_slots(candidates, available_groups)
         except Exception as error:
+            call_invocation_ms = call_invocation_ms or round((time.perf_counter() - invocation_started) * 1000)
             candidates = []
             validation_results["rejected"] += missing
             reason = f"response: {error}"
@@ -1394,6 +1403,13 @@ def _generate_topic_quiz_v2(
                 rejection_reasons_by_slot[slot["slot_id"]].append(reason)
         elapsed = round((time.perf_counter() - stage_started) * 1000)
         generation_ms += elapsed
+        model_invocation_ms += call_invocation_ms
+        if phase == "initial":
+            initial_generation_ms += elapsed
+        elif phase == "repair":
+            repair_generation_ms += elapsed
+        else:
+            fill_generation_ms += elapsed
 
         validation_started = time.perf_counter()
         for candidate_index, raw in enumerate(candidates):
@@ -1466,6 +1482,10 @@ def _generate_topic_quiz_v2(
     timings["model_load_ms"] = model_load_ms
     timings["prompt_eval_ms"] = prompt_eval_ms
     timings["token_generation_ms"] = token_generation_ms
+    timings["model_invocation_ms"] = model_invocation_ms
+    timings["initial_generation_ms"] = initial_generation_ms
+    timings["repair_generation_ms"] = repair_generation_ms
+    timings["fill_generation_ms"] = fill_generation_ms
     timings["validation_ms"] = validation_ms
     timings["repair_ms"] = repair_ms
     timings["repair_llm_calls"] = repair_attempt_count + fill_attempt_count
@@ -1474,6 +1494,7 @@ def _generate_topic_quiz_v2(
     timings["missing_slots_before_each_retry"] = missing_slots_before_each_retry
     timings["rejection_reasons_by_slot"] = rejection_reasons_by_slot
     timings["final_fill_llm_calls"] = final_fill_llm_calls
+    timings["total_quiz_generation_ms"] = round((time.perf_counter() - total_started) * 1000)
     if len(accepted) != question_count:
         timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
         timings["total_request_ms"] = timings["total_ms"]
@@ -1641,6 +1662,7 @@ def _run_document_v2_batch(
     generation_run_id: str,
 ) -> tuple[list[dict], dict, dict]:
     """Generate document slots in bounded batches, then repair only missing slots."""
+    batch_started = time.perf_counter()
     authoritative_slots = planned_slots[:question_count]
     groups_by_id = {slot["slot_id"]: slot for slot in authoritative_slots}
     slot_positions = {slot["slot_id"]: index for index, slot in enumerate(authoritative_slots)}
@@ -1656,6 +1678,8 @@ def _run_document_v2_batch(
         "validation_ms": 0, "repair_ms": 0, "model_load_ms": 0,
         "prompt_eval_ms": 0, "token_generation_ms": 0,
         "prompt_tokens": 0, "output_tokens": 0,
+        "model_invocation_ms": 0, "repair_generation_ms": 0,
+        "fill_generation_ms": 0,
         "initial_batch_count": 0, "initial_batches": [],
     }
     llm_calls = 0
@@ -1733,15 +1757,18 @@ def _run_document_v2_batch(
             format=_document_batch_output_schema(),
             num_ctx=16384 if requested > 15 else 8192,
             num_predict=min(4800, max(520, requested * 150)),
-            keep_alive=0,
+            keep_alive=QUIZ_GENERATION_KEEP_ALIVE,
             client_kwargs={"timeout": 270},
         )
         print(
             f"[quiz-document-llm] attempt={llm_calls}, phase={phase}, batch={batch_index}, "
             f"model={model_id}, requested={requested}, slots={len(call_slots)}"
         )
+        invocation_started = time.perf_counter()
+        invocation_ms = 0
         try:
             response = llm.invoke(prompt)
+            invocation_ms = round((time.perf_counter() - invocation_started) * 1000)
             metadata = getattr(response, "response_metadata", {}) or {}
             model_load_ms = round(float(metadata.get("load_duration") or 0) / 1_000_000)
             prompt_eval_ms = round(float(metadata.get("prompt_eval_duration") or 0) / 1_000_000)
@@ -1775,6 +1802,7 @@ def _run_document_v2_batch(
                 f"output_tokens={output_tokens}"
             )
         except Exception as error:
+            invocation_ms = invocation_ms or round((time.perf_counter() - invocation_started) * 1000)
             candidates = []
             results["rejected"] += requested
             reason = f"response: {error}"
@@ -1782,8 +1810,13 @@ def _run_document_v2_batch(
             for slot in call_slots:
                 rejection_reasons_by_slot[slot["slot_id"]].append(reason)
         generation_elapsed = round((time.perf_counter() - generation_started) * 1000)
+        timings["model_invocation_ms"] += invocation_ms
         if phase == "initial":
             timings["initial_batch_generation_ms"] += generation_elapsed
+        elif phase == "repair":
+            timings["repair_generation_ms"] += generation_elapsed
+        else:
+            timings["fill_generation_ms"] += generation_elapsed
 
         validation_started = time.perf_counter()
         accepted_before = len(accepted_by_slot)
@@ -1894,6 +1927,8 @@ def _run_document_v2_batch(
     timings["rejection_reasons_by_slot"] = rejection_reasons_by_slot
     timings["final_fill_llm_calls"] = final_fill_llm_calls
     timings["candidate_stems_by_attempt"] = candidate_stems_by_attempt
+    timings["initial_generation_ms"] = timings["initial_batch_generation_ms"]
+    timings["total_quiz_generation_ms"] = round((time.perf_counter() - batch_started) * 1000)
     accepted = [accepted_by_slot[slot["slot_id"]] for slot in authoritative_slots if slot["slot_id"] in accepted_by_slot]
     for question_id, question in enumerate(accepted, start=1):
         question["id"] = question_id
