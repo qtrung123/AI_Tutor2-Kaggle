@@ -71,6 +71,8 @@ class QuizGenerationError(ValueError):
     def __init__(
         self, message: str, *, stage: str, valid_questions: int = 0,
         target_questions: int = 10, failure_summary: list[str] | None = None,
+        missing_slots: list[str] | None = None,
+        rejection_reasons_by_slot: dict[str, list[str]] | None = None,
     ):
         super().__init__(message)
         missing_questions = max(0, target_questions - valid_questions)
@@ -83,6 +85,11 @@ class QuizGenerationError(ValueError):
             "requested_count": target_questions,
             "valid_count": valid_questions,
             "missing_count": missing_questions,
+            "missing_slots": list(missing_slots or []),
+            "rejection_reasons_by_slot": {
+                slot_id: list(reasons)
+                for slot_id, reasons in (rejection_reasons_by_slot or {}).items()
+            },
             "failure_summary": list(failure_summary or []),
         }
 
@@ -956,6 +963,7 @@ def _build_v2_prompt(
     count: int,
     accepted_stems: list[str],
     repair: bool,
+    rejection_reasons_by_slot: dict[str, list[str]] | None = None,
 ) -> str:
     cognitive_intent = {
         "easy": "recall",
@@ -968,7 +976,20 @@ def _build_v2_prompt(
         for group in groups
     )
     avoid = " | ".join(stem[:100] for stem in accepted_stems) if repair else ""
-    repair_line = f"Avoid: {avoid}\n" if avoid else ""
+    repair_lines = []
+    if repair:
+        repair_lines.append(
+            "TARGETED MISSING-SLOT FILL: Return questions only for the listed missing slots. "
+            "For every slot, write a complete standalone question stem ending in a question mark; "
+            "never return a fragment, placeholder, or accepted question."
+        )
+        for group in groups:
+            reasons = (rejection_reasons_by_slot or {}).get(str(group["slot_id"]), [])
+            if reasons:
+                repair_lines.append(f"{group['slot_id']} previous rejection: {'; '.join(reasons[-3:])}")
+    if avoid:
+        repair_lines.append(f"ACCEPTED STEMS — DO NOT REPEAT: {avoid}")
+    repair_line = "\n".join(repair_lines) + ("\n" if repair_lines else "")
     difficulty_contracts = {
         "easy": (
             "EASY QUALITY: Ask direct recall/basic comprehension about one explicit evidence fact. "
@@ -1261,6 +1282,7 @@ def _generate_topic_quiz_v2(
     fill_attempt_count = 0
     final_fill_llm_calls = 0
     missing_slots_before_each_retry = []
+    rejection_reasons_by_slot = {slot_id: [] for slot_id in groups_by_id}
     for attempt_index, phase in enumerate(generation_phases):
         call_started = time.perf_counter()
         missing = question_count - len(accepted)
@@ -1272,6 +1294,10 @@ def _generate_topic_quiz_v2(
             retry_state = {
                 "phase": phase, "attempt": retry_attempt,
                 "missing_slots": [slot["slot_id"] for slot in available_groups],
+                "rejection_reasons_by_slot": {
+                    slot["slot_id"]: list(rejection_reasons_by_slot[slot["slot_id"]])
+                    for slot in available_groups
+                },
             }
             missing_slots_before_each_retry.append(retry_state)
             print(f"[quiz-v2-retry] {json.dumps(retry_state)}")
@@ -1280,8 +1306,13 @@ def _generate_topic_quiz_v2(
         elif phase == "fill":
             fill_attempt_count += 1
         prompt = _build_v2_prompt(
-            document["id"], topic, difficulty, available_groups, missing, accepted_stems, phase != "initial"
+            document["id"], topic, difficulty, available_groups, missing, accepted_stems,
+            phase != "initial", rejection_reasons_by_slot,
         )
+        rejection_counts_before_call = {
+            slot["slot_id"]: len(rejection_reasons_by_slot[slot["slot_id"]])
+            for slot in available_groups
+        }
         stage_started = time.perf_counter()
         llm_calls += 1
         if phase == "fill":
@@ -1342,7 +1373,10 @@ def _generate_topic_quiz_v2(
         except Exception as error:
             candidates = []
             validation_results["rejected"] += missing
-            validation_results["reasons"].append(f"response: {error}")
+            reason = f"response: {error}"
+            validation_results["reasons"].append(reason)
+            for slot in available_groups:
+                rejection_reasons_by_slot[slot["slot_id"]].append(reason)
         elapsed = round((time.perf_counter() - stage_started) * 1000)
         generation_ms += elapsed
 
@@ -1394,11 +1428,22 @@ def _generate_topic_quiz_v2(
                     "latency_ms": 0,
                 })
             except Exception as error:
+                reason = str(error)
+                candidate_slot_id = str(raw.get("slot_id") or raw.get("concept_id") or "").strip() if isinstance(raw, dict) else ""
+                if candidate_slot_id not in remaining_slot_ids and candidate_index < len(available_groups):
+                    candidate_slot_id = str(available_groups[candidate_index]["slot_id"])
+                if candidate_slot_id in rejection_reasons_by_slot:
+                    rejection_reasons_by_slot[candidate_slot_id].append(reason)
                 validation_results["rejected"] += 1
                 validation_results["hard_rejections"] += 1
-                validation_results["reasons"].append(str(error))
+                validation_results["reasons"].append(reason)
                 print(f"[quiz-v2-validation] discarded candidate: {error}")
         validation_ms += round((time.perf_counter() - validation_started) * 1000)
+        for slot in available_groups:
+            slot_id = slot["slot_id"]
+            if (slot_id in remaining_slot_ids
+                    and len(rejection_reasons_by_slot[slot_id]) == rejection_counts_before_call[slot_id]):
+                rejection_reasons_by_slot[slot_id].append("Model returned no valid candidate for the requested slot.")
         if phase != "initial":
             repair_ms += round((time.perf_counter() - call_started) * 1000)
 
@@ -1412,6 +1457,7 @@ def _generate_topic_quiz_v2(
     timings["repair_attempt_count"] = repair_attempt_count
     timings["fill_attempt_count"] = fill_attempt_count
     timings["missing_slots_before_each_retry"] = missing_slots_before_each_retry
+    timings["rejection_reasons_by_slot"] = rejection_reasons_by_slot
     timings["final_fill_llm_calls"] = final_fill_llm_calls
     if len(accepted) != question_count:
         timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
@@ -1428,6 +1474,11 @@ def _generate_topic_quiz_v2(
             valid_questions=len(accepted),
             target_questions=question_count,
             failure_summary=summary,
+            missing_slots=[slot["slot_id"] for slot in planned_slots if slot["slot_id"] in remaining_slot_ids],
+            rejection_reasons_by_slot={
+                slot_id: reasons for slot_id, reasons in rejection_reasons_by_slot.items()
+                if slot_id in remaining_slot_ids
+            },
         )
 
     partial = False
@@ -1571,6 +1622,7 @@ def _run_document_v2_batch(
     fill_attempt_count = 0
     final_fill_llm_calls = 0
     missing_slots_before_each_retry = []
+    rejection_reasons_by_slot = {slot_id: [] for slot_id in groups_by_id}
     document_scope = {"topic_id": "document", "name": "Entire document"}
 
     def run_generation_call(call_slots: list[dict], phase: str, batch_index: int) -> None:
@@ -1583,8 +1635,12 @@ def _run_document_v2_batch(
         prompt_started = time.perf_counter()
         prompt = _build_v2_prompt(
             document["id"], document_scope, difficulty, call_slots, requested,
-            accepted_stems, phase != "initial",
+            accepted_stems, phase != "initial", rejection_reasons_by_slot,
         )
+        rejection_counts_before_call = {
+            slot["slot_id"]: len(rejection_reasons_by_slot[slot["slot_id"]])
+            for slot in call_slots
+        }
         timings["prompt_construction_ms"] += round((time.perf_counter() - prompt_started) * 1000)
         generation_started = time.perf_counter()
         llm_calls += 1
@@ -1638,7 +1694,10 @@ def _run_document_v2_batch(
         except Exception as error:
             candidates = []
             results["rejected"] += requested
-            results["reasons"].append(f"response: {error}")
+            reason = f"response: {error}"
+            results["reasons"].append(reason)
+            for slot in call_slots:
+                rejection_reasons_by_slot[slot["slot_id"]].append(reason)
         generation_elapsed = round((time.perf_counter() - generation_started) * 1000)
         if phase == "initial":
             timings["initial_batch_generation_ms"] += generation_elapsed
@@ -1690,11 +1749,22 @@ def _run_document_v2_batch(
                     "latency_ms": 0,
                 })
             except Exception as error:
+                reason = str(error)
+                candidate_slot_id = str(raw.get("slot_id") or raw.get("concept_id") or "").strip() if isinstance(raw, dict) else ""
+                if candidate_slot_id not in remaining_slot_ids and candidate_index < len(call_slots):
+                    candidate_slot_id = str(call_slots[candidate_index]["slot_id"])
+                if candidate_slot_id in rejection_reasons_by_slot:
+                    rejection_reasons_by_slot[candidate_slot_id].append(reason)
                 results["rejected"] += 1
                 results["hard_rejections"] += 1
-                results["reasons"].append(str(error))
+                results["reasons"].append(reason)
                 print(f"[quiz-document-validation] discarded candidate: {error}")
         validation_elapsed = round((time.perf_counter() - validation_started) * 1000)
+        for slot in call_slots:
+            slot_id = slot["slot_id"]
+            if (slot_id in remaining_slot_ids
+                    and len(rejection_reasons_by_slot[slot_id]) == rejection_counts_before_call[slot_id]):
+                rejection_reasons_by_slot[slot_id].append("Model returned no valid candidate for the requested slot.")
         timings["validation_ms"] += validation_elapsed
         call_elapsed = round((time.perf_counter() - attempt_started) * 1000)
         if phase != "initial":
@@ -1723,6 +1793,10 @@ def _run_document_v2_batch(
             retry_state = {
                 "phase": phase, "attempt": retry_index,
                 "missing_slots": [slot["slot_id"] for slot in missing_slots],
+                "rejection_reasons_by_slot": {
+                    slot["slot_id"]: list(rejection_reasons_by_slot[slot["slot_id"]])
+                    for slot in missing_slots
+                },
             }
             missing_slots_before_each_retry.append(retry_state)
             print(f"[quiz-document-retry] {json.dumps(retry_state)}")
@@ -1734,6 +1808,7 @@ def _run_document_v2_batch(
     timings["repair_attempt_count"] = repair_attempt_count
     timings["fill_attempt_count"] = fill_attempt_count
     timings["missing_slots_before_each_retry"] = missing_slots_before_each_retry
+    timings["rejection_reasons_by_slot"] = rejection_reasons_by_slot
     timings["final_fill_llm_calls"] = final_fill_llm_calls
     accepted = [accepted_by_slot[slot["slot_id"]] for slot in authoritative_slots if slot["slot_id"] in accepted_by_slot]
     for question_id, question in enumerate(accepted, start=1):
@@ -1898,6 +1973,15 @@ def generate_quiz(
             valid_questions=len(questions),
             target_questions=question_count,
             failure_summary=summary,
+            missing_slots=[
+                retry_slot for retry_slot, reasons in timings.get("rejection_reasons_by_slot", {}).items()
+                if retry_slot not in {question.get("slot_id") for question in questions}
+            ],
+            rejection_reasons_by_slot={
+                retry_slot: reasons
+                for retry_slot, reasons in timings.get("rejection_reasons_by_slot", {}).items()
+                if retry_slot not in {question.get("slot_id") for question in questions}
+            },
         )
 
     quiz = {

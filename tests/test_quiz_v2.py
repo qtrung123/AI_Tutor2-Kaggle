@@ -113,7 +113,7 @@ class QuizV2Tests(unittest.TestCase):
         semantic.assert_not_called()
         return result, saved
 
-    def run_document_batch(self, payloads, question_count=10, difficulty="easy"):
+    def run_document_batch(self, payloads, question_count=10, difficulty="easy", document_id="lecture.pdf"):
         FakeBatchModel.payloads = list(payloads)
         slots = []
         for index in range(question_count):
@@ -131,7 +131,7 @@ class QuizV2Tests(unittest.TestCase):
             patch("backend.quiz_service.save_quiz_validation_event"),
         ):
             questions, validation, timings = _run_document_v2_batch(
-                {**DOCUMENT, "id": "lecture.pdf"}, difficulty, slots, "owner",
+                {**DOCUMENT, "id": document_id, "title": Path(document_id).stem}, difficulty, slots, "owner",
                 "qwen-2.5-3b-runtime", question_count, "run-id",
             )
         return questions, validation, timings, slots
@@ -487,6 +487,8 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(raised.exception.detail["valid_count"], 8)
         self.assertEqual(raised.exception.detail["missing_count"], 2)
         self.assertTrue(raised.exception.detail["failure_summary"])
+        self.assertEqual(raised.exception.detail["missing_slots"], ["S9", "S10"])
+        self.assertEqual(set(raised.exception.detail["rejection_reasons_by_slot"]), {"S9", "S10"})
         self.assertEqual(len(FakeBatchModel.configurations), 5)
         save.assert_not_called()
 
@@ -634,6 +636,10 @@ class QuizV2Tests(unittest.TestCase):
         self.assertIn("Write exactly 1", FakeBatchModel.prompts[2])
         self.assertIn("S15|Topic 3|", FakeBatchModel.prompts[2])
         self.assertNotIn("S14|Topic 2|", FakeBatchModel.prompts[2])
+        self.assertIn("TARGETED MISSING-SLOT FILL", FakeBatchModel.prompts[2])
+        self.assertIn("complete standalone question stem", FakeBatchModel.prompts[2])
+        self.assertIn("ACCEPTED STEMS", FakeBatchModel.prompts[2])
+        self.assertIn("duplicates an accepted question", FakeBatchModel.prompts[2])
         repaired_question = questions[-1]
         self.assertEqual(repaired_question["topic_id"], slots[-1]["topic_id"])
         self.assertEqual(repaired_question["concept_id"], slots[-1]["concept_id"])
@@ -662,6 +668,8 @@ class QuizV2Tests(unittest.TestCase):
         self.assertGreaterEqual(validation["hard_rejections"], 1)
         self.assertIn("Write exactly 1", FakeBatchModel.prompts[1])
         self.assertIn("Write exactly 1", FakeBatchModel.prompts[2])
+        self.assertIn("Question stem is empty, generic, or unusable", FakeBatchModel.prompts[2])
+        self.assertIn("EVIDENCE:", FakeBatchModel.prompts[2])
 
     def test_second_targeted_repair_completes_partial_first_repair(self):
         initial = [raw_question(index) for index in range(8)]
@@ -677,6 +685,25 @@ class QuizV2Tests(unittest.TestCase):
             [retry["missing_slots"] for retry in timings["missing_slots_before_each_retry"]],
             [["S9", "S10"], ["S10"]],
         )
+        self.assertIn("S9|Topic 1|", FakeBatchModel.prompts[1])
+        self.assertIn("S10|Topic 2|", FakeBatchModel.prompts[1])
+        self.assertNotIn("S8|Topic 4|", FakeBatchModel.prompts[1])
+        self.assertIn(raw_question(0)["question"], FakeBatchModel.prompts[1])
+        self.assertNotIn("S9|Topic 1|", FakeBatchModel.prompts[2])
+        self.assertIn("S10|Topic 2|", FakeBatchModel.prompts[2])
+
+    def test_targeted_fill_is_generic_across_arbitrary_document_names(self):
+        for document_id in ("distributed-systems-notes.pdf", "chapter_42.txt"):
+            with self.subTest(document_id=document_id):
+                self.setUp()
+                initial = [raw_question(index) for index in range(9)]
+                questions, _validation, timings, _slots = self.run_document_batch([
+                    {"questions": initial}, {"questions": [raw_question(9)]},
+                ], document_id=document_id)
+                self.assertEqual(len(questions), 10)
+                self.assertEqual(timings["repair_attempt_count"], 1)
+                self.assertIn("TARGETED MISSING-SLOT FILL", FakeBatchModel.prompts[1])
+                self.assertNotRegex("\n".join(FakeBatchModel.prompts), r"Uniprocessor|uniprocessor")
 
     def test_fill_can_use_two_attempts_and_stops_at_exact_count(self):
         initial = [raw_question(index) for index in range(9)]

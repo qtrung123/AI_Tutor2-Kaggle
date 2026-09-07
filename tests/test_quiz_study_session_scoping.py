@@ -117,7 +117,7 @@ class QuizStudySessionScopingTests(unittest.TestCase):
         generation_body = function_body("generateAssessmentQuiz")
         session_body = function_body("openStudySession")
 
-        self.assertIn("const requestedQuizKey = currentQuizKey()", generation_body)
+        self.assertIn("const requestedQuizKey = quizGenerationRequestKey(generationRequest)", generation_body)
         self.assertGreaterEqual(generation_body.count("requestedQuizKey !== currentQuizKey()"), 2)
         self.assertLess(generation_body.index("requestedQuizKey !== currentQuizKey()"), generation_body.index("currentQuiz = generatedQuiz"))
         self.assertIn("if (activeDocumentId !== documentId) return", session_body)
@@ -127,7 +127,7 @@ class QuizStudySessionScopingTests(unittest.TestCase):
         generation_body = function_body("generateAssessmentQuiz")
         mastery_body = function_body("renderPracticeMastery")
 
-        self.assertEqual(generation_body.count("await requestGeneratedQuiz()"), 1)
+        self.assertEqual(generation_body.count("await requestGeneratedQuiz(generationRequest)"), 1)
         quiz_assignment = generation_body.index("currentQuiz = generatedQuiz")
         null_attempt = generation_body.index("currentAttempt = null", quiz_assignment)
         immediate_render = generation_body.index("renderAssessmentQuiz()", null_attempt)
@@ -147,6 +147,25 @@ class QuizStudySessionScopingTests(unittest.TestCase):
         self.assertLess(saved_message, clear_failed_generation)
         self.assertLess(clear_failed_generation, generation_failed_message)
         self.assertIn("return;", generation_body[persisted_guard:clear_failed_generation])
+
+    def test_generation_and_regeneration_send_one_immutable_ui_configuration(self):
+        selection_body = function_body("selectedQuizGenerationRequest")
+        request_body = function_body("requestGeneratedQuiz")
+        generation_body = function_body("generateAssessmentQuiz")
+        regeneration_body = function_body("regenerateAssessmentQuiz")
+        regenerate_request_body = function_body("requestQuizRegeneration")
+
+        for field in ("document_id", "assessment_scope", "topic_id", "difficulty", "question_count", "model_id"):
+            self.assertIn(field, selection_body)
+        self.assertIn("body: JSON.stringify(request)", request_body)
+        self.assertIn("const generationRequest = selectedQuizGenerationRequest()", generation_body)
+        self.assertIn("quizGenerationRequestKey(generationRequest)", generation_body)
+        self.assertIn("requestGeneratedQuiz(generationRequest)", generation_body)
+        self.assertIn("const generationRequest = selectedQuizGenerationRequest()", regeneration_body)
+        for field in ("difficulty", "assessment_scope", "topic_id", "question_count", "model_id"):
+            self.assertIn(f"{field}: request.{field}", regenerate_request_body)
+        self.assertNotIn("selectedDifficulty()", request_body)
+        self.assertNotIn("selectedQuestionCount()", request_body)
 
 
 if __name__ == "__main__":

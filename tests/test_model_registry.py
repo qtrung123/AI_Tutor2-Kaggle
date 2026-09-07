@@ -66,7 +66,9 @@ class ModelRegistryTests(unittest.TestCase):
         summary = (ROOT / "backend" / "summary_service.py").read_text(encoding="utf-8")
         rag = (ROOT / "backend" / "rag_service.py").read_text(encoding="utf-8")
 
-        self.assertGreaterEqual(frontend.count('model_id: quizModelSelect?.value || "qwen3-4b"'), 2)
+        self.assertIn('model_id: quizModelSelect?.value || "qwen3-4b"', frontend)
+        self.assertIn("model_id: request.model_id", frontend)
+        self.assertIn("body: JSON.stringify(request)", frontend)
         self.assertGreaterEqual(main.count("or QUIZ_DEFAULT_GENERATION_MODEL"), 2)
         self.assertIn("model_id or DEFAULT_GENERATION_MODEL", summary)
         self.assertIn("resolve_generation_model(model_id)", rag)

@@ -1222,6 +1222,23 @@ function selectedTopicId() {
   return selectedAssessmentScope() === "document" ? "document" : (quizTopicSelect?.value || "");
 }
 
+function selectedQuizGenerationRequest() {
+  const assessmentScope = selectedAssessmentScope();
+  return {
+    document_id: quizDocumentSelect?.value || "",
+    assessment_scope: assessmentScope,
+    topic_id: assessmentScope === "topic" ? selectedTopicId() : null,
+    difficulty: selectedDifficulty(),
+    question_count: selectedQuestionCount(),
+    model_id: quizModelSelect?.value || "qwen3-4b"
+  };
+}
+
+function quizGenerationRequestKey(request) {
+  return [request.document_id, request.assessment_scope, request.topic_id || "document",
+    request.difficulty, request.question_count, request.model_id].join("::");
+}
+
 function getActiveStudySessionDocument() {
   const documentItem = indexedDocuments.find((item) => item.id === activeDocumentId);
   if (!documentItem) {
@@ -1565,7 +1582,7 @@ function selectedAssessmentScope() {
 }
 
 function currentQuizKey() {
-  return `${quizDocumentSelect?.value || ""}::${selectedTopicId()}::${selectedDifficulty()}`;
+  return quizGenerationRequestKey(selectedQuizGenerationRequest());
 }
 
 function updateDifficultyOptions() {
@@ -1702,22 +1719,19 @@ function setAssessmentLoading(isLoading) {
   generateQuizButton.disabled = isLoading;
   newQuizButton.disabled = isLoading;
   resetQuizButton.disabled = isLoading;
+  [quizDocumentSelect, quizScopeSelect, quizTopicSelect, quizDifficultySelect,
+    quizQuestionCountSelect, quizModelSelect].forEach((control) => {
+    if (control) control.disabled = isLoading;
+  });
 }
 
-async function requestGeneratedQuiz() {
+async function requestGeneratedQuiz(request) {
   const response = await fetch(QUIZ_GENERATE_API_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({
-      document_id: quizDocumentSelect.value,
-      assessment_scope: selectedAssessmentScope(),
-      topic_id: selectedAssessmentScope() === "topic" ? selectedTopicId() : null,
-      difficulty: selectedDifficulty(),
-      question_count: selectedQuestionCount(),
-      model_id: quizModelSelect?.value || "qwen3-4b"
-    })
+    body: JSON.stringify(request)
   });
 
   if (!response.ok) {
@@ -1752,18 +1766,18 @@ async function requestQuizDetail(documentId) {
   return response.json();
 }
 
-async function requestQuizRegeneration(documentId) {
+async function requestQuizRegeneration(documentId, request) {
   const response = await fetch(`${QUIZ_API_BASE_URL}/${encodeURIComponent(documentId)}/regenerate`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      difficulty: selectedDifficulty(),
-      assessment_scope: selectedAssessmentScope(),
-      topic_id: selectedAssessmentScope() === "topic" ? selectedTopicId() : null,
-      question_count: currentQuiz?.assessment_plan?.target_questions || selectedQuestionCount(),
-      model_id: quizModelSelect?.value || "qwen3-4b"
+      difficulty: request.difficulty,
+      assessment_scope: request.assessment_scope,
+      topic_id: request.topic_id,
+      question_count: request.question_count,
+      model_id: request.model_id
     })
   });
   if (!response.ok) {
@@ -2159,14 +2173,15 @@ async function generateAssessmentQuiz() {
     return;
   }
 
-  const requestedQuizKey = currentQuizKey();
+  const generationRequest = selectedQuizGenerationRequest();
+  const requestedQuizKey = quizGenerationRequestKey(generationRequest);
   setAssessmentLoading(true);
   quizList.innerHTML = "";
   assessmentTitle.textContent = "Generating assessment";
 
   let generatedQuiz = null;
   try {
-    generatedQuiz = await requestGeneratedQuiz();
+    generatedQuiz = await requestGeneratedQuiz(generationRequest);
     if (requestedQuizKey !== currentQuizKey()) return;
     currentQuiz = generatedQuiz;
     currentAttempt = null;
@@ -2213,12 +2228,16 @@ async function regenerateAssessmentQuiz() {
     return;
   }
 
+  const generationRequest = selectedQuizGenerationRequest();
+  const requestedQuizKey = quizGenerationRequestKey(generationRequest);
   setAssessmentLoading(true);
   quizList.innerHTML = "";
   assessmentTitle.textContent = "Regenerating assessment";
 
   try {
-    currentQuiz = await requestQuizRegeneration(quizDocumentSelect.value);
+    const regeneratedQuiz = await requestQuizRegeneration(generationRequest.document_id, generationRequest);
+    if (requestedQuizKey !== currentQuizKey()) return;
+    currentQuiz = regeneratedQuiz;
     currentAttempt = null;
     quizAttemptSummary = null;
     quizAnswers = {};
