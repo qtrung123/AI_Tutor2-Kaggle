@@ -964,6 +964,7 @@ def _build_v2_prompt(
     accepted_stems: list[str],
     repair: bool,
     rejection_reasons_by_slot: dict[str, list[str]] | None = None,
+    retry_attempt_by_slot: dict[str, int] | None = None,
 ) -> str:
     cognitive_intent = {
         "easy": "recall",
@@ -975,7 +976,7 @@ def _build_v2_prompt(
         if group.get("topic_name") else f"{group['slot_id']}|{group['evidence_excerpt']}|cognitive_intent={cognitive_intent}"
         for group in groups
     )
-    avoid = " | ".join(stem[:100] for stem in accepted_stems) if repair else ""
+    avoid = "\n".join(f"- {stem}" for stem in accepted_stems) if repair else ""
     repair_lines = []
     if repair:
         repair_lines.append(
@@ -985,10 +986,24 @@ def _build_v2_prompt(
         )
         for group in groups:
             reasons = (rejection_reasons_by_slot or {}).get(str(group["slot_id"]), [])
+            attempt = int((retry_attempt_by_slot or {}).get(str(group["slot_id"]), 1))
+            repair_lines.append(
+                f"{group['slot_id']} diversification attempt {attempt}: use a different question angle and "
+                "formulation from every forbidden question, while staying within this slot's evidence."
+            )
+            if group.get("evidence_rotated"):
+                repair_lines.append(f"{group['slot_id']} uses alternative evidence; base the question on that new evidence.")
+            if group.get("slot_replanned"):
+                repair_lines.append(
+                    f"{group['slot_id']} alone was replanned with unused evidence from the same topic. "
+                    "Keep its requested difficulty and do not use another topic."
+                )
             if reasons:
                 repair_lines.append(f"{group['slot_id']} previous rejection: {'; '.join(reasons[-3:])}")
     if avoid:
-        repair_lines.append(f"ACCEPTED STEMS — DO NOT REPEAT: {avoid}")
+        repair_lines.append(
+            f"ACCEPTED STEMS / FORBIDDEN QUESTIONS (all accepted stems; do not repeat or closely paraphrase):\n{avoid}"
+        )
     repair_line = "\n".join(repair_lines) + ("\n" if repair_lines else "")
     difficulty_contracts = {
         "easy": (
@@ -1554,6 +1569,31 @@ def _document_v2_slots(
                 _v2_excerpt(chunk.get("content", ""), index, len(evidence_chunks))
                 for index, chunk in enumerate(evidence_chunks)
             ]
+            evidence_variants = []
+            for chunk, excerpt in zip(evidence_chunks, excerpts):
+                chunk_id = str((chunk.get("metadata") or {}).get("chunk_id") or "").strip()
+                if not chunk_id:
+                    continue
+                content = re.sub(r"\s+", " ", str(chunk.get("content") or "")).strip()
+                angles = [
+                    part.strip()[:280]
+                    for part in re.split(r"(?<=[.!?])\s+|\s*[;•]\s*", content)
+                    if len(part.split()) >= 5
+                ]
+                for angle in angles or [excerpt]:
+                    if angle and all(angle != variant["evidence_excerpt"] for variant in evidence_variants):
+                        evidence_variants.append({
+                            "evidence_excerpt": angle, "source_chunk_ids": [chunk_id],
+                        })
+            resolved_ids = {chunk_id for variant in evidence_variants for chunk_id in variant["source_chunk_ids"]}
+            topic_evidence_variants = []
+            for chunk_index, chunk in enumerate(chunks):
+                chunk_id = str((chunk.get("metadata") or {}).get("chunk_id") or "").strip()
+                excerpt = _v2_excerpt(chunk.get("content", ""), chunk_index, len(chunks))
+                if chunk_id and chunk_id not in resolved_ids and excerpt:
+                    topic_evidence_variants.append({
+                        "evidence_excerpt": excerpt, "source_chunk_ids": [chunk_id],
+                    })
             slots.append({
                 **concept,
                 "slot_id": f"S{len(slots) + 1}",
@@ -1562,6 +1602,8 @@ def _document_v2_slots(
                 "concept_plan_id": str(topic_plan["concept_plan_id"]),
                 "assessment_capacity": int(topic_plan["assessment_capacity"]),
                 "evidence_excerpt": " ".join(excerpts)[:560],
+                "evidence_variants": evidence_variants,
+                "topic_evidence_variants": topic_evidence_variants,
             })
     return slots
 
@@ -1623,19 +1665,51 @@ def _run_document_v2_batch(
     final_fill_llm_calls = 0
     missing_slots_before_each_retry = []
     rejection_reasons_by_slot = {slot_id: [] for slot_id in groups_by_id}
+    retry_attempt_by_slot = {slot_id: 0 for slot_id in groups_by_id}
+    used_replan_evidence_by_topic: dict[str, set[str]] = {}
+    for slot in authoritative_slots:
+        used_replan_evidence_by_topic.setdefault(str(slot.get("topic_id") or "document"), set()).update(
+            str(chunk_id) for chunk_id in slot.get("source_chunk_ids") or [] if chunk_id
+        )
+    candidate_stems_by_attempt = []
     document_scope = {"topic_id": "document", "name": "Entire document"}
+
+    def diversified_slot(slot: dict) -> dict:
+        """Rotate concept evidence, then replan only this slot within its topic."""
+        slot_id = str(slot["slot_id"])
+        attempt = retry_attempt_by_slot[slot_id]
+        variants = list(slot.get("evidence_variants") or [])
+        if attempt >= 2 and variants:
+            variant_index = attempt - 2
+            if variant_index < len(variants):
+                return {**slot, **variants[variant_index], "evidence_rotated": True}
+        if attempt >= 4:
+            topic_id = str(slot.get("topic_id") or "document")
+            used = used_replan_evidence_by_topic.setdefault(topic_id, set())
+            for variant in slot.get("topic_evidence_variants") or []:
+                variant_ids = set(variant.get("source_chunk_ids") or [])
+                if variant_ids and not (variant_ids & used):
+                    used.update(variant_ids)
+                    return {**slot, **variant, "evidence_rotated": True, "slot_replanned": True}
+        return dict(slot)
 
     def run_generation_call(call_slots: list[dict], phase: str, batch_index: int) -> None:
         nonlocal llm_calls, repair_llm_calls, repair_attempt_count, fill_attempt_count, final_fill_llm_calls
         attempt_started = time.perf_counter()
         requested = len(call_slots)
+        if phase != "initial":
+            for slot in call_slots:
+                retry_attempt_by_slot[str(slot["slot_id"])] += 1
+            call_slots = [diversified_slot(slot) for slot in call_slots]
         call_slot_ids = {slot["slot_id"] for slot in call_slots}
+        validation_groups = {**groups_by_id, **{slot["slot_id"]: slot for slot in call_slots}}
         if not requested:
             return
         prompt_started = time.perf_counter()
         prompt = _build_v2_prompt(
             document["id"], document_scope, difficulty, call_slots, requested,
             accepted_stems, phase != "initial", rejection_reasons_by_slot,
+            retry_attempt_by_slot,
         )
         rejection_counts_before_call = {
             slot["slot_id"]: len(rejection_reasons_by_slot[slot["slot_id"]])
@@ -1684,6 +1758,15 @@ def _run_document_v2_batch(
             if not isinstance(candidates, list):
                 raise ValueError("Quiz JSON does not contain a questions list.")
             candidates = _bind_full_v2_response_to_slots(candidates, call_slots)
+            candidate_stems_by_attempt.append({
+                "attempt": llm_calls, "phase": phase,
+                "slot_ids": [str(slot["slot_id"]) for slot in call_slots],
+                "stems": [
+                    _clean_inline_text(candidate.get("question", ""))
+                    for candidate in candidates if isinstance(candidate, dict)
+                ],
+            })
+            print(f"[quiz-document-candidate-stems] {json.dumps(candidate_stems_by_attempt[-1])}")
             print(
                 f"[quiz-document-ollama] attempt={llm_calls}, phase={phase}, batch={batch_index}, "
                 f"returned={len(candidates)}, "
@@ -1713,7 +1796,7 @@ def _run_document_v2_batch(
                     raise ValueError("Question uses a slot_id outside its requested batch.")
                 slot = groups_by_id.get(slot_id) or {}
                 normalized, warnings = _validate_v2_question(
-                    raw, groups_by_id, remaining_slot_ids, accepted_stems, difficulty,
+                    raw, validation_groups, remaining_slot_ids, accepted_stems, difficulty,
                     slot_positions.get(slot_id, len(accepted_by_slot)) + 1,
                     document_scope, int(slot.get("assessment_capacity", 0)),
                 )
@@ -1810,6 +1893,7 @@ def _run_document_v2_batch(
     timings["missing_slots_before_each_retry"] = missing_slots_before_each_retry
     timings["rejection_reasons_by_slot"] = rejection_reasons_by_slot
     timings["final_fill_llm_calls"] = final_fill_llm_calls
+    timings["candidate_stems_by_attempt"] = candidate_stems_by_attempt
     accepted = [accepted_by_slot[slot["slot_id"]] for slot in authoritative_slots if slot["slot_id"] in accepted_by_slot]
     for question_id, question in enumerate(accepted, start=1):
         question["id"] = question_id
