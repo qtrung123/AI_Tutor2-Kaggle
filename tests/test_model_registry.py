@@ -29,6 +29,25 @@ class ModelRegistryTests(unittest.TestCase):
             "hf.co/Qwen/Qwen3-4B-GGUF:Q4_K_M",
         )
 
+    def test_environment_configured_allowlist_accepts_both_public_ids(self):
+        with patch.object(model_registry, "GENERATION_MODELS", ("qwen-2.5-7b", "qwen3-4b")):
+            self.assertEqual(
+                model_registry.resolve_generation_model("qwen-2.5-7b"),
+                "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M",
+            )
+            self.assertEqual(
+                model_registry.resolve_generation_model("qwen3-4b"),
+                "hf.co/Qwen/Qwen3-4B-GGUF:Q4_K_M",
+            )
+
+    def test_kaggle_startup_repairs_an_older_environment_allowlist(self):
+        startup = (ROOT / "deployment" / "start_kaggle.sh").read_text(encoding="utf-8")
+        notebook = (ROOT / "kaggle_run.ipynb").read_text(encoding="utf-8")
+
+        self.assertIn("for required_model_id in qwen-2.5-7b qwen3-4b", startup)
+        self.assertIn('case ",$OLLAMA_GENERATION_MODELS,"', startup)
+        self.assertIn('OLLAMA_GENERATION_MODELS = \\"qwen-2.5-7b,qwen3-4b\\"', notebook)
+
     def test_feature_defaults_keep_chat_summary_on_7b_and_quiz_on_4b(self):
         self.assertEqual(config.DEFAULT_GENERATION_MODEL, "qwen-2.5-7b")
         self.assertEqual(config.QUIZ_DEFAULT_GENERATION_MODEL, "qwen3-4b")
