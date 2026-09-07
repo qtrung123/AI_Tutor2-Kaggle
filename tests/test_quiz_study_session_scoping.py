@@ -13,7 +13,7 @@ SCRIPT = (Path(__file__).parents[1] / "frontend" / "app.js").read_text(encoding=
 
 
 def function_body(name: str) -> str:
-    match = re.search(rf"async function {name}\([^)]*\) \{{", SCRIPT)
+    match = re.search(rf"(?:async )?function {name}\([^)]*\) \{{", SCRIPT)
     if not match:
         raise AssertionError(f"{name} was not found")
     start, depth = match.end(), 1
@@ -95,6 +95,33 @@ class QuizStudySessionScopingTests(unittest.TestCase):
         self.assertIn("attempt.document_id === requestDocumentId", history_body)
         self.assertIn("!== requestDocumentId) return", history_body)
         self.assertLess(detail_body.index("currentQuiz = null"), detail_body.index("requestQuizDetail(documentId)"))
+
+    def test_two_new_documents_without_attempts_render_as_unassessed(self):
+        """A and B both use the generic null-attempt path; no document special case is allowed."""
+        mastery_body = function_body("renderPracticeMastery")
+
+        self.assertIn("currentAttempt?.mastery_by_topic || {}", mastery_body)
+        self.assertIn("currentAttempt?.mastery", mastery_body)
+        self.assertNotRegex(mastery_body, r"[AaBb]\.pdf|document_[ab]")
+
+    def test_assessed_document_keeps_attempt_mastery_precedence(self):
+        mastery_body = function_body("renderPracticeMastery")
+
+        attempt_rows = mastery_body.index("currentAttempt?.mastery_by_topic")
+        legacy_attempt_row = mastery_body.index("currentAttempt?.mastery)")
+        dashboard_fallback = mastery_body.index("dashboardData.mastery || []")
+        self.assertLess(attempt_rows, legacy_attempt_row)
+        self.assertLess(legacy_attempt_row, dashboard_fallback)
+
+    def test_switching_c_to_a_to_b_rejects_stale_quiz_and_session_responses(self):
+        generation_body = function_body("generateAssessmentQuiz")
+        session_body = function_body("openStudySession")
+
+        self.assertIn("const requestedQuizKey = currentQuizKey()", generation_body)
+        self.assertGreaterEqual(generation_body.count("requestedQuizKey !== currentQuizKey()"), 2)
+        self.assertLess(generation_body.index("requestedQuizKey !== currentQuizKey()"), generation_body.index("currentQuiz = generatedQuiz"))
+        self.assertIn("if (activeDocumentId !== documentId) return", session_body)
+        self.assertLess(session_body.index("activeDocumentId !== documentId"), session_body.index("quizDocumentSelect.value = documentId"))
 
 
 if __name__ == "__main__":

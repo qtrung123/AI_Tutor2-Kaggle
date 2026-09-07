@@ -546,6 +546,7 @@ async function openStudySession(documentId, tab = "material", topicId = "") {
     console.error("Could not prepare the Study Session conversation", error);
     showToast(error.message || "Could not scope the tutor to this document");
   }
+  if (activeDocumentId !== documentId) return;
   sessionDocumentName.textContent = documentItem.title;
   const matchingMaterial = (dashboardData?.materials || []).find((item) => item.document_id === documentId);
   const assessed = matchingMaterial?.assessed_topic_count || 0;
@@ -2157,12 +2158,15 @@ async function generateAssessmentQuiz() {
     return;
   }
 
+  const requestedQuizKey = currentQuizKey();
   setAssessmentLoading(true);
   quizList.innerHTML = "";
   assessmentTitle.textContent = "Generating assessment";
 
   try {
-    currentQuiz = await requestGeneratedQuiz();
+    const generatedQuiz = await requestGeneratedQuiz();
+    if (requestedQuizKey !== currentQuizKey()) return;
+    currentQuiz = generatedQuiz;
     currentAttempt = null;
     quizAttemptSummary = null;
     quizAnswers = {};
@@ -2176,6 +2180,7 @@ async function generateAssessmentQuiz() {
       ? `Quiz ready with ${currentQuiz.questions.length}/${currentQuiz.assessment_plan?.target_questions || selectedQuestionCount()} grounded questions`
       : "Quiz ready");
   } catch (error) {
+    if (requestedQuizKey !== currentQuizKey()) return;
     currentQuiz = null;
     quizAnswers = {};
     quizList.innerHTML = "";
@@ -2244,8 +2249,8 @@ function renderPracticeMastery() {
     return;
   }
   const topicNames = Object.fromEntries((currentQuiz?.questions || []).map((question) => [question.topic_id, question.topic_name || question.topic_id]));
-  let masteries = Object.values(currentAttempt.mastery_by_topic || {});
-  if (!masteries.length && currentAttempt.mastery) masteries = [currentAttempt.mastery];
+  let masteries = Object.values(currentAttempt?.mastery_by_topic || {});
+  if (!masteries.length && currentAttempt?.mastery) masteries = [currentAttempt.mastery];
   if (!masteries.length && dashboardData) {
     const represented = new Set((currentQuiz?.questions || []).map((question) => question.topic_id));
     masteries = (dashboardData.mastery || []).filter((mastery) => mastery.document_id === currentQuiz.document_id && represented.has(mastery.topic_id));
