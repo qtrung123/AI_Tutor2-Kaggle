@@ -2164,8 +2164,9 @@ async function generateAssessmentQuiz() {
   quizList.innerHTML = "";
   assessmentTitle.textContent = "Generating assessment";
 
+  let generatedQuiz = null;
   try {
-    const generatedQuiz = await requestGeneratedQuiz();
+    generatedQuiz = await requestGeneratedQuiz();
     if (requestedQuizKey !== currentQuizKey()) return;
     currentQuiz = generatedQuiz;
     currentAttempt = null;
@@ -2182,6 +2183,11 @@ async function generateAssessmentQuiz() {
       : "Quiz ready");
   } catch (error) {
     if (requestedQuizKey !== currentQuizKey()) return;
+    if (generatedQuiz) {
+      console.error("Quiz was generated and persisted, but the UI could not render it", error);
+      showToast("Quiz was generated and saved, but the screen could not update");
+      return;
+    }
     currentQuiz = null;
     quizAnswers = {};
     quizList.innerHTML = "";

@@ -123,6 +123,31 @@ class QuizStudySessionScopingTests(unittest.TestCase):
         self.assertIn("if (activeDocumentId !== documentId) return", session_body)
         self.assertLess(session_body.index("activeDocumentId !== documentId"), session_body.index("quizDocumentSelect.value = documentId"))
 
+    def test_first_generated_quiz_renders_immediately_with_null_attempt(self):
+        generation_body = function_body("generateAssessmentQuiz")
+        mastery_body = function_body("renderPracticeMastery")
+
+        self.assertEqual(generation_body.count("await requestGeneratedQuiz()"), 1)
+        quiz_assignment = generation_body.index("currentQuiz = generatedQuiz")
+        null_attempt = generation_body.index("currentAttempt = null", quiz_assignment)
+        immediate_render = generation_body.index("renderAssessmentQuiz()", null_attempt)
+        self.assertLess(quiz_assignment, null_attempt)
+        self.assertLess(null_attempt, immediate_render)
+        self.assertIn("currentAttempt?.mastery_by_topic || {}", mastery_body)
+        self.assertIn("Mastery evidence is not available for this quiz.", mastery_body)
+
+    def test_post_persistence_render_failure_is_not_reported_as_generation_failure(self):
+        generation_body = function_body("generateAssessmentQuiz")
+
+        persisted_guard = generation_body.index("if (generatedQuiz)")
+        saved_message = generation_body.index("Quiz was generated and saved")
+        clear_failed_generation = generation_body.index("currentQuiz = null", persisted_guard)
+        generation_failed_message = generation_body.index("Quiz generation failed")
+        self.assertLess(persisted_guard, saved_message)
+        self.assertLess(saved_message, clear_failed_generation)
+        self.assertLess(clear_failed_generation, generation_failed_message)
+        self.assertIn("return;", generation_body[persisted_guard:clear_failed_generation])
+
 
 if __name__ == "__main__":
     unittest.main()
