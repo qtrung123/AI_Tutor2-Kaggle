@@ -1081,8 +1081,9 @@ def _build_v2_prompt(
         'JSON only: {"questions":[{"slot_id":"S1","question_type":"single_choice|true_false|multi_select","question":"...","options":["..."],"correct_answers":[0],"explanation":"..."}]}\n'
         "Use each evidence slot exactly once and only its evidence. single_choice uses four options and one answer; "
         "true_false uses exactly True/False and one answer; multi_select uses four options, two or more answers, and at least one incorrect option. "
-        "Pick each question_type to fit its evidence; initial batch must include single_choice, true_false, and "
-        "multi_select at least once, no fixed ratio. On retries, prefer another valid type or angle before fallback. "
+        "Choose each question_type from what its evidence can assess naturally; include single_choice, true_false, "
+        "and multi_select at least once each, with no fixed ratio. On retries, try another valid question_type "
+        "or a different same-topic angle before fallback. "
         "Question <=18 words, each option <=10 words, explanation <=16 words. No markdown or extra fields.\n"
         f"{difficulty_contracts[difficulty]}{repair_line}EVIDENCE:\n{evidence}"
     )
