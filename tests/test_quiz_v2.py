@@ -474,7 +474,7 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(timings["final_fill_llm_calls"], 1)
         self.assertEqual(len(saved), 1)
 
-    def test_repair_failure_reports_counts_and_does_not_persist(self):
+    def test_topic_repair_exhaustion_uses_fallback_and_persists_exact_count(self):
         FakeBatchModel.payloads = [
             {"questions": [raw_question(index) for index in range(8)]},
             {"questions": []}, {"questions": []},
@@ -484,18 +484,17 @@ class QuizV2Tests(unittest.TestCase):
             patch("backend.quiz_service.get_topic_chunks", return_value=[CHUNK]),
             patch("backend.quiz_service.ChatOllama", FakeBatchModel),
             patch("backend.quiz_service.save_quiz_validation_event"),
-            patch("backend.quiz_service.save_quiz") as save,
+            patch("backend.quiz_service.save_quiz", side_effect=lambda _d, _v, quiz, _o: quiz) as save,
         ):
-            with self.assertRaises(QuizGenerationError) as raised:
-                _generate_topic_quiz_v2(DOCUMENT, TOPIC, "easy", "owner", "qwen-3b", False)
-        self.assertEqual(raised.exception.detail["requested_count"], 10)
-        self.assertEqual(raised.exception.detail["valid_count"], 8)
-        self.assertEqual(raised.exception.detail["missing_count"], 2)
-        self.assertTrue(raised.exception.detail["failure_summary"])
-        self.assertEqual(raised.exception.detail["missing_slots"], ["S9", "S10"])
-        self.assertEqual(set(raised.exception.detail["rejection_reasons_by_slot"]), {"S9", "S10"})
+            result = _generate_topic_quiz_v2(DOCUMENT, TOPIC, "easy", "owner", "qwen-3b", False)
+        self.assertEqual(len(result["questions"]), 10)
+        self.assertEqual(result["assessment_plan"]["timings_ms"]["deterministic_fallback_count"], 2)
+        self.assertEqual(
+            [question["source_chunk_ids"] for question in result["questions"][-2:]],
+            [["canonical_chunk_1"], ["canonical_chunk_1"]],
+        )
         self.assertEqual(len(FakeBatchModel.configurations), 5)
-        save.assert_not_called()
+        save.assert_called_once()
 
     def test_wrong_model_slot_is_corrected_by_backend_order_for_full_topic_batch(self):
         questions = [raw_question(index) for index in range(10)]
@@ -729,7 +728,8 @@ class QuizV2Tests(unittest.TestCase):
             {"questions": []}, {"questions": []},
             {"questions": [raw_question(8), raw_question(9)]},
         ])
-        self.assertEqual(len(questions), 8)
+        self.assertEqual(len(questions), 10)
+        self.assertEqual(timings["deterministic_fallback_count"], 2)
         self.assertEqual(timings["repair_attempt_count"], 2)
         self.assertEqual(timings["fill_attempt_count"], 2)
         self.assertEqual(timings["llm_calls"], 5)

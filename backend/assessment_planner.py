@@ -204,9 +204,9 @@ def build_structural_seeds(topic: dict, chunks: list[dict]) -> list[dict]:
                 grouped.setdefault(subtopic_id, []).append(clipped)
                 used_memberships.add(membership)
 
-    # Preserve topic-level evidence only when its primary assignment is this
-    # topic with no subtopic, clipped to the top-level interval. Do not duplicate
-    # a chunk already used by one of this topic's structural seeds.
+    # Resolve topic-level evidence by structural overlap, not only by the
+    # winner-takes-all primary topic_id assigned during chunking. The clipped
+    # fragment keeps adjacent topic text out of this topic's evidence block.
     topic_id = str(topic.get("topic_id") or "").strip()
     used_chunk_ids = {chunk_id for _, chunk_id in used_memberships}
     topic_group = []
@@ -214,7 +214,7 @@ def build_structural_seeds(topic: dict, chunks: list[dict]) -> list[dict]:
         metadata, chunk_id = chunk.get("metadata") or {}, _chunk_id(chunk)
         if not chunk_id or chunk_id in used_chunk_ids:
             continue
-        if str(metadata.get("topic_id") or "").strip() != topic_id or _subtopic_id(chunk):
+        if _subtopic_id(chunk) and str(metadata.get("topic_id") or "").strip() == topic_id:
             continue
         clipped, overlap = _clip_to_topic_gaps(
             chunk, topic["boundary"], [subtopic["boundary"] for subtopic in subtopics]
@@ -228,6 +228,20 @@ def build_structural_seeds(topic: dict, chunks: list[dict]) -> list[dict]:
     structural_order = [str(item.get("subtopic_id") or "") for item in subtopics]
     order = ([""] if "" in grouped else []) + structural_order
     return _seeds_from_groups(topic, grouped, order)
+
+
+def resolve_topic_evidence(topic: dict, chunks: list[dict]) -> list[dict]:
+    """Return unique, boundary-clipped evidence for one usable schema topic."""
+    resolved = []
+    seen = set()
+    for seed in build_structural_seeds(topic, chunks):
+        for chunk in seed.get("chunks") or []:
+            chunk_id = _chunk_id(chunk)
+            key = (chunk_id, str((chunk.get("metadata") or {}).get("evidence_subtopic_id") or ""))
+            if chunk_id and key not in seen and str(chunk.get("content") or "").strip():
+                seen.add(key)
+                resolved.append(chunk)
+    return resolved
 
 
 def resolve_concept_evidence(topic: dict, chunks: list[dict], concept: dict) -> list[dict]:

@@ -8,6 +8,7 @@ from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 
 from backend.topic_extractor import TOPIC_SCHEMA_VERSION, TopicExtractor, ollama_heading_refiner
+from backend.assessment_planner import resolve_topic_evidence
 from backend.auth_store import LEGACY_USER_ID
 from backend.indexed_document_store import (
     delete_indexed_document,
@@ -141,6 +142,11 @@ def add_topic_metadata(documents, chunks, ids, extractor: TopicExtractor | None 
     extractor.map_chunks(chunks, documents, topics, headings)
     for chunk, chunk_id in zip(chunks, ids):
         chunk.metadata["chunk_id"] = chunk_id
+    chunk_records = [{"content": chunk.page_content, "metadata": dict(chunk.metadata)} for chunk in chunks]
+    usable_topics = [topic for topic in topics if resolve_topic_evidence(topic, chunk_records)]
+    if usable_topics and len(usable_topics) != len(topics):
+        extractor.map_chunks(chunks, documents, usable_topics, headings)
+    topics = usable_topics
     return topics
 
 

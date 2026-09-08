@@ -96,6 +96,25 @@ class SummaryFeatureTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["llm_calls"], 2)
         self.assertEqual(result["metrics"]["topic_generation_usage"]["input_tokens"], 100)
 
+    def test_boundary_topic_with_no_meaningful_evidence_is_excluded(self):
+        document = indexed_document_store.get_indexed_document(self.alice, "lecture.pdf")
+        topics = [
+            {"topic_id": "usable", "name": "Usable", "boundary": {"start": {}, "end": {}}},
+            {"topic_id": "empty", "name": "Empty", "boundary": {"start": {}, "end": {}}},
+        ]
+        indexed_document_store.upsert_indexed_document(self.alice, "lecture.pdf", {**document, "topics": topics})
+        FakeLlm.responses = [
+            FakeResponse('{"topics":[{"topic_id":"usable","overview":"Usable grounded evidence is summarized.","subsections":[]}]}', 20, 10),
+            FakeResponse('{"overview":"Grounded document overview.","key_takeaways":["One","Two","Three","Four"]}', 10, 5),
+        ]
+        with patch.object(summary_service, "get_schema_topic_evidence", side_effect=lambda _d, t, _o: (
+            [{"content": "Usable grounded evidence", "metadata": {"chunk_id": "c1"}}]
+            if t["topic_id"] == "usable" else []
+        )), patch.object(summary_service, "ChatOllama", FakeLlm), \
+             patch.object(summary_service, "resolve_generation_model", return_value="runtime-model"):
+            result = summary_service.generate_document_summary(self.alice, "lecture.pdf", regenerate=True)
+        self.assertEqual([item["topic_id"] for item in result["topic_summaries"]], ["usable"])
+
     def test_cache_reuse_regeneration_and_model_staleness(self):
         first, _retrievals, _prompts = self.generate()
         with patch.object(summary_service, "get_topic_chunks") as retrieval, \
@@ -206,6 +225,24 @@ class SummaryFeatureTests(unittest.TestCase):
         ]}]
         validated = summary_service._validated_topic_summaries(raw, topics, evidence)
         self.assertEqual([item["subtopic_id"] for item in validated[0]["subsections"]], ["scheduling", "memory"])
+
+    def test_empty_unsupported_and_heading_only_subtopics_are_omitted(self):
+        topics = [{"topic_id": "rtos", "name": "RTOS", "subtopics": [
+            {"subtopic_id": "scheduling", "name": "Scheduling"},
+            {"subtopic_id": "unsupported", "name": "Interrupt Handling"},
+            {"subtopic_id": "trivial", "name": "Memory Management"},
+            {"subtopic_id": "empty", "name": "Device Drivers"},
+        ]}]
+        evidence = [(topics[0], [{"content": "RTOS scheduling assigns priorities to runnable tasks.", "metadata": {}}])]
+        raw = [{"topic_id": "rtos", "overview": "RTOS scheduling assigns priorities to runnable tasks.", "subsections": [
+            {"subtopic_id": "empty", "content_type": "bullets", "paragraph": "", "bullets": [], "table": {"headers": [], "rows": []}},
+            {"subtopic_id": "trivial", "content_type": "paragraph", "paragraph": "Memory management overview.", "bullets": [], "table": {"headers": [], "rows": []}},
+            {"subtopic_id": "scheduling", "content_type": "paragraph", "paragraph": "Scheduling assigns priorities to runnable tasks.", "bullets": [], "table": {"headers": [], "rows": []}},
+            {"subtopic_id": "unsupported", "content_type": "paragraph", "paragraph": "Interrupt handling is not detailed in the provided evidence.", "bullets": [], "table": {"headers": [], "rows": []}},
+        ]}]
+        validated = summary_service._validated_topic_summaries(raw, topics, evidence)
+        self.assertEqual([item["subtopic_id"] for item in validated[0]["subsections"]], ["scheduling"])
+        self.assertEqual(validated[0]["subsections"][0]["content"]["text"], "Scheduling assigns priorities to runnable tasks.")
 
     def test_incomplete_subtopic_set_with_wrong_ids_is_not_guessed(self):
         topics = [{"topic_id": "rtos", "name": "RTOS", "subtopics": [

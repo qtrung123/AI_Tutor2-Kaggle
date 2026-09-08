@@ -39,7 +39,7 @@ from backend.assessment_planner import (
     allocate_document_topics,
     build_topic_plan,
     is_valid_concept_plan,
-    resolve_concept_evidence,
+    resolve_concept_evidence, resolve_topic_evidence,
     planner_input_fingerprint,
 )
 from backend.quiz_options import canonicalize_option, strip_leading_option_label
@@ -294,6 +294,13 @@ def get_document_chunks(document_id: str, owner_id: str = LEGACY_USER_ID) -> lis
         if chunk["metadata"].get("owner_id") == owner_id
         and chunk["metadata"].get("document_id", chunk["metadata"].get("source")) == document_id
     ]
+
+
+def get_schema_topic_evidence(document_id: str, topic: dict, owner_id: str = LEGACY_USER_ID) -> list[dict]:
+    """Retrieve owner/document-scoped evidence and isolate it to one schema boundary."""
+    if not isinstance(topic.get("boundary"), dict):
+        return get_topic_chunks(document_id, str(topic["topic_id"]), owner_id)
+    return resolve_topic_evidence(topic, get_document_chunks(document_id, owner_id))
 
 
 def _format_context(chunks: list[dict]) -> str:
@@ -1255,11 +1262,7 @@ def _generate_topic_quiz_v2(
     generation_run_id = str(uuid4())
 
     stage_started = time.perf_counter()
-    chunks = (
-        get_document_chunks(document["id"], owner_id)
-        if isinstance(topic.get("boundary"), dict)
-        else get_topic_chunks(document["id"], str(topic["topic_id"]), owner_id)
-    )
+    chunks = get_schema_topic_evidence(document["id"], topic, owner_id)
     topic_plan, plan_cache_timing = _get_or_build_topic_plan(document, topic, chunks, owner_id)
     timings["concept_plan_cache_hit"] = plan_cache_timing["cache_hit"]
     timings["concept_plan_cache_lookup_ms"] = plan_cache_timing["lookup_ms"]
@@ -1478,6 +1481,51 @@ def _generate_topic_quiz_v2(
         if phase != "initial":
             repair_ms += round((time.perf_counter() - call_started) * 1000)
 
+    deterministic_fallback_count = 0
+    for fallback_index, slot in enumerate(planned_slots):
+        slot_id = str(slot["slot_id"])
+        if slot_id not in remaining_slot_ids:
+            continue
+        try:
+            scope_evidence = [
+                str(other.get("evidence_excerpt") or "")
+                for other in planned_slots if str(other.get("topic_id") or topic["topic_id"]) == str(topic["topic_id"])
+            ]
+            raw = _deterministic_grounded_candidate(slot, fallback_index, scope_evidence)
+            normalized, warnings = _validate_v2_question(
+                raw, groups_by_id, remaining_slot_ids, accepted_stems, difficulty,
+                len(accepted) + 1, topic, int(topic_plan["assessment_capacity"]),
+            )
+            accepted.append(normalized)
+            accepted_stems.append(normalized["question"])
+            remaining_slot_ids.remove(slot_id)
+            deterministic_fallback_count += 1
+            validation_results["accepted_with_warnings" if warnings else "accepted"] += 1
+            validation_results["quality_warnings"] += len(warnings)
+            save_quiz_validation_event({
+                "generation_run_id": generation_run_id, "owner_id": owner_id,
+                "document_id": document["id"], "document_hash": document.get("hash", ""),
+                "topic_id": topic["topic_id"],
+                "topic_schema_version": int(document.get("topic_schema_version", 0)),
+                "difficulty": difficulty, "batch_index": 1,
+                "generation_attempt": llm_calls + 1, "candidate_index": fallback_index,
+                "generator_model": "deterministic-grounded-fallback",
+                "generation_prompt_version": QUIZ_V2_PROMPT_VERSION,
+                "validator_model": "deterministic-v2", "validator_prompt_version": "no-semantic-llm-v2",
+                "candidate_question": normalized, "cited_chunk_ids": normalized["source_chunk_ids"],
+                "evidence_chunk_ids": normalized["source_chunk_ids"], "hard_passed": True,
+                "quality_passed": not warnings, "accepted": True,
+                "outcome": normalized["validation_outcome"],
+                "verdict": {"mode": "deterministic-grounded-fallback", "warnings": warnings},
+                "rejection_reasons": warnings, "latency_ms": 0,
+            })
+        except Exception as error:
+            reason = f"deterministic fallback: {error}"
+            rejection_reasons_by_slot[slot_id].append(reason)
+            validation_results["rejected"] += 1
+            validation_results["hard_rejections"] += 1
+            validation_results["reasons"].append(reason)
+
     timings["generation_ms"] = generation_ms
     timings["model_load_ms"] = model_load_ms
     timings["prompt_eval_ms"] = prompt_eval_ms
@@ -1494,6 +1542,7 @@ def _generate_topic_quiz_v2(
     timings["missing_slots_before_each_retry"] = missing_slots_before_each_retry
     timings["rejection_reasons_by_slot"] = rejection_reasons_by_slot
     timings["final_fill_llm_calls"] = final_fill_llm_calls
+    timings["deterministic_fallback_count"] = deterministic_fallback_count
     timings["total_quiz_generation_ms"] = round((time.perf_counter() - total_started) * 1000)
     if len(accepted) != question_count:
         timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
@@ -1649,6 +1698,68 @@ def _document_batch_output_schema() -> dict:
             }
         },
         "required": ["questions"],
+    }
+
+
+def _grounded_option_phrases(evidence_values: list[str], require_four: bool = False) -> list[str]:
+    """Extract grammatical propositions, then same-domain terms, without adding facts."""
+    propositions = []
+    normalized_values = [re.sub(r"\s+", " ", str(value or "")).strip() for value in evidence_values]
+    for evidence in normalized_values:
+        for part in re.split(r"(?<=[.!?])\s+|\s*[;•]\s*", evidence):
+            phrase = part.strip().rstrip(" ,;:")
+            if len(phrase.split()) >= 3:
+                phrase += "" if phrase.endswith((".", "!", "?")) else "."
+                if _normalize_question_key(phrase) not in {_normalize_question_key(item) for item in propositions}:
+                    propositions.append(phrase)
+    if propositions and (not require_four or len(propositions) >= 4):
+        return propositions
+    terms = []
+    for evidence in normalized_values:
+        words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'/-]*", evidence)
+        for size in (3, 2, 1):
+            for index in range(max(0, len(words) - size + 1)):
+                term = " ".join(words[index:index + size])
+                if len(term) < 4:
+                    continue
+                statement = f'The documented term is "{term}".'
+                if _normalize_question_key(statement) not in {_normalize_question_key(item) for item in terms}:
+                    terms.append(statement)
+    return terms
+
+
+def _deterministic_grounded_candidate(
+    slot: dict, ordinal: int, alternative_evidence: list[str] | None = None,
+) -> dict:
+    """Build a distinct final-resort MCQ solely from authoritative slot evidence."""
+    evidence = re.sub(r"\s+", " ", str(slot.get("evidence_excerpt") or "")).strip()
+    if not evidence or not slot.get("source_chunk_ids"):
+        raise ValueError("Deterministic fallback requires grounded evidence and provenance.")
+    concept = _clean_inline_text(slot.get("name") or slot.get("concept_id") or "the documented concept")
+    option_pool = _grounded_option_phrases([evidence, *(alternative_evidence or [])], require_four=True)
+    term_mode = bool(option_pool and option_pool[0].startswith('The documented term is "'))
+    own_options = _grounded_option_phrases([evidence], require_four=term_mode)
+    if not own_options:
+        raise ValueError("Deterministic fallback could not extract a grounded answer phrase.")
+    correct = own_options[ordinal % len(own_options)][:220]
+    alternatives = [
+        option for option in option_pool
+        if _normalize_question_key(option) != _normalize_question_key(correct)
+    ]
+    if len(alternatives) < 3:
+        raise ValueError("Deterministic fallback requires three distinct grounded alternatives.")
+    angles = (
+        "Which documented statement best supports the selected concept",
+        "Which source-backed relationship is most relevant to the selected concept",
+        "Which application follows from the supplied evidence for the selected concept",
+        "Which comparison is supported by the supplied evidence for the selected concept",
+    )
+    stem = f"{angles[ordinal % len(angles)]} '{concept}' (evidence angle {ordinal + 1})?"
+    distractors = alternatives[:3]
+    return {
+        "slot_id": str(slot["slot_id"]), "question": stem,
+        "options": [correct, *distractors], "correct_answer": 0,
+        "explanation": f"The first option exactly preserves the cited in-scope evidence for {concept}.",
     }
 
 
@@ -1919,6 +2030,75 @@ def _run_document_v2_batch(
             run_generation_call(missing_slots, phase, next_batch_index)
             next_batch_index += 1
 
+    # Exact count is contractual. Fill only still-missing slots, preserving all
+    # accepted questions, and run deterministic candidates through the same
+    # authoritative validator and duplicate checks.
+    fallback_count = 0
+    for fallback_index, original_slot in enumerate(authoritative_slots):
+        slot_id = str(original_slot["slot_id"])
+        if slot_id not in remaining_slot_ids:
+            continue
+        variants = list(original_slot.get("evidence_variants") or [])
+        unused = list(original_slot.get("topic_evidence_variants") or [])
+        chosen = dict(original_slot)
+        if unused:
+            chosen.update(unused[0])
+        elif variants:
+            chosen.update(variants[min(1, len(variants) - 1)])
+        compatible = [variant for variant in [*variants, *unused] if variant.get("evidence_excerpt")]
+        if len(compatible) >= 2:
+            chosen["evidence_excerpt"] = " ".join(
+                str(variant["evidence_excerpt"]) for variant in compatible[:2]
+            )[:560]
+            chosen["source_chunk_ids"] = list(dict.fromkeys(
+                chunk_id for variant in compatible[:2] for chunk_id in variant.get("source_chunk_ids") or []
+            ))
+        fallback_groups = {**groups_by_id, slot_id: chosen}
+        try:
+            scope_evidence = []
+            for other in authoritative_slots:
+                if str(other.get("topic_id") or "") != str(chosen.get("topic_id") or ""):
+                    continue
+                scope_evidence.append(str(other.get("evidence_excerpt") or ""))
+                scope_evidence.extend(
+                    str(variant.get("evidence_excerpt") or "")
+                    for variant in [*(other.get("evidence_variants") or []), *(other.get("topic_evidence_variants") or [])]
+                )
+            raw = _deterministic_grounded_candidate(chosen, fallback_index, scope_evidence)
+            normalized, warnings = _validate_v2_question(
+                raw, fallback_groups, remaining_slot_ids, accepted_stems, difficulty,
+                slot_positions[slot_id] + 1, document_scope, int(chosen.get("assessment_capacity", 0)),
+            )
+            accepted_by_slot[slot_id] = normalized
+            accepted_stems.append(normalized["question"])
+            remaining_slot_ids.remove(slot_id)
+            fallback_count += 1
+            results["accepted_with_warnings" if warnings else "accepted"] += 1
+            results["quality_warnings"] += len(warnings)
+            save_quiz_validation_event({
+                "generation_run_id": generation_run_id, "owner_id": owner_id,
+                "document_id": document["id"], "document_hash": document.get("hash", ""),
+                "topic_id": normalized["topic_id"],
+                "topic_schema_version": int(document.get("topic_schema_version", 0)),
+                "difficulty": difficulty, "batch_index": next_batch_index,
+                "generation_attempt": llm_calls + 1, "candidate_index": fallback_index,
+                "generator_model": "deterministic-grounded-fallback",
+                "generation_prompt_version": QUIZ_V2_PROMPT_VERSION,
+                "validator_model": "deterministic-v2", "validator_prompt_version": "no-semantic-llm-v2",
+                "candidate_question": normalized, "cited_chunk_ids": normalized["source_chunk_ids"],
+                "evidence_chunk_ids": normalized["source_chunk_ids"], "hard_passed": True,
+                "quality_passed": not warnings, "accepted": True,
+                "outcome": normalized["validation_outcome"],
+                "verdict": {"mode": "deterministic-grounded-fallback", "warnings": warnings},
+                "rejection_reasons": warnings, "latency_ms": 0,
+            })
+        except Exception as error:
+            reason = f"deterministic fallback: {error}"
+            rejection_reasons_by_slot[slot_id].append(reason)
+            results["rejected"] += 1
+            results["hard_rejections"] += 1
+            results["reasons"].append(reason)
+
     timings["llm_calls"] = llm_calls
     timings["repair_llm_calls"] = repair_llm_calls
     timings["repair_attempt_count"] = repair_attempt_count
@@ -1927,6 +2107,7 @@ def _run_document_v2_batch(
     timings["rejection_reasons_by_slot"] = rejection_reasons_by_slot
     timings["final_fill_llm_calls"] = final_fill_llm_calls
     timings["candidate_stems_by_attempt"] = candidate_stems_by_attempt
+    timings["deterministic_fallback_count"] = fallback_count
     timings["initial_generation_ms"] = timings["initial_batch_generation_ms"]
     timings["total_quiz_generation_ms"] = round((time.perf_counter() - batch_started) * 1000)
     accepted = [accepted_by_slot[slot["slot_id"]] for slot in authoritative_slots if slot["slot_id"] in accepted_by_slot]

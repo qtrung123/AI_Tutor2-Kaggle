@@ -117,16 +117,52 @@ class MissingSlotRecoveryTests(unittest.TestCase):
         self.assertEqual(normalized["difficulty"], "medium")
         self.assertNotIn("negative_or_trick_stem", warnings)
 
-    def test_bounded_exhaustion_returns_missing_slot_diagnostics(self):
+    def test_bounded_exhaustion_uses_grounded_fallback_to_reach_exact_count(self):
         first = "How does Alpha fact operate in this documented mechanism?"
-        slots = [slot("S1", "topic-a", "alpha", "a1"), slot("S2", "topic-a", "beta", "a2")]
+        slots = [
+            slot("S1", "topic-a", "Alpha controls delivery. Alpha preserves ordering.", "a1"),
+            slot("S2", "topic-a", "Beta regulates flow. Beta detects loss.", "a2"),
+        ]
         duplicate = candidate("S2", first)
         responses = [[candidate("S1", first), candidate("S2", "TBD?")], [duplicate], [duplicate], [duplicate], [duplicate]]
         (questions, results, timings), _prompts = self.run_batch(slots, responses)
-        self.assertEqual(len(questions), 1)
+        self.assertEqual(len(questions), 2)
+        self.assertEqual(questions[1]["source_chunk_ids"], ["a2"])
+        self.assertEqual(timings["deterministic_fallback_count"], 1)
         self.assertIn("S2", timings["rejection_reasons_by_slot"])
         self.assertGreaterEqual(results["hard_rejections"], 5)
         self.assertEqual(timings["llm_calls"], 5)
+
+    def test_exact_duplicate_fallback_candidate_is_still_rejected(self):
+        group = slot("S1", "topic-a", "Alpha evidence supports the mechanism.", "a1")
+        raw = quiz_service._deterministic_grounded_candidate(group, 0, [
+            "Beta evidence supports flow control.",
+            "Gamma evidence supports ordering.",
+            "Delta evidence supports recovery.",
+        ])
+        with self.assertRaisesRegex(ValueError, "duplicates an accepted question"):
+            quiz_service._validate_v2_question(
+                raw, {"S1": group}, {"S1"}, [raw["question"]], "easy", 1,
+                {"topic_id": "document", "name": "Entire document"}, 1,
+            )
+
+    def test_sparse_document_reaches_exact_count_with_grounded_fallbacks(self):
+        slots = [slot(f"S{i}", "topic-a", f"Grounded evidence fact {i}.", f"c{i}") for i in range(1, 11)]
+        empty_calls = [[] for _ in range(5)]
+        (questions, _results, timings), _prompts = self.run_batch(slots, empty_calls)
+        self.assertEqual(len(questions), 10)
+        self.assertEqual(len({question["question"] for question in questions}), 10)
+        self.assertEqual(timings["deterministic_fallback_count"], 10)
+        self.assertEqual([question["source_chunk_ids"] for question in questions], [[f"c{i}"] for i in range(1, 11)])
+        evidence_options = {f"Grounded evidence fact {i}." for i in range(1, 11)}
+        for question in questions:
+            options = [option[3:] for option in question["options"]]
+            self.assertEqual(len(set(options)), 4)
+            self.assertTrue(all(option in evidence_options for option in options))
+            self.assertTrue(all(option.endswith(".") and len(option.split()) >= 4 for option in options))
+            self.assertNotIn("Reordered evidence", " ".join(options))
+            self.assertNotIn("Shifted evidence", " ".join(options))
+            self.assertNotIn("Incomplete evidence", " ".join(options))
 
 
 if __name__ == "__main__":

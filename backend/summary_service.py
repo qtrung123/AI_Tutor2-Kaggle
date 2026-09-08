@@ -8,11 +8,11 @@ from langchain_ollama import ChatOllama
 
 from backend.indexed_document_store import get_indexed_document
 from backend.model_registry import resolve_generation_model
-from backend.quiz_service import get_topic_chunks
+from backend.quiz_service import get_schema_topic_evidence, get_topic_chunks
 from backend.summary_store import get_compatible_summary, save_summary
 from config import DEFAULT_GENERATION_MODEL
 
-SUMMARY_VERSION = "full_document_summary_v3_structured_study_notes_relaxed_grounding"
+SUMMARY_VERSION = "full_document_summary_v3_structured_study_notes_low_value_filter"
 MAX_CHARS_PER_CHUNK = 1200
 _WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]{2,}")
 _STOP_WORDS = {
@@ -25,6 +25,16 @@ _OBVIOUSLY_UNRELATED_PATTERNS = (
     "unrelated to the supplied", "unrelated to the provided", "cannot summarize the provided",
     "cannot summarize the supplied", "no information was provided", "no evidence was provided",
 )
+_UNSUPPORTED_SUBTOPIC_PATTERNS = (
+    "not detailed in the provided evidence", "not detailed in the supplied evidence",
+    "not provided in the evidence", "not supported by the evidence", "insufficient evidence",
+    "no information is provided", "no details are provided", "not discussed in the evidence",
+    "not mentioned in the evidence", "the evidence does not describe", "the evidence does not explain",
+)
+_TRIVIAL_SUBTOPIC_WORDS = {
+    "concept", "concepts", "covered", "covers", "described", "describes", "details", "discussed",
+    "discusses", "explained", "explains", "important", "information", "overview", "section",
+}
 
 
 def _json_object(content: str) -> dict:
@@ -91,6 +101,8 @@ For each topic, write one concise overview and use only subsection headings from
 Include each supported, non-redundant subtopic in that existing order. You may omit a subtopic only when its evidence
 is not meaningful enough to summarize or its content would merely repeat the parent topic overview. Do not invent,
 rename, or merge subtopics. Topics with no useful required subtopics must return an empty subsections list.
+Never create placeholder sections such as "not detailed in the provided evidence", and do not return sections that
+only restate the subsection heading without meaningful explanation.
 Avoid repeating the same fact in the topic overview and subsections.
 Each subsection content must use exactly one natural format: paragraph, bullets, or a small table. Use tables only
 when the evidence genuinely contains compact comparable attributes. Do not return per-topic key takeaways.
@@ -143,22 +155,24 @@ def _bind_topic_responses(raw_topics, topics: list[dict]) -> tuple[list[dict], b
     return bound, rebound
 
 
-def _normalized_subsection_content(item: dict) -> dict:
+def _normalized_subsection_content(item: dict) -> dict | None:
     content_type = str(item.get("content_type") or "").strip().lower()
     if content_type == "paragraph":
         text = str(item.get("paragraph") or "").strip()
         if not text:
-            raise ValueError("Structured summary paragraph content is empty.")
+            return None
         return {"type": "paragraph", "text": text}
     if content_type == "bullets":
         bullets = [str(value).strip() for value in item.get("bullets") or [] if str(value).strip()]
         if not bullets:
-            raise ValueError("Structured summary bullet content is empty.")
+            return None
         return {"type": "bullets", "items": bullets}
     if content_type == "table":
         table = item.get("table") or {}
         headers = [str(value).strip() for value in table.get("headers") or [] if str(value).strip()]
         rows = [[str(value).strip() for value in row] for row in table.get("rows") or [] if isinstance(row, list)]
+        if not headers and not rows:
+            return None
         if not headers or not rows or any(len(row) != len(headers) for row in rows):
             raise ValueError("Structured summary table must have headers and equally sized rows.")
         return {"type": "table", "headers": headers, "rows": rows}
@@ -190,6 +204,28 @@ def _content_text(content: dict) -> str:
     return " ".join([*content["headers"], *(cell for row in content["rows"] for cell in row)])
 
 
+def _subsection_statements(content: dict) -> list[str]:
+    if content["type"] == "paragraph":
+        return [content["text"]]
+    if content["type"] == "bullets":
+        return list(content["items"])
+    return [" ".join([*content["headers"], *row]) for row in content["rows"]]
+
+
+def _is_low_value_subsection(subtopic: dict, content: dict | None) -> bool:
+    if not content:
+        return True
+    heading_tokens = _tokens(str(subtopic.get("name") or subtopic.get("subtopic_id") or ""))
+    for statement in _subsection_statements(content):
+        normalized = statement.strip().lower()
+        if not normalized or any(pattern in normalized for pattern in _UNSUPPORTED_SUBTOPIC_PATTERNS):
+            continue
+        meaningful_tokens = _tokens(statement) - _TRIVIAL_SUBTOPIC_WORDS
+        if meaningful_tokens and not meaningful_tokens.issubset(heading_tokens):
+            return False
+    return True
+
+
 def _grounding_warnings(summary_text: str, takeaways: list[str], own_tokens: set[str], other_tokens: set[str]) -> list[str]:
     warnings = []
     statements = [part.strip() for part in re.split(r"(?<=[.!?])\s+", summary_text) if part.strip()] + takeaways
@@ -218,6 +254,8 @@ def _validated_topic_summaries(raw_topics, topics: list[dict], evidence: list[tu
         normalized_subsections = []
         for subtopic, subsection in bound_subsections:
             content = _normalized_subsection_content(subsection)
+            if _is_low_value_subsection(subtopic, content):
+                continue
             normalized_subsections.append({
                 "subtopic_id": str(subtopic["subtopic_id"]),
                 "subtopic_name": str(subtopic.get("name") or subtopic["subtopic_id"]),
@@ -284,10 +322,16 @@ def generate_document_summary(owner_id: str, document_id: str, model_id: str | N
             return cached
 
     retrieval_started = time.perf_counter()
-    evidence = [(topic, get_topic_chunks(document_id, str(topic["topic_id"]), owner_id)) for topic in topics]
-    if any(not chunks for _topic, chunks in evidence):
-        missing = [str(topic["topic_id"]) for topic, chunks in evidence if not chunks]
-        raise ValueError(f"No indexed chunks found for topic(s): {', '.join(missing)}")
+    evidence = [(
+        topic,
+        get_schema_topic_evidence(document_id, topic, owner_id)
+        if isinstance(topic.get("boundary"), dict)
+        else get_topic_chunks(document_id, str(topic["topic_id"]), owner_id),
+    ) for topic in topics]
+    evidence = [(topic, chunks) for topic, chunks in evidence if chunks]
+    topics = [topic for topic, _chunks in evidence]
+    if not topics:
+        raise ValueError("Document has no topics with meaningful indexed evidence.")
     retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000)
 
     llm = ChatOllama(model=runtime_model, temperature=0, format="json", num_ctx=32768)

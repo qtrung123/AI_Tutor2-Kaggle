@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable
 
-TOPIC_SCHEMA_VERSION = 3
+TOPIC_SCHEMA_VERSION = 4
 
 @dataclass(frozen=True)
 class HeadingCandidate:

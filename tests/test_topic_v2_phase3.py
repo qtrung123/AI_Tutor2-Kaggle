@@ -1,6 +1,6 @@
 import unittest
 
-from backend.assessment_planner import build_structural_seeds, resolve_concept_evidence
+from backend.assessment_planner import build_structural_seeds, resolve_concept_evidence, resolve_topic_evidence
 
 
 def location(offset):
@@ -40,6 +40,13 @@ class TopicV2Phase3Tests(unittest.TestCase):
         self.assertEqual(seed["source_chunk_ids"], ["cross"])
         self.assertEqual(seed["chunks"][0]["content"], "A" * 60)
         self.assertNotIn("B", seed["chunks"][0]["content"])
+
+    def test_topic_evidence_uses_boundary_without_cross_topic_leakage(self):
+        topic = {"topic_id": "topic_a", "name": "Topic A", "boundary": boundary(20, 80), "subtopics": []}
+        chunks = [chunk("cross", 0, "B" * 20 + "A" * 60 + "C" * 40, topic_id="topic_b")]
+        evidence = resolve_topic_evidence(topic, chunks)
+        self.assertEqual([item["content"] for item in evidence], ["A" * 60])
+        self.assertEqual(evidence[0]["metadata"]["chunk_id"], "cross")
 
     def test_heading_only_trivial_overlap_is_rejected(self):
         topic = {"topic_id": "topic_a", "name": "Topic A", "boundary": boundary(0, 100), "subtopics": [
