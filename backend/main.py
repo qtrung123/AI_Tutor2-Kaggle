@@ -179,7 +179,7 @@ class QuizRegenerateRequest(BaseModel):
 class QuizProgressRequest(BaseModel):
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
     question_id: int = Field(ge=1)
-    selected_answer: str = Field(pattern="^[ABCDabcd]$")
+    selected_answer: str | list[str]
     topic_id: str
 
 
@@ -199,6 +199,8 @@ class QuizQuestion(BaseModel):
     question: str
     options: list[str]
     correct_answer: str
+    question_type: Literal["single_choice", "true_false", "multi_select"] = "single_choice"
+    correct_answers: list[str] = Field(default_factory=list)
     topic_id: str
     topic_name: str = ""
     concept_id: str = ""
@@ -216,7 +218,7 @@ class QuizSubmitRequest(BaseModel):
     quiz_id: Optional[str] = None
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
     topic_id: str
-    answers: dict[str, str]
+    answers: dict[str, str | list[str]]
 
 
 class QuizGenerateResponse(BaseModel):

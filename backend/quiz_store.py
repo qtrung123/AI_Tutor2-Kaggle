@@ -228,6 +228,8 @@ def initialize_quiz_store() -> None:
                 "planner_version": "TEXT NOT NULL DEFAULT 'legacy'",
             },
             "quiz_questions": {
+                "question_type": "TEXT NOT NULL DEFAULT 'single_choice'",
+                "correct_answers_json": "TEXT NOT NULL DEFAULT '[]'",
                 "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
                 "difficulty": "TEXT NOT NULL DEFAULT 'easy'",
                 "explanation": "TEXT NOT NULL DEFAULT ''",
@@ -248,6 +250,9 @@ def initialize_quiz_store() -> None:
                 "percentage": "REAL NOT NULL DEFAULT 0",
             },
             "quiz_attempt_answers": {
+                "question_type": "TEXT NOT NULL DEFAULT 'single_choice'",
+                "selected_answers_json": "TEXT NOT NULL DEFAULT '[]'",
+                "correct_answers_json": "TEXT NOT NULL DEFAULT '[]'",
                 "question_difficulty": "TEXT NOT NULL DEFAULT 'easy'",
                 "validation_outcome": "TEXT NOT NULL DEFAULT 'accepted'",
                 "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
@@ -411,8 +416,9 @@ def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: s
                 quiz_id, question_id, position, question, correct_answer,
                 topic_id, difficulty, explanation, source_chunk_ids_json, validation_outcome
                 , topic_name, concept_id, concept_name, assessment_capacity,
-                source_subtopic_ids_json, concept_origin, concept_plan_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_subtopic_ids_json, concept_origin, concept_plan_id,
+                question_type, correct_answers_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 quiz_id,
@@ -432,6 +438,8 @@ def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: s
                 json.dumps(question.get("source_subtopic_ids") or [], ensure_ascii=False),
                 str(question.get("concept_origin") or ""),
                 str(question.get("concept_plan_id") or ""),
+                str(question.get("question_type") or "single_choice"),
+                json.dumps(question.get("correct_answers") or [question.get("correct_answer", "")], ensure_ascii=False),
             ),
         )
         for option_index, option in enumerate(_normalize_options(question.get("options")), start=0):
@@ -453,6 +461,7 @@ def _row_to_quiz(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
                explanation, source_chunk_ids_json, validation_outcome,
                topic_name, concept_id, concept_name, assessment_capacity,
                source_subtopic_ids_json, concept_origin, concept_plan_id
+               , question_type, correct_answers_json
         FROM quiz_questions WHERE quiz_id = ? ORDER BY position
         """,
         (row["quiz_id"],),
@@ -472,6 +481,8 @@ def _row_to_quiz(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
                 "question": question_row["question"],
                 "options": [option["option_text"] for option in options],
                 "correct_answer": question_row["correct_answer"],
+                "question_type": question_row["question_type"] or "single_choice",
+                "correct_answers": json.loads(question_row["correct_answers_json"] or "[]") or [question_row["correct_answer"]],
                 "topic_id": question_row["topic_id"],
                 "difficulty": question_row["difficulty"],
                 "explanation": question_row["explanation"],
@@ -558,7 +569,14 @@ def _row_to_attempt(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
         """,
         (row["attempt_id"],),
     ).fetchall()
-    answers = {str(answer["question_id"]): answer["selected_answer"] for answer in answer_rows}
+    answers = {
+        str(answer["question_id"]): (
+            json.loads(answer["selected_answers_json"] or "[]")
+            if (answer["question_type"] or "single_choice") == "multi_select"
+            else answer["selected_answer"]
+        )
+        for answer in answer_rows
+    }
     question_results = [
         {
             "question_id": answer["question_id"],
@@ -566,6 +584,9 @@ def _row_to_attempt(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
             "options": json.loads(answer["options_json"] or "[]"),
             "selected_answer": answer["selected_answer"],
             "correct_answer": answer["correct_answer"],
+            "question_type": answer["question_type"] or "single_choice",
+            "selected_answers": json.loads(answer["selected_answers_json"] or "[]") or ([answer["selected_answer"]] if answer["selected_answer"] else []),
+            "correct_answers": json.loads(answer["correct_answers_json"] or "[]") or ([answer["correct_answer"]] if answer["correct_answer"] else []),
             "is_correct": bool(answer["is_correct"]),
             "question_difficulty": answer["question_difficulty"],
             "validation_outcome": answer["validation_outcome"],
@@ -694,7 +715,8 @@ def _save_attempt_row(
     connection.execute("DELETE FROM quiz_attempt_answers WHERE attempt_id = ?", (attempt_id,))
     for result in results:
         question_id = int(result.get("question_id"))
-        selected_answer = str(result.get("selected_answer") or answers.get(str(question_id), ""))
+        selected_answers = list(result.get("selected_answers") or [])
+        selected_answer = str(result.get("selected_answer") or (selected_answers[0] if selected_answers else answers.get(str(question_id), "")))
         connection.execute(
             """
             INSERT INTO quiz_attempt_answers (
@@ -703,8 +725,9 @@ def _save_attempt_row(
                 , question_difficulty, validation_outcome, topic_id, topic_name,
                 concept_id, assessment_capacity, evidence_requirement_version,
                 explanation, source_chunk_ids_json, source_subtopic_ids_json,
-                concept_origin, concept_plan_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                concept_origin, concept_plan_id, question_type,
+                selected_answers_json, correct_answers_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 attempt_id,
@@ -726,6 +749,9 @@ def _save_attempt_row(
                 json.dumps(result.get("source_subtopic_ids") or [], ensure_ascii=False),
                 str(result.get("concept_origin") or ""),
                 str(result.get("concept_plan_id") or ""),
+                str(result.get("question_type") or "single_choice"),
+                json.dumps(result.get("selected_answers") or ([selected_answer] if selected_answer else []), ensure_ascii=False),
+                json.dumps(result.get("correct_answers") or ([result.get("correct_answer")] if result.get("correct_answer") else []), ensure_ascii=False),
             ),
         )
     return attempt_id

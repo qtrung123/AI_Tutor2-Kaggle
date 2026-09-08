@@ -64,6 +64,46 @@ class QuizRetakeFlowTests(unittest.TestCase):
             )
         self.assertEqual(quiz_store.list_quiz_history(student_id=LEGACY_USER_ID), [])
 
+    def test_mixed_question_types_persist_grade_and_review(self):
+        mixed = saved_quiz()
+        mixed["quiz_id"] = "mixed-types"
+        mixed["questions"] = [
+            {**mixed["questions"][0], "question_type": "single_choice", "correct_answers": ["A"]},
+            {**mixed["questions"][1], "question_type": "true_false",
+             "options": ["A. True", "B. False"], "correct_answer": "B", "correct_answers": ["B"]},
+            {**mixed["questions"][2], "question_type": "multi_select",
+             "correct_answer": "A", "correct_answers": ["A", "C"]},
+        ]
+        quiz_store.save_quiz("lecture.pdf", "easy", mixed, LEGACY_USER_ID)
+        persisted = quiz_store.get_quiz("lecture.pdf", "easy", "topic_1", LEGACY_USER_ID)
+        self.assertEqual([question["question_type"] for question in persisted["questions"]], [
+            "single_choice", "true_false", "multi_select",
+        ])
+        self.assertEqual(persisted["questions"][2]["correct_answers"], ["A", "C"])
+
+        attempt = submit_quiz_attempt(
+            "lecture.pdf", "easy", "topic_1", {"1": "A", "2": "B", "3": ["C", "A"]}, LEGACY_USER_ID
+        )
+        self.assertEqual(attempt["score"], 3)
+        self.assertEqual(attempt["question_results"][2]["selected_answers"], ["A", "C"])
+        review = quiz_store.get_quiz_history_attempt(attempt["attempt_id"], LEGACY_USER_ID)
+        self.assertEqual(review["answers"]["3"], ["A", "C"])
+        self.assertEqual(review["question_results"][2]["correct_answers"], ["A", "C"])
+        mastery = recompute_topic_mastery(LEGACY_USER_ID, "lecture.pdf", "topic_1")
+        self.assertEqual(mastery["answered_questions"], 3)
+        self.assertEqual(mastery["mastery_score"], 100.0)
+
+    def test_invalid_multi_select_does_not_persist_partial_attempt(self):
+        mixed = saved_quiz()
+        mixed["quiz_id"] = "invalid-multi"
+        mixed["questions"][2] = {**mixed["questions"][2], "question_type": "multi_select", "correct_answers": ["A", "C"]}
+        quiz_store.save_quiz("lecture.pdf", "easy", mixed, LEGACY_USER_ID)
+        with self.assertRaisesRegex(ValueError, "at least two selected"):
+            submit_quiz_attempt(
+                "lecture.pdf", "easy", "topic_1", {"1": "A", "2": "B", "3": ["A"]}, LEGACY_USER_ID
+            )
+        self.assertEqual(quiz_store.list_quiz_history(student_id=LEGACY_USER_ID), [])
+
     def test_each_retake_is_new_attempt_with_scores_and_full_snapshots(self):
         first = submit_quiz_attempt(
             "lecture.pdf", "easy", "topic_1", {"1": "D", "2": "D", "3": "C"}, LEGACY_USER_ID

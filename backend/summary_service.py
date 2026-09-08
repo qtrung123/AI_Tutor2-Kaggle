@@ -181,19 +181,18 @@ def _normalized_subsection_content(item: dict) -> dict | None:
 
 def _bind_optional_subtopics(raw_items, expected_subtopics: list[dict]) -> tuple[list[tuple[dict, dict]], bool]:
     """Bind an optional model subset to existing subtopics without inventing or merging identities."""
-    if not isinstance(raw_items, list) or len(raw_items) > len(expected_subtopics):
-        raise ValueError("Summary model returned an invalid number of subsections.")
-    if any(not isinstance(item, dict) for item in raw_items):
-        raise ValueError("Summary model returned an incomplete or ambiguous subsections response.")
+    if not isinstance(raw_items, list):
+        raw_items = []
     expected_ids = [str(item["subtopic_id"]) for item in expected_subtopics]
-    returned_ids = [str(item.get("subtopic_id") or "") for item in raw_items]
-    if len(set(returned_ids)) != len(returned_ids):
-        raise ValueError("Summary model returned duplicate subsection IDs.")
-    unknown = sorted(set(returned_ids) - set(expected_ids))
-    if unknown:
-        raise ValueError(f"Summary model returned unknown subsection IDs: {', '.join(unknown)}.")
-    by_id = dict(zip(returned_ids, raw_items))
-    return [(subtopic, by_id[subtopic_id]) for subtopic, subtopic_id in zip(expected_subtopics, expected_ids) if subtopic_id in by_id], False
+    by_id = {}
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        subtopic_id = str(item.get("subtopic_id") or "")
+        if subtopic_id in expected_ids and subtopic_id not in by_id:
+            by_id[subtopic_id] = item
+    bound = [(subtopic, by_id[subtopic_id]) for subtopic, subtopic_id in zip(expected_subtopics, expected_ids) if subtopic_id in by_id]
+    return bound, len(bound) != len(raw_items)
 
 
 def _content_text(content: dict) -> str:

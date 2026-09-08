@@ -2088,9 +2088,11 @@ async function showQuizHistoryDetail(attemptId) {
         const letter = option.trim().charAt(0).toUpperCase();
         const row = document.createElement("div");
         row.className = "review-answer-option";
-        if (letter === result.correct_answer) row.classList.add("correct");
-        if (letter === result.selected_answer) row.classList.add("selected");
-        if (letter === result.selected_answer && !result.is_correct) row.classList.add("incorrect");
+        const correctAnswers = result.correct_answers || [result.correct_answer];
+        const selectedAnswers = result.selected_answers || [result.selected_answer];
+        if (correctAnswers.includes(letter)) row.classList.add("correct");
+        if (selectedAnswers.includes(letter)) row.classList.add("selected");
+        if (selectedAnswers.includes(letter) && !correctAnswers.includes(letter)) row.classList.add("incorrect");
         row.textContent = option;
         options.appendChild(row);
       });
@@ -2552,9 +2554,11 @@ function createAssessmentReviewCard(question, result, index, total) {
     const letter = option.trim().charAt(0).toUpperCase();
     const row = document.createElement("div");
     row.className = "review-answer-option";
-    if (letter === result.correct_answer) row.classList.add("correct");
-    if (letter === result.selected_answer) row.classList.add("selected");
-    if (letter === result.selected_answer && !result.is_correct) row.classList.add("incorrect");
+    const correctAnswers = result.correct_answers || [result.correct_answer];
+    const selectedAnswers = result.selected_answers || [result.selected_answer];
+    if (correctAnswers.includes(letter)) row.classList.add("correct");
+    if (selectedAnswers.includes(letter)) row.classList.add("selected");
+    if (selectedAnswers.includes(letter) && !correctAnswers.includes(letter)) row.classList.add("incorrect");
     row.textContent = option;
     options.appendChild(row);
   });
@@ -2568,6 +2572,11 @@ function reviewedAnswerText(question, answerLetter) {
   return question.options.find((option) => option.trim().charAt(0).toUpperCase() === answerLetter) || indexedOption || answerLetter;
 }
 
+function reviewedAnswersText(question, answerLetters) {
+  const values = Array.isArray(answerLetters) ? answerLetters : [answerLetters];
+  return values.filter(Boolean).map((letter) => reviewedAnswerText(question, letter)).join(", ") || "no answer";
+}
+
 async function explainReviewedQuestion(question, result, button) {
   if (quizExplanationPending || chatForm.classList.contains("is-sending")) return;
   quizExplanationPending = true;
@@ -2579,8 +2588,9 @@ async function explainReviewedQuestion(question, result, button) {
   if (window.matchMedia("(max-width: 1050px)").matches) {
     tutorLayout.scrollIntoView({ behavior: "smooth", block: "start" });
   }
-  const correctAnswer = reviewedAnswerText(question, result.correct_answer);
-  const selectedContext = result.selected_answer ? ` I answered ${reviewedAnswerText(question, result.selected_answer)}.` : "";
+  const correctAnswer = reviewedAnswersText(question, result.correct_answers || result.correct_answer);
+  const selectedValues = result.selected_answers || result.selected_answer;
+  const selectedContext = selectedValues ? ` I answered ${reviewedAnswersText(question, selectedValues)}.` : "";
   const message = `Explain why the correct answer is ${correctAnswer} for this question: ${question.question}.${selectedContext} Give a concise explanation grounded in the current document.`;
   try {
     await sendTutorMessage(message);
@@ -2781,7 +2791,8 @@ function renderAssessmentQuiz() {
     button.type = "button";
     button.textContent = option;
     const letter = option.trim().charAt(0).toUpperCase();
-    button.classList.toggle("selected", quizAnswers[String(question.id)] === letter);
+    const selected = quizAnswers[String(question.id)];
+    button.classList.toggle("selected", Array.isArray(selected) ? selected.includes(letter) : selected === letter);
     button.addEventListener("click", () => selectAssessmentAnswer(question, option));
     options.appendChild(button);
   });
@@ -2831,7 +2842,16 @@ function moveQuizQuestionLegacy(direction) {
 
 function selectAssessmentAnswer(question, option) {
   if (currentAttempt?.completed) return;
-  quizAnswers[String(question.id)] = option.trim().charAt(0).toUpperCase();
+  const key = String(question.id);
+  const letter = option.trim().charAt(0).toUpperCase();
+  if (question.question_type === "multi_select") {
+    const selected = new Set(Array.isArray(quizAnswers[key]) ? quizAnswers[key] : []);
+    selected.has(letter) ? selected.delete(letter) : selected.add(letter);
+    if (selected.size) quizAnswers[key] = [...selected].sort();
+    else delete quizAnswers[key];
+  } else {
+    quizAnswers[key] = letter;
+  }
   renderAssessmentQuiz();
 }
 

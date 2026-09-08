@@ -249,7 +249,7 @@ def explain_quiz_answer(
     document_id: str,
     question: str,
     options: list[str],
-    correct_answer: str,
+    correct_answer: str | list[str],
 ) -> dict:
     """Generate a short, grounded quiz explanation from only the selected document."""
     vectorstore = load_vectorstore()
@@ -262,10 +262,12 @@ def explain_quiz_answer(
     if not docs:
         raise ValueError("No relevant chunks were found in the selected document.")
 
-    correct_option = next(
-        (option for option in options if option.strip().upper().startswith(f"{correct_answer}.")),
-        correct_answer,
-    )
+    correct_answers = correct_answer if isinstance(correct_answer, list) else [correct_answer]
+    correct_options = [
+        option for answer in correct_answers
+        for option in options if option.strip().upper().startswith(f"{str(answer).upper()}.")
+    ]
+    correct_option = "; ".join(correct_options or [str(answer) for answer in correct_answers])
     prompt = f"""
 Use only the course material context below.
 

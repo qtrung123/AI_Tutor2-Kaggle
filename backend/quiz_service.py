@@ -96,6 +96,25 @@ class QuizGenerationError(ValueError):
 
 
 OPTION_LETTERS = {"A", "B", "C", "D"}
+
+
+def _question_type(question: dict) -> str:
+    return str(question.get("question_type") or "single_choice")
+
+
+def _correct_answers(question: dict) -> list[str]:
+    values = question.get("correct_answers")
+    if not isinstance(values, list) or not values:
+        values = [question.get("correct_answer", "")]
+    return list(dict.fromkeys(str(value).strip().upper() for value in values if str(value).strip()))
+
+
+def _selected_answers(value) -> list[str]:
+    values = value if isinstance(value, list) else [value]
+    normalized = list(dict.fromkeys(str(item).strip().upper() for item in values if str(item).strip()))
+    if not normalized or any(item not in OPTION_LETTERS for item in normalized):
+        raise ValueError("Selected answers must contain only A, B, C, or D.")
+    return sorted(normalized)
 QUIZ_DIFFICULTIES = {"easy", "medium", "difficult"}
 GENERIC_QUESTION_PATTERNS = [
     r"\bwhich statement is supported\b",
@@ -651,6 +670,8 @@ def _validate_quiz_batch(
                 "question": _clean_inline_text(question.get("question", "")),
                 "options": options,
                 "correct_answer": correct_answer,
+                "question_type": "single_choice",
+                "correct_answers": [correct_answer],
                 "topic_id": topic_id,
                 "topic_name": topic_name,
                 "concept_id": concept_id,
@@ -999,6 +1020,10 @@ def _build_v2_prompt(
                 f"{group['slot_id']} diversification attempt {attempt}: use a different question angle and "
                 "formulation from every forbidden question, while staying within this slot's evidence."
             )
+            if attempt >= 2:
+                repair_lines.append(
+                    f"{group['slot_id']}: prefer a different valid question_type before using deterministic fallback."
+                )
             if group.get("evidence_rotated"):
                 repair_lines.append(f"{group['slot_id']} uses alternative evidence; base the question on that new evidence.")
             if group.get("slot_replanned"):
@@ -1033,8 +1058,9 @@ def _build_v2_prompt(
     }
     return (
         f"Write exactly {count} {difficulty} MCQs for {topic.get('name') or topic.get('topic_id')}.\n"
-        'JSON only: {"questions":[{"slot_id":"S1","question":"...","options":["...","...","...","..."],"correct_answer":0,"explanation":"..."}]}\n'
-        "Use each evidence slot exactly once. Use only its evidence. Four distinct options; correct_answer is 0-3. "
+        'JSON only: {"questions":[{"slot_id":"S1","question_type":"single_choice|true_false|multi_select","question":"...","options":["..."],"correct_answers":[0],"explanation":"..."}]}\n'
+        "Use each evidence slot exactly once and only its evidence. single_choice uses four options and one answer; "
+        "true_false uses exactly True/False and one answer; multi_select uses four options, two or more answers, and at least one incorrect option. "
         "Question <=18 words, each option <=10 words, explanation <=16 words. No markdown or extra fields.\n"
         f"{difficulty_contracts[difficulty]}{repair_line}EVIDENCE:\n{evidence}"
     )
@@ -1168,21 +1194,40 @@ def _validate_v2_question(
         for existing in accepted_stems
     )
 
+    question_type = str(raw.get("question_type") or "single_choice").strip().lower()
+    if question_type not in {"single_choice", "true_false", "multi_select"}:
+        raise ValueError("Question has an unsupported question_type.")
     raw_options = raw.get("options")
-    if not isinstance(raw_options, list) or len(raw_options) != 4:
-        raise ValueError("Question must contain exactly 4 options.")
+    required_option_count = 2 if question_type == "true_false" else 4
+    if not isinstance(raw_options, list) or len(raw_options) != required_option_count:
+        raise ValueError(f"{question_type} question must contain exactly {required_option_count} options.")
     option_bodies = [strip_leading_option_label(_clean_inline_text(option)) for option in raw_options]
-    if len({option.lower() for option in option_bodies}) != 4:
+    if len({option.lower() for option in option_bodies}) != len(option_bodies):
         raise ValueError("Question options must be distinct.")
     normalized_options = [_normalize_question_key(option) for option in option_bodies]
     near_duplicate_options = any(
         difflib.SequenceMatcher(None, normalized_options[left], normalized_options[right]).ratio() >= 0.94
-        for left in range(4) for right in range(left + 1, 4)
+        for left in range(len(option_bodies)) for right in range(left + 1, len(option_bodies))
     )
 
-    answer_index = raw.get("correct_answer")
-    if isinstance(answer_index, bool) or not isinstance(answer_index, int) or answer_index not in range(4):
-        raise ValueError("correct_answer must be an integer from 0 to 3.")
+    raw_answers = raw.get("correct_answers")
+    if raw_answers is None:
+        raw_answers = [raw.get("correct_answer")]
+    if not isinstance(raw_answers, list):
+        raise ValueError("correct_answers must be a list.")
+    answer_indices = []
+    for answer in raw_answers:
+        if isinstance(answer, bool) or not isinstance(answer, int) or answer not in range(len(option_bodies)):
+            raise ValueError("correct_answers contains an invalid option index.")
+        if answer not in answer_indices:
+            answer_indices.append(answer)
+    if question_type in {"single_choice", "true_false"} and len(answer_indices) != 1:
+        raise ValueError(f"{question_type} requires exactly one correct answer.")
+    if question_type == "multi_select" and (len(answer_indices) < 2 or len(answer_indices) >= len(option_bodies)):
+        raise ValueError("multi_select requires at least two correct and one incorrect option.")
+    if question_type == "true_false" and {option.lower() for option in option_bodies} != {"true", "false"}:
+        raise ValueError("true_false options must be True and False.")
+    answer_index = answer_indices[0]
     slot_id = str(raw.get("slot_id") or raw.get("concept_id") or "").strip()
     if slot_id not in groups_by_id:
         raise ValueError("Question has an unknown slot_id.")
@@ -1231,6 +1276,8 @@ def _validate_v2_question(
         "question": stem,
         "options": [canonicalize_option(option, "ABCD"[index]) for index, option in enumerate(option_bodies)],
         "correct_answer": "ABCD"[answer_index],
+        "question_type": question_type,
+        "correct_answers": ["ABCD"[index] for index in answer_indices],
         "topic_id": authoritative_topic_id,
         "topic_name": authoritative_topic_name,
         "concept_id": concept_id,
@@ -1349,12 +1396,14 @@ def _generate_topic_quiz_v2(
                         "type": "object",
                         "properties": {
                             "question": {"type": "string"},
-                            "options": {"type": "array", "items": {"type": "string"}, "minItems": 4, "maxItems": 4},
+                            "question_type": {"type": "string", "enum": ["single_choice", "true_false", "multi_select"]},
+                            "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 4},
                             "slot_id": {"type": "string"},
                             "correct_answer": {"type": "integer", "minimum": 0, "maximum": 3},
+                            "correct_answers": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 3}},
                             "explanation": {"type": "string"},
                         },
-                        "required": ["slot_id", "question", "options", "correct_answer", "explanation"],
+                        "required": ["slot_id", "question_type", "question", "options", "correct_answers", "explanation"],
                     },
                 }
             },
@@ -1688,12 +1737,14 @@ def _document_batch_output_schema() -> dict:
                     "type": "object",
                     "properties": {
                         "question": {"type": "string"},
-                        "options": {"type": "array", "items": {"type": "string"}, "minItems": 4, "maxItems": 4},
+                        "question_type": {"type": "string", "enum": ["single_choice", "true_false", "multi_select"]},
+                        "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 4},
                         "slot_id": {"type": "string"},
                         "correct_answer": {"type": "integer", "minimum": 0, "maximum": 3},
+                        "correct_answers": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 3}},
                         "explanation": {"type": "string"},
                     },
-                    "required": ["slot_id", "question", "options", "correct_answer", "explanation"],
+                    "required": ["slot_id", "question_type", "question", "options", "correct_answers", "explanation"],
                 },
             }
         },
@@ -2350,6 +2401,8 @@ def _quiz_from_attempt_snapshot(attempt: dict) -> dict | None:
     questions = [{
         "id": int(result["question_id"]), "question": result.get("question", ""),
         "options": list(result.get("options") or []), "correct_answer": result.get("correct_answer", ""),
+        "question_type": result.get("question_type") or "single_choice",
+        "correct_answers": list(result.get("correct_answers") or ([result.get("correct_answer")] if result.get("correct_answer") else [])),
         "topic_id": result.get("topic_id") or topic_id, "topic_name": result.get("topic_name", ""),
         "concept_id": result.get("concept_id", ""), "concept_name": "",
         "source_subtopic_ids": list(result.get("source_subtopic_ids") or []),
@@ -2422,7 +2475,7 @@ def update_quiz_progress(
     difficulty: str,
     topic_id: str,
     question_id: int,
-    selected_answer: str,
+    selected_answer: str | list[str],
     student_id: str = LEGACY_USER_ID,
 ) -> dict:
     """Check one answer and persist the learner's current progress immediately."""
@@ -2430,9 +2483,7 @@ def update_quiz_progress(
     quiz = get_quiz(document_id, difficulty, topic_id, student_id)
     if not quiz:
         raise ValueError("Quiz has not been generated for this document and difficulty.")
-    selected_answer = selected_answer.strip().upper()
-    if selected_answer not in OPTION_LETTERS:
-        raise ValueError("selected_answer must be A, B, C, or D.")
+    selected_answers = _selected_answers(selected_answer)
 
     questions = quiz.get("questions", [])
     target_question = next(
@@ -2444,23 +2495,27 @@ def update_quiz_progress(
 
     previous = get_latest_attempt(document_id, difficulty, topic_id, student_id) or {}
     answers = {str(key): value for key, value in (previous.get("answers") or {}).items()}
-    answers[str(question_id)] = selected_answer
+    answers[str(question_id)] = selected_answers if _question_type(target_question) == "multi_select" else selected_answers[0]
     results = []
     score = 0
     for question in questions:
         current_id = str(question.get("id"))
         if current_id not in answers:
             continue
-        correct_answer = str(question.get("correct_answer", "")).upper()
-        is_correct = answers[current_id] == correct_answer
+        correct_answers = sorted(_correct_answers(question))
+        current_answers = _selected_answers(answers[current_id])
+        is_correct = current_answers == correct_answers
         score += int(is_correct)
         results.append(
             {
                 "question_id": int(question.get("id")),
                 "question": question.get("question", ""),
                 "options": list(question.get("options", [])),
-                "selected_answer": answers[current_id],
-                "correct_answer": correct_answer,
+                "selected_answer": current_answers[0],
+                "selected_answers": current_answers,
+                "correct_answer": correct_answers[0],
+                "correct_answers": correct_answers,
+                "question_type": _question_type(question),
                 "is_correct": is_correct,
                 "question_difficulty": question.get("difficulty", difficulty),
                 "validation_outcome": question.get("validation_outcome", "accepted"),
@@ -2515,7 +2570,7 @@ def submit_quiz_attempt(
     document_id: str,
     difficulty: str,
     topic_id: str,
-    answers: dict[str, str],
+    answers: dict[str, str | list[str]],
     student_id: str = LEGACY_USER_ID,
     quiz_id: str | None = None,
 ) -> dict:
@@ -2529,25 +2584,36 @@ def submit_quiz_attempt(
         raise ValueError("The persisted quiz questions are no longer available.")
     if quiz.get("document_id") != document_id or quiz.get("difficulty") != difficulty or quiz.get("topic_id") != topic_id:
         raise ValueError("The submitted quiz identity does not match its persisted questions.")
-    normalized_answers = {str(key): str(value).strip().upper() for key, value in answers.items()}
+    normalized_answers = {str(key): _selected_answers(value) for key, value in answers.items()}
     questions = list(quiz.get("questions") or [])
     expected_ids = {str(question.get("id")) for question in questions}
     if set(normalized_answers) != expected_ids:
         raise ValueError("Every quiz question must be answered exactly once before submission.")
-    if any(answer not in OPTION_LETTERS for answer in normalized_answers.values()):
-        raise ValueError("Every selected answer must be A, B, C, or D.")
-
+    for question in questions:
+        selected = normalized_answers[str(question.get("id"))]
+        question_type = _question_type(question)
+        valid_letters = set("ABCD"[:len(question.get("options") or [])])
+        if any(answer not in valid_letters for answer in selected):
+            raise ValueError("A selected answer does not exist for its question.")
+        if question_type == "multi_select" and len(selected) < 2:
+            raise ValueError("multi_select questions require at least two selected answers.")
+        if question_type != "multi_select" and len(selected) != 1:
+            raise ValueError(f"{question_type} questions require exactly one selected answer.")
     results = []
     for question in questions:
         question_id = str(question.get("id"))
-        correct_answer = str(question.get("correct_answer", "")).upper()
+        correct_answers = sorted(_correct_answers(question))
+        selected_answers = normalized_answers[question_id]
         results.append({
             "question_id": int(question_id),
             "question": question.get("question", ""),
             "options": list(question.get("options", [])),
-            "selected_answer": normalized_answers[question_id],
-            "correct_answer": correct_answer,
-            "is_correct": normalized_answers[question_id] == correct_answer,
+            "selected_answer": selected_answers[0],
+            "selected_answers": selected_answers,
+            "correct_answer": correct_answers[0],
+            "correct_answers": correct_answers,
+            "question_type": _question_type(question),
+            "is_correct": selected_answers == correct_answers,
             "question_difficulty": question.get("difficulty", difficulty),
             "validation_outcome": question.get("validation_outcome", "accepted"),
             "topic_id": question.get("topic_id", topic_id),
@@ -2577,7 +2643,7 @@ def submit_quiz_attempt(
         "completed": True,
         "attempt_number": int(summary["attempts"]) + 1,
         "percentage": round(100.0 * score / total, 2) if total else 0,
-        "answers": normalized_answers,
+        "answers": {key: (value if len(value) > 1 else value[0]) for key, value in normalized_answers.items()},
         "question_results": results,
     }, topic_id, student_id)
     represented_topics = sorted({str(result["topic_id"]) for result in results if result.get("topic_id")})
@@ -2749,7 +2815,7 @@ def explain_quiz_question(
         document_id=document_id,
         question=question["question"],
         options=question["options"],
-        correct_answer=question["correct_answer"],
+        correct_answer=_correct_answers(question),
     )
     saved = {
         "document_id": document_id,

@@ -173,6 +173,65 @@ class QuizV2Tests(unittest.TestCase):
         self.assertIn("[10, 15, 20, 25].forEach((count)", frontend)
         self.assertNotIn("[3, 5, 10]", frontend)
 
+    def test_all_supported_question_types_validate_with_normalized_answers(self):
+        group = {
+            "slot_id": "S1", "topic_id": "topic_001", "topic_name": "Transport",
+            "concept_id": "reliability", "name": "Reliability", "concept_plan_id": "plan",
+            "source_subtopic_ids": ["ack"], "concept_origin": "structural",
+            "source_chunk_ids": ["canonical_chunk_1"], "assessment_capacity": 3,
+            "evidence_excerpt": "TCP acknowledgements and sequence numbers support reliable ordered delivery.",
+        }
+        candidates = [
+            {"question_type": "single_choice", "options": ["Acknowledgements", "Routers", "Encryption", "Compression"], "correct_answers": [0]},
+            {"question_type": "true_false", "options": ["True", "False"], "correct_answers": [0]},
+            {"question_type": "multi_select", "options": ["Acknowledgements", "Sequence numbers", "Compression", "Encryption"], "correct_answers": [0, 1]},
+        ]
+        for index, candidate in enumerate(candidates, start=1):
+            with self.subTest(question_type=candidate["question_type"]):
+                question, _warnings = _validate_v2_question(
+                    {"slot_id": "S1", "question": f"Which transport facts are supported in case {index}?",
+                     "explanation": "The authoritative evidence directly supports the marked answer.", **candidate},
+                    {"S1": group}, {"S1"}, [], "medium", index, TOPIC, 3,
+                )
+                self.assertEqual(question["question_type"], candidate["question_type"])
+                self.assertEqual(question["correct_answers"], ["ABCD"[value] for value in candidate["correct_answers"]])
+                self.assertEqual(question["correct_answer"], question["correct_answers"][0])
+
+    def test_mixed_type_generation_keeps_exact_requested_count(self):
+        questions = []
+        for index in range(10):
+            question = raw_question(index)
+            if index % 3 == 1:
+                question.update({
+                    "question_type": "true_false", "options": ["True", "False"],
+                    "correct_answers": [0],
+                })
+            elif index % 3 == 2:
+                question.update({"question_type": "multi_select", "correct_answers": [0, 2]})
+            else:
+                question.update({"question_type": "single_choice", "correct_answers": [0]})
+            questions.append(question)
+        result, saved = self.run_v2([{"questions": questions}], 10)
+        self.assertEqual(len(result["questions"]), 10)
+        self.assertEqual(len(saved[0]["questions"]), 10)
+        self.assertEqual({question["question_type"] for question in result["questions"]}, {
+            "single_choice", "true_false", "multi_select",
+        })
+
+    def test_sparse_retry_prefers_another_question_type_before_fallback(self):
+        prompt = _build_v2_prompt(
+            "lecture.pdf", TOPIC, "easy", [{"slot_id": "S1", "evidence_excerpt": CHUNK["content"]}], 1,
+            ["Which mechanism supports delivery?"], True,
+            rejection_reasons_by_slot={"S1": ["duplicate"]}, retry_attempt_by_slot={"S1": 2},
+        )
+        self.assertIn("prefer a different valid question_type before using deterministic fallback", prompt)
+
+    def test_frontend_supports_multi_select_submission_and_review(self):
+        frontend = Path("frontend/app.js").read_text(encoding="utf-8")
+        self.assertIn('question.question_type === "multi_select"', frontend)
+        self.assertIn("result.correct_answers || [result.correct_answer]", frontend)
+        self.assertIn("result.selected_answers || [result.selected_answer]", frontend)
+
     def test_requested_counts_generate_exact_supported_slots(self):
         for count in (10, 15, 20, 25):
             with self.subTest(question_count=count):

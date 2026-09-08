@@ -244,7 +244,7 @@ class SummaryFeatureTests(unittest.TestCase):
         self.assertEqual([item["subtopic_id"] for item in validated[0]["subsections"]], ["scheduling"])
         self.assertEqual(validated[0]["subsections"][0]["content"]["text"], "Scheduling assigns priorities to runnable tasks.")
 
-    def test_incomplete_subtopic_set_with_wrong_ids_is_not_guessed(self):
+    def test_unsupported_extra_subtopic_ids_are_ignored_without_guessing(self):
         topics = [{"topic_id": "rtos", "name": "RTOS", "subtopics": [
             {"subtopic_id": "scheduling", "name": "Scheduling"},
             {"subtopic_id": "sync", "name": "Synchronization"},
@@ -253,8 +253,23 @@ class SummaryFeatureTests(unittest.TestCase):
         raw = [{"topic_id": "rtos", "overview": "RTOS scheduling priorities and synchronization.", "subsections": [
             {"subtopic_id": "invented", "content_type": "paragraph", "paragraph": "Scheduling priorities.", "bullets": [], "table": {"headers": [], "rows": []}},
         ]}]
-        with self.assertRaisesRegex(ValueError, "unknown subsection IDs"):
-            summary_service._validated_topic_summaries(raw, topics, evidence)
+        validated = summary_service._validated_topic_summaries(raw, topics, evidence)
+        self.assertEqual(validated[0]["subsections"], [])
+
+    def test_missing_and_extra_model_subtopics_preserve_authoritative_identity_and_order(self):
+        topics = [{"topic_id": "rtos", "name": "RTOS", "subtopics": [
+            {"subtopic_id": "scheduling", "name": "Scheduling"},
+            {"subtopic_id": "sync", "name": "Synchronization"},
+        ]}]
+        evidence = [(topics[0], [{"content": "Scheduling uses priorities. Synchronization uses mutex locks.", "metadata": {}}])]
+        raw = [{"topic_id": "rtos", "overview": "Scheduling and synchronization are described.", "subsections": [
+            {"subtopic_id": "invented", "content_type": "paragraph", "paragraph": "Unsupported extra.", "bullets": [], "table": {"headers": [], "rows": []}},
+            {"subtopic_id": "sync", "content_type": "paragraph", "paragraph": "Synchronization uses mutex locks.", "bullets": [], "table": {"headers": [], "rows": []}},
+            {"subtopic_id": "also-invented", "content_type": "paragraph", "paragraph": "Another extra.", "bullets": [], "table": {"headers": [], "rows": []}},
+        ]}]
+        validated = summary_service._validated_topic_summaries(raw, topics, evidence)
+        self.assertEqual([item["subtopic_id"] for item in validated[0]["subsections"]], ["sync"])
+        self.assertEqual(validated[0]["subsections"][0]["subtopic_name"], "Synchronization")
 
     def test_frontend_renders_structured_notes_and_one_final_takeaway_block(self):
         script = (Path(__file__).parents[1] / "frontend" / "app.js").read_text(encoding="utf-8")
