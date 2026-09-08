@@ -1,10 +1,13 @@
 import hashlib
 import json
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable
 
-TOPIC_SCHEMA_VERSION = 4
+TOPIC_SCHEMA_VERSION = 5
+_HIERARCHY_CACHE: dict[tuple[str, int], tuple[list[dict], list["HeadingCandidate"]]] = {}
+_HIGH_CONFIDENCE = 0.85
 
 @dataclass(frozen=True)
 class HeadingCandidate:
@@ -110,7 +113,10 @@ class TopicExtractor:
             document_base += len(content) + 1
         repeated_headers = {
             normalized for normalized, pages in page_occurrences.items()
-            if len(pages) >= 2 and all(c.char_start <= 160 for c in candidates if c.normalized == normalized)
+            if len(pages) >= 2 and all(
+                c.char_start <= 160 or c.char_start >= max(0, len(documents[c.page_index].page_content or "") - 160)
+                for c in candidates if c.normalized == normalized
+            )
         }
         seen, result = set(), []
         for candidate in candidates:
@@ -125,44 +131,57 @@ class TopicExtractor:
     def _select_major_candidates(headings: list[HeadingCandidate], document_length: int) -> tuple[list[HeadingCandidate], float]:
         structured = [heading for heading in headings if heading.family != "unnumbered"]
         if structured:
-            families = {}
-            for heading in structured:
-                depth = len(heading.number_path) if heading.family == "dotted" else 1
-                families.setdefault((heading.family, depth), []).append(heading)
-            def family_score(item):
-                (family, depth), members = item
-                rank = depth if family == "dotted" else _LABEL_RANK.get(family, 9)
-                return (len(members) >= 2, min(len(members), 4), -rank, -members[0].document_offset)
-            selected = max(families.items(), key=family_score)[1]
-            return selected, 0.96 if len(selected) >= 2 else 0.82
+            labeled = [heading for heading in structured if heading.family != "dotted"]
+            if labeled:
+                top_rank = min(_LABEL_RANK[heading.family] for heading in labeled)
+                selected = [heading for heading in labeled if _LABEL_RANK[heading.family] == top_rank]
+                coherent = len(selected) >= 2 and len({heading.family for heading in selected}) == 1
+                return selected, 0.97 if coherent else 0.78
+            minimum_depth = min(len(heading.number_path) for heading in structured)
+            selected = [heading for heading in structured if len(heading.number_path) == minimum_depth]
+            roots = [heading.number_path[0] for heading in selected if heading.number_path]
+            coherent = len(selected) >= 2 and roots == sorted(roots) and len(roots) == len(set(roots))
+            return selected, 0.96 if coherent else 0.76
         if not headings:
             return [], 0.0
         ordered = sorted(headings, key=lambda item: item.document_offset)
         spans = [(ordered[i + 1].document_offset if i + 1 < len(ordered) else document_length) - h.document_offset for i, h in enumerate(ordered)]
         meaningful = [heading for heading, span in zip(ordered, spans) if span >= 120]
-        return (meaningful or ordered), (0.72 if meaningful else 0.58)
+        return (meaningful or ordered), (0.68 if meaningful else 0.52)
 
     def extract(self, documents) -> tuple[list[dict], list[HeadingCandidate]]:
+        document_hash = next((str(doc.metadata.get("file_hash") or "") for doc in documents if doc.metadata.get("file_hash")), "")
+        cache_key = (document_hash, TOPIC_SCHEMA_VERSION) if document_hash else None
+        if cache_key and cache_key in _HIERARCHY_CACHE:
+            return deepcopy(_HIERARCHY_CACHE[cache_key])
         headings = sorted(self.detect_headings(documents), key=lambda item: item.document_offset)
         document_length = sum(len(document.page_content or "") + 1 for document in documents)
         selected, confidence = self._select_major_candidates(headings, document_length)
-        if not selected and self.llm_refiner and self._needs_refinement(headings, len(documents)):
-            payload = {"candidates": [{"name": h.name, "page": h.page_index + 1, "level": h.level} for h in headings[:100]]}
+        llm_assignments = None
+        if confidence < _HIGH_CONFIDENCE and self.llm_refiner and self._needs_refinement(headings, len(documents)):
+            payload = {"candidates": [self._candidate_payload(index, h) for index, h in enumerate(headings[:100])]}
             try:
-                selected = self._apply_refinement(self.llm_refiner(payload), headings, len(documents))
-                confidence = 0.55 if selected else 0.0
+                llm_assignments = self._validate_refinement(self.llm_refiner(payload), headings[:100])
+                selected = [heading for heading, role, _parent in llm_assignments if role == "major"]
+                confidence = 0.74
             except Exception as error:
                 print(f"Topic LLM refinement failed; using deterministic topics: {error}")
         if not selected:
             end = self._document_end(documents, document_length)
-            return [{"topic_id": "topic_document_overview", "name": "Document Overview", "subtopics": [], "start_page": 1, "end_page": max(1, len(documents)), "boundary": {"start": {"page": 1, "page_index": 0, "char_offset": 0, "document_offset": 0}, "end": end, "interval": "half-open"}, "structure_confidence": 0.35}], headings
+            result = ([{"topic_id": "topic_document_overview", "name": "Document Overview", "subtopics": [], "start_page": 1, "end_page": max(1, len(documents)), "boundary": {"start": {"page": 1, "page_index": 0, "char_offset": 0, "document_offset": 0}, "end": end, "interval": "half-open"}, "structure_confidence": 0.35}], headings)
+            if cache_key:
+                _HIERARCHY_CACHE[cache_key] = deepcopy(result)
+            return result
 
         selected = sorted(selected, key=lambda item: item.document_offset)
         selected_offsets, topic_occurrences, topics = {h.document_offset for h in selected}, {}, []
         for index, heading in enumerate(selected):
             end_heading = selected[index + 1] if index + 1 < len(selected) else None
             end_offset = end_heading.document_offset if end_heading else document_length
-            subordinate = [h for h in headings if heading.document_offset < h.document_offset < end_offset and h.document_offset not in selected_offsets]
+            if llm_assignments is None:
+                subordinate = [h for h in headings if heading.document_offset < h.document_offset < end_offset and h.document_offset not in selected_offsets]
+            else:
+                subordinate = [h for h, role, parent in llm_assignments if role == "subtopic" and parent is heading]
             occurrence = topic_occurrences.get(heading.normalized, 0) + 1
             topic_occurrences[heading.normalized] = occurrence
             topic_id = _stable_id("topic", "document", heading, occurrence)
@@ -174,7 +193,12 @@ class TopicExtractor:
                 sub_occurrences[subheading.normalized] = sub_occurrence
                 subtopics.append({"subtopic_id": _stable_id("subtopic", topic_id, subheading, sub_occurrence), "name": subheading.name, "start_page": subheading.page_index + 1, "end_page": (sub_end.page_index + 1) if sub_end else max(1, len(documents)), "boundary": {"start": _location(subheading), "end": _location(sub_end) if sub_end else end_location, "interval": "half-open"}, "structure_confidence": round(max(0.5, confidence - 0.08), 2)})
             topics.append({"topic_id": topic_id, "name": heading.name, "subtopics": subtopics, "start_page": heading.page_index + 1, "end_page": end_location["page"], "boundary": {"start": _location(heading), "end": end_location, "interval": "half-open"}, "structure_confidence": confidence})
-        return topics, headings
+        result = (topics, headings)
+        if cache_key:
+            if len(_HIERARCHY_CACHE) >= 128:
+                _HIERARCHY_CACHE.pop(next(iter(_HIERARCHY_CACHE)))
+            _HIERARCHY_CACHE[cache_key] = deepcopy(result)
+        return result
 
     @staticmethod
     def _document_end(documents, document_length: int) -> dict:
@@ -182,18 +206,38 @@ class TopicExtractor:
 
     @staticmethod
     def _needs_refinement(headings: list[HeadingCandidate], page_count: int) -> bool:
-        return not headings and page_count >= 1
+        return bool(headings) and page_count >= 1
 
     @staticmethod
-    def _apply_refinement(refined: list[dict], headings: list[HeadingCandidate], page_count: int) -> list[HeadingCandidate]:
-        by_name = {heading.normalized: heading for heading in headings}
-        result, seen = [], set()
-        for item in refined or []:
-            source = by_name.get(normalize_heading(item.get("name", "")))
-            if source and source.document_offset not in seen:
-                result.append(source)
-                seen.add(source.document_offset)
-        return result
+    def _candidate_payload(index: int, heading: HeadingCandidate) -> dict:
+        return {"id": f"h{index}", "heading": heading.name, "page": heading.page_index + 1,
+                "numbering_depth": len(heading.number_path), "structure": heading.family}
+
+    @staticmethod
+    def _validate_refinement(refined: list[dict], headings: list[HeadingCandidate]):
+        if not isinstance(refined, list) or len(refined) != len(headings):
+            raise ValueError("refiner must classify every candidate exactly once")
+        assignments, seen, current_major, current_major_id = [], set(), None, None
+        for index, item in enumerate(refined):
+            expected_id = f"h{index}"
+            if not isinstance(item, dict) or item.get("id") != expected_id or expected_id in seen:
+                raise ValueError("candidate IDs must be unique and preserve document order")
+            heading = headings[index]
+            if item.get("heading") != heading.name:
+                raise ValueError("headings may not be invented or renamed")
+            role, parent_id, parent_heading = item.get("role"), item.get("parent_id"), item.get("parent_heading")
+            if role == "major" and parent_id in (None, "") and parent_heading in (None, ""):
+                current_major, current_major_id = heading, expected_id
+            elif (role == "subtopic" and current_major is not None
+                  and parent_id == current_major_id and parent_heading == current_major.name):
+                pass
+            else:
+                raise ValueError("invalid role or parent hierarchy")
+            assignments.append((heading, role, None if role == "major" else current_major))
+            seen.add(expected_id)
+        if not any(role == "major" for _heading, role, _parent in assignments):
+            raise ValueError("at least one major topic is required")
+        return assignments
 
     @staticmethod
     def map_chunks(chunks, documents, topics: list[dict], headings: list[HeadingCandidate]) -> None:
@@ -220,13 +264,22 @@ class TopicExtractor:
             metadata.update({"topic_id": topic["topic_id"], "topic_name": topic["name"], "subtopic_id": subtopic["subtopic_id"] if subtopic else "", "subtopic_name": subtopic["name"] if subtopic else "", "heading_path": json.dumps([topic["name"]] + ([subtopic["name"]] if subtopic else []), ensure_ascii=False), "structure_confidence": float(subtopic.get("structure_confidence") if subtopic else topic.get("structure_confidence", 0.0))})
 
 def ollama_heading_refiner(model: str):
-    """Create a bounded refiner that may select detected candidates only."""
+    """Create a bounded classifier that cannot alter detected candidates."""
     from langchain_ollama import ChatOllama
     def refine(payload: dict) -> list[dict]:
-        prompt = "Select major topics from supplied headings. Return exact candidate names only; never invent or rename. Return a JSON array of objects with name.\n" + json.dumps(payload, ensure_ascii=False)
-        response = ChatOllama(model=model, temperature=0, num_predict=800).invoke(prompt)
+        prompt = (
+            "Classify each ordered candidate as role major or subtopic. Copy id and heading exactly. "
+            "For a major use parent_id and parent_heading null; for a subtopic copy the id and exact "
+            "heading text of its preceding major parent. "
+            "Do not omit, reorder, invent, or rename anything. Return JSON only as "
+            '{"classifications":[{"id":"h0","heading":"exact text","role":"major|subtopic",'
+            '"parent_id":null|"hN","parent_heading":null|"exact parent text"}]}.\n'
+            + json.dumps(payload, ensure_ascii=False)
+        )
+        response = ChatOllama(model=model, temperature=0, num_predict=500, format="json").invoke(prompt)
         text = str(response.content).strip()
-        match = re.search(r"\[[\s\S]*\]", text)
-        parsed = json.loads(match.group(0) if match else text)
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            parsed = parsed.get("classifications", [])
         return parsed if isinstance(parsed, list) else []
     return refine

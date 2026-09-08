@@ -55,6 +55,51 @@ class TopicExtractorTests(unittest.TestCase):
         )
         self.assertEqual([topic["name"] for topic in topics], ["Unit 1: Basics", "Unit 2: Practice"])
 
+    def test_explicit_sections_with_numbered_children_do_not_call_llm(self):
+        calls = []
+        text = "\n".join(
+            f"Section {index}: Major {index}\n{index}.1 Child\n" + "body " * 30
+            for index in range(1, 6)
+        )
+        topics, _ = TopicExtractor(llm_refiner=lambda payload: calls.append(payload)).extract(
+            [Document(page_content=text, metadata={"page": 0})]
+        )
+        self.assertEqual(len(topics), 5)
+        self.assertTrue(all(topic["name"].startswith("Section ") for topic in topics))
+        self.assertEqual(calls, [])
+
+    def test_ambiguous_headings_invoke_valid_qwen_classification(self):
+        calls = []
+        def refine(payload):
+            calls.append(payload)
+            return [
+                {"id": "h0", "heading": "Course Overview", "role": "major", "parent_id": None, "parent_heading": None},
+                {"id": "h1", "heading": "Key Concepts", "role": "subtopic", "parent_id": "h0", "parent_heading": "Course Overview"},
+            ]
+        text = "Course Overview\n" + "body " * 30 + "\nKey Concepts\n" + "detail " * 30
+        topics, _ = TopicExtractor(llm_refiner=refine).extract([Document(page_content=text, metadata={"page": 0})])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([topic["name"] for topic in topics], ["Course Overview"])
+        self.assertEqual([sub["name"] for sub in topics[0]["subtopics"]], ["Key Concepts"])
+        self.assertEqual(set(calls[0]), {"candidates"})
+
+    def test_qwen_cannot_invent_or_rename_and_invalid_output_falls_back(self):
+        def refine(_payload):
+            return [{"id": "h0", "heading": "Invented", "role": "major", "parent_id": None, "parent_heading": None}]
+        text = "1 Only Topic\n" + "body " * 30
+        topics, _ = TopicExtractor(llm_refiner=refine).extract([Document(page_content=text, metadata={"page": 0})])
+        self.assertEqual([topic["name"] for topic in topics], ["1 Only Topic"])
+
+    def test_hash_schema_cache_avoids_second_refiner_call(self):
+        calls = []
+        def refine(payload):
+            calls.append(payload)
+            return [{"id": "h0", "heading": "Course Overview", "role": "major", "parent_id": None, "parent_heading": None}]
+        document = Document(page_content="Course Overview\n" + "body " * 30, metadata={"page": 0, "file_hash": uuid4().hex})
+        extractor = TopicExtractor(llm_refiner=refine)
+        extractor.extract([document]); extractor.extract([document])
+        self.assertEqual(len(calls), 1)
+
     def test_dotted_numbering_infers_depth_one_topics(self):
         topics = self._extract_text(
             "1 Overview\n" + "body " * 30 + "\n1.1 Definitions\n" + "body " * 30
