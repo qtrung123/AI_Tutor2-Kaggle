@@ -61,7 +61,7 @@ from config import (
 
 GENERATION_PROMPT_VERSION = "topic_mcq_v2_backend_evidence"
 QUIZ_V2_PROMPT_VERSION = "topic_mcq_v2_slot_batch_fast"
-QUIZ_V2_ALLOWED_QUESTION_COUNTS = {10, 15, 20, 25}
+QUIZ_V2_ALLOWED_QUESTION_COUNTS = {12, 15}
 QUIZ_V2_DISTINCT_CONCEPT_LIMIT = 5
 QUIZ_GENERATION_KEEP_ALIVE = "5m"
 
@@ -71,7 +71,7 @@ class QuizGenerationError(ValueError):
 
     def __init__(
         self, message: str, *, stage: str, valid_questions: int = 0,
-        target_questions: int = 10, failure_summary: list[str] | None = None,
+        target_questions: int = 12, failure_summary: list[str] | None = None,
         missing_slots: list[str] | None = None,
         rejection_reasons_by_slot: dict[str, list[str]] | None = None,
     ):
@@ -558,6 +558,26 @@ def _looks_like_raw_chunk(option: str) -> bool:
     if text.count(".") >= 3 and len(words) > 22:
         return True
     return False
+
+
+_FORBIDDEN_FINAL_PHRASES = ("evidence angle", "selected concept", "source-backed")
+_RAW_MESSAGE_HEADER = re.compile(
+    r"(?:^|\s)(?:from|to|cc|bcc|subject|date|reply-to|message-id)\s*:\s*\S+",
+    flags=re.IGNORECASE,
+)
+_RAW_EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", flags=re.IGNORECASE)
+
+
+def _reject_unsafe_final_text(value: str, *, field: str) -> None:
+    """Keep prompt scaffolding and copied message/evidence artifacts out of saved quizzes."""
+    text = _clean_inline_text(value)
+    lowered = text.lower()
+    if any(phrase in lowered for phrase in _FORBIDDEN_FINAL_PHRASES):
+        raise ValueError(f"{field} contains forbidden generation scaffolding.")
+    if _RAW_MESSAGE_HEADER.search(text) or _RAW_EMAIL.search(text):
+        raise ValueError(f"{field} contains a raw header or email address.")
+    if _looks_like_raw_chunk(text):
+        raise ValueError(f"{field} contains long or malformed raw evidence text.")
 
 
 def _validate_question_quality(
@@ -1057,10 +1077,13 @@ def _build_v2_prompt(
         ),
     }
     return (
-        f"Write exactly {count} {difficulty} MCQs for {topic.get('name') or topic.get('topic_id')}.\n"
+        f"Write exactly {count} {difficulty} quiz questions for {topic.get('name') or topic.get('topic_id')}.\n"
         'JSON only: {"questions":[{"slot_id":"S1","question_type":"single_choice|true_false|multi_select","question":"...","options":["..."],"correct_answers":[0],"explanation":"..."}]}\n'
         "Use each evidence slot exactly once and only its evidence. single_choice uses four options and one answer; "
         "true_false uses exactly True/False and one answer; multi_select uses four options, two or more answers, and at least one incorrect option. "
+        "Choose each question_type from what its evidence can assess naturally. In the initial batch, include single_choice, "
+        "true_false, and multi_select at least once each; prefer multiple types whenever the evidence supports them, with no fixed ratio. "
+        "On retries, try another valid question_type or a different same-topic angle before deterministic fallback. "
         "Question <=18 words, each option <=10 words, explanation <=16 words. No markdown or extra fields.\n"
         f"{difficulty_contracts[difficulty]}{repair_line}EVIDENCE:\n{evidence}"
     )
@@ -1184,6 +1207,7 @@ def _validate_v2_question(
     if not isinstance(raw, dict):
         raise ValueError("Question must be a JSON object.")
     stem = _clean_inline_text(raw.get("question", ""))
+    _reject_unsafe_final_text(stem, field="Question")
     if len(stem.split()) < 4 or any(re.search(pattern, stem.lower()) for pattern in GENERIC_QUESTION_PATTERNS):
         raise ValueError("Question stem is empty, generic, or unusable.")
     candidate_key = _normalize_question_key(stem)
@@ -1202,6 +1226,8 @@ def _validate_v2_question(
     if not isinstance(raw_options, list) or len(raw_options) != required_option_count:
         raise ValueError(f"{question_type} question must contain exactly {required_option_count} options.")
     option_bodies = [strip_leading_option_label(_clean_inline_text(option)) for option in raw_options]
+    for option in option_bodies:
+        _reject_unsafe_final_text(option, field="Option")
     if len({option.lower() for option in option_bodies}) != len(option_bodies):
         raise ValueError("Question options must be distinct.")
     normalized_options = [_normalize_question_key(option) for option in option_bodies]
@@ -1245,6 +1271,7 @@ def _validate_v2_question(
     if any(not option for option in option_bodies):
         warnings.append("empty_option")
     explanation = _clean_inline_text(raw.get("explanation", ""))
+    _reject_unsafe_final_text(explanation, field="Explanation")
     if difficulty == "easy":
         warnings.extend(_validate_easy_v2_quality(
             stem, option_bodies, answer_index, explanation, str(group.get("evidence_excerpt") or "")
@@ -1800,17 +1827,17 @@ def _deterministic_grounded_candidate(
     if len(alternatives) < 3:
         raise ValueError("Deterministic fallback requires three distinct grounded alternatives.")
     angles = (
-        "Which documented statement best supports the selected concept",
-        "Which source-backed relationship is most relevant to the selected concept",
-        "Which application follows from the supplied evidence for the selected concept",
-        "Which comparison is supported by the supplied evidence for the selected concept",
+        "Which documented statement best explains",
+        "Which documented relationship is most relevant to",
+        "Which application follows for",
+        "Which comparison is documented for",
     )
-    stem = f"{angles[ordinal % len(angles)]} '{concept}' (evidence angle {ordinal + 1})?"
+    stem = f"{angles[ordinal % len(angles)]} '{concept}'?"
     distractors = alternatives[:3]
     return {
         "slot_id": str(slot["slot_id"]), "question": stem,
         "options": [correct, *distractors], "correct_answer": 0,
-        "explanation": f"The first option exactly preserves the cited in-scope evidence for {concept}.",
+        "explanation": f"The first option matches the documented facts about {concept}.",
     }
 
 

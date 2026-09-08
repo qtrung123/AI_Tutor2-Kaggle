@@ -163,7 +163,7 @@ class QuizGenerateRequest(BaseModel):
     assessment_scope: str = Field(pattern="^(topic|document)$")
     topic_id: Optional[str] = None
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
-    question_count: Literal[10, 15, 20, 25] = 10
+    question_count: Literal[12, 15] = 12
     model_id: Optional[str] = None
 
 
@@ -173,7 +173,7 @@ class QuizRegenerateRequest(BaseModel):
     model_id: Optional[str] = None
     assessment_scope: str = Field(pattern="^(topic|document)$")
     topic_id: Optional[str] = None
-    question_count: Literal[10, 15, 20, 25] = 10
+    question_count: Literal[12, 15] = 12
 
 
 class QuizProgressRequest(BaseModel):
