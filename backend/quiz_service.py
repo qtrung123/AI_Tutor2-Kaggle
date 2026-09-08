@@ -1081,9 +1081,8 @@ def _build_v2_prompt(
         'JSON only: {"questions":[{"slot_id":"S1","question_type":"single_choice|true_false|multi_select","question":"...","options":["..."],"correct_answers":[0],"explanation":"..."}]}\n'
         "Use each evidence slot exactly once and only its evidence. single_choice uses four options and one answer; "
         "true_false uses exactly True/False and one answer; multi_select uses four options, two or more answers, and at least one incorrect option. "
-        "Choose each question_type from what its evidence can assess naturally. In the initial batch, include single_choice, "
-        "true_false, and multi_select at least once each; prefer multiple types whenever the evidence supports them, with no fixed ratio. "
-        "On retries, try another valid question_type or a different same-topic angle before deterministic fallback. "
+        "Pick each question_type to fit its evidence; initial batch must include single_choice, true_false, and "
+        "multi_select at least once, no fixed ratio. On retries, prefer another valid type or angle before fallback. "
         "Question <=18 words, each option <=10 words, explanation <=16 words. No markdown or extra fields.\n"
         f"{difficulty_contracts[difficulty]}{repair_line}EVIDENCE:\n{evidence}"
     )
@@ -2215,7 +2214,7 @@ def generate_quiz(
     regenerate: bool = False,
     owner_id: str = LEGACY_USER_ID,
     model_id: str = CHAT_MODEL,
-    question_count: int = 10,
+    question_count: int = 12,
 ) -> dict:
     """
     Generate or load the persistent quiz for one indexed document.
@@ -2232,7 +2231,7 @@ def generate_quiz(
     if difficulty not in QUIZ_DIFFICULTIES:
         raise ValueError("difficulty must be easy, medium, or difficult.")
     if question_count not in QUIZ_V2_ALLOWED_QUESTION_COUNTS:
-        raise ValueError("question_count must be one of 10, 15, 20, or 25.")
+        raise ValueError("question_count must be one of 12 or 15.")
     print(f"[quiz-service] difficulty={difficulty}")
     document = known_documents[document_id]
     assessment_scope = str(assessment_scope).lower().strip()

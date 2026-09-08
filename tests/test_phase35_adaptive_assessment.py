@@ -185,7 +185,7 @@ class AdaptiveAssessmentTests(unittest.TestCase):
              patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _owner: quiz):
             result = quiz_service.generate_quiz("doc.pdf", "easy", "document")
 
-        self.assertEqual(result["question_count"], 10)
+        self.assertEqual(result["question_count"], 12)
         self.assertEqual(generator.call_count, 1)
         self.assertEqual({question["topic_id"] for question in result["questions"]}, {"topic_a", "topic_b"})
         self.assertTrue(all(question["concept_id"] for question in result["questions"]))
@@ -195,7 +195,7 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         self.assertIn("question_count", QuizRegenerateRequest.model_fields)
         self.assertEqual(QuizGenerateRequest(
             document_id="doc.pdf", assessment_scope="topic", topic_id="topic_a", difficulty="easy"
-        ).question_count, 10)
+        ).question_count, 12)
         frontend = (Path(__file__).parents[1] / "frontend" / "app.js").read_text(encoding="utf-8")
         self.assertIn("quizQuestionCountSelect", frontend)
         self.assertIn("question_count:", frontend)
@@ -233,6 +233,10 @@ class AdaptiveAssessmentTests(unittest.TestCase):
             "id": "dashboard.pdf", "title": "Dashboard PDF", "chunks": 2,
             "topics": [{"topic_id": "topic_a", "name": "Topic A"}, {"topic_id": "topic_b", "name": "Topic B"}],
         }
+        second_document = {
+            "id": "second-dashboard.pdf", "title": "Second Dashboard PDF", "chunks": 1,
+            "topics": [{"topic_id": "topic_c", "name": "Topic C"}],
+        }
         results = [
             {**answer(1, "concept_001", 1, True), "topic_id": "topic_a", "topic_name": "Topic A"},
             {**answer(2, "concept_001", 1, False), "topic_id": "topic_b", "topic_name": "Topic B"},
@@ -241,12 +245,15 @@ class AdaptiveAssessmentTests(unittest.TestCase):
             "quiz_id": "dashboard-quiz", "answers": {"1": "A", "2": "B"},
             "question_results": results, "score": 1, "answered": 2, "total": 2, "completed": True,
         }, "document", "dashboard-student")
-        with patch.object(quiz_service, "list_indexed_documents", return_value=[document]):
+        with patch.object(quiz_service, "list_indexed_documents", return_value=[document, second_document]):
             dashboard = quiz_service.build_learning_dashboard("dashboard-student")
-        self.assertEqual(dashboard["metrics"]["documents"], 1)
+        self.assertEqual(dashboard["metrics"]["documents"], 2)
+        self.assertEqual(dashboard["metrics"]["total_topics"], 3)
         self.assertEqual(dashboard["metrics"]["topics_assessed"], 2)
         self.assertEqual(dashboard["metrics"]["quiz_accuracy"], 50.0)
-        self.assertEqual({row["topic_name"] for row in dashboard["mastery"]}, {"Topic A", "Topic B"})
+        self.assertEqual(dashboard["metrics"]["answered_questions"], 2)
+        self.assertEqual(dashboard["metrics"]["topics_mastered"], 1)
+        self.assertEqual({row["topic_name"] for row in dashboard["mastery"]}, {"Topic A", "Topic B", "Topic C"})
         self.assertEqual(set(dashboard["latest_attempt"]["represented_topic_ids"]), {"topic_a", "topic_b"})
 
     def test_overview_markup_uses_real_dashboard_and_mastery_containers(self):
@@ -264,6 +271,11 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         self.assertIn('id="overview-materials-list"', markup)
         self.assertIn('/api/dashboard', script)
         self.assertIn("mastery_by_topic", script)
+        self.assertIn('"Learning materials"', script)
+        self.assertIn('"Overall accuracy"', script)
+        self.assertIn("Across all learning materials", script)
+        self.assertIn('.filter((mastery) => mastery.mastery_level !== "Not assessed")', script)
+        self.assertIn("No assessed topics yet. Complete a quiz to see mastery progress.", script)
 
 
 if __name__ == "__main__":

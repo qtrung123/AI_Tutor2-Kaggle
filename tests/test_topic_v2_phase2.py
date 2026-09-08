@@ -148,7 +148,7 @@ class TopicV2Phase2Tests(unittest.TestCase):
                 "llm_calls": 1, "prompt_construction_ms": 1, "initial_batch_generation_ms": 2,
                 "validation_ms": 1, "repair_ms": 0, "prompt_tokens": 100, "output_tokens": 200,
             }
-        for requested in (10, 15, 20, 25):
+        for requested in (12, 15):
             with self.subTest(question_count=requested), \
                  patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
                  patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
@@ -200,10 +200,10 @@ class TopicV2Phase2Tests(unittest.TestCase):
              patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated), \
              patch.object(quiz_service, "save_quiz") as save:
             with self.assertRaises(quiz_service.QuizGenerationError) as raised:
-                quiz_service.generate_quiz("doc.pdf", "easy", "document", question_count=10)
-        self.assertEqual(raised.exception.detail["requested_count"], 10)
+                quiz_service.generate_quiz("doc.pdf", "easy", "document", question_count=12)
+        self.assertEqual(raised.exception.detail["requested_count"], 12)
         self.assertEqual(raised.exception.detail["valid_count"], 9)
-        self.assertEqual(raised.exception.detail["missing_count"], 1)
+        self.assertEqual(raised.exception.detail["missing_count"], 3)
         self.assertTrue(raised.exception.detail["failure_summary"])
         save.assert_not_called()
 
