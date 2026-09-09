@@ -182,15 +182,25 @@ class QuizV2Tests(unittest.TestCase):
             "evidence_excerpt": "TCP acknowledgements and sequence numbers support reliable ordered delivery.",
         }
         candidates = [
-            {"question_type": "single_choice", "options": ["Acknowledgements", "Routers", "Encryption", "Compression"], "correct_answers": [0]},
-            {"question_type": "true_false", "options": ["True", "False"], "correct_answers": [0]},
-            {"question_type": "multi_select", "options": ["Acknowledgements", "Sequence numbers", "Compression", "Encryption"], "correct_answers": [0, 1]},
+            {
+                "question_type": "single_choice", "question": "Which transport facts are supported in case 1?",
+                "options": ["Acknowledgements", "Routers", "Encryption", "Compression"], "correct_answers": [0],
+            },
+            {
+                "question_type": "true_false",
+                "question": "Acknowledgements and sequence numbers support reliable ordered delivery here.",
+                "options": ["True", "False"], "correct_answers": [0],
+            },
+            {
+                "question_type": "multi_select", "question": "Which transport facts are supported in case 3?",
+                "options": ["Acknowledgements", "Sequence numbers", "Compression", "Encryption"], "correct_answers": [0, 1],
+            },
         ]
         for index, candidate in enumerate(candidates, start=1):
             with self.subTest(question_type=candidate["question_type"]):
                 question, _warnings = _validate_v2_question(
-                    {"slot_id": "S1", "question": f"Which transport facts are supported in case {index}?",
-                     "explanation": "The authoritative evidence directly supports the marked answer.", **candidate},
+                    {"slot_id": "S1", "explanation": "The authoritative evidence directly supports the marked answer.",
+                     **candidate},
                     {"S1": group}, {"S1"}, [], "medium", index, TOPIC, 3,
                 )
                 self.assertEqual(question["question_type"], candidate["question_type"])
@@ -198,13 +208,18 @@ class QuizV2Tests(unittest.TestCase):
                 self.assertEqual(question["correct_answer"], question["correct_answers"][0])
 
     def test_mixed_type_generation_keeps_exact_requested_count(self):
+        declarative_stems = {
+            1: "Flow control protects a receiving endpoint in this mechanism.",
+            4: "Checksums reveal corruption during transport in this mechanism.",
+            7: "Duplicate detection contributes to reliable communication in this mechanism.",
+        }
         questions = []
         for index in range(10):
             question = raw_question(index)
             if index % 3 == 1:
                 question.update({
                     "question_type": "true_false", "options": ["True", "False"],
-                    "correct_answers": [0],
+                    "correct_answers": [0], "question": declarative_stems[index],
                 })
             elif index % 3 == 2:
                 question.update({"question_type": "multi_select", "correct_answers": [0, 2]})
@@ -558,7 +573,10 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(len(FakeBatchModel.configurations), 5)
         save.assert_called_once()
 
-    def test_wrong_model_slot_is_corrected_by_backend_order_for_full_topic_batch(self):
+    def test_wrong_model_slot_is_rejected_not_corrected_by_backend_order(self):
+        """A whole batch sharing one invalid slot_id must never be salvaged by array position
+        (that was the source of real cross-topic/cross-concept mis-binding); bounded repair and
+        deterministic fallback must still reach the exact count instead."""
         questions = [raw_question(index) for index in range(10)]
         for question in questions:
             question["slot_id"] = "invented_slot"
@@ -572,14 +590,16 @@ class QuizV2Tests(unittest.TestCase):
             result = _generate_topic_quiz_v2(DOCUMENT, TOPIC, "easy", "owner", "qwen-3b", False)
         self.assertEqual(len(result["questions"]), 10)
         self.assertFalse(result["assessment_plan"]["partial"])
-        self.assertEqual(len(FakeBatchModel.configurations), 1)
+        self.assertEqual(result["assessment_plan"]["timings_ms"]["deterministic_fallback_count"], 10)
         self.assertEqual([question["slot_id"] for question in result["questions"]], [f"S{index}" for index in range(1, 11)])
 
     def test_partial_repeated_slot_mapping_is_rejected_then_repaired(self):
         partial = [raw_question(index) for index in range(9)]
-        repair = [raw_question(index) for index in range(1, 10)]
-        for question in partial + repair:
+        for question in partial:
             question["slot_id"] = "S1"
+        # Each repair candidate must carry its own correct slot_id (raw_question already sets
+        # S2..S10 here) — repair no longer salvages mismatched slot_ids by array position.
+        repair = [raw_question(index) for index in range(1, 10)]
         result, saved = self.run_v2([
             {"questions": partial}, {"questions": repair},
         ])
@@ -668,7 +688,12 @@ class QuizV2Tests(unittest.TestCase):
                 )
                 self.assertIn("Topic 1", FakeBatchModel.prompts[0])
 
-    def test_repeated_model_slot_ids_in_full_document_batch_bind_by_order(self):
+    def test_repeated_model_slot_ids_in_full_document_batch_are_rejected_not_bound_by_order(self):
+        """All 10 candidates claiming slot_id "S1" must never be silently redistributed across
+        S1..S10 by array position — that exact pattern caused real cross-topic/cross-concept
+        mis-binding. Only the true S1 candidate is accepted; the rest are rejected and the
+        missing slots are filled by grounded deterministic fallback, each keeping its own
+        topic/concept, so exact count is still reached."""
         candidates = [raw_question(index) for index in range(10)]
         for candidate in candidates:
             candidate["slot_id"] = "S1"
@@ -676,10 +701,11 @@ class QuizV2Tests(unittest.TestCase):
             {"questions": candidates},
         ])
         self.assertEqual(len(questions), 10)
-        self.assertEqual(timings["repair_llm_calls"], 0)
-        self.assertEqual(validation["hard_rejections"], 0)
+        self.assertEqual(validation["hard_rejections"], 9)
+        self.assertEqual(timings["deterministic_fallback_count"], 9)
         self.assertEqual([question["slot_id"] for question in questions], [slot["slot_id"] for slot in slots])
         self.assertEqual([question["concept_id"] for question in questions], [slot["concept_id"] for slot in slots])
+        self.assertEqual([question["topic_id"] for question in questions], [slot["topic_id"] for slot in slots])
 
     def test_partial_document_batch_repairs_only_missing_slot_and_owns_metadata(self):
         first_batch = [raw_question(index) for index in range(10)]

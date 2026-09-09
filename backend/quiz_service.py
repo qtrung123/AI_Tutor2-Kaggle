@@ -1020,6 +1020,12 @@ def _select_v2_evidence_groups(
     return groups
 
 
+_TRUE_FALSE_INTERROGATIVE_START = re.compile(
+    r"^(?:what|which|how|why|who|when|where|is|are|does|do|can|should)\b",
+    flags=re.IGNORECASE,
+)
+
+
 _FORMAT_REJECTION_MARKERS = (
     "must contain exactly",
     "must be true and false",
@@ -1138,19 +1144,6 @@ def _build_v2_prompt(
     )
 
 
-def _bind_full_v2_response_to_slots(candidates: list, requested_slots: list[dict]) -> list:
-    """Use backend order only when a complete response makes the mapping unambiguous."""
-    if len(candidates) != len(requested_slots):
-        return candidates
-    bound = []
-    for candidate, slot in zip(candidates, requested_slots):
-        if not isinstance(candidate, dict):
-            bound.append(candidate)
-            continue
-        bound.append({**candidate, "slot_id": str(slot["slot_id"])})
-    return bound
-
-
 _EASY_NEGATIVE_STEM = re.compile(
     r"\b(?:not|except|false|incorrect|least|never)\b|\b(?:no|not|never)\b.{0,28}\b(?:without|not|never)\b",
     flags=re.IGNORECASE,
@@ -1191,19 +1184,27 @@ def _easy_content_tokens(value: str) -> set[str]:
 
 def _validate_easy_v2_quality(
     stem: str, options: list[str], answer_index: int, explanation: str, evidence: str,
+    question_type: str = "single_choice",
 ) -> list[str]:
-    """Hard-reject structural Easy defects and warn on fallible heuristics."""
+    """Hard-reject structural Easy defects and warn on fallible heuristics.
+
+    true_false stems are declarative statements, not interrogative ones (enforced separately),
+    so the "?"-ending and WH-question template checks below only apply to the other types.
+    """
     warnings: list[str] = []
     lowered_stem = stem.lower().strip()
     if _EASY_NEGATIVE_STEM.search(lowered_stem):
         warnings.append("negative_or_trick_stem")
-    if (
-        not stem.endswith("?") or _EASY_PLACEHOLDER_STEM.search(stem)
-        or re.search(r"\b(?:of|for|and|or|the|a|an|to|is|are)\s*\?$", lowered_stem)
-    ):
+    if question_type != "true_false":
+        if (
+            not stem.endswith("?") or _EASY_PLACEHOLDER_STEM.search(stem)
+            or re.search(r"\b(?:of|for|and|or|the|a|an|to|is|are)\s*\?$", lowered_stem)
+        ):
+            raise ValueError("Easy quality: incomplete or placeholder stem.")
+        if _EASY_TEMPLATE_STYLE_STEM.search(stem):
+            warnings.append("template_like_stem")
+    elif _EASY_PLACEHOLDER_STEM.search(stem):
         raise ValueError("Easy quality: incomplete or placeholder stem.")
-    if _EASY_TEMPLATE_STYLE_STEM.search(stem):
-        warnings.append("template_like_stem")
 
     correct = options[answer_index]
     explicit_count = re.search(r"\b(two|three|four|five|six|seven|eight|nine|ten|\d+)\b", lowered_stem)
@@ -1243,6 +1244,26 @@ def _validate_easy_v2_quality(
     return list(dict.fromkeys(warnings))
 
 
+def _concept_grounding_overlap(stem: str, option_bodies: list[str], group: dict) -> float | None:
+    """Fraction of the assigned slot's own vocabulary echoed by the candidate's stem/options.
+
+    A conservative, LLM-free backstop against slot/topic mis-binding: it only ever fires on
+    ZERO overlap with the slot's own concept name + evidence, which is what cross-slot
+    contamination looks like (a question about a completely different concept). Paraphrases,
+    abbreviations, and evidence-derived wording always share at least one content word, so this
+    never demands literal concept_name containment. Returns None when there isn't enough
+    vocabulary on either side to judge conservatively, so thin fixtures/short concepts are
+    never penalized.
+    """
+    concept_tokens = _easy_content_tokens(f"{group.get('name', '')} {group.get('evidence_excerpt', '')}")
+    if len(concept_tokens) < 3:
+        return None
+    candidate_tokens = _easy_content_tokens(f"{stem} {' '.join(option_bodies)}")
+    if not candidate_tokens:
+        return None
+    return len(candidate_tokens & concept_tokens) / len(concept_tokens)
+
+
 def _validate_v2_question(
     raw: dict,
     groups_by_id: dict[str, dict],
@@ -1272,9 +1293,9 @@ def _validate_v2_question(
         raise ValueError("Question has an unsupported question_type.")
     if question_type == "true_false":
         stripped_stem = stem.strip()
-        if stripped_stem.endswith("?") and re.search(r"\bor\b", stripped_stem.lower()):
+        if stripped_stem.endswith("?") or _TRUE_FALSE_INTERROGATIVE_START.match(stripped_stem):
             raise ValueError(
-                "true_false question must be a declarative statement, not an either/or question."
+                "true_false question must be a declarative statement, not an interrogative one."
             )
     raw_options = raw.get("options")
     required_option_count = 2 if question_type == "true_false" else 4
@@ -1322,8 +1343,13 @@ def _validate_v2_question(
     source_ids = list(group["source_chunk_ids"])
     if slot_id not in remaining_slot_ids:
         raise ValueError("Question repeats or exceeds its planned slot_id.")
+    grounding_overlap = _concept_grounding_overlap(stem, option_bodies, group)
+    if grounding_overlap == 0.0:
+        raise ValueError("Question does not appear to test the assigned slot's concept or evidence.")
 
     warnings = []
+    if grounding_overlap is not None and grounding_overlap < 0.12:
+        warnings.append("uncertain_concept_grounding")
     if near_duplicate_stem:
         warnings.append("near_duplicate_question")
     if near_duplicate_options:
@@ -1336,7 +1362,8 @@ def _validate_v2_question(
     _reject_unsafe_final_text(explanation, field="Explanation")
     if difficulty == "easy":
         warnings.extend(_validate_easy_v2_quality(
-            stem, option_bodies, answer_index, explanation, str(group.get("evidence_excerpt") or "")
+            stem, option_bodies, answer_index, explanation, str(group.get("evidence_excerpt") or ""),
+            question_type,
         ))
     if len(explanation.split()) < 4:
         warnings.append("explanation_quality")
@@ -1533,7 +1560,6 @@ def _generate_topic_quiz_v2(
             candidates = data.get("questions") if isinstance(data, dict) else None
             if not isinstance(candidates, list):
                 raise ValueError("Quiz JSON does not contain a questions list.")
-            candidates = _bind_full_v2_response_to_slots(candidates, available_groups)
         except Exception as error:
             call_invocation_ms = call_invocation_ms or round((time.perf_counter() - invocation_started) * 1000)
             candidates = []
@@ -2056,7 +2082,6 @@ def _run_document_v2_batch(
             candidates = data.get("questions") if isinstance(data, dict) else None
             if not isinstance(candidates, list):
                 raise ValueError("Quiz JSON does not contain a questions list.")
-            candidates = _bind_full_v2_response_to_slots(candidates, call_slots)
             candidate_stems_by_attempt.append({
                 "attempt": llm_calls, "phase": phase,
                 "slot_ids": [str(slot["slot_id"]) for slot in call_slots],

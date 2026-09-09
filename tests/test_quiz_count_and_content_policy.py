@@ -48,15 +48,20 @@ class QuizCountAndContentPolicyTests(unittest.TestCase):
         base = {
             "slot_id": "S1", "question_type": "true_false",
             "options": ["True", "False"], "correct_answers": [0],
-            "explanation": "The evidence states hardware performs this translation.",
+            "explanation": "The evidence states acknowledgements confirm delivery.",
         }
-        with self.assertRaises(ValueError):
-            _validate_v2_question(
-                {**base, "question": "Is address translation handled by the hardware or by software?"},
-                {"S1": GROUP}, {"S1"}, [], "medium", 1, TOPIC, 3,
-            )
+        for bad_stem in (
+            "Is the ordering handled by acknowledgements or by sequence numbers?",
+            "Does the evidence confirm delivery through acknowledgements",
+            "How do acknowledgements preserve ordering in this evidence",
+        ):
+            with self.subTest(stem=bad_stem[:30]), self.assertRaises(ValueError):
+                _validate_v2_question(
+                    {**base, "question": bad_stem},
+                    {"S1": GROUP}, {"S1"}, [], "medium", 1, TOPIC, 3,
+                )
         question, _warnings = _validate_v2_question(
-            {**base, "question": "Address translation is handled by hardware in this system."},
+            {**base, "question": "Acknowledgements confirm delivery while sequence numbers preserve ordering here."},
             {"S1": GROUP}, {"S1"}, [], "medium", 1, TOPIC, 3,
         )
         self.assertEqual(question["question_type"], "true_false")
