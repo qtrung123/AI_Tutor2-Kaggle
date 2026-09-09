@@ -125,7 +125,12 @@ class TopicV2Phase2Tests(unittest.TestCase):
         topics = [{"topic_id": name, "name": name, "subtopics": []} for name in ("a", "b", "c", "d")]
         document = {"id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 3, "topics": topics}
         def chunks(_document_id, topic_id, _owner):
-            return [chunk(f"{topic_id}-chunk", "", f"Evidence for {topic_id}", topic_id)]
+            return [chunk(
+                f"{topic_id}-chunk", "",
+                f"{topic_id} directly governs this documented mechanism. "
+                f"{topic_id} also affects the resulting system behavior.",
+                topic_id,
+            )]
         def plan(topic, _chunks):
             concepts = [{
                 "concept_id": f"aconcept_{topic['topic_id']}_{index}", "name": f"Concept {index}",
@@ -180,7 +185,12 @@ class TopicV2Phase2Tests(unittest.TestCase):
     def test_document_partial_generation_fails_without_persistence(self):
         topic = {"topic_id": "a", "name": "A", "subtopics": []}
         document = {"id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 3, "topics": [topic]}
-        evidence = chunk("a-chunk", "", "Grounded evidence for A", "a")
+        evidence = chunk(
+            "a-chunk", "",
+            "Concept A directly governs this documented mechanism. "
+            "Concept A also affects the resulting system behavior.",
+            "a",
+        )
         concept = {
             "concept_id": "aconcept_a", "name": "Concept A", "source_subtopic_ids": [],
             "source_chunk_ids": ["a-chunk"], "concept_origin": "derived",

@@ -14,6 +14,7 @@ from backend.quiz_service import (
     _deterministic_true_false_candidate,
     _document_slot_propositions,
     _document_slot_type_scores,
+    _prepare_document_slot_blueprint,
     _run_document_v2_batch,
     _validate_v2_question,
 )
@@ -281,7 +282,13 @@ class GenerateQuizDocumentContractTests(unittest.TestCase):
             }
 
         def chunks(_document_id, topic_id, _owner_id):
-            return [{"content": "evidence", "metadata": {"chunk_id": f"chunk_{i}", "topic_id": topic_id}} for i in range(15)]
+            return [{
+                "content": (
+                    f"Concept {i} directly governs this documented mechanism. "
+                    f"Concept {i} also affects the resulting system behavior."
+                ),
+                "metadata": {"chunk_id": f"chunk_{i}", "topic_id": topic_id},
+            } for i in range(15)]
 
         captured = {}
 
@@ -417,6 +424,336 @@ class SuitabilityScoringTests(unittest.TestCase):
         self.assertTrue(multi_select_slot_ids.issubset(list_like_slot_ids))
         noisy_slot_ids = {s["slot_id"] for i, s in enumerate(assigned) if i % 6 in (4, 5)}
         self.assertFalse(noisy_slot_ids & multi_select_slot_ids)
+
+
+class InfeasibleSlotReassignmentTests(unittest.TestCase):
+    """Hard-gate guard: even when two genuinely feasible slots exist (so no reselection is
+    needed), the ranking must still never let a one-proposition slot like S2 win a multi_select
+    seat just by index tie-break. See ReselectionFromConceptPoolTests below for the exact
+    reported runtime failure, where only one feasible slot exists among the first 15 and
+    preflight must reselect a second one from the topic's fuller concept pool."""
+
+    def _weak_field_slots(self):
+        # S3 and S5 have >=2 propositions; every other slot (including S2) has exactly 1.
+        fact_pattern = {i: 1 for i in range(1, 16)}
+        fact_pattern[3] = 3
+        fact_pattern[5] = 3
+        return [slot(i, ((i - 1) % 4) + 1, f"Item{i}", fact_pattern[i]) for i in range(1, 16)]
+
+    def test_preflight_never_assigns_multi_select_to_a_one_proposition_slot(self):
+        assigned = _assign_document_slot_types(self._weak_field_slots())
+        self.assertEqual(
+            Counter(s["question_type"] for s in assigned),
+            {"single_choice": 10, "true_false": 3, "multi_select": 2},
+        )
+        by_id = {s["slot_id"]: s for s in assigned}
+        self.assertNotEqual(by_id["S2"]["question_type"], "multi_select")
+        self.assertEqual({s["slot_id"] for s in assigned if s["question_type"] == "multi_select"}, {"S3", "S5"})
+
+    def test_deterministic_fallback_is_constructible_for_both_assigned_multi_select_slots(self):
+        assigned = _assign_document_slot_types(self._weak_field_slots())
+        multi_select_slots = [s for s in assigned if s["question_type"] == "multi_select"]
+        self.assertEqual(len(multi_select_slots), 2)
+        for slot_data in multi_select_slots:
+            raw = _deterministic_multi_select_candidate(slot_data, 0)
+            self.assertEqual(raw["question_type"], "multi_select")
+            normalized, _warnings = _validate_v2_question(
+                raw, {slot_data["slot_id"]: slot_data}, {slot_data["slot_id"]}, [], "medium", 1, DOCUMENT_SCOPE, 5,
+            )
+            self.assertGreaterEqual(len(normalized["correct_answers"]), 2)
+
+    def test_generation_reaches_exact_fifteen_even_when_every_llm_response_is_unusable(self):
+        """The exact scenario from the bug report: force every batch to fail so every slot must
+        go through deterministic fallback, and confirm it no longer stalls at 14/15."""
+        slots = _assign_document_slot_types(self._weak_field_slots())
+
+        def respond(_prompt):
+            return []
+
+        questions, validation, timings = run_blueprint(slots, respond)
+        self.assertEqual(len(questions), 15)
+        self.assertEqual(
+            Counter(q["question_type"] for q in questions),
+            {"single_choice": 10, "true_false": 3, "multi_select": 2},
+        )
+        self.assertEqual(timings["deterministic_fallback_count"], 15)
+
+
+def _reselection_fixture():
+    """15 slots where only S1 has enough of its own evidence for multi_select, plus one extra,
+    not-yet-selected concept in the same topic with rich evidence for the reselection pool."""
+    fact_pattern = {i: (3 if i == 1 else 1) for i in range(1, 16)}
+    initial_slots = [slot(i, 1, f"Item{i}", fact_pattern[i]) for i in range(1, 16)]
+    extra_concept = {
+        "concept_id": "aconcept_extra", "name": "Concept Extra",
+        "source_subtopic_ids": ["sub_1"], "source_chunk_ids": ["chunk_extra"],
+        "concept_origin": "structural",
+    }
+    topic_plan = {
+        "topic_id": "topic_1", "topic_name": "Topic 1",
+        "concept_plan_id": "plan_1", "assessment_capacity": 16,
+        "concepts": [
+            {
+                "concept_id": f"aconcept_{i}", "name": f"Concept {i}",
+                "source_subtopic_ids": ["sub_1"], "source_chunk_ids": [f"chunk_{i}"],
+                "concept_origin": "structural",
+            }
+            for i in range(1, 16)
+        ] + [extra_concept],
+    }
+    topic = {"topic_id": "topic_1", "name": "Topic 1"}
+    extra_evidence = [{
+        "content": (
+            "Extra fact one is documented here. Extra fact two is documented here. "
+            "Extra fact three is documented here."
+        ),
+        "metadata": {"chunk_id": "chunk_extra"},
+    }]
+
+    def resolve_side_effect(_topic, _chunks, concept):
+        if concept["concept_id"] == "aconcept_extra":
+            return extra_evidence
+        return []
+
+    return initial_slots, topic_plan, topic, resolve_side_effect
+
+
+class ReselectionFromConceptPoolTests(unittest.TestCase):
+    """Reproduces the exact reported runtime failure: only one of the first 15 selected concepts
+    (S1) has enough of its own evidence for multi_select. Verified (via a manual pre-fix
+    simulation) that the old count-only ranking picked S1 and S2 -- S2 with only one usable
+    proposition -- which deterministic fallback then could not satisfy, stalling generation at
+    14/15. Preflight must instead reselect a second feasible concept from the same topic's
+    fuller pool before generation starts."""
+
+    def test_reselects_an_unused_concept_from_the_same_topic_when_the_first_fifteen_lack_feasibility(self):
+        initial_slots, topic_plan, topic, resolve_side_effect = _reselection_fixture()
+        with patch.object(quiz_service, "resolve_concept_evidence", side_effect=resolve_side_effect):
+            assigned = _prepare_document_slot_blueprint(
+                initial_slots, [topic_plan], {"topic_1": topic}, {"topic_1": []},
+            )
+        self.assertEqual(
+            Counter(s["question_type"] for s in assigned),
+            {"single_choice": 10, "true_false": 3, "multi_select": 2},
+        )
+        multi_select_slots = [s for s in assigned if s["question_type"] == "multi_select"]
+        swapped_in = [s for s in multi_select_slots if s.get("concept_id") == "aconcept_extra"]
+        self.assertEqual(len(swapped_in), 1)
+        self.assertEqual(swapped_in[0]["topic_id"], "topic_1")
+
+    def test_blueprint_preflight_never_calls_the_model(self):
+        initial_slots, topic_plan, topic, resolve_side_effect = _reselection_fixture()
+
+        class ExplodingOllama:
+            def __init__(self, **_kwargs):
+                raise AssertionError("Blueprint preflight must never call the model.")
+
+        with patch.object(quiz_service, "ChatOllama", ExplodingOllama), \
+             patch.object(quiz_service, "resolve_concept_evidence", side_effect=resolve_side_effect):
+            assigned = _prepare_document_slot_blueprint(
+                initial_slots, [topic_plan], {"topic_1": topic}, {"topic_1": []},
+            )
+        self.assertEqual(
+            Counter(s["question_type"] for s in assigned),
+            {"single_choice": 10, "true_false": 3, "multi_select": 2},
+        )
+
+
+class BlueprintPreflightFailureTests(unittest.TestCase):
+    """When the ENTIRE document concept pool -- not just the first 15 -- cannot satisfy the
+    fixed 10/3/2 blueprint, preflight must raise before touching the model, never silently
+    return an under-filled distribution."""
+
+    def test_preflight_raises_when_only_one_feasible_multi_select_slot_exists_anywhere(self):
+        # Only S1 has >=2 propositions; every other slot has exactly 1, and the topic's full
+        # concept pool contains nothing beyond the 15 already selected -- nothing left to swap in.
+        fact_pattern = {i: (3 if i == 1 else 1) for i in range(1, 16)}
+        initial_slots = [slot(i, 1, f"Item{i}", fact_pattern[i]) for i in range(1, 16)]
+        topic_plan = {
+            "topic_id": "topic_1", "topic_name": "Topic 1", "concept_plan_id": "plan_1",
+            "assessment_capacity": 15,
+            "concepts": [
+                {
+                    "concept_id": f"aconcept_{i}", "name": f"Concept {i}",
+                    "source_subtopic_ids": ["sub_1"], "source_chunk_ids": [f"chunk_{i}"],
+                    "concept_origin": "structural",
+                }
+                for i in range(1, 16)
+            ],
+        }
+        topic = {"topic_id": "topic_1", "name": "Topic 1"}
+
+        class ExplodingOllama:
+            def __init__(self, **_kwargs):
+                raise AssertionError("Blueprint preflight must never call the model.")
+
+        with patch.object(quiz_service, "ChatOllama", ExplodingOllama):
+            with self.assertRaises(quiz_service.QuizGenerationError) as raised:
+                _prepare_document_slot_blueprint(
+                    initial_slots, [topic_plan], {"topic_1": topic}, {"topic_1": []},
+                )
+        self.assertEqual(raised.exception.detail["stage"], "blueprint")
+        self.assertIn("multi_select", raised.exception.detail["message"])
+
+    def test_exact_distribution_assertion_on_the_error_detail(self):
+        # Every slot has 0 usable propositions, so BOTH types are infeasible everywhere.
+        weak_slots = [
+            {**slot(i, 1, f"Item{i}", 1), "evidence_excerpt": "Heading Only"}
+            for i in range(1, 16)
+        ]
+        topic_plan = {
+            "topic_id": "topic_1", "topic_name": "Topic 1", "concept_plan_id": "plan_1",
+            "assessment_capacity": 15, "concepts": [],
+        }
+        topic = {"topic_id": "topic_1", "name": "Topic 1"}
+        with self.assertRaises(quiz_service.QuizGenerationError) as raised:
+            _prepare_document_slot_blueprint(weak_slots, [topic_plan], {"topic_1": topic}, {"topic_1": []})
+        detail = raised.exception.detail
+        self.assertEqual(detail["stage"], "blueprint")
+        self.assertTrue(any("multi_select" in item for item in detail["failure_summary"]))
+        self.assertTrue(any("true_false" in item for item in detail["failure_summary"]))
+
+
+class NoPartialPersistenceOnBlueprintFailureTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temp_dir.name) / "blueprint_fail.db"
+        self.database_patch = patch.object(quiz_store, "DATABASE_PATH", self.database_path)
+        self.database_patch.start()
+
+    def tearDown(self):
+        self.database_patch.stop()
+        self.temp_dir.cleanup()
+
+    def test_generate_quiz_raises_and_never_persists_or_calls_the_model_when_blueprint_is_infeasible(self):
+        document = {
+            "id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 2,
+            "topics": [{"topic_id": "topic_a", "name": "A"}],
+        }
+
+        def planned(topic, _chunks):
+            concepts = [{
+                "concept_id": f"concept_{i}", "name": f"Concept {i}",
+                "source_subtopic_ids": [], "source_chunk_ids": [f"chunk_{i}"],
+                "concept_origin": "derived",
+            } for i in range(15)]
+            return {
+                "topic_id": topic["topic_id"], "topic_name": topic["name"],
+                "planner_version": quiz_service.PLANNER_VERSION,
+                "concept_plan_id": "plan-a", "assessment_capacity": 15,
+                "allocated_questions": 0, "concepts": concepts,
+            }
+
+        def chunks(_document_id, topic_id, _owner_id):
+            # A single short word never produces a usable proposition anywhere in the document.
+            return [{"content": "brief", "metadata": {"chunk_id": f"chunk_{i}", "topic_id": topic_id}} for i in range(15)]
+
+        with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
+             patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
+             patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
+             patch.object(quiz_service, "build_topic_plan", side_effect=planned), \
+             patch.object(quiz_service, "ChatOllama") as ollama_mock, \
+             patch.object(quiz_service, "save_quiz") as save_mock:
+            with self.assertRaises(quiz_service.QuizGenerationError) as raised:
+                quiz_service.generate_quiz("doc.pdf", "easy", "document")
+        self.assertEqual(raised.exception.detail["stage"], "blueprint")
+        save_mock.assert_not_called()
+        ollama_mock.assert_not_called()
+
+
+class CrossTopicReconciliationTests(unittest.TestCase):
+    def test_reconcile_updates_allocated_questions_to_match_final_slot_topics(self):
+        planned_topics = [
+            {"topic_id": "topic_1", "topic_name": "Topic 1", "allocated_questions": 8, "assessment_capacity": 8},
+            {"topic_id": "topic_2", "topic_name": "Topic 2", "allocated_questions": 7, "assessment_capacity": 7},
+        ]
+        final_slots = (
+            [{"topic_id": "topic_1"} for _ in range(7)]
+            + [{"topic_id": "topic_2"} for _ in range(8)]
+        )
+        reconciled = quiz_service._reconcile_topic_allocation_with_final_slots(planned_topics, final_slots)
+        by_id = {plan["topic_id"]: plan for plan in reconciled}
+        self.assertEqual(by_id["topic_1"]["allocated_questions"], 7)
+        self.assertEqual(by_id["topic_2"]["allocated_questions"], 8)
+        self.assertEqual(by_id["topic_1"]["topic_name"], "Topic 1")
+
+    def test_cross_topic_replacement_only_after_same_topic_exhausted_and_metadata_reflects_final_slots(self):
+        # topic_1: S1 is rich (3 props, satisfies one multi_select seat on its own); S2..S8 are
+        # thin and topic_1 has no unused concepts left to swap in for the second seat.
+        rich_t1 = [slot(1, 1, "RichItem", 3)]
+        thin_t1 = [slot(i, 1, f"T1Item{i}", 1) for i in range(2, 9)]
+        thin_t2 = [slot(i, 2, f"T2Item{i}", 1) for i in range(9, 16)]
+        initial_slots = rich_t1 + thin_t1 + thin_t2
+        topic_plan_1 = {
+            "topic_id": "topic_1", "topic_name": "Topic 1", "concept_plan_id": "plan_1",
+            "assessment_capacity": 8,
+            "concepts": [
+                {
+                    "concept_id": f"aconcept_{i}", "name": f"Concept {i}",
+                    "source_subtopic_ids": ["sub_1"], "source_chunk_ids": [f"chunk_{i}"],
+                    "concept_origin": "structural",
+                }
+                for i in range(1, 9)
+            ],  # fully used by the initial 8 topic_1 slots -- nothing left to reselect here
+        }
+        extra_concept = {
+            "concept_id": "aconcept_extra", "name": "Concept Extra",
+            "source_subtopic_ids": ["sub_2"], "source_chunk_ids": ["chunk_extra"], "concept_origin": "structural",
+        }
+        topic_plan_2 = {
+            "topic_id": "topic_2", "topic_name": "Topic 2", "concept_plan_id": "plan_2",
+            "assessment_capacity": 8,
+            "concepts": [
+                {
+                    "concept_id": f"aconcept_{i}", "name": f"Concept {i}",
+                    "source_subtopic_ids": ["sub_2"], "source_chunk_ids": [f"chunk_{i}"],
+                    "concept_origin": "structural",
+                }
+                for i in range(9, 16)
+            ] + [extra_concept],
+        }
+        topic_1 = {"topic_id": "topic_1", "name": "Topic 1"}
+        topic_2 = {"topic_id": "topic_2", "name": "Topic 2"}
+        extra_evidence = [{
+            "content": (
+                "Extra fact one is documented here. Extra fact two is documented here. "
+                "Extra fact three is documented here."
+            ),
+            "metadata": {"chunk_id": "chunk_extra"},
+        }]
+
+        def resolve_side_effect(_topic, _chunks, concept):
+            if concept["concept_id"] == "aconcept_extra":
+                return extra_evidence
+            return []
+
+        with patch.object(quiz_service, "resolve_concept_evidence", side_effect=resolve_side_effect):
+            assigned = _prepare_document_slot_blueprint(
+                initial_slots, [topic_plan_1, topic_plan_2],
+                {"topic_1": topic_1, "topic_2": topic_2}, {"topic_1": [], "topic_2": []},
+            )
+
+        self.assertEqual(
+            Counter(s["question_type"] for s in assigned),
+            {"single_choice": 10, "true_false": 3, "multi_select": 2},
+        )
+        swapped_in = [s for s in assigned if s.get("concept_id") == "aconcept_extra"]
+        self.assertEqual(len(swapped_in), 1, "the extra topic_2 concept must have been reselected")
+        self.assertEqual(swapped_in[0]["topic_id"], "topic_2")
+        self.assertEqual(swapped_in[0]["question_type"], "multi_select")
+
+        # The swap moved one slot's ownership from topic_1 to topic_2 -- final allocation
+        # metadata must reflect that, not the stale pre-reselection 8/7 split.
+        reconciled = quiz_service._reconcile_topic_allocation_with_final_slots(
+            [topic_plan_1, topic_plan_2], assigned,
+        )
+        by_id = {plan["topic_id"]: plan for plan in reconciled}
+        final_topic_1_count = sum(1 for s in assigned if s["topic_id"] == "topic_1")
+        final_topic_2_count = sum(1 for s in assigned if s["topic_id"] == "topic_2")
+        self.assertEqual(final_topic_1_count, 7)
+        self.assertEqual(final_topic_2_count, 8)
+        self.assertEqual(by_id["topic_1"]["allocated_questions"], 7)
+        self.assertEqual(by_id["topic_2"]["allocated_questions"], 8)
 
 
 class FrontendDocumentBlueprintTests(unittest.TestCase):

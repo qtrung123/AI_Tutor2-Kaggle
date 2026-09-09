@@ -225,11 +225,21 @@ class QuizRetakeFlowTests(unittest.TestCase):
 
         with patch.object(quiz_service, "_document_lookup", return_value={document["id"]: document}), \
              patch.object(quiz_service, "get_topic_chunks", return_value=[{
-                 "content": "Grounded embedded systems evidence", "metadata": {"chunk_id": "chunk_1"},
+                 "content": (
+                     "Embedded systems evidence confirms reliable behavior. "
+                     "This evidence directly supports the documented mechanism. "
+                     "The system behavior remains consistent under load."
+                 ),
+                 "metadata": {"chunk_id": "chunk_1"},
              }]), \
              patch.object(quiz_service, "build_topic_plan", side_effect=lambda topic, _chunks: topic_plans[topic["topic_id"]]), \
              patch.object(quiz_service, "resolve_concept_evidence", return_value=[{
-                 "content": "Grounded embedded systems evidence", "metadata": {"chunk_id": "chunk_1"},
+                 "content": (
+                     "Embedded systems evidence confirms reliable behavior. "
+                     "This evidence directly supports the documented mechanism. "
+                     "The system behavior remains consistent under load."
+                 ),
+                 "metadata": {"chunk_id": "chunk_1"},
              }]), \
              patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated_batch), \
              patch.object(quiz_service, "uuid4", return_value="document-batch-15"):

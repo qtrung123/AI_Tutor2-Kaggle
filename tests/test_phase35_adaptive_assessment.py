@@ -175,7 +175,13 @@ class AdaptiveAssessmentTests(unittest.TestCase):
             return questions, {"accepted": requested, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}, {"llm_calls": 1}
 
         def chunks(document_id, topic_id, owner_id):
-            return [{"content": topic_id, "metadata": {"chunk_id": f"{topic_id}_1", "topic_id": topic_id}}]
+            return [{
+                "content": (
+                    f"{topic_id} directly governs this documented mechanism. "
+                    f"{topic_id} also affects the resulting system behavior."
+                ),
+                "metadata": {"chunk_id": f"{topic_id}_1", "topic_id": topic_id},
+            }]
 
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \

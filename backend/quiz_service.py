@@ -1807,6 +1807,65 @@ def _generate_topic_quiz_v2(
     return saved
 
 
+def _build_document_slot(
+    topic_plan: dict, topic: dict, chunks: list[dict], concept: dict, slot_id: str,
+    evidence_cache: dict[tuple[str, str], list[dict]] | None = None,
+) -> dict | None:
+    """Build one backend-owned document slot for a single concept, or None without evidence.
+
+    Shared by the normal allocation-order slot build and by feasibility reselection, which
+    needs to materialize an alternate, not-yet-selected concept's evidence on demand.
+    """
+    topic_id = str(topic_plan["topic_id"])
+    cache_key = (topic_id, str(concept["concept_id"]))
+    cache = evidence_cache if evidence_cache is not None else {}
+    if cache_key not in cache:
+        cache[cache_key] = resolve_concept_evidence(topic, chunks, concept)
+    evidence_chunks = cache[cache_key]
+    if not evidence_chunks:
+        return None
+    excerpts = [
+        _v2_excerpt(chunk.get("content", ""), index, len(evidence_chunks))
+        for index, chunk in enumerate(evidence_chunks)
+    ]
+    evidence_variants = []
+    for chunk, excerpt in zip(evidence_chunks, excerpts):
+        chunk_id = str((chunk.get("metadata") or {}).get("chunk_id") or "").strip()
+        if not chunk_id:
+            continue
+        content = re.sub(r"\s+", " ", str(chunk.get("content") or "")).strip()
+        angles = [
+            part.strip()[:280]
+            for part in re.split(r"(?<=[.!?])\s+|\s*[;•]\s*", content)
+            if len(part.split()) >= 5
+        ]
+        for angle in angles or [excerpt]:
+            if angle and all(angle != variant["evidence_excerpt"] for variant in evidence_variants):
+                evidence_variants.append({
+                    "evidence_excerpt": angle, "source_chunk_ids": [chunk_id],
+                })
+    resolved_ids = {chunk_id for variant in evidence_variants for chunk_id in variant["source_chunk_ids"]}
+    topic_evidence_variants = []
+    for chunk_index, chunk in enumerate(chunks):
+        chunk_id = str((chunk.get("metadata") or {}).get("chunk_id") or "").strip()
+        excerpt = _v2_excerpt(chunk.get("content", ""), chunk_index, len(chunks))
+        if chunk_id and chunk_id not in resolved_ids and excerpt:
+            topic_evidence_variants.append({
+                "evidence_excerpt": excerpt, "source_chunk_ids": [chunk_id],
+            })
+    return {
+        **concept,
+        "slot_id": slot_id,
+        "topic_id": topic_id,
+        "topic_name": str(topic_plan.get("topic_name") or topic.get("name") or topic_id),
+        "concept_plan_id": str(topic_plan["concept_plan_id"]),
+        "assessment_capacity": int(topic_plan["assessment_capacity"]),
+        "evidence_excerpt": " ".join(excerpts)[:560],
+        "evidence_variants": evidence_variants,
+        "topic_evidence_variants": topic_evidence_variants,
+    }
+
+
 def _document_v2_slots(
     planned_topics: list[dict], topic_lookup: dict[str, dict], topic_chunks: dict[str, list[dict]],
 ) -> list[dict]:
@@ -1818,52 +1877,11 @@ def _document_v2_slots(
         topic = topic_lookup[topic_id]
         chunks = topic_chunks.get(topic_id, [])
         for concept in topic_plan.get("selected_concepts") or []:
-            cache_key = (topic_id, str(concept["concept_id"]))
-            if cache_key not in evidence_cache:
-                evidence_cache[cache_key] = resolve_concept_evidence(topic, chunks, concept)
-            evidence_chunks = evidence_cache[cache_key]
-            if not evidence_chunks:
-                continue
-            excerpts = [
-                _v2_excerpt(chunk.get("content", ""), index, len(evidence_chunks))
-                for index, chunk in enumerate(evidence_chunks)
-            ]
-            evidence_variants = []
-            for chunk, excerpt in zip(evidence_chunks, excerpts):
-                chunk_id = str((chunk.get("metadata") or {}).get("chunk_id") or "").strip()
-                if not chunk_id:
-                    continue
-                content = re.sub(r"\s+", " ", str(chunk.get("content") or "")).strip()
-                angles = [
-                    part.strip()[:280]
-                    for part in re.split(r"(?<=[.!?])\s+|\s*[;•]\s*", content)
-                    if len(part.split()) >= 5
-                ]
-                for angle in angles or [excerpt]:
-                    if angle and all(angle != variant["evidence_excerpt"] for variant in evidence_variants):
-                        evidence_variants.append({
-                            "evidence_excerpt": angle, "source_chunk_ids": [chunk_id],
-                        })
-            resolved_ids = {chunk_id for variant in evidence_variants for chunk_id in variant["source_chunk_ids"]}
-            topic_evidence_variants = []
-            for chunk_index, chunk in enumerate(chunks):
-                chunk_id = str((chunk.get("metadata") or {}).get("chunk_id") or "").strip()
-                excerpt = _v2_excerpt(chunk.get("content", ""), chunk_index, len(chunks))
-                if chunk_id and chunk_id not in resolved_ids and excerpt:
-                    topic_evidence_variants.append({
-                        "evidence_excerpt": excerpt, "source_chunk_ids": [chunk_id],
-                    })
-            slots.append({
-                **concept,
-                "slot_id": f"S{len(slots) + 1}",
-                "topic_id": topic_id,
-                "topic_name": str(topic_plan.get("topic_name") or topic.get("name") or topic_id),
-                "concept_plan_id": str(topic_plan["concept_plan_id"]),
-                "assessment_capacity": int(topic_plan["assessment_capacity"]),
-                "evidence_excerpt": " ".join(excerpts)[:560],
-                "evidence_variants": evidence_variants,
-                "topic_evidence_variants": topic_evidence_variants,
-            })
+            slot = _build_document_slot(
+                topic_plan, topic, chunks, concept, f"S{len(slots) + 1}", evidence_cache,
+            )
+            if slot is not None:
+                slots.append(slot)
     return slots
 
 
@@ -1936,25 +1954,26 @@ def _document_slot_type_scores(slot: dict) -> tuple[int, int]:
 
 
 def _assign_document_slot_types(slots: list[dict]) -> list[dict]:
-    """Deterministically stamp each slot with the fixed document blueprint's question_type.
+    """Stamp each slot with a question_type using HARD minimum feasibility gates.
 
-    Exactly DOCUMENT_QUIZ_TYPE_COUNTS is produced regardless of content: multi_select goes to
-    the slots that best fit its suitability score (>=2 clean independent facts, boosted by
-    list-like structure), true_false goes to the next-most-suitable remaining slots (>=1 clean
-    declarative fact), and every other slot is single_choice -- the always-safe default. Low or
-    zero scores are still ranked (never hard-excluded) so the fixed 10/3/2 split always holds
-    even for a thin or noisy document. Never asks the model and never inspects document/topic
-    names or domain vocabulary.
+    multi_select is only ever assigned to a slot with >=2 clean independent propositions;
+    true_false only to a slot with >=1. A slot scoring 0 is never chosen just to fill the
+    count -- if there aren't enough feasible slots among the given 15, fewer than
+    DOCUMENT_QUIZ_TYPE_COUNTS's multi_select/true_false targets get stamped here, and the extra
+    slots fall through to single_choice. The caller (_prepare_document_slot_blueprint) is
+    responsible for detecting that shortfall and reselecting alternate concept evidence before
+    generation; this function never fabricates feasibility. Never asks the model and never
+    inspects document/topic names or domain vocabulary.
     """
     type_counts = dict(DOCUMENT_QUIZ_TYPE_COUNTS)
     scored = [(index, *_document_slot_type_scores(slot)) for index, slot in enumerate(slots)]
 
-    richest_first = sorted(scored, key=lambda item: (-item[1], item[0]))
-    multi_select_indices = {index for index, _ms, _tf in richest_first[:type_counts["multi_select"]]}
+    feasible_ms = sorted((item for item in scored if item[1] > 0), key=lambda item: (-item[1], item[0]))
+    multi_select_indices = {index for index, _ms, _tf in feasible_ms[:type_counts["multi_select"]]}
 
     remaining = [item for item in scored if item[0] not in multi_select_indices]
-    strongest_tf_first = sorted(remaining, key=lambda item: (-item[2], item[0]))
-    true_false_indices = {index for index, _ms, _tf in strongest_tf_first[:type_counts["true_false"]]}
+    feasible_tf = sorted((item for item in remaining if item[2] > 0), key=lambda item: (-item[2], item[0]))
+    true_false_indices = {index for index, _ms, _tf in feasible_tf[:type_counts["true_false"]]}
 
     assigned = []
     for index, slot in enumerate(slots):
@@ -1966,6 +1985,161 @@ def _assign_document_slot_types(slots: list[dict]) -> list[dict]:
             question_type = "single_choice"
         assigned.append({**slot, "question_type": question_type})
     return assigned
+
+
+def _document_topic_unused_concepts(topic_plan: dict, used_concept_ids: set[str]) -> list[dict]:
+    """Concepts in this topic's full pool not already used by any of the 15 blueprint slots."""
+    return [
+        concept for concept in topic_plan.get("concepts") or []
+        if str(concept.get("concept_id")) not in used_concept_ids
+    ]
+
+
+def _document_slot_blueprint_problems(slots: list[dict]) -> list[str]:
+    """Enumerate every way the fixed document blueprint contract is violated, or [] if none."""
+    problems = []
+    if len(slots) != DOCUMENT_QUIZ_QUESTION_COUNT:
+        problems.append(f"expected {DOCUMENT_QUIZ_QUESTION_COUNT} slots, found {len(slots)}")
+    slot_ids = [str(slot.get("slot_id")) for slot in slots]
+    if len(set(slot_ids)) != len(slot_ids):
+        problems.append("slot_ids are not unique")
+    counts: dict[str, int] = {}
+    for slot in slots:
+        question_type = str(slot.get("question_type") or "")
+        counts[question_type] = counts.get(question_type, 0) + 1
+    for question_type, needed in DOCUMENT_QUIZ_TYPE_COUNTS:
+        found = counts.get(question_type, 0)
+        if found != needed:
+            problems.append(f"expected {needed} {question_type} slots, found {found}")
+    for slot in slots:
+        question_type = slot.get("question_type")
+        if question_type not in {"multi_select", "true_false"}:
+            continue
+        proposition_count = len(_document_slot_propositions(slot))
+        minimum = 2 if question_type == "multi_select" else 1
+        if proposition_count < minimum:
+            problems.append(
+                f"{slot.get('slot_id')} is assigned {question_type} but has only "
+                f"{proposition_count} clean proposition(s) (needs >= {minimum})"
+            )
+    return problems
+
+
+def _validate_document_slot_blueprint(slots: list[dict]) -> None:
+    """Hard pre-generation gate. Raises QuizGenerationError(stage="blueprint") -- never lets an
+    under-filled or infeasible blueprint reach the model or persistence layer.
+    """
+    problems = _document_slot_blueprint_problems(slots)
+    if not problems:
+        return
+    raise QuizGenerationError(
+        "The fixed document quiz blueprint (10 single_choice / 3 true_false / 2 multi_select) "
+        "could not be satisfied by the document's available evidence: " + "; ".join(problems),
+        stage="blueprint",
+        valid_questions=0,
+        target_questions=DOCUMENT_QUIZ_QUESTION_COUNT,
+        failure_summary=problems,
+    )
+
+
+def _prepare_document_slot_blueprint(
+    slots: list[dict], planned_topics: list[dict], topic_lookup: dict[str, dict],
+    topic_chunks: dict[str, list[dict]],
+) -> list[dict]:
+    """Guarantee the 15-slot document blueprint is generation-ready before any LLM call:
+    exactly 10 single_choice / 3 true_false / 2 multi_select, with both multi_select slots and
+    all three true_false slots deterministic-fallback-feasible.
+
+    _assign_document_slot_types only ever stamps a type on a slot that meets its hard minimum
+    feasibility; if the initially selected 15 concepts don't have enough feasible slots for the
+    exact split, this swaps the weakest single_choice slot for another concept's evidence --
+    first an unused concept from the SAME topic (preserving topic allocation), then, only as a
+    last resort, an unused concept from any other topic in the document -- and re-evaluates. No
+    LLM call, no document/domain vocabulary. If the whole document's concept pool still can't
+    produce enough feasible slots, this raises QuizGenerationError(stage="blueprint") instead of
+    returning an under-filled distribution; the caller must not proceed to generation or
+    persistence in that case.
+    """
+    topic_plans_by_id = {str(plan["topic_id"]): plan for plan in planned_topics}
+    evidence_cache: dict[tuple[str, str], list[dict]] = {}
+
+    def topic_pool_order(preferred_topic_id: str | None) -> list[str]:
+        ids = list(topic_plans_by_id)
+        if preferred_topic_id and preferred_topic_id in ids:
+            ids = [preferred_topic_id] + [tid for tid in ids if tid != preferred_topic_id]
+        return ids
+
+    def find_feasible_replacement(used_concept_ids: set[str], score_index: int, preferred_topic_id: str | None):
+        for topic_id in topic_pool_order(preferred_topic_id):
+            topic_plan = topic_plans_by_id[topic_id]
+            topic = topic_lookup.get(topic_id)
+            chunks = topic_chunks.get(topic_id, [])
+            if topic is None:
+                continue
+            for concept in _document_topic_unused_concepts(topic_plan, used_concept_ids):
+                used_concept_ids.add(str(concept.get("concept_id")))
+                candidate = _build_document_slot(topic_plan, topic, chunks, concept, "candidate", evidence_cache)
+                if candidate is None:
+                    continue
+                if _document_slot_type_scores(candidate)[score_index] > 0:
+                    return candidate
+        return None
+
+    current = list(slots)
+    used_concept_ids = {str(slot.get("concept_id")) for slot in current}
+    target = dict(DOCUMENT_QUIZ_TYPE_COUNTS)
+    max_rounds = len(current) + 5
+    assigned = _assign_document_slot_types(current)
+    for _round in range(max_rounds):
+        counts: dict[str, int] = {}
+        for slot in assigned:
+            counts[slot["question_type"]] = counts.get(slot["question_type"], 0) + 1
+        shortfalls = [
+            (question_type, needed - counts.get(question_type, 0))
+            for question_type, needed in target.items()
+            if question_type != "single_choice" and counts.get(question_type, 0) < needed
+        ]
+        if not shortfalls:
+            break
+        question_type, _gap = max(shortfalls, key=lambda item: item[1])
+        score_index = 0 if question_type == "multi_select" else 1
+        single_choice_slots = [
+            (index, slot) for index, slot in enumerate(assigned) if slot["question_type"] == "single_choice"
+        ]
+        if not single_choice_slots:
+            break
+        weakest_index, weakest_slot = min(
+            single_choice_slots,
+            key=lambda item: (_document_slot_type_scores(item[1])[score_index], item[0]),
+        )
+        replacement = find_feasible_replacement(used_concept_ids, score_index, weakest_slot.get("topic_id"))
+        if replacement is None:
+            break
+        replacement["slot_id"] = weakest_slot["slot_id"]
+        current[weakest_index] = replacement
+        assigned = _assign_document_slot_types(current)
+    _validate_document_slot_blueprint(assigned)
+    return assigned
+
+
+def _reconcile_topic_allocation_with_final_slots(
+    planned_topics: list[dict], final_slots: list[dict],
+) -> list[dict]:
+    """Recompute each topic's allocated_questions from the FINAL blueprint slots.
+
+    Cross-topic reselection (last resort only, inside _prepare_document_slot_blueprint) can move
+    a slot from one topic to another; when that happens the pre-reselection allocation counts
+    from allocate_document_topics go stale. This keeps assessment_plan honest without touching
+    the allocation algorithm itself. Same-topic swaps never change any topic's count here.
+    """
+    final_counts: dict[str, int] = {}
+    for slot in final_slots:
+        topic_id = str(slot.get("topic_id") or "")
+        final_counts[topic_id] = final_counts.get(topic_id, 0) + 1
+    return [
+        {**topic_plan, "allocated_questions": final_counts.get(str(topic_plan["topic_id"]), 0)}
+        for topic_plan in planned_topics
+    ]
 
 
 def _document_batch_output_schema() -> dict:
@@ -2695,7 +2869,8 @@ def generate_quiz(
     generation_run_id = str(uuid4())
     slot_started = time.perf_counter()
     planned_slots = _document_v2_slots(planned_topics, topic_lookup, topic_chunks)
-    planned_slots = _assign_document_slot_types(planned_slots)
+    planned_slots = _prepare_document_slot_blueprint(planned_slots, planned_topics, topic_lookup, topic_chunks)
+    planned_topics = _reconcile_topic_allocation_with_final_slots(planned_topics, planned_slots)
     timings["slot_build_ms"] = round((time.perf_counter() - slot_started) * 1000)
     print(
         f"[quiz-document-plan] requested={question_count}, planned_slots={len(planned_slots)}, "
