@@ -142,8 +142,9 @@ class TopicV2Phase2Tests(unittest.TestCase):
                     "allocated_questions": 0, "concepts": concepts}
         def generated(_document, _difficulty, slots, _owner, _model, requested, _run_id, **_kwargs):
             questions = [{
-                "id": index + 1, "question": f"Which supported concept applies in case {index + 1}?",
-                "question_type": "single_choice",
+                "id": index + 1, "slot_id": slot["slot_id"],
+                "question": f"Which supported concept applies in case {index + 1}?",
+                "question_type": slot.get("question_type", "single_choice"),
                 "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
                 "topic_id": slot["topic_id"], "topic_name": slot["topic_name"],
                 "concept_id": slot["concept_id"], "concept_name": slot["name"],
@@ -163,6 +164,10 @@ class TopicV2Phase2Tests(unittest.TestCase):
                  patch.object(quiz_service, "get_quiz", return_value=None), \
                  patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
                  patch.object(quiz_service, "build_topic_plan", side_effect=plan), \
+                 patch.object(
+                     quiz_service, "_plan_document_slot_types",
+                     return_value=(None, {"type_planning_llm_calls": 0, "type_planning_ms": 0}),
+                 ), \
                  patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated) as batch, \
                  patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, value, _o: value):
                 kwargs = {"question_count": requested} if requested is not None else {}
@@ -211,6 +216,10 @@ class TopicV2Phase2Tests(unittest.TestCase):
              patch.object(quiz_service, "get_topic_chunks", return_value=[evidence]), \
              patch.object(quiz_service, "build_topic_plan", return_value=plan), \
              patch.object(quiz_service, "resolve_concept_evidence", return_value=[evidence]), \
+             patch.object(
+                 quiz_service, "_plan_document_slot_types",
+                 return_value=(None, {"type_planning_llm_calls": 0, "type_planning_ms": 0}),
+             ), \
              patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated), \
              patch.object(quiz_service, "save_quiz") as save:
             with self.assertRaises(quiz_service.QuizGenerationError) as raised:

@@ -73,6 +73,9 @@ DOCUMENT_QUIZ_TYPE_COUNTS = (("multi_select", 2), ("true_false", 3), ("single_ch
 DOCUMENT_QUIZ_BATCH_PLAN = (
     ("single_choice", 5), ("single_choice", 5), ("true_false", 3), ("multi_select", 2),
 )
+# Bounded count of question_type swaps _run_document_v2_batch may perform when a special-type
+# slot is still missing after repair+fill are exhausted (see type_alternates).
+DOCUMENT_TYPE_SWAP_BUDGET = 2
 
 
 class QuizGenerationError(ValueError):
@@ -1044,7 +1047,18 @@ _FORMAT_REJECTION_MARKERS = (
     "invalid option index",
     "correct_answers must be a list",
     "must be a json object",
+    "but its slot requires",
 )
+
+
+def _is_type_specific_rejection_reason(reason: str) -> bool:
+    """True for a rejection tied to the OLD question_type's structural contract (e.g. a
+    multi_select answer-count error, or a type-mismatch message). Used to drop stale history
+    after a type swap so the new type's repair prompt isn't primed with errors that no longer
+    apply to it.
+    """
+    lowered = reason.lower()
+    return any(marker in lowered for marker in _FORMAT_REJECTION_MARKERS)
 
 
 def _is_formatting_rejection(reasons: list[str]) -> bool:
@@ -1953,33 +1967,37 @@ def _document_slot_type_scores(slot: dict) -> tuple[int, int]:
     return multi_select_score, true_false_score
 
 
-def _assign_document_slot_types(slots: list[dict]) -> list[dict]:
-    """Stamp each slot with a question_type using HARD minimum feasibility gates.
-
-    multi_select is only ever assigned to a slot with >=2 clean independent propositions;
-    true_false only to a slot with >=1. A slot scoring 0 is never chosen just to fill the
-    count -- if there aren't enough feasible slots among the given 15, fewer than
-    DOCUMENT_QUIZ_TYPE_COUNTS's multi_select/true_false targets get stamped here, and the extra
-    slots fall through to single_choice. The caller (_prepare_document_slot_blueprint) is
-    responsible for detecting that shortfall and reselecting alternate concept evidence before
-    generation; this function never fabricates feasibility. Never asks the model and never
-    inspects document/topic names or domain vocabulary.
+def _rank_document_slots_by_type(slots: list[dict]) -> dict[str, list[str]]:
+    """Pure deterministic ranking, never gated: every slot_id, best-first per special type, by
+    the lightweight text heuristic. Used only as (a) the type planner's fallback when the LLM
+    call is unavailable/malformed and (b) the source of ranked alternates for type-swap
+    recovery. Never blocks and never inspects document/topic names or domain vocabulary.
     """
+    scored = [(str(slot["slot_id"]), *_document_slot_type_scores(slot)) for slot in slots]
+    return {
+        "multi_select": [slot_id for slot_id, ms, _tf in sorted(scored, key=lambda item: (-item[1], item[0]))],
+        "true_false": [slot_id for slot_id, _ms, tf in sorted(scored, key=lambda item: (-item[2], item[0]))],
+    }
+
+
+def _assign_document_slot_types(slots: list[dict]) -> list[dict]:
+    """Deterministic ranking-only fallback: always stamps exactly the fixed 10/3/2 split, never
+    hard-gated on proposition feasibility. Semantic suitability is the LLM type planner's job
+    (see _plan_document_slot_types); this is only its fallback when that call is unavailable or
+    returns something unusable, so a valid document is never blocked by a text heuristic.
+    """
+    ranked = _rank_document_slots_by_type(slots)
     type_counts = dict(DOCUMENT_QUIZ_TYPE_COUNTS)
-    scored = [(index, *_document_slot_type_scores(slot)) for index, slot in enumerate(slots)]
-
-    feasible_ms = sorted((item for item in scored if item[1] > 0), key=lambda item: (-item[1], item[0]))
-    multi_select_indices = {index for index, _ms, _tf in feasible_ms[:type_counts["multi_select"]]}
-
-    remaining = [item for item in scored if item[0] not in multi_select_indices]
-    feasible_tf = sorted((item for item in remaining if item[2] > 0), key=lambda item: (-item[2], item[0]))
-    true_false_indices = {index for index, _ms, _tf in feasible_tf[:type_counts["true_false"]]}
-
+    multi_select_ids = set(ranked["multi_select"][:type_counts["multi_select"]])
+    true_false_ids = set(
+        [sid for sid in ranked["true_false"] if sid not in multi_select_ids][:type_counts["true_false"]]
+    )
     assigned = []
-    for index, slot in enumerate(slots):
-        if index in multi_select_indices:
+    for slot in slots:
+        slot_id = str(slot["slot_id"])
+        if slot_id in multi_select_ids:
             question_type = "multi_select"
-        elif index in true_false_indices:
+        elif slot_id in true_false_ids:
             question_type = "true_false"
         else:
             question_type = "single_choice"
@@ -1987,16 +2005,170 @@ def _assign_document_slot_types(slots: list[dict]) -> list[dict]:
     return assigned
 
 
-def _document_topic_unused_concepts(topic_plan: dict, used_concept_ids: set[str]) -> list[dict]:
-    """Concepts in this topic's full pool not already used by any of the 15 blueprint slots."""
-    return [
-        concept for concept in topic_plan.get("concepts") or []
-        if str(concept.get("concept_id")) not in used_concept_ids
+DOCUMENT_TYPE_PLANNER_PROMPT_VERSION = "document_type_planner_v1"
+
+
+def _document_type_planner_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "multi_select": {"type": "array", "items": {"type": "string"}},
+            "true_false": {"type": "array", "items": {"type": "string"}},
+            "multi_select_alternates": {"type": "array", "items": {"type": "string"}},
+            "true_false_alternates": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["multi_select", "true_false", "multi_select_alternates", "true_false_alternates"],
+    }
+
+
+def _document_type_planner_prompt(slots: list[dict]) -> str:
+    type_counts = dict(DOCUMENT_QUIZ_TYPE_COUNTS)
+    lines = "\n".join(
+        f"{slot['slot_id']}|{slot.get('topic_name', '')}: {slot.get('name', '')}|"
+        f"{_sanitize_fallback_evidence(str(slot.get('evidence_excerpt') or ''))[:220]}"
+        for slot in slots
+    )
+    return (
+        "Rank these evidence slots by fit for two special quiz question types. Do not write "
+        "any questions.\n"
+        'JSON only: {"multi_select":["Sx","Sy"],"true_false":["Sa","Sb","Sc"],'
+        '"multi_select_alternates":["..."],"true_false_alternates":["..."]}\n'
+        f"multi_select needs evidence with two or more independently correct statements; pick "
+        f"exactly {type_counts['multi_select']} slot_ids. true_false needs evidence stating one "
+        f"clear factual proposition, rule, or relationship; pick exactly {type_counts['true_false']} "
+        "slot_ids, distinct from the multi_select picks. Only use the slot_ids listed below. List "
+        "3-5 more alternates per type, ranked best first, for use if a primary pick fails.\n"
+        f"SLOTS:\n{lines}"
+    )
+
+
+def _plan_document_slot_types(slots: list[dict], model_id: str) -> tuple[dict | None, dict]:
+    """One small, question-free LLM call: which slots best fit multi_select/true_false.
+
+    Returns (result, timings). result is None -- triggering the deterministic ranking fallback,
+    never a hard failure -- if the call errors, the JSON is malformed, or every referenced
+    slot_id fails to resolve to one of the given slots.
+    """
+    known_ids = {str(slot["slot_id"]) for slot in slots}
+    timings = {"type_planning_llm_calls": 0, "type_planning_ms": 0}
+    started = time.perf_counter()
+    try:
+        llm = ChatOllama(
+            model=model_id, reasoning=False, temperature=0.1,
+            format=_document_type_planner_schema(),
+            num_ctx=4096, num_predict=220,
+            keep_alive=QUIZ_GENERATION_KEEP_ALIVE, client_kwargs={"timeout": 90},
+        )
+        timings["type_planning_llm_calls"] = 1
+        response = llm.invoke(_document_type_planner_prompt(slots))
+        data = _extract_json(str(response.content))
+    except Exception as error:
+        print(f"[quiz-document-type-planner] call failed: {error}")
+        timings["type_planning_ms"] = round((time.perf_counter() - started) * 1000)
+        return None, timings
+    timings["type_planning_ms"] = round((time.perf_counter() - started) * 1000)
+    if not isinstance(data, dict):
+        return None, timings
+
+    def clean_ids(raw_ids: object) -> list[str]:
+        if not isinstance(raw_ids, list):
+            return []
+        seen: list[str] = []
+        for value in raw_ids:
+            slot_id = str(value).strip()
+            if slot_id in known_ids and slot_id not in seen:
+                seen.append(slot_id)
+        return seen
+
+    multi_select = clean_ids(data.get("multi_select"))
+    true_false = [slot_id for slot_id in clean_ids(data.get("true_false")) if slot_id not in multi_select]
+    multi_select_alternates = [
+        slot_id for slot_id in clean_ids(data.get("multi_select_alternates")) if slot_id not in multi_select
     ]
+    true_false_alternates = [
+        slot_id for slot_id in clean_ids(data.get("true_false_alternates"))
+        if slot_id not in true_false and slot_id not in multi_select
+    ]
+    if not multi_select and not true_false:
+        return None, timings
+    return {
+        "multi_select": multi_select, "true_false": true_false,
+        "multi_select_alternates": multi_select_alternates, "true_false_alternates": true_false_alternates,
+    }, timings
 
 
-def _document_slot_blueprint_problems(slots: list[dict]) -> list[str]:
-    """Enumerate every way the fixed document blueprint contract is violated, or [] if none."""
+def _resolve_document_slot_types(
+    slots: list[dict], planner_result: dict | None,
+) -> tuple[list[dict], dict[str, list[str]]]:
+    """Stamp question_type on all 15 slots -- always exactly the fixed 10/3/2 -- preferring the
+    LLM type planner's picks, backfilled first from its own ranked alternates and then from the
+    deterministic ranking so a short/partial planner result never blocks generation. Also
+    returns each type's ranked alternate slot_ids (planner alternates first, then the rest of
+    the deterministic ranking) for type-swap recovery during generation.
+    """
+    type_counts = dict(DOCUMENT_QUIZ_TYPE_COUNTS)
+    fallback_ranked = _rank_document_slots_by_type(slots)
+    known_ids = {str(slot["slot_id"]) for slot in slots}
+
+    def known_only(raw_ids) -> list[str]:
+        return [str(sid) for sid in (raw_ids or []) if str(sid) in known_ids]
+
+    planner_multi_select = known_only((planner_result or {}).get("multi_select"))
+    planner_true_false = known_only((planner_result or {}).get("true_false"))
+    planner_ms_alternates = known_only((planner_result or {}).get("multi_select_alternates"))
+    planner_tf_alternates = known_only((planner_result or {}).get("true_false_alternates"))
+
+    def backfill(primary: list[str], needed: int, alternates_pool: list[str], fallback_pool: list[str], exclude: set[str]) -> list[str]:
+        chosen = [sid for sid in dict.fromkeys(primary) if sid not in exclude]
+        for pool in (alternates_pool, fallback_pool):
+            for sid in pool:
+                if len(chosen) >= needed:
+                    break
+                if sid not in chosen and sid not in exclude:
+                    chosen.append(sid)
+        return chosen[:needed]
+
+    multi_select_ids = backfill(
+        planner_multi_select, type_counts["multi_select"], planner_ms_alternates,
+        fallback_ranked["multi_select"], set(),
+    )
+    true_false_ids = backfill(
+        planner_true_false, type_counts["true_false"], planner_tf_alternates,
+        fallback_ranked["true_false"], set(multi_select_ids),
+    )
+
+    chosen_ids = set(multi_select_ids) | set(true_false_ids)
+    alternates = {
+        "multi_select": [
+            sid for sid in dict.fromkeys([*planner_ms_alternates, *fallback_ranked["multi_select"]])
+            if sid not in chosen_ids
+        ],
+        "true_false": [
+            sid for sid in dict.fromkeys([*planner_tf_alternates, *fallback_ranked["true_false"]])
+            if sid not in chosen_ids
+        ],
+    }
+
+    assigned = []
+    for slot in slots:
+        slot_id = str(slot["slot_id"])
+        if slot_id in multi_select_ids:
+            question_type = "multi_select"
+        elif slot_id in true_false_ids:
+            question_type = "true_false"
+        else:
+            question_type = "single_choice"
+        assigned.append({**slot, "question_type": question_type})
+    return assigned, alternates
+
+
+def _document_structural_blueprint_problems(slots: list[dict]) -> list[str]:
+    """Enumerate structural-only blueprint violations, or [] if none.
+
+    Deliberately does NOT judge whether a slot's evidence is "suitable" for its assigned type --
+    that is the LLM type planner's call (with heuristic ranking as its own fallback); this only
+    guards the hard structural contract that generation and persistence depend on.
+    """
     problems = []
     if len(slots) != DOCUMENT_QUIZ_QUESTION_COUNT:
         problems.append(f"expected {DOCUMENT_QUIZ_QUESTION_COUNT} slots, found {len(slots)}")
@@ -2012,29 +2184,24 @@ def _document_slot_blueprint_problems(slots: list[dict]) -> list[str]:
         if found != needed:
             problems.append(f"expected {needed} {question_type} slots, found {found}")
     for slot in slots:
-        question_type = slot.get("question_type")
-        if question_type not in {"multi_select", "true_false"}:
-            continue
-        proposition_count = len(_document_slot_propositions(slot))
-        minimum = 2 if question_type == "multi_select" else 1
-        if proposition_count < minimum:
-            problems.append(
-                f"{slot.get('slot_id')} is assigned {question_type} but has only "
-                f"{proposition_count} clean proposition(s) (needs >= {minimum})"
-            )
+        if not slot.get("source_chunk_ids"):
+            problems.append(f"{slot.get('slot_id')} has no authoritative source_chunk_ids")
+        if not str(slot.get("evidence_excerpt") or "").strip():
+            problems.append(f"{slot.get('slot_id')} has no evidence")
     return problems
 
 
-def _validate_document_slot_blueprint(slots: list[dict]) -> None:
-    """Hard pre-generation gate. Raises QuizGenerationError(stage="blueprint") -- never lets an
-    under-filled or infeasible blueprint reach the model or persistence layer.
+def _validate_document_structural_blueprint(slots: list[dict]) -> None:
+    """Structural-only pre-generation gate: exact slot/type counts, unique ids, and authoritative
+    evidence/provenance on every slot. Never rejects a blueprint just because a deterministic
+    heuristic judged TF/MS evidence "unsuitable" for its assigned type.
     """
-    problems = _document_slot_blueprint_problems(slots)
+    problems = _document_structural_blueprint_problems(slots)
     if not problems:
         return
     raise QuizGenerationError(
         "The fixed document quiz blueprint (10 single_choice / 3 true_false / 2 multi_select) "
-        "could not be satisfied by the document's available evidence: " + "; ".join(problems),
+        "is structurally invalid: " + "; ".join(problems),
         stage="blueprint",
         valid_questions=0,
         target_questions=DOCUMENT_QUIZ_QUESTION_COUNT,
@@ -2042,104 +2209,52 @@ def _validate_document_slot_blueprint(slots: list[dict]) -> None:
     )
 
 
+def _verify_final_document_quiz_contract(questions: list[dict]) -> None:
+    """Last gate before persistence: the accepted questions must still satisfy the exact
+    document blueprint contract (unique slot_ids, exactly 10/3/2) after generation, repair, type
+    swaps, and fallback -- never persist a quiz that drifted from it.
+    """
+    problems = []
+    if len(questions) != DOCUMENT_QUIZ_QUESTION_COUNT:
+        problems.append(f"expected {DOCUMENT_QUIZ_QUESTION_COUNT} questions, found {len(questions)}")
+    slot_ids = [str(question.get("slot_id")) for question in questions]
+    if len(set(slot_ids)) != len(slot_ids):
+        problems.append("slot_ids are not unique")
+    counts: dict[str, int] = {}
+    for question in questions:
+        question_type = str(question.get("question_type") or "")
+        counts[question_type] = counts.get(question_type, 0) + 1
+    for question_type, needed in DOCUMENT_QUIZ_TYPE_COUNTS:
+        found = counts.get(question_type, 0)
+        if found != needed:
+            problems.append(f"expected {needed} {question_type} questions, found {found}")
+    if not problems:
+        return
+    raise QuizGenerationError(
+        "Final document quiz contract violated before persistence: " + "; ".join(problems),
+        stage="generation",
+        valid_questions=len(questions),
+        target_questions=DOCUMENT_QUIZ_QUESTION_COUNT,
+        failure_summary=problems,
+    )
+
+
 def _prepare_document_slot_blueprint(
-    slots: list[dict], planned_topics: list[dict], topic_lookup: dict[str, dict],
-    topic_chunks: dict[str, list[dict]],
-) -> list[dict]:
-    """Guarantee the 15-slot document blueprint is generation-ready before any LLM call:
-    exactly 10 single_choice / 3 true_false / 2 multi_select, with both multi_select slots and
-    all three true_false slots deterministic-fallback-feasible.
+    slots: list[dict], model_id: str,
+) -> tuple[list[dict], dict[str, list[str]], dict]:
+    """Decide each of the 15 content slots' question_type via ONE small, question-free LLM call
+    (semantic suitability is the model's job), with deterministic ranking as a pure fallback
+    that never blocks. Returns (typed_slots, alternates_by_type, timings).
 
-    _assign_document_slot_types only ever stamps a type on a slot that meets its hard minimum
-    feasibility; if the initially selected 15 concepts don't have enough feasible slots for the
-    exact split, this swaps the weakest single_choice slot for another concept's evidence --
-    first an unused concept from the SAME topic (preserving topic allocation), then, only as a
-    last resort, an unused concept from any other topic in the document -- and re-evaluates. No
-    LLM call, no document/domain vocabulary. If the whole document's concept pool still can't
-    produce enough feasible slots, this raises QuizGenerationError(stage="blueprint") instead of
-    returning an under-filled distribution; the caller must not proceed to generation or
-    persistence in that case.
+    typed_slots always has the exact 10 single_choice / 3 true_false / 2 multi_select split,
+    validated only structurally before generation -- never rejected for "unsuitable" evidence.
+    alternates_by_type carries ranked backup slot_ids per special type for type-swap recovery
+    during generation (see _run_document_v2_batch).
     """
-    topic_plans_by_id = {str(plan["topic_id"]): plan for plan in planned_topics}
-    evidence_cache: dict[tuple[str, str], list[dict]] = {}
-
-    def topic_pool_order(preferred_topic_id: str | None) -> list[str]:
-        ids = list(topic_plans_by_id)
-        if preferred_topic_id and preferred_topic_id in ids:
-            ids = [preferred_topic_id] + [tid for tid in ids if tid != preferred_topic_id]
-        return ids
-
-    def find_feasible_replacement(used_concept_ids: set[str], score_index: int, preferred_topic_id: str | None):
-        for topic_id in topic_pool_order(preferred_topic_id):
-            topic_plan = topic_plans_by_id[topic_id]
-            topic = topic_lookup.get(topic_id)
-            chunks = topic_chunks.get(topic_id, [])
-            if topic is None:
-                continue
-            for concept in _document_topic_unused_concepts(topic_plan, used_concept_ids):
-                used_concept_ids.add(str(concept.get("concept_id")))
-                candidate = _build_document_slot(topic_plan, topic, chunks, concept, "candidate", evidence_cache)
-                if candidate is None:
-                    continue
-                if _document_slot_type_scores(candidate)[score_index] > 0:
-                    return candidate
-        return None
-
-    current = list(slots)
-    used_concept_ids = {str(slot.get("concept_id")) for slot in current}
-    target = dict(DOCUMENT_QUIZ_TYPE_COUNTS)
-    max_rounds = len(current) + 5
-    assigned = _assign_document_slot_types(current)
-    for _round in range(max_rounds):
-        counts: dict[str, int] = {}
-        for slot in assigned:
-            counts[slot["question_type"]] = counts.get(slot["question_type"], 0) + 1
-        shortfalls = [
-            (question_type, needed - counts.get(question_type, 0))
-            for question_type, needed in target.items()
-            if question_type != "single_choice" and counts.get(question_type, 0) < needed
-        ]
-        if not shortfalls:
-            break
-        question_type, _gap = max(shortfalls, key=lambda item: item[1])
-        score_index = 0 if question_type == "multi_select" else 1
-        single_choice_slots = [
-            (index, slot) for index, slot in enumerate(assigned) if slot["question_type"] == "single_choice"
-        ]
-        if not single_choice_slots:
-            break
-        weakest_index, weakest_slot = min(
-            single_choice_slots,
-            key=lambda item: (_document_slot_type_scores(item[1])[score_index], item[0]),
-        )
-        replacement = find_feasible_replacement(used_concept_ids, score_index, weakest_slot.get("topic_id"))
-        if replacement is None:
-            break
-        replacement["slot_id"] = weakest_slot["slot_id"]
-        current[weakest_index] = replacement
-        assigned = _assign_document_slot_types(current)
-    _validate_document_slot_blueprint(assigned)
-    return assigned
-
-
-def _reconcile_topic_allocation_with_final_slots(
-    planned_topics: list[dict], final_slots: list[dict],
-) -> list[dict]:
-    """Recompute each topic's allocated_questions from the FINAL blueprint slots.
-
-    Cross-topic reselection (last resort only, inside _prepare_document_slot_blueprint) can move
-    a slot from one topic to another; when that happens the pre-reselection allocation counts
-    from allocate_document_topics go stale. This keeps assessment_plan honest without touching
-    the allocation algorithm itself. Same-topic swaps never change any topic's count here.
-    """
-    final_counts: dict[str, int] = {}
-    for slot in final_slots:
-        topic_id = str(slot.get("topic_id") or "")
-        final_counts[topic_id] = final_counts.get(topic_id, 0) + 1
-    return [
-        {**topic_plan, "allocated_questions": final_counts.get(str(topic_plan["topic_id"]), 0)}
-        for topic_plan in planned_topics
-    ]
+    planner_result, timings = _plan_document_slot_types(slots, model_id)
+    assigned, alternates = _resolve_document_slot_types(slots, planner_result)
+    _validate_document_structural_blueprint(assigned)
+    return assigned, alternates, timings
 
 
 def _document_batch_output_schema() -> dict:
@@ -2240,7 +2355,7 @@ def _grounded_option_phrases(evidence_values: list[str], require_four: bool = Fa
                 term = " ".join(words[index:index + size])
                 if len(term) < 4:
                     continue
-                statement = f'The documented term is "{term}".'
+                statement = f'This evidence refers to "{term}".'
                 if _normalize_question_key(statement) not in {_normalize_question_key(item) for item in terms}:
                     terms.append(statement)
     return terms
@@ -2256,7 +2371,7 @@ def _deterministic_grounded_candidate(
     concept = _sanitize_fallback_evidence(slot.get("name") or slot.get("concept_id") or "the documented concept")
     concept = " ".join(concept.split()[:_FALLBACK_OPTION_WORD_LIMIT]) or "the documented concept"
     option_pool = _grounded_option_phrases([evidence, *(alternative_evidence or [])], require_four=True)
-    term_mode = bool(option_pool and option_pool[0].startswith('The documented term is "'))
+    term_mode = bool(option_pool and option_pool[0].startswith('This evidence refers to "'))
     own_options = _grounded_option_phrases([evidence], require_four=term_mode)
     if not own_options:
         raise ValueError("Deterministic fallback could not extract a grounded answer phrase.")
@@ -2279,7 +2394,7 @@ def _deterministic_grounded_candidate(
         "slot_id": str(slot["slot_id"]), "question": stem,
         "question_type": "single_choice",
         "options": [correct, *distractors], "correct_answer": 0, "correct_answers": [0],
-        "explanation": f"The first option matches the documented facts about {concept}.",
+        "explanation": f"This answer is directly supported by the evidence about {concept}.",
     }
 
 
@@ -2359,6 +2474,7 @@ def _run_document_v2_batch(
     question_count: int,
     generation_run_id: str,
     fixed_type_batches: tuple[tuple[str, int], ...] | None = None,
+    type_alternates: dict[str, list[str]] | None = None,
 ) -> tuple[list[dict], dict, dict]:
     """Generate document slots in bounded batches, then repair only missing slots.
 
@@ -2366,6 +2482,12 @@ def _run_document_v2_batch(
     "question_type" per slot (see _assign_document_slot_types): the initial batches and every
     repair/fill call are grouped to be homogeneous by that type instead of one generic mixed
     batch, and the model is told exactly which single type each call must return.
+
+    type_alternates (multi_select/true_false -> ranked backup slot_ids, from
+    _prepare_document_slot_blueprint) enables bounded type-swap recovery: if a special-type slot
+    is still missing after repair+fill are exhausted, its question_type ownership is traded with
+    a ranked single_choice alternate -- never its content/evidence -- before falling back to
+    deterministic generation. See DOCUMENT_TYPE_SWAP_BUDGET.
     """
     batch_started = time.perf_counter()
     authoritative_slots = planned_slots[:question_count]
@@ -2645,6 +2767,64 @@ def _run_document_v2_batch(
                 run_generation_call(call_slots, phase, next_batch_index, required_type)
                 next_batch_index += 1
 
+    # Type-swap recovery: repair+fill are exhausted. A special-type slot that is STILL missing
+    # never stays permanently stuck as that type -- trade question_type ownership (never
+    # content/evidence) with a ranked single_choice alternate, then make one bounded targeted
+    # generation attempt for exactly the slots whose type just changed. Content stays bound to
+    # its own slot_id throughout; only which type each slot_id is asked to produce changes.
+    type_swap_count = 0
+    if fixed_type_batches and type_alternates:
+        for special_type in ("multi_select", "true_false"):
+            if type_swap_count >= DOCUMENT_TYPE_SWAP_BUDGET:
+                break
+            alternates = list(type_alternates.get(special_type) or [])
+            still_missing = [
+                slot_id for slot_id in list(remaining_slot_ids)
+                if str(groups_by_id[slot_id].get("question_type")) == special_type
+            ]
+            for slot_id in still_missing:
+                if type_swap_count >= DOCUMENT_TYPE_SWAP_BUDGET:
+                    break
+                alt_id = next(
+                    (
+                        aid for aid in alternates
+                        if aid in groups_by_id and groups_by_id[aid].get("question_type") == "single_choice"
+                    ),
+                    None,
+                )
+                if alt_id is None:
+                    continue
+                alternates.remove(alt_id)
+                groups_by_id[slot_id]["question_type"] = "single_choice"
+                groups_by_id[alt_id]["question_type"] = special_type
+                if alt_id not in remaining_slot_ids:
+                    accepted_by_slot.pop(alt_id, None)
+                    remaining_slot_ids.add(alt_id)
+                # Both slots now owe a different type's contract than whatever earlier rejection
+                # reasons were recorded for them -- drop only the stale type-specific ones (e.g.
+                # "multi_select requires...") so the next repair prompt isn't primed with errors
+                # that no longer apply; generic history (duplicates, grounding) is still useful.
+                for affected_id in (slot_id, alt_id):
+                    rejection_reasons_by_slot[affected_id] = [
+                        reason for reason in rejection_reasons_by_slot.get(affected_id, [])
+                        if not _is_type_specific_rejection_reason(reason)
+                    ]
+                type_swap_count += 1
+                print(
+                    f"[quiz-document-type-swap] {slot_id} -> single_choice, {alt_id} -> {special_type}"
+                )
+        if type_swap_count:
+            for required_type in ("single_choice", "true_false", "multi_select"):
+                swapped_missing = [
+                    slot for slot in authoritative_slots
+                    if slot["slot_id"] in remaining_slot_ids
+                    and str(slot.get("question_type")) == required_type
+                ]
+                if not swapped_missing:
+                    continue
+                run_generation_call(swapped_missing, "repair", next_batch_index, required_type)
+                next_batch_index += 1
+
     # Exact count is contractual. Fill only still-missing slots, preserving all
     # accepted questions, and run deterministic candidates through the same
     # authoritative validator and duplicate checks.
@@ -2723,6 +2903,7 @@ def _run_document_v2_batch(
     timings["final_fill_llm_calls"] = final_fill_llm_calls
     timings["candidate_stems_by_attempt"] = candidate_stems_by_attempt
     timings["deterministic_fallback_count"] = fallback_count
+    timings["type_swap_count"] = type_swap_count
     timings["initial_generation_ms"] = timings["initial_batch_generation_ms"]
     timings["total_quiz_generation_ms"] = round((time.perf_counter() - batch_started) * 1000)
     accepted = [accepted_by_slot[slot["slot_id"]] for slot in authoritative_slots if slot["slot_id"] in accepted_by_slot]
@@ -2869,8 +3050,10 @@ def generate_quiz(
     generation_run_id = str(uuid4())
     slot_started = time.perf_counter()
     planned_slots = _document_v2_slots(planned_topics, topic_lookup, topic_chunks)
-    planned_slots = _prepare_document_slot_blueprint(planned_slots, planned_topics, topic_lookup, topic_chunks)
-    planned_topics = _reconcile_topic_allocation_with_final_slots(planned_topics, planned_slots)
+    planned_slots, type_alternates, type_planning_timings = _prepare_document_slot_blueprint(
+        planned_slots, model_id,
+    )
+    timings.update(type_planning_timings)
     timings["slot_build_ms"] = round((time.perf_counter() - slot_started) * 1000)
     print(
         f"[quiz-document-plan] requested={question_count}, planned_slots={len(planned_slots)}, "
@@ -2878,7 +3061,7 @@ def generate_quiz(
     )
     questions, validation_results, batch_timings = _run_document_v2_batch(
         document, difficulty, planned_slots, owner_id, model_id, question_count, generation_run_id,
-        fixed_type_batches=DOCUMENT_QUIZ_BATCH_PLAN,
+        fixed_type_batches=DOCUMENT_QUIZ_BATCH_PLAN, type_alternates=type_alternates,
     )
     timings.update(batch_timings)
 
@@ -2906,6 +3089,7 @@ def generate_quiz(
                 if retry_slot not in {question.get("slot_id") for question in questions}
             },
         )
+    _verify_final_document_quiz_contract(questions)
 
     quiz = {
         "quiz_id": str(uuid4()),

@@ -163,7 +163,9 @@ class AdaptiveAssessmentTests(unittest.TestCase):
 
         def generated(_document, difficulty, slots, _owner, _model, requested, _run_id, **_kwargs):
             questions = [{
-                "id": index + 1, "question": f"Question for {slot['name']} case {index + 1}?",
+                "id": index + 1, "slot_id": slot["slot_id"],
+                "question_type": slot.get("question_type", "single_choice"),
+                "question": f"Question for {slot['name']} case {index + 1}?",
                 "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
                 "topic_id": slot["topic_id"], "topic_name": slot["topic_name"],
                 "concept_id": slot["concept_id"], "concept_name": slot["name"],
@@ -187,6 +189,10 @@ class AdaptiveAssessmentTests(unittest.TestCase):
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
              patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
              patch.object(quiz_service, "build_topic_plan", side_effect=planned), \
+             patch.object(
+                 quiz_service, "_plan_document_slot_types",
+                 return_value=(None, {"type_planning_llm_calls": 0, "type_planning_ms": 0}),
+             ), \
              patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated) as generator, \
              patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _owner: quiz):
             result = quiz_service.generate_quiz("doc.pdf", "easy", "document")

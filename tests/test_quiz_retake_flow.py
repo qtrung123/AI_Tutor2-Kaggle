@@ -177,6 +177,10 @@ class QuizRetakeFlowTests(unittest.TestCase):
             "questions": [
                 {
                     "id": index,
+                    "slot_id": f"S{index}",
+                    "question_type": (
+                        "single_choice" if index <= 10 else "true_false" if index <= 13 else "multi_select"
+                    ),
                     "question": f"Grounded embedded-systems question {index}?",
                     "options": ["A. Alpha", "B. Beta", "C. Gamma", "D. Delta"],
                     "correct_answer": "A",
@@ -241,6 +245,10 @@ class QuizRetakeFlowTests(unittest.TestCase):
                  ),
                  "metadata": {"chunk_id": "chunk_1"},
              }]), \
+             patch.object(
+                 quiz_service, "_plan_document_slot_types",
+                 return_value=(None, {"type_planning_llm_calls": 0, "type_planning_ms": 0}),
+             ), \
              patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated_batch), \
              patch.object(quiz_service, "uuid4", return_value="document-batch-15"):
             generated = quiz_service.generate_quiz(
@@ -272,7 +280,7 @@ class QuizRetakeFlowTests(unittest.TestCase):
             "A. Alpha", "B. Beta", "C. Gamma", "D. Delta",
         ])
 
-        answers = {str(index): "A" for index in range(1, 16)}
+        answers = {str(index): (["A", "B"] if index > 13 else "A") for index in range(1, 16)}
         completed = submit_quiz_attempt(
             "Embedded Systems.pdf", "easy", "document", answers,
             LEGACY_USER_ID, quiz_id="document-batch-15",
