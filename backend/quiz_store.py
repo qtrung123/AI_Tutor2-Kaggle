@@ -542,6 +542,46 @@ def get_quiz_by_id(quiz_id: str, owner_id: str = LEGACY_USER_ID) -> dict | None:
         return _row_to_quiz(connection, row) if row else None
 
 
+def delete_quiz(quiz_id: str, owner_id: str = LEGACY_USER_ID) -> dict | None:
+    """Delete one quiz plus its own attempts, answers, and generation logs.
+
+    Does not touch the source document, its topic hierarchy, or any other
+    quiz. Returns the document_id and the distinct topic_ids that had
+    completed answers under this quiz (so callers can recompute mastery for
+    exactly the topics this deletion could make stale), or None if the quiz
+    was not found.
+    """
+    initialize_quiz_store()
+    with _connect() as connection:
+        quiz_row = connection.execute(
+            "SELECT document_id FROM quizzes WHERE quiz_id = ? AND owner_id = ?",
+            (quiz_id, owner_id),
+        ).fetchone()
+        if not quiz_row:
+            return None
+        document_id = quiz_row["document_id"]
+        affected_topic_ids = [
+            row["topic_id"]
+            for row in connection.execute(
+                """
+                SELECT DISTINCT a.topic_id AS topic_id
+                FROM quiz_attempt_answers a
+                JOIN quiz_attempts t ON t.attempt_id = a.attempt_id
+                WHERE t.quiz_id = ? AND t.student_id = ? AND t.completed = 1
+                """,
+                (quiz_id, owner_id),
+            ).fetchall()
+        ]
+        connection.execute("DELETE FROM quizzes WHERE quiz_id = ? AND owner_id = ?", (quiz_id, owner_id))
+        connection.execute(
+            "DELETE FROM quiz_attempts WHERE quiz_id = ? AND student_id = ?", (quiz_id, owner_id)
+        )
+        connection.execute(
+            "DELETE FROM quiz_validation_events WHERE quiz_id = ? AND owner_id = ?", (quiz_id, owner_id)
+        )
+    return {"document_id": document_id, "affected_topic_ids": affected_topic_ids}
+
+
 def save_quiz(document_id: str, difficulty: str, quiz: dict, owner_id: str = LEGACY_USER_ID) -> dict:
     initialize_quiz_store()
     with _connect() as connection:

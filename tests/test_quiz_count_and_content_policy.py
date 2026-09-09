@@ -44,6 +44,23 @@ class QuizCountAndContentPolicyTests(unittest.TestCase):
         self.assertIn("with no fixed ratio", prompt)
         self.assertIn("another valid question_type or a different same-topic angle", prompt)
 
+    def test_true_false_rejects_either_or_interrogative_stems(self):
+        base = {
+            "slot_id": "S1", "question_type": "true_false",
+            "options": ["True", "False"], "correct_answers": [0],
+            "explanation": "The evidence states hardware performs this translation.",
+        }
+        with self.assertRaises(ValueError):
+            _validate_v2_question(
+                {**base, "question": "Is address translation handled by the hardware or by software?"},
+                {"S1": GROUP}, {"S1"}, [], "medium", 1, TOPIC, 3,
+            )
+        question, _warnings = _validate_v2_question(
+            {**base, "question": "Address translation is handled by hardware in this system."},
+            {"S1": GROUP}, {"S1"}, [], "medium", 1, TOPIC, 3,
+        )
+        self.assertEqual(question["question_type"], "true_false")
+
     def test_final_question_rejects_scaffolding_headers_emails_and_raw_evidence(self):
         base = {
             "slot_id": "S1", "question_type": "single_choice",

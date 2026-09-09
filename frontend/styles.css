@@ -416,6 +416,10 @@ body[data-page="tutor"] #tutor-view.active {
   font-size: 18px;
 }
 
+.danger-button {
+  color: var(--danger);
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1640,6 +1644,52 @@ body[data-page="tutor"] .tutor-layout {
   color: var(--ink);
   text-align: left;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.answer-option-indicator {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--line);
+  background: #ffffff;
+  box-sizing: border-box;
+}
+
+.answer-option--radio .answer-option-indicator {
+  border-radius: 50%;
+}
+
+.answer-option--checkbox .answer-option-indicator {
+  border-radius: 4px;
+}
+
+.answer-option.selected .answer-option-indicator {
+  border-color: var(--navy-2);
+  background: var(--navy-2);
+}
+
+.answer-option--radio.selected .answer-option-indicator {
+  box-shadow: inset 0 0 0 3px #ffffff;
+}
+
+.answer-option--checkbox.selected .answer-option-indicator {
+  box-shadow: inset 0 0 0 3px #ffffff, inset 0 0 0 3px #ffffff;
+  background: var(--navy-2)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='white' d='M6.2 11.4 3 8.2l1.2-1.2 2 2 5.6-5.6 1.2 1.2z'/%3E%3C/svg%3E")
+    no-repeat center / 12px 12px;
+}
+
+.answer-option-label {
+  flex: 1 1 auto;
+}
+
+.quiz-multiselect-helper {
+  margin: -8px 0 14px;
+  color: var(--muted, #667085);
+  font-size: 14px;
 }
 
 .answer-option:hover {

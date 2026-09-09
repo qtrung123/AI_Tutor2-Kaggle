@@ -11,6 +11,7 @@ from langchain_ollama import ChatOllama, OllamaEmbeddings
 
 from backend.quiz_store import (
     delete_document_attempts,
+    delete_quiz as _delete_quiz_row,
     get_latest_attempt,
     get_latest_completed_attempt_for_quiz,
     get_quiz,
@@ -1221,6 +1222,12 @@ def _validate_v2_question(
     question_type = str(raw.get("question_type") or "single_choice").strip().lower()
     if question_type not in {"single_choice", "true_false", "multi_select"}:
         raise ValueError("Question has an unsupported question_type.")
+    if question_type == "true_false":
+        stripped_stem = stem.strip()
+        if stripped_stem.endswith("?") and re.search(r"\bor\b", stripped_stem.lower()):
+            raise ValueError(
+                "true_false question must be a declarative statement, not an either/or question."
+            )
     raw_options = raw.get("options")
     required_option_count = 2 if question_type == "true_false" else 4
     if not isinstance(raw_options, list) or len(raw_options) != required_option_count:
@@ -2803,6 +2810,32 @@ def clear_quiz_progress(
         raise ValueError("Quiz has not been generated for this document and difficulty.")
     reset_quiz_progress(document_id, difficulty, topic_id, student_id)
     return {"student_id": student_id, "document_id": document_id, "topic_id": topic_id, "difficulty": difficulty, "reset": True}
+
+
+def delete_quiz(quiz_id: str, owner_id: str = LEGACY_USER_ID) -> dict:
+    """
+    Permanently delete one quiz along with its own questions, attempts, and answers.
+
+    The source document and its topic hierarchy are never touched. If the
+    deleted quiz had completed attempts, mastery for the topics those answers
+    fed is recomputed from whatever attempts remain; topics untouched by this
+    quiz keep their existing mastery unchanged.
+    """
+    result = _delete_quiz_row(quiz_id, owner_id)
+    if result is None:
+        raise ValueError("Quiz was not found.")
+    document_id = result["document_id"]
+    recomputed = [
+        recompute_topic_mastery(owner_id, document_id, topic_id)
+        for topic_id in result["affected_topic_ids"]
+    ]
+    return {
+        "quiz_id": quiz_id,
+        "document_id": document_id,
+        "deleted": True,
+        "recomputed_topic_ids": result["affected_topic_ids"],
+        "mastery": recomputed,
+    }
 
 
 def explain_quiz_question(

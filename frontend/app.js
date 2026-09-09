@@ -2262,6 +2262,21 @@ async function regenerateAssessmentQuiz() {
   }
 }
 
+async function deleteAssessmentQuiz() {
+  const quizId = currentQuiz?.quiz_id;
+  if (!quizId) return;
+  if (!window.confirm("Delete this quiz? Its questions, attempts, and answers cannot be recovered.")) return;
+  try {
+    await fetchJson(`${QUIZZES_API_URL}/${encodeURIComponent(quizId)}`, { method: "DELETE" });
+    backToQuizzes();
+    await loadQuizStatuses();
+    await loadDashboard();
+    showToast("Quiz deleted");
+  } catch (error) {
+    showToast(error.message || "Could not delete quiz");
+  }
+}
+
 function setQuizProgressDrawerOpen(open) {
   const shouldOpen = Boolean(open && currentQuiz?.questions?.length);
   document.body.classList.toggle("quiz-progress-open", shouldOpen);
@@ -2625,6 +2640,7 @@ function renderCompletedQuizReview(container, attempt, questions, callbacks) {
     ["← Back to Quizzes", "text-button", callbacks.back],
     ["Retake Quiz", "primary-button", callbacks.retake],
     ["Regenerate Quiz", "text-button", callbacks.regenerate],
+    ["Delete Quiz", "text-button danger-button", callbacks.remove],
   ].forEach(([label, className, handler]) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -2742,6 +2758,7 @@ function renderAssessmentQuiz() {
       back: backToQuizzes,
       retake: resetAssessmentQuiz,
       regenerate: regenerateAssessmentQuiz,
+      remove: deleteAssessmentQuiz,
     });
     updateAssessmentSummary();
     renderPracticeMastery();
@@ -2783,16 +2800,32 @@ function renderAssessmentQuiz() {
   heading.append(number, count);
   const questionText = document.createElement("h3");
   questionText.textContent = question.question;
+  const isMultiSelect = question.question_type === "multi_select";
+  let multiSelectHelper = null;
+  if (isMultiSelect) {
+    multiSelectHelper = document.createElement("p");
+    multiSelectHelper.className = "quiz-multiselect-helper";
+    multiSelectHelper.textContent = "Select all that apply.";
+  }
   const options = document.createElement("div");
   options.className = "answer-list";
   question.options.forEach((option) => {
     const button = document.createElement("button");
-    button.className = "answer-option";
+    button.className = `answer-option ${isMultiSelect ? "answer-option--checkbox" : "answer-option--radio"}`;
     button.type = "button";
-    button.textContent = option;
+    button.setAttribute("role", isMultiSelect ? "checkbox" : "radio");
+    const indicator = document.createElement("span");
+    indicator.className = "answer-option-indicator";
+    indicator.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.className = "answer-option-label";
+    label.textContent = option;
+    button.append(indicator, label);
     const letter = option.trim().charAt(0).toUpperCase();
     const selected = quizAnswers[String(question.id)];
-    button.classList.toggle("selected", Array.isArray(selected) ? selected.includes(letter) : selected === letter);
+    const isSelected = Array.isArray(selected) ? selected.includes(letter) : selected === letter;
+    button.classList.toggle("selected", isSelected);
+    button.setAttribute("aria-checked", String(isSelected));
     button.addEventListener("click", () => selectAssessmentAnswer(question, option));
     options.appendChild(button);
   });
@@ -2829,7 +2862,7 @@ function renderAssessmentQuiz() {
   check.disabled = Object.keys(quizAnswers).length !== currentQuiz.questions.length;
   check.addEventListener("click", submitAssessmentQuiz);
   navigation.append(previous, next, check);
-  card.append(heading, questionText, options, navigator, navigation);
+  card.append(heading, questionText, ...(multiSelectHelper ? [multiSelectHelper] : []), options, navigator, navigation);
   quizList.appendChild(card);
   updateAssessmentSummary();
   renderPracticeMastery();

@@ -12,6 +12,7 @@ from backend.ingest import delete_indexed_file, index_files
 from backend.quiz_service import (
     QuizGenerationError,
     clear_quiz_progress,
+    delete_quiz,
     explain_quiz_question,
     generate_quiz,
     list_indexed_documents,
@@ -562,6 +563,25 @@ def quizzes(current_user: dict = Depends(require_current_user)) -> list[dict]:
         raise HTTPException(
             status_code=500,
             detail=f"Could not load quiz statuses. Original error: {error}",
+        ) from error
+
+
+@app.delete("/api/quizzes/{quiz_id}")
+def quiz_delete(quiz_id: str, current_user: dict = Depends(require_current_user)) -> dict:
+    """
+    Permanently delete one quiz and its own attempts and answers.
+
+    The source document and topic hierarchy are left untouched. Mastery for
+    any topic this quiz's completed attempts fed is recomputed afterward.
+    """
+    try:
+        return delete_quiz(quiz_id, current_user["id"])
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not delete quiz. Original error: {error}",
         ) from error
 
 

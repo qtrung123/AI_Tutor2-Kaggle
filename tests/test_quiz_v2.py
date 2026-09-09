@@ -231,6 +231,9 @@ class QuizV2Tests(unittest.TestCase):
         self.assertIn('question.question_type === "multi_select"', frontend)
         self.assertIn("result.correct_answers || [result.correct_answer]", frontend)
         self.assertIn("result.selected_answers || [result.selected_answer]", frontend)
+        self.assertIn("answer-option--checkbox", frontend)
+        self.assertIn("answer-option--radio", frontend)
+        self.assertIn("Select all that apply.", frontend)
 
     def test_requested_counts_generate_exact_supported_slots(self):
         for count in (10, 15, 20, 25):
