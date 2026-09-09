@@ -119,7 +119,9 @@ class TopicV2Phase2Tests(unittest.TestCase):
         self.assertEqual(sum(counts.values()), 10)
         self.assertTrue(all(count >= 1 for count in counts.values()))
 
-    def test_document_generation_uses_requested_ten_question_cap(self):
+    def test_document_generation_always_uses_the_fixed_fifteen_question_cap(self):
+        """Document scope ignores any requested question_count and always plans/generates
+        exactly the fixed 15-question blueprint (see DOCUMENT_QUIZ_QUESTION_COUNT)."""
         topics = [{"topic_id": name, "name": name, "subtopics": []} for name in ("a", "b", "c", "d")]
         document = {"id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 3, "topics": topics}
         def chunks(_document_id, topic_id, _owner):
@@ -133,9 +135,10 @@ class TopicV2Phase2Tests(unittest.TestCase):
             return {"topic_id": topic["topic_id"], "topic_name": topic["name"], "planner_version": PLANNER_VERSION,
                     "concept_plan_id": f"plan-{topic['topic_id']}", "assessment_capacity": 4,
                     "allocated_questions": 0, "concepts": concepts}
-        def generated(_document, _difficulty, slots, _owner, _model, requested, _run_id):
+        def generated(_document, _difficulty, slots, _owner, _model, requested, _run_id, **_kwargs):
             questions = [{
                 "id": index + 1, "question": f"Which supported concept applies in case {index + 1}?",
+                "question_type": "single_choice",
                 "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
                 "topic_id": slot["topic_id"], "topic_name": slot["topic_name"],
                 "concept_id": slot["concept_id"], "concept_name": slot["name"],
@@ -148,7 +151,7 @@ class TopicV2Phase2Tests(unittest.TestCase):
                 "llm_calls": 1, "prompt_construction_ms": 1, "initial_batch_generation_ms": 2,
                 "validation_ms": 1, "repair_ms": 0, "prompt_tokens": 100, "output_tokens": 200,
             }
-        for requested in (12, 15):
+        for requested in (None, 12, 15):
             with self.subTest(question_count=requested), \
                  patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
                  patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
@@ -157,12 +160,15 @@ class TopicV2Phase2Tests(unittest.TestCase):
                  patch.object(quiz_service, "build_topic_plan", side_effect=plan), \
                  patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated) as batch, \
                  patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, value, _o: value):
-                result = quiz_service.generate_quiz("doc.pdf", "easy", "document", question_count=requested)
-            self.assertEqual(result["question_count"], requested)
-            self.assertEqual(result["assessment_plan"]["target_questions"], requested)
+                kwargs = {"question_count": requested} if requested is not None else {}
+                result = quiz_service.generate_quiz("doc.pdf", "easy", "document", **kwargs)
+            self.assertEqual(result["question_count"], quiz_service.DOCUMENT_QUIZ_QUESTION_COUNT)
+            self.assertEqual(result["assessment_plan"]["target_questions"], quiz_service.DOCUMENT_QUIZ_QUESTION_COUNT)
             represented = {question["topic_id"] for question in result["questions"]}
             self.assertEqual(represented, {"a", "b", "c", "d"})
             self.assertEqual(batch.call_count, 1)
+            batch_kwargs = batch.call_args.kwargs
+            self.assertEqual(batch_kwargs.get("fixed_type_batches"), quiz_service.DOCUMENT_QUIZ_BATCH_PLAN)
             timings = result["assessment_plan"]["timings_ms"]
             for key in (
                 "concept_planning_ms", "allocation_ms", "prompt_construction_ms",
@@ -170,8 +176,6 @@ class TopicV2Phase2Tests(unittest.TestCase):
                 "persistence_ms", "total_request_ms", "prompt_tokens", "output_tokens",
             ):
                 self.assertIn(key, timings)
-            if requested > 16:
-                self.assertLess(len({question["concept_id"] for question in result["questions"]}), requested)
 
     def test_document_partial_generation_fails_without_persistence(self):
         topic = {"topic_id": "a", "name": "A", "subtopics": []}
@@ -186,7 +190,7 @@ class TopicV2Phase2Tests(unittest.TestCase):
             "concept_plan_id": "plan-a", "assessment_capacity": 1,
             "allocated_questions": 0, "concepts": [concept],
         }
-        def generated(*_args):
+        def generated(*_args, **_kwargs):
             return ([{"id": index + 1, "question": f"Grounded question {index + 1}?"} for index in range(9)],
                     {"accepted": 9, "accepted_with_warnings": 0, "rejected": 1,
                      "reasons": ["bounded repair exhausted"]}, {"llm_calls": 3})
@@ -200,10 +204,12 @@ class TopicV2Phase2Tests(unittest.TestCase):
              patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated), \
              patch.object(quiz_service, "save_quiz") as save:
             with self.assertRaises(quiz_service.QuizGenerationError) as raised:
+                # Document scope always overrides to the fixed 15-question blueprint, so this
+                # requested value is intentionally ignored -- the fixture below still expects 15.
                 quiz_service.generate_quiz("doc.pdf", "easy", "document", question_count=12)
-        self.assertEqual(raised.exception.detail["requested_count"], 12)
+        self.assertEqual(raised.exception.detail["requested_count"], quiz_service.DOCUMENT_QUIZ_QUESTION_COUNT)
         self.assertEqual(raised.exception.detail["valid_count"], 9)
-        self.assertEqual(raised.exception.detail["missing_count"], 3)
+        self.assertEqual(raised.exception.detail["missing_count"], quiz_service.DOCUMENT_QUIZ_QUESTION_COUNT - 9)
         self.assertTrue(raised.exception.detail["failure_summary"])
         save.assert_not_called()
 

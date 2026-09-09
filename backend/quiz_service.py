@@ -66,6 +66,14 @@ QUIZ_V2_ALLOWED_QUESTION_COUNTS = {12, 15}
 QUIZ_V2_DISTINCT_CONCEPT_LIMIT = 5
 QUIZ_GENERATION_KEEP_ALIVE = "5m"
 
+# Document-scope quizzes use a fixed, backend-authoritative blueprint: the model never
+# chooses the type mix. Order matters for _assign_document_slot_types's deterministic pick.
+DOCUMENT_QUIZ_QUESTION_COUNT = 15
+DOCUMENT_QUIZ_TYPE_COUNTS = (("multi_select", 2), ("true_false", 3), ("single_choice", 10))
+DOCUMENT_QUIZ_BATCH_PLAN = (
+    ("single_choice", 5), ("single_choice", 5), ("true_false", 3), ("multi_select", 2),
+)
+
 
 class QuizGenerationError(ValueError):
     """Structured topic-quiz failure that is safe to expose through the API."""
@@ -1062,6 +1070,7 @@ def _build_v2_prompt(
     repair: bool,
     rejection_reasons_by_slot: dict[str, list[str]] | None = None,
     retry_attempt_by_slot: dict[str, int] | None = None,
+    required_question_type: str | None = None,
 ) -> str:
     cognitive_intent = {
         "easy": "recall",
@@ -1076,10 +1085,14 @@ def _build_v2_prompt(
     avoid = "\n".join(f"- {stem}" for stem in accepted_stems) if repair else ""
     repair_lines = []
     if repair:
+        stem_shape = (
+            "a complete declarative statement (never a question, never ending in '?')"
+            if required_question_type == "true_false"
+            else "a complete standalone question stem ending in a question mark"
+        )
         repair_lines.append(
             "TARGETED MISSING-SLOT FILL: Return questions only for the listed missing slots. "
-            "For every slot, write a complete standalone question stem ending in a question mark; "
-            "never return a fragment, placeholder, or accepted question."
+            f"For every slot, write {stem_shape}; never return a fragment, placeholder, or accepted question."
         )
         for group in groups:
             reasons = (rejection_reasons_by_slot or {}).get(str(group["slot_id"]), [])
@@ -1095,7 +1108,7 @@ def _build_v2_prompt(
                     f"{group['slot_id']} diversification attempt {attempt}: use a different question angle and "
                     "formulation from every forbidden question, while staying within this slot's evidence."
                 )
-                if attempt >= 2:
+                if attempt >= 2 and not required_question_type:
                     repair_lines.append(
                         f"{group['slot_id']}: prefer a different valid question_type before using deterministic fallback."
                     )
@@ -1131,14 +1144,20 @@ def _build_v2_prompt(
             "Do not combine separate concept slots and do not ask direct recall alone.\n"
         ),
     }
+    type_instruction = (
+        f'Every one of the {count} questions must use "question_type":"{required_question_type}" only, matching its slot; '
+        "do not use any other type. "
+        if required_question_type else
+        "Choose each question_type from what its evidence can assess naturally; include single_choice, true_false, "
+        "and multi_select at least once each, with no fixed ratio. On retries, try another valid question_type "
+        "or a different same-topic angle before fallback. "
+    )
     return (
         f"Write exactly {count} {difficulty} quiz questions for {topic.get('name') or topic.get('topic_id')}.\n"
         'JSON only: {"questions":[{"slot_id":"S1","question_type":"single_choice|true_false|multi_select","question":"...","options":["..."],"correct_answers":[0],"explanation":"..."}]}\n'
         "Use each evidence slot exactly once and only its evidence. single_choice uses four options and one answer; "
         "true_false uses exactly True/False and one answer; multi_select uses four options, two or more answers, and at least one incorrect option. "
-        "Choose each question_type from what its evidence can assess naturally; include single_choice, true_false, "
-        "and multi_select at least once each, with no fixed ratio. On retries, try another valid question_type "
-        "or a different same-topic angle before fallback. "
+        f"{type_instruction}"
         "Question <=18 words, each option <=10 words, explanation <=16 words. No markdown or extra fields.\n"
         f"{difficulty_contracts[difficulty]}{repair_line}EVIDENCE:\n{evidence}"
     )
@@ -1343,6 +1362,12 @@ def _validate_v2_question(
     source_ids = list(group["source_chunk_ids"])
     if slot_id not in remaining_slot_ids:
         raise ValueError("Question repeats or exceeds its planned slot_id.")
+    authoritative_question_type = group.get("question_type")
+    if authoritative_question_type and authoritative_question_type != question_type:
+        raise ValueError(
+            f"Question uses question_type={question_type!r} but its slot requires "
+            f"{authoritative_question_type!r}."
+        )
     grounding_overlap = _concept_grounding_overlap(stem, option_bodies, group)
     if grounding_overlap == 0.0:
         raise ValueError("Question does not appear to test the assigned slot's concept or evidence.")
@@ -1842,6 +1867,107 @@ def _document_v2_slots(
     return slots
 
 
+_DOCUMENT_LIST_MARKER = re.compile(r"(?:^|\n|\s{2,})(?:[•\-\*]|\d{1,2}[.)])\s+\S")
+_DOCUMENT_HEADING_PREFIX = re.compile(r"^(?:chapter|section|table|figure|appendix)\s+[\divxlc]+\b", re.IGNORECASE)
+
+
+def _looks_like_heading_fragment(text: str) -> bool:
+    """Cheap, vocabulary-free heading/label detector.
+
+    Headings, table labels, and OCR running headers are ALL CAPS throughout (any length), or
+    short and Title-Cased throughout -- unlike ordinary sentence-case prose, which only
+    capitalizes its first word.
+    """
+    words = text.split()
+    if not words:
+        return False
+    if _DOCUMENT_HEADING_PREFIX.match(text):
+        return True
+    letters = re.sub(r"[^A-Za-z]", "", text)
+    if letters and letters.isupper():
+        return True
+    if len(words) <= 8:
+        capitalized_words = [word for word in words if word[:1].isalpha()]
+        if capitalized_words and all(word[0].isupper() for word in capitalized_words):
+            return True
+    return False
+
+
+def _document_slot_propositions(slot: dict) -> list[str]:
+    """Clean declarative fragments from one slot's own evidence, with no LLM and no domain
+    vocabulary: strips headers/emails, then drops fragments, headings, questions, and
+    long/malformed raw-chunk text, keeping only usable standalone factual statements.
+    """
+    evidence = _sanitize_fallback_evidence(str(slot.get("evidence_excerpt") or ""))
+    fragments = re.split(r"(?<=[.!?])\s+|\s*[;•]\s*|\n+", evidence)
+    propositions = []
+    for part in fragments:
+        text = re.sub(r"^\s*(?:[•\-\*]|\d{1,2}[.)])\s*", "", part.strip()).rstrip(" ,;:")
+        if not text or len(text.split()) < 3:
+            continue
+        if text.endswith("?"):
+            continue
+        words = text.split()
+        if len(words) > _FALLBACK_OPTION_WORD_LIMIT:
+            text = " ".join(words[:_FALLBACK_OPTION_WORD_LIMIT]).rstrip(" ,;:")
+        text += "" if text.endswith((".", "!", "?")) else "."
+        if _looks_like_raw_chunk(text):
+            continue
+        if _looks_like_heading_fragment(text):
+            continue
+        propositions.append(text)
+    return propositions
+
+
+def _document_slot_type_scores(slot: dict) -> tuple[int, int]:
+    """(multi_select_score, true_false_score); 0 means "unsuitable", higher is more suitable.
+
+    multi_select needs at least two clean independent propositions -- boosted when the raw
+    evidence itself looks like a bulleted/numbered list of properties, since that structure is
+    a strong signal of multiple independently-correct facts. true_false only needs one clean
+    declarative proposition to restate as a fact; it does not prefer fewer propositions over
+    more, it just requires evidence that is not a heading, fragment, question, or noise.
+    """
+    propositions = _document_slot_propositions(slot)
+    list_like = bool(_DOCUMENT_LIST_MARKER.search(str(slot.get("evidence_excerpt") or "")))
+    multi_select_score = (len(propositions) + (2 if list_like else 0)) if len(propositions) >= 2 else 0
+    true_false_score = 1 if propositions else 0
+    return multi_select_score, true_false_score
+
+
+def _assign_document_slot_types(slots: list[dict]) -> list[dict]:
+    """Deterministically stamp each slot with the fixed document blueprint's question_type.
+
+    Exactly DOCUMENT_QUIZ_TYPE_COUNTS is produced regardless of content: multi_select goes to
+    the slots that best fit its suitability score (>=2 clean independent facts, boosted by
+    list-like structure), true_false goes to the next-most-suitable remaining slots (>=1 clean
+    declarative fact), and every other slot is single_choice -- the always-safe default. Low or
+    zero scores are still ranked (never hard-excluded) so the fixed 10/3/2 split always holds
+    even for a thin or noisy document. Never asks the model and never inspects document/topic
+    names or domain vocabulary.
+    """
+    type_counts = dict(DOCUMENT_QUIZ_TYPE_COUNTS)
+    scored = [(index, *_document_slot_type_scores(slot)) for index, slot in enumerate(slots)]
+
+    richest_first = sorted(scored, key=lambda item: (-item[1], item[0]))
+    multi_select_indices = {index for index, _ms, _tf in richest_first[:type_counts["multi_select"]]}
+
+    remaining = [item for item in scored if item[0] not in multi_select_indices]
+    strongest_tf_first = sorted(remaining, key=lambda item: (-item[2], item[0]))
+    true_false_indices = {index for index, _ms, _tf in strongest_tf_first[:type_counts["true_false"]]}
+
+    assigned = []
+    for index, slot in enumerate(slots):
+        if index in multi_select_indices:
+            question_type = "multi_select"
+        elif index in true_false_indices:
+            question_type = "true_false"
+        else:
+            question_type = "single_choice"
+        assigned.append({**slot, "question_type": question_type})
+    return assigned
+
+
 def _document_batch_output_schema() -> dict:
     return {
         "type": "object",
@@ -1857,6 +1983,39 @@ def _document_batch_output_schema() -> dict:
                         "slot_id": {"type": "string"},
                         "correct_answer": {"type": "integer", "minimum": 0, "maximum": 3},
                         "correct_answers": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 3}},
+                        "explanation": {"type": "string"},
+                    },
+                    "required": ["slot_id", "question_type", "question", "options", "correct_answers", "explanation"],
+                },
+            }
+        },
+        "required": ["questions"],
+    }
+
+
+def _document_batch_output_schema_for_type(question_type: str) -> dict:
+    """Structured-output schema constrained to one homogeneous question_type and its option/answer shape."""
+    option_count = 2 if question_type == "true_false" else 4
+    answer_bounds = {"true_false": (1, 1), "multi_select": (2, 3), "single_choice": (1, 1)}[question_type]
+    return {
+        "type": "object",
+        "properties": {
+            "questions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string"},
+                        "question_type": {"type": "string", "enum": [question_type]},
+                        "options": {
+                            "type": "array", "items": {"type": "string"},
+                            "minItems": option_count, "maxItems": option_count,
+                        },
+                        "slot_id": {"type": "string"},
+                        "correct_answers": {
+                            "type": "array", "items": {"type": "integer", "minimum": 0, "maximum": option_count - 1},
+                            "minItems": answer_bounds[0], "maxItems": answer_bounds[1],
+                        },
                         "explanation": {"type": "string"},
                     },
                     "required": ["slot_id", "question_type", "question", "options", "correct_answers", "explanation"],
@@ -1950,6 +2109,73 @@ def _deterministic_grounded_candidate(
     }
 
 
+def _deterministic_true_false_candidate(slot: dict, ordinal: int) -> dict:
+    """Build a declarative True/False fallback stating one fact this slot's own evidence documents."""
+    evidence = re.sub(r"\s+", " ", str(slot.get("evidence_excerpt") or "")).strip()
+    if not evidence or not slot.get("source_chunk_ids"):
+        raise ValueError("Deterministic fallback requires grounded evidence and provenance.")
+    own_options = _grounded_option_phrases([evidence])
+    if not own_options:
+        raise ValueError("Deterministic fallback could not extract a grounded declarative statement.")
+    fact = own_options[ordinal % len(own_options)]
+    stem = fact.rstrip(".").strip() + "."
+    if stem == "." or stem.endswith("?") or _TRUE_FALSE_INTERROGATIVE_START.match(stem):
+        raise ValueError("Deterministic fallback extracted an unusable true_false statement.")
+    concept = _sanitize_fallback_evidence(slot.get("name") or slot.get("concept_id") or "the documented concept")
+    concept = " ".join(concept.split()[:_FALLBACK_OPTION_WORD_LIMIT]) or "the documented concept"
+    return {
+        "slot_id": str(slot["slot_id"]), "question": stem,
+        "question_type": "true_false",
+        "options": ["True", "False"], "correct_answer": 0, "correct_answers": [0],
+        "explanation": f"This statement is documented for {concept}.",
+    }
+
+
+def _deterministic_multi_select_candidate(
+    slot: dict, ordinal: int, alternative_evidence: list[str] | None = None,
+) -> dict:
+    """Build a final-resort multi_select MCQ whose correct answers are all grounded in this
+    slot's own evidence; sibling evidence may only widen the distractor pool for variety --
+    it is never treated as this question's provenance (source_chunk_ids stay the slot's own,
+    attached by the validator from the authoritative slot, never from here)."""
+    evidence = re.sub(r"\s+", " ", str(slot.get("evidence_excerpt") or "")).strip()
+    if not evidence or not slot.get("source_chunk_ids"):
+        raise ValueError("Deterministic fallback requires grounded evidence and provenance.")
+    # Correct answers must be clean, independent, non-heading/non-fragment propositions -- the
+    # same suitability bar _assign_document_slot_types used to route this slot to multi_select
+    # in the first place, not the looser term-extraction fallback used only for distractors.
+    own_options = _document_slot_propositions(slot)
+    if len(own_options) < 2:
+        raise ValueError("Deterministic fallback requires at least two grounded correct facts for multi_select.")
+    correct_count = min(3, len(own_options))
+    start = ordinal % len(own_options)
+    correct = [own_options[(start + offset) % len(own_options)] for offset in range(correct_count)]
+    correct_keys = {_normalize_question_key(option) for option in correct}
+    pool = _grounded_option_phrases([evidence, *(alternative_evidence or [])], require_four=True)
+    distractors = [option for option in pool if _normalize_question_key(option) not in correct_keys]
+    needed = 4 - correct_count
+    if len(distractors) < needed:
+        raise ValueError("Deterministic fallback requires enough distinct grounded distractors for multi_select.")
+    concept = _sanitize_fallback_evidence(slot.get("name") or slot.get("concept_id") or "the documented concept")
+    concept = " ".join(concept.split()[:_FALLBACK_OPTION_WORD_LIMIT]) or "the documented concept"
+    return {
+        "slot_id": str(slot["slot_id"]), "question": f"Which documented statements are true about '{concept}'?",
+        "question_type": "multi_select",
+        "options": [*correct, *distractors[:needed]], "correct_answers": list(range(correct_count)),
+        "explanation": f"These options match the documented facts about {concept}.",
+    }
+
+
+def _deterministic_document_candidate(slot: dict, ordinal: int, alternative_evidence: list[str] | None = None) -> dict:
+    """Dispatch to the type-specific fallback builder for the slot's authoritative question_type."""
+    question_type = str(slot.get("question_type") or "single_choice")
+    if question_type == "true_false":
+        return _deterministic_true_false_candidate(slot, ordinal)
+    if question_type == "multi_select":
+        return _deterministic_multi_select_candidate(slot, ordinal, alternative_evidence)
+    return _deterministic_grounded_candidate(slot, ordinal, alternative_evidence)
+
+
 def _run_document_v2_batch(
     document: dict,
     difficulty: str,
@@ -1958,8 +2184,15 @@ def _run_document_v2_batch(
     model_id: str,
     question_count: int,
     generation_run_id: str,
+    fixed_type_batches: tuple[tuple[str, int], ...] | None = None,
 ) -> tuple[list[dict], dict, dict]:
-    """Generate document slots in bounded batches, then repair only missing slots."""
+    """Generate document slots in bounded batches, then repair only missing slots.
+
+    When fixed_type_batches is given, planned_slots must already carry an authoritative
+    "question_type" per slot (see _assign_document_slot_types): the initial batches and every
+    repair/fill call are grouped to be homogeneous by that type instead of one generic mixed
+    batch, and the model is told exactly which single type each call must return.
+    """
     batch_started = time.perf_counter()
     authoritative_slots = planned_slots[:question_count]
     groups_by_id = {slot["slot_id"]: slot for slot in authoritative_slots}
@@ -2015,7 +2248,7 @@ def _run_document_v2_batch(
                     return {**slot, **variant, "evidence_rotated": True, "slot_replanned": True}
         return dict(slot)
 
-    def run_generation_call(call_slots: list[dict], phase: str, batch_index: int) -> None:
+    def run_generation_call(call_slots: list[dict], phase: str, batch_index: int, required_type: str | None = None) -> None:
         nonlocal llm_calls, repair_llm_calls, repair_attempt_count, fill_attempt_count, final_fill_llm_calls
         attempt_started = time.perf_counter()
         requested = len(call_slots)
@@ -2031,7 +2264,7 @@ def _run_document_v2_batch(
         prompt = _build_v2_prompt(
             document["id"], document_scope, difficulty, call_slots, requested,
             accepted_stems, phase != "initial", rejection_reasons_by_slot,
-            retry_attempt_by_slot,
+            retry_attempt_by_slot, required_type,
         )
         rejection_counts_before_call = {
             slot["slot_id"]: len(rejection_reasons_by_slot[slot["slot_id"]])
@@ -2052,7 +2285,7 @@ def _run_document_v2_batch(
             model=model_id,
             reasoning=False,
             temperature=0.1 if phase == "initial" else 0.25,
-            format=_document_batch_output_schema(),
+            format=_document_batch_output_schema_for_type(required_type) if required_type else _document_batch_output_schema(),
             num_ctx=16384 if requested > 15 else 8192,
             num_predict=min(4800, max(520, requested * 150)),
             keep_alive=QUIZ_GENERATION_KEEP_ALIVE,
@@ -2192,12 +2425,27 @@ def _run_document_v2_batch(
             timings["initial_batches"].append(batch_timing)
         print(f"[quiz-document-batch-timing] {json.dumps(batch_timing)}")
 
-    initial_batches = [authoritative_slots[index:index + 10] for index in range(0, len(authoritative_slots), 10)]
+    if fixed_type_batches:
+        pools: dict[str, list[dict]] = {}
+        for slot in authoritative_slots:
+            pools.setdefault(str(slot.get("question_type") or "single_choice"), []).append(slot)
+        initial_batches = []
+        for qtype, size in fixed_type_batches:
+            pool = pools.get(qtype, [])
+            batch_slots, pools[qtype] = pool[:size], pool[size:]
+            if batch_slots:
+                initial_batches.append((batch_slots, qtype))
+    else:
+        initial_batches = [
+            (authoritative_slots[index:index + 10], None)
+            for index in range(0, len(authoritative_slots), 10)
+        ]
     timings["initial_batch_count"] = len(initial_batches)
-    for batch_index, batch_slots in enumerate(initial_batches, start=1):
-        run_generation_call(batch_slots, "initial", batch_index)
+    for batch_index, (batch_slots, required_type) in enumerate(initial_batches, start=1):
+        run_generation_call(batch_slots, "initial", batch_index, required_type)
 
     next_batch_index = len(initial_batches) + 1
+    retry_types = ("single_choice", "true_false", "multi_select") if fixed_type_batches else (None,)
     for phase, retry_limit in (("repair", 2), ("fill", 2)):
         for retry_index in range(1, retry_limit + 1):
             missing_slots = [slot for slot in authoritative_slots if slot["slot_id"] in remaining_slot_ids]
@@ -2213,8 +2461,15 @@ def _run_document_v2_batch(
             }
             missing_slots_before_each_retry.append(retry_state)
             print(f"[quiz-document-retry] {json.dumps(retry_state)}")
-            run_generation_call(missing_slots, phase, next_batch_index)
-            next_batch_index += 1
+            for required_type in retry_types:
+                call_slots = (
+                    [slot for slot in missing_slots if str(slot.get("question_type") or "single_choice") == required_type]
+                    if required_type else missing_slots
+                )
+                if not call_slots:
+                    continue
+                run_generation_call(call_slots, phase, next_batch_index, required_type)
+                next_batch_index += 1
 
     # Exact count is contractual. Fill only still-missing slots, preserving all
     # accepted questions, and run deterministic candidates through the same
@@ -2250,7 +2505,7 @@ def _run_document_v2_batch(
                     str(variant.get("evidence_excerpt") or "")
                     for variant in [*(other.get("evidence_variants") or []), *(other.get("topic_evidence_variants") or [])]
                 )
-            raw = _deterministic_grounded_candidate(chosen, fallback_index, scope_evidence)
+            raw = _deterministic_document_candidate(chosen, fallback_index, scope_evidence)
             normalized, warnings = _validate_v2_question(
                 raw, fallback_groups, remaining_slot_ids, accepted_stems, difficulty,
                 slot_positions[slot_id] + 1, document_scope, int(chosen.get("assessment_capacity", 0)),
@@ -2339,13 +2594,18 @@ def generate_quiz(
     difficulty = difficulty.lower().strip()
     if difficulty not in QUIZ_DIFFICULTIES:
         raise ValueError("difficulty must be easy, medium, or difficult.")
-    if question_count not in QUIZ_V2_ALLOWED_QUESTION_COUNTS:
-        raise ValueError("question_count must be one of 12 or 15.")
     print(f"[quiz-service] difficulty={difficulty}")
     document = known_documents[document_id]
     assessment_scope = str(assessment_scope).lower().strip()
     if assessment_scope not in {"topic", "document"}:
         raise ValueError("assessment_scope must be topic or document.")
+    if assessment_scope == "document":
+        # Document-scope quizzes use a fixed backend-authoritative blueprint (15 questions:
+        # 10 single_choice, 3 true_false, 2 multi_select) -- the model never picks the count
+        # or the type mix, so any requested question_count is overridden here.
+        question_count = DOCUMENT_QUIZ_QUESTION_COUNT
+    elif question_count not in QUIZ_V2_ALLOWED_QUESTION_COUNTS:
+        raise ValueError("question_count must be one of 12 or 15.")
     topic_lookup = {topic.get("topic_id"): topic for topic in document.get("topics", [])}
     if assessment_scope == "topic" and topic_id not in topic_lookup:
         raise ValueError("topic_id was not found in the selected document.")
@@ -2435,6 +2695,7 @@ def generate_quiz(
     generation_run_id = str(uuid4())
     slot_started = time.perf_counter()
     planned_slots = _document_v2_slots(planned_topics, topic_lookup, topic_chunks)
+    planned_slots = _assign_document_slot_types(planned_slots)
     timings["slot_build_ms"] = round((time.perf_counter() - slot_started) * 1000)
     print(
         f"[quiz-document-plan] requested={question_count}, planned_slots={len(planned_slots)}, "
@@ -2442,6 +2703,7 @@ def generate_quiz(
     )
     questions, validation_results, batch_timings = _run_document_v2_batch(
         document, difficulty, planned_slots, owner_id, model_id, question_count, generation_run_id,
+        fixed_type_batches=DOCUMENT_QUIZ_BATCH_PLAN,
     )
     timings.update(batch_timings)
 
@@ -2486,6 +2748,10 @@ def generate_quiz(
             "excluded_topic_ids": excluded_topic_ids,
             "target_questions": question_count,
             "total_questions": len(questions),
+            "type_distribution": {
+                question_type: sum(1 for question in questions if question.get("question_type") == question_type)
+                for question_type, _count in DOCUMENT_QUIZ_TYPE_COUNTS
+            },
             "generation_warnings": validation_results["reasons"],
             "validation_results": validation_results,
             "llm_calls": timings["llm_calls"],

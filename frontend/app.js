@@ -94,7 +94,9 @@ const quizScopeSelect = document.getElementById("quiz-scope-select");
 const quizTopicField = document.getElementById("quiz-topic-field");
 const quizDifficultySelect = document.getElementById("quiz-difficulty-select");
 let quizQuestionCountSelect = document.getElementById("quiz-question-count-select");
+let quizQuestionCountField = document.getElementById("quiz-question-count-field");
 let quizModelSelect = document.getElementById("quiz-model-select");
+const DOCUMENT_QUIZ_QUESTION_COUNT = 15;
 const generateQuizButton = document.getElementById("generate-quiz-button");
 const resetQuizButton = document.getElementById("reset-quiz-button");
 resetQuizButton.textContent = "Retake Quiz";
@@ -1214,6 +1216,7 @@ function selectedDifficulty() {
 }
 
 function selectedQuestionCount() {
+  if (selectedAssessmentScope() === "document") return DOCUMENT_QUIZ_QUESTION_COUNT;
   const value = Number(quizQuestionCountSelect?.value || 12);
   return [12, 15].includes(value) ? value : 12;
 }
@@ -1696,6 +1699,7 @@ function updateTopicOptions() {
 function updateAssessmentScope() {
   const topicMode = selectedAssessmentScope() === "topic";
   if (quizTopicField) quizTopicField.hidden = !topicMode;
+  if (quizQuestionCountField) quizQuestionCountField.hidden = !topicMode;
 }
 
 async function handleQuizDocumentChange() {
@@ -2731,6 +2735,33 @@ function renderAttemptSummary() {
   return summary;
 }
 
+function quizTypeLabel(questionType) {
+  return { single_choice: "Multiple Choice", true_false: "True/False", multi_select: "Multiple Select" }[questionType]
+    || questionType;
+}
+
+function documentQuizTypeBreakdown(quiz) {
+  if (quiz.assessment_plan?.type_distribution) return quiz.assessment_plan.type_distribution;
+  const counts = {};
+  (quiz.questions || []).forEach((question) => {
+    const questionType = question.question_type || "single_choice";
+    counts[questionType] = (counts[questionType] || 0) + 1;
+  });
+  return counts;
+}
+
+function assessmentTitleText(quiz) {
+  if (!quiz?.questions?.length) return "Assessment Agent";
+  if (quiz.assessment_scope === "document") {
+    const distribution = documentQuizTypeBreakdown(quiz);
+    const parts = ["single_choice", "true_false", "multi_select"]
+      .filter((questionType) => distribution[questionType])
+      .map((questionType) => `${distribution[questionType]} ${quizTypeLabel(questionType)}`);
+    return `${quiz.questions.length} questions · ${parts.join(" · ")}`;
+  }
+  return `${quiz.questions.length} ${quiz.difficulty} questions from ${quiz.document_id}`;
+}
+
 function renderAssessmentQuiz() {
   const quizPane = document.querySelector('[data-session-pane="quiz"]');
   const hasQuiz = Boolean(currentQuiz?.questions?.length);
@@ -2740,9 +2771,7 @@ function renderAssessmentQuiz() {
   quizPane?.classList.toggle("quiz-landing", !hasQuiz);
   updateQuizLandingLayout();
   quizList.innerHTML = "";
-  assessmentTitle.textContent = hasQuiz
-    ? `${currentQuiz.questions.length} ${currentQuiz.difficulty} questions from ${currentQuiz.document_id}`
-    : "Assessment Agent";
+  assessmentTitle.textContent = assessmentTitleText(currentQuiz);
   if (!hasQuiz) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
@@ -3080,6 +3109,7 @@ function openQuizCreateDialog() {
   }
   if (!quizQuestionCountSelect) {
     const label = document.createElement("label");
+    label.id = "quiz-question-count-field";
     const caption = document.createElement("span");
     caption.textContent = "Number of questions";
     quizQuestionCountSelect = document.createElement("select");
@@ -3093,6 +3123,7 @@ function openQuizCreateDialog() {
     });
     label.append(caption, quizQuestionCountSelect);
     generateQuizButton.before(label);
+    quizQuestionCountField = label;
   }
   if (!quizCreateDialog) {
     quizCreateDialog = document.createElement("div");

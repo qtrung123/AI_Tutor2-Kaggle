@@ -161,7 +161,7 @@ class AdaptiveAssessmentTests(unittest.TestCase):
                 concept["source_chunk_ids"] = [f"{topic['topic_id']}_1"]
             return plan
 
-        def generated(_document, difficulty, slots, _owner, _model, requested, _run_id):
+        def generated(_document, difficulty, slots, _owner, _model, requested, _run_id, **_kwargs):
             questions = [{
                 "id": index + 1, "question": f"Question for {slot['name']} case {index + 1}?",
                 "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
@@ -185,7 +185,7 @@ class AdaptiveAssessmentTests(unittest.TestCase):
              patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _owner: quiz):
             result = quiz_service.generate_quiz("doc.pdf", "easy", "document")
 
-        self.assertEqual(result["question_count"], 12)
+        self.assertEqual(result["question_count"], 15)
         self.assertEqual(generator.call_count, 1)
         self.assertEqual({question["topic_id"] for question in result["questions"]}, {"topic_a", "topic_b"})
         self.assertTrue(all(question["concept_id"] for question in result["questions"]))
