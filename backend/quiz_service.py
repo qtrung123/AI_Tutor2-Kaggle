@@ -549,6 +549,21 @@ def _option_text(option: str) -> str:
     return strip_leading_option_label(option)
 
 
+def _normalize_true_false_label(option: str) -> str:
+    """Fold harmless True/False punctuation noise ("True.", "'False'") into the canonical label.
+
+    Only exact True/False content (ignoring surrounding quotes/punctuation) is touched, so a
+    genuinely wrong option still fails the true_false content check below unchanged.
+    """
+    core = option.strip(" \t.!?:;,'\"“”‘’")
+    lowered = core.lower()
+    if lowered == "true":
+        return "True"
+    if lowered == "false":
+        return "False"
+    return option
+
+
 def _looks_like_raw_chunk(option: str) -> bool:
     text = _option_text(option)
     words = text.split()
@@ -1005,6 +1020,32 @@ def _select_v2_evidence_groups(
     return groups
 
 
+_FORMAT_REJECTION_MARKERS = (
+    "must contain exactly",
+    "must be true and false",
+    "requires exactly one correct answer",
+    "requires at least two correct",
+    "options must be distinct",
+    "unsupported question_type",
+    "invalid option index",
+    "correct_answers must be a list",
+    "must be a json object",
+)
+
+
+def _is_formatting_rejection(reasons: list[str]) -> bool:
+    """True when the slot's latest rejection was a structural/format mistake, not a content problem.
+
+    Format mistakes (wrong option count, non-distinct options, wrong answer count, ...) are fixed by
+    correcting that one structural detail; content problems (duplicates, generic stems) need a genuinely
+    different question. Repair prompts should ask for the right kind of fix, not conflate the two.
+    """
+    if not reasons:
+        return False
+    latest = reasons[-1].lower()
+    return any(marker in latest for marker in _FORMAT_REJECTION_MARKERS)
+
+
 def _build_v2_prompt(
     document_id: str,
     topic: dict,
@@ -1037,14 +1078,21 @@ def _build_v2_prompt(
         for group in groups:
             reasons = (rejection_reasons_by_slot or {}).get(str(group["slot_id"]), [])
             attempt = int((retry_attempt_by_slot or {}).get(str(group["slot_id"]), 1))
-            repair_lines.append(
-                f"{group['slot_id']} diversification attempt {attempt}: use a different question angle and "
-                "formulation from every forbidden question, while staying within this slot's evidence."
-            )
-            if attempt >= 2:
+            if _is_formatting_rejection(reasons):
                 repair_lines.append(
-                    f"{group['slot_id']}: prefer a different valid question_type before using deterministic fallback."
+                    f"{group['slot_id']} attempt {attempt}: the previous question's content was fine but it broke "
+                    "a formatting rule (see its rejection reason below); keep the same question and evidence, and "
+                    "only fix that exact structural problem."
                 )
+            else:
+                repair_lines.append(
+                    f"{group['slot_id']} diversification attempt {attempt}: use a different question angle and "
+                    "formulation from every forbidden question, while staying within this slot's evidence."
+                )
+                if attempt >= 2:
+                    repair_lines.append(
+                        f"{group['slot_id']}: prefer a different valid question_type before using deterministic fallback."
+                    )
             if group.get("evidence_rotated"):
                 repair_lines.append(f"{group['slot_id']} uses alternative evidence; base the question on that new evidence.")
             if group.get("slot_replanned"):
@@ -1233,6 +1281,11 @@ def _validate_v2_question(
     if not isinstance(raw_options, list) or len(raw_options) != required_option_count:
         raise ValueError(f"{question_type} question must contain exactly {required_option_count} options.")
     option_bodies = [strip_leading_option_label(_clean_inline_text(option)) for option in raw_options]
+    true_false_label_normalized = False
+    if question_type == "true_false":
+        normalized_labels = [_normalize_true_false_label(option) for option in option_bodies]
+        true_false_label_normalized = normalized_labels != option_bodies
+        option_bodies = normalized_labels
     for option in option_bodies:
         _reject_unsafe_final_text(option, field="Option")
     if len({option.lower() for option in option_bodies}) != len(option_bodies):
@@ -1277,6 +1330,8 @@ def _validate_v2_question(
         warnings.append("near_duplicate_options")
     if any(not option for option in option_bodies):
         warnings.append("empty_option")
+    if true_false_label_normalized:
+        warnings.append("true_false_label_normalized")
     explanation = _clean_inline_text(raw.get("explanation", ""))
     _reject_unsafe_final_text(explanation, field="Explanation")
     if difficulty == "easy":
@@ -1786,17 +1841,36 @@ def _document_batch_output_schema() -> dict:
     }
 
 
+_FALLBACK_OPTION_WORD_LIMIT = 12
+
+
+def _sanitize_fallback_evidence(text: str) -> str:
+    """Strip raw message headers and email addresses before deriving fallback option text."""
+    cleaned = _RAW_MESSAGE_HEADER.sub(" ", str(text or ""))
+    cleaned = _RAW_EMAIL.sub(" ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _grounded_option_phrases(evidence_values: list[str], require_four: bool = False) -> list[str]:
-    """Extract grammatical propositions, then same-domain terms, without adding facts."""
+    """Extract short, sanitized grammatical propositions, then same-domain terms, without adding facts.
+
+    Evidence is scraped document text: it can carry raw headers, emails, or long run-on sentences.
+    Those are stripped and phrases are capped to a short concept-level clause so a fallback option
+    never reproduces something the validator's raw-evidence/scaffolding checks would reject.
+    """
     propositions = []
-    normalized_values = [re.sub(r"\s+", " ", str(value or "")).strip() for value in evidence_values]
+    normalized_values = [_sanitize_fallback_evidence(value) for value in evidence_values]
     for evidence in normalized_values:
         for part in re.split(r"(?<=[.!?])\s+|\s*[;•]\s*", evidence):
-            phrase = part.strip().rstrip(" ,;:")
-            if len(phrase.split()) >= 3:
-                phrase += "" if phrase.endswith((".", "!", "?")) else "."
-                if _normalize_question_key(phrase) not in {_normalize_question_key(item) for item in propositions}:
-                    propositions.append(phrase)
+            words = part.strip().rstrip(" ,;:").split()
+            if len(words) < 3:
+                continue
+            phrase = " ".join(words[:_FALLBACK_OPTION_WORD_LIMIT]).rstrip(" ,;:")
+            phrase += "" if phrase.endswith((".", "!", "?")) else "."
+            if _looks_like_raw_chunk(phrase):
+                continue
+            if _normalize_question_key(phrase) not in {_normalize_question_key(item) for item in propositions}:
+                propositions.append(phrase)
     if propositions and (not require_four or len(propositions) >= 4):
         return propositions
     terms = []
@@ -1820,7 +1894,8 @@ def _deterministic_grounded_candidate(
     evidence = re.sub(r"\s+", " ", str(slot.get("evidence_excerpt") or "")).strip()
     if not evidence or not slot.get("source_chunk_ids"):
         raise ValueError("Deterministic fallback requires grounded evidence and provenance.")
-    concept = _clean_inline_text(slot.get("name") or slot.get("concept_id") or "the documented concept")
+    concept = _sanitize_fallback_evidence(slot.get("name") or slot.get("concept_id") or "the documented concept")
+    concept = " ".join(concept.split()[:_FALLBACK_OPTION_WORD_LIMIT]) or "the documented concept"
     option_pool = _grounded_option_phrases([evidence, *(alternative_evidence or [])], require_four=True)
     term_mode = bool(option_pool and option_pool[0].startswith('The documented term is "'))
     own_options = _grounded_option_phrases([evidence], require_four=term_mode)
@@ -1843,7 +1918,8 @@ def _deterministic_grounded_candidate(
     distractors = alternatives[:3]
     return {
         "slot_id": str(slot["slot_id"]), "question": stem,
-        "options": [correct, *distractors], "correct_answer": 0,
+        "question_type": "single_choice",
+        "options": [correct, *distractors], "correct_answer": 0, "correct_answers": [0],
         "explanation": f"The first option matches the documented facts about {concept}.",
     }
 
