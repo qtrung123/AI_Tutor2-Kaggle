@@ -55,6 +55,13 @@ def initialize_flashcard_store() -> None:
                 ON flashcards(owner_id, document_id, position, created_at);
             """
         )
+        # Additive migration: flashcard_language distinguishes cached sets by requested study
+        # language (Auto/English/Vietnamese) so one language's cache is never served for another.
+        existing_columns = {row["name"] for row in connection.execute("PRAGMA table_info(flashcard_sets)")}
+        if "flashcard_language" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE flashcard_sets ADD COLUMN flashcard_language TEXT NOT NULL DEFAULT 'auto'"
+            )
 
 
 def _card(row: sqlite3.Row) -> dict:
@@ -74,10 +81,11 @@ def get_compatible_flashcards(identity: dict) -> dict | None:
         rows = connection.execute(
             """SELECT * FROM flashcard_sets WHERE owner_id=? AND document_id=? AND document_hash=?
                AND topic_schema_version=? AND flashcard_version=? AND model_id=? AND runtime_model=?
+               AND flashcard_language=?
                ORDER BY created_at DESC""",
             (identity["owner_id"], identity["document_id"], identity["document_hash"],
              identity["topic_schema_version"], identity["flashcard_version"], identity["model_id"],
-             identity["runtime_model"]),
+             identity["runtime_model"], identity.get("flashcard_language") or "auto"),
         ).fetchall()
         target = next((row for row in rows if json.loads(row["topic_ids_json"]) == identity["topic_ids"]), None)
         if not target:
@@ -95,11 +103,13 @@ def save_flashcards(identity: dict, cards: list[dict]) -> dict:
     with _connect() as connection:
         connection.execute(
             """INSERT INTO flashcard_sets (set_id, owner_id, document_id, document_hash,
-               topic_schema_version, flashcard_version, model_id, runtime_model, topic_ids_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               topic_schema_version, flashcard_version, model_id, runtime_model, topic_ids_json,
+               created_at, flashcard_language)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (set_id, identity["owner_id"], identity["document_id"], identity["document_hash"],
              identity["topic_schema_version"], identity["flashcard_version"], identity["model_id"],
-             identity["runtime_model"], json.dumps(identity["topic_ids"]), created_at),
+             identity["runtime_model"], json.dumps(identity["topic_ids"]), created_at,
+             identity.get("flashcard_language") or "auto"),
         )
         for position, card in enumerate(cards):
             card_id = card.get("flashcard_id") or str(uuid4())

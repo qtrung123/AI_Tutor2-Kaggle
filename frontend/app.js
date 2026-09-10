@@ -71,6 +71,7 @@ let flashcardIndex = 0;
 let flashcardFlipped = false;
 let flashcardTopicFilter = "all";
 let loadedFlashcardKey = "";
+let flashcardLanguage = localStorage.getItem("aiTutorFlashcardLanguage") || "auto";
 
 const navItems = document.querySelectorAll(".nav-item");
 const views = document.querySelectorAll(".view");
@@ -197,11 +198,13 @@ const summaryContent = document.getElementById("summary-content");
 const regenerateSummaryButton = document.getElementById("regenerate-summary-button");
 const flashcardsPane = document.querySelector('[data-session-pane="flashcards"]');
 flashcardsPane?.classList.remove("placeholder-pane");
-if (flashcardsPane) flashcardsPane.innerHTML = `<article class="panel flashcards-panel"><div class="flashcards-toolbar"><div><p class="eyebrow">Flashcards</p><h2>Study Cards</h2></div><div class="flashcards-actions"><label>Filter Topics<select id="flashcard-topic-filter"><option value="all">All topics</option></select></label><button class="secondary-button" id="shuffle-flashcards" type="button">Shuffle</button><button class="secondary-button" id="manage-flashcards" type="button">Manage Cards</button></div></div><div id="flashcards-loading" class="empty-state" hidden>Generating grounded flashcards…</div><div id="flashcards-error" class="empty-state" hidden></div><div id="flashcards-stage" hidden><div class="flashcard-topic-title" id="flashcard-topic-title"></div><button class="flashcard" id="flashcard" type="button" aria-label="Flip flashcard"><span class="flashcard-side-label" id="flashcard-side-label">Front</span><span class="flashcard-copy" id="flashcard-copy"></span><span class="flashcard-flip-hint">Click to flip</span></button><div class="flashcard-navigation"><button class="secondary-button" id="previous-flashcard" type="button">Previous</button><span id="flashcard-position">0 of 0</span><button class="secondary-button" id="next-flashcard" type="button">Next</button><button class="favorite-button" id="favorite-flashcard" type="button" aria-label="Favorite card">☆</button></div></div></article>`;
+if (flashcardsPane) flashcardsPane.innerHTML = `<article class="panel flashcards-panel"><div class="flashcards-toolbar"><div><p class="eyebrow">Flashcards</p><h2>Study Cards</h2></div><div class="flashcards-actions"><label>Filter Topics<select id="flashcard-topic-filter"><option value="all">All topics</option></select></label><label>Flashcard language<select id="flashcard-language-select"><option value="auto">Auto</option><option value="english">English</option><option value="vietnamese">Vietnamese</option></select></label><button class="secondary-button" id="shuffle-flashcards" type="button">Shuffle</button><button class="secondary-button" id="manage-flashcards" type="button">Manage Cards</button></div></div><div id="flashcards-loading" class="empty-state" hidden>Generating grounded flashcards…</div><div id="flashcards-error" class="empty-state" hidden></div><div id="flashcards-stage" hidden><div class="flashcard-topic-title" id="flashcard-topic-title"></div><button class="flashcard" id="flashcard" type="button" aria-label="Flip flashcard"><span class="flashcard-side-label" id="flashcard-side-label">Front</span><span class="flashcard-copy" id="flashcard-copy"></span><span class="flashcard-flip-hint">Click to flip</span></button><div class="flashcard-navigation"><button class="secondary-button" id="previous-flashcard" type="button">Previous</button><span id="flashcard-position">0 of 0</span><button class="secondary-button" id="next-flashcard" type="button">Next</button><button class="favorite-button" id="favorite-flashcard" type="button" aria-label="Favorite card">☆</button></div></div></article>`;
 const flashcardsLoading = document.getElementById("flashcards-loading");
 const flashcardsError = document.getElementById("flashcards-error");
 const flashcardsStage = document.getElementById("flashcards-stage");
 const flashcardTopicSelect = document.getElementById("flashcard-topic-filter");
+const flashcardLanguageSelect = document.getElementById("flashcard-language-select");
+if (flashcardLanguageSelect) flashcardLanguageSelect.value = flashcardLanguage;
 const flashcardElement = document.getElementById("flashcard");
 const flashcardCopy = document.getElementById("flashcard-copy");
 const flashcardSideLabel = document.getElementById("flashcard-side-label");
@@ -392,11 +395,11 @@ function renderFlashcardTopicFilter() {
 
 async function loadDocumentFlashcards() {
   if (!activeDocumentId || !flashcardsPane) return;
-  const requestDocumentId = activeDocumentId, key = `${requestDocumentId}:${selectedModelId}`;
+  const requestDocumentId = activeDocumentId, key = `${requestDocumentId}:${selectedModelId}:${flashcardLanguage}`;
   if (loadedFlashcardKey === key && flashcards.length) { renderCurrentFlashcard(); return; }
   flashcardsLoading.hidden = false; flashcardsError.hidden = true; flashcardsStage.hidden = true;
   try {
-    flashcardSet = await fetchJson(`${FLASHCARDS_API_BASE_URL}/${encodeURIComponent(requestDocumentId)}?model_id=${encodeURIComponent(selectedModelId)}`);
+    flashcardSet = await fetchJson(`${FLASHCARDS_API_BASE_URL}/${encodeURIComponent(requestDocumentId)}?model_id=${encodeURIComponent(selectedModelId)}&language=${encodeURIComponent(flashcardLanguage)}`);
     if (activeDocumentId !== requestDocumentId) return;
     flashcards = flashcardSet.cards || []; flashcardIndex = 0; flashcardFlipped = false; loadedFlashcardKey = key;
     renderFlashcardTopicFilter(); renderCurrentFlashcard();
@@ -2993,6 +2996,12 @@ flashcardElement?.addEventListener("click", () => { flashcardFlipped = !flashcar
 document.getElementById("previous-flashcard")?.addEventListener("click", () => { const cards = visibleFlashcards(); if (cards.length) { flashcardIndex = (flashcardIndex - 1 + cards.length) % cards.length; flashcardFlipped = false; renderCurrentFlashcard(); } });
 document.getElementById("next-flashcard")?.addEventListener("click", () => { const cards = visibleFlashcards(); if (cards.length) { flashcardIndex = (flashcardIndex + 1) % cards.length; flashcardFlipped = false; renderCurrentFlashcard(); } });
 flashcardTopicSelect?.addEventListener("change", () => { flashcardTopicFilter = flashcardTopicSelect.value; flashcardIndex = 0; flashcardFlipped = false; renderCurrentFlashcard(); });
+flashcardLanguageSelect?.addEventListener("change", () => {
+  flashcardLanguage = flashcardLanguageSelect.value;
+  localStorage.setItem("aiTutorFlashcardLanguage", flashcardLanguage);
+  loadedFlashcardKey = "";
+  loadDocumentFlashcards();
+});
 document.getElementById("shuffle-flashcards")?.addEventListener("click", () => { for (let index = flashcards.length - 1; index > 0; index -= 1) { const swap = Math.floor(Math.random() * (index + 1)); [flashcards[index], flashcards[swap]] = [flashcards[swap], flashcards[index]]; } flashcardIndex = 0; flashcardFlipped = false; renderCurrentFlashcard(); });
 document.getElementById("manage-flashcards")?.addEventListener("click", openFlashcardManager);
 favoriteFlashcardButton?.addEventListener("click", async () => { const card = visibleFlashcards()[flashcardIndex]; if (!card) return; try { await patchFlashcard(card, { is_favorite: !card.is_favorite }); renderCurrentFlashcard(); } catch (error) { showToast(error.message); } });

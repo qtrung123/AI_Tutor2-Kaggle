@@ -125,21 +125,33 @@ class FlashcardFeatureTests(unittest.TestCase):
         variants = [
             {"document_hash": "hash-2"}, {"topic_schema_version": 3},
             {"model_id": "model-b"}, {"runtime_model": "runtime-model-b"},
-            {"flashcard_version": "grounded_flashcards_v2"}, {"topic_ids": ["beta"]},
+            {"flashcard_version": "grounded_flashcards_v1"}, {"topic_ids": ["beta"]},
         ]
         for change in variants:
             with self.subTest(change=change):
                 self.assertIsNone(flashcard_store.get_compatible_flashcards({**base, **change}))
 
     def test_cards_without_same_topic_chunk_provenance_are_discarded(self):
+        # beta gets one ungrounded card (wrong chunk_id, discarded) plus one grounded card, so
+        # beta still has coverage -- isolates the provenance-discard behavior from the separate
+        # full-topic-coverage requirement (see test_flashcard_bilingual_quality.py).
         class UngroundedResponse:
-            content = '{"topics":[{"cards":[{"front":"Bad","back":"Wrong","source_chunk_ids":["a1"]}]},{"cards":[{"front":"Good","back":"Right","source_chunk_ids":["a1"]}]}]}'
+            content = (
+                '{"topics":['
+                '{"cards":[{"front":"Bad","back":"Wrong","source_chunk_ids":["a1"]},'
+                '{"front":"Beta good","back":"Beta right","source_chunk_ids":["b1"]}]},'
+                '{"cards":[{"front":"Good","back":"Right","source_chunk_ids":["a1"]}]}'
+                ']}'
+            )
         with patch.object(FakeLlm, "invoke", return_value=UngroundedResponse()), \
              patch.object(flashcard_service, "ChatOllama", FakeLlm), \
              patch.object(flashcard_service, "get_topic_chunks", side_effect=self.chunks), \
              patch.object(flashcard_service, "resolve_generation_model", return_value="other-runtime"):
             result = flashcard_service.generate_flashcards(self.alice, "notes.pdf", model_id="model-a")
-        self.assertEqual([(card["topic_id"], card["front"]) for card in result["cards"]], [("alpha", "Good")])
+        self.assertEqual(
+            [(card["topic_id"], card["front"]) for card in result["cards"]],
+            [("beta", "Beta good"), ("alpha", "Good")],
+        )
 
 
 if __name__ == "__main__":

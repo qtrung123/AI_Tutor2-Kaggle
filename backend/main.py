@@ -611,10 +611,11 @@ def summary_regenerate(document_id: str, request: SummaryGenerateRequest, curren
 
 @app.get("/api/flashcards/{document_id}")
 def flashcards_detail(document_id: str, topic_ids: list[str] | None = Query(default=None),
-                      model_id: Optional[str] = None, current_user: dict = Depends(require_current_user)) -> dict:
+                      model_id: Optional[str] = None, language: Optional[str] = None,
+                      current_user: dict = Depends(require_current_user)) -> dict:
     """Reuse or generate grounded cards from existing owner-scoped indexed chunks."""
     try:
-        return generate_flashcards(current_user["id"], document_id, topic_ids=topic_ids, model_id=model_id)
+        return generate_flashcards(current_user["id"], document_id, topic_ids=topic_ids, model_id=model_id, language=language)
     except ValueError as error:
         raise HTTPException(status_code=404 if str(error) == "Document not found." else 400, detail=str(error)) from error
     except Exception as error:
