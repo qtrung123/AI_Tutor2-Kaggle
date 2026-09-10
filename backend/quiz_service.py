@@ -72,8 +72,9 @@ QUIZ_GENERATION_KEEP_ALIVE = "5m"
 # exactly 2 multi_select and 3 true_false by generating small ranked candidate WINDOWS in one
 # homogeneous batch call each (generate -> targeted repair only for candidates the model actually
 # attempted -> next ranked window -> constructible fallback), gated by a hard quota check before
-# any single_choice slot is even assigned. See DOCUMENT_QUIZ_SPECIAL_TYPE_PLAN,
-# DOCUMENT_QUIZ_SPECIAL_CANDIDATE_WINDOW, and DOCUMENT_QUIZ_SC_BATCH_SIZES.
+# any single_choice slot is even assigned. The remaining 10 slots then go through the dedicated
+# _run_document_single_choice_batch pure-MCQ generator (see DOCUMENT_QUIZ_SPECIAL_TYPE_PLAN and
+# DOCUMENT_QUIZ_SPECIAL_CANDIDATE_WINDOW for the special-type side).
 DOCUMENT_QUIZ_QUESTION_COUNT = 15
 DOCUMENT_QUIZ_TYPE_COUNTS = (("multi_select", 2), ("true_false", 3), ("single_choice", 10))
 # Special types are locked in this order, before any single_choice slot is even assigned.
@@ -81,8 +82,6 @@ DOCUMENT_QUIZ_SPECIAL_TYPE_PLAN = (("multi_select", 2), ("true_false", 3))
 # How many ranked candidates are generated together in one homogeneous batch call per special
 # type, before checking whether the quota is met and (if not) moving to the next window.
 DOCUMENT_QUIZ_SPECIAL_CANDIDATE_WINDOW = {"multi_select": 4, "true_false": 5}
-# Once the 10 remaining content slots are assigned single_choice, they generate in two batches.
-DOCUMENT_QUIZ_SC_BATCH_SIZES = (5, 5)
 
 
 class QuizGenerationError(ValueError):
@@ -2381,6 +2380,515 @@ def _deterministic_document_candidate(slot: dict, ordinal: int, alternative_evid
     return _deterministic_grounded_candidate(slot, ordinal, alternative_evidence)
 
 
+def _is_clean_grounded_mcq_candidate(raw: dict, evidence_text: str) -> bool:
+    """Generic structural/text-quality gate for a deterministically-built MCQ candidate, reusing
+    the same vocabulary-free heuristics used elsewhere in this file (_looks_like_raw_chunk,
+    _looks_like_heading_fragment, _normalize_question_key) instead of special-casing specific
+    garbage phrases such as "This evidence refers to..." or a particular document's header text.
+
+    Rejects a candidate whose stem or any option is raw/header/heading-like, whose options are
+    empty or duplicated, or whose "correct" answer cannot actually be traced back to the slot's
+    own evidence -- the generic tell for a synthesized template (e.g. the loose term-extraction
+    mode _grounded_option_phrases falls back to for thin evidence) rather than a genuine
+    extracted proposition, which is always a near-verbatim slice of the evidence text.
+    """
+    stem = str(raw.get("question") or "").strip()
+    if not stem or _looks_like_raw_chunk(stem) or _looks_like_heading_fragment(stem):
+        return False
+    options = raw.get("options") or []
+    if len(options) != 4:
+        return False
+    cleaned_options = [str(option or "").strip() for option in options]
+    if any(not option for option in cleaned_options):
+        return False
+    if len({_normalize_question_key(option) for option in cleaned_options}) != len(cleaned_options):
+        return False
+    if any(_looks_like_raw_chunk(option) or _looks_like_heading_fragment(option) for option in cleaned_options):
+        return False
+    try:
+        correct = cleaned_options[int(raw.get("correct_answer"))]
+    except (TypeError, ValueError, IndexError):
+        return False
+    correct_key = _normalize_question_key(correct)
+    evidence_key = _normalize_question_key(evidence_text)
+    if not correct_key or correct_key not in evidence_key:
+        return False
+    return True
+
+
+def _document_single_choice_output_schema() -> dict:
+    """Model-facing schema for the dedicated single_choice generator: the historically proven
+    flat MCQ contract from 02134eaea7348cf6224a831844e9e817c11d92e5 -- no question_type field, no
+    correct_answers array. The model only ever sees slot_id/question/options/correct_answer/
+    explanation; question_type and correct_answers are backend-only normalization applied after
+    parsing, before the shared validator (see _run_document_single_choice_batch)."""
+    return {
+        "type": "object",
+        "properties": {
+            "questions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "slot_id": {"type": "string"},
+                        "question": {"type": "string"},
+                        "options": {"type": "array", "items": {"type": "string"}, "minItems": 4, "maxItems": 4},
+                        "correct_answer": {"type": "integer", "minimum": 0, "maximum": 3},
+                        "explanation": {"type": "string"},
+                    },
+                    "required": ["slot_id", "question", "options", "correct_answer", "explanation"],
+                },
+            }
+        },
+        "required": ["questions"],
+    }
+
+
+def _build_document_single_choice_prompt(
+    document_id: str,
+    topic: dict,
+    difficulty: str,
+    groups: list[dict],
+    count: int,
+    accepted_stems: list[str],
+    repair: bool,
+    rejection_reasons_by_slot: dict[str, list[str]] | None = None,
+    retry_attempt_by_slot: dict[str, int] | None = None,
+) -> str:
+    """Dedicated single_choice prompt: the historically proven pure-MCQ task from
+    02134eaea7348cf6224a831844e9e817c11d92e5's _build_v2_prompt -- no question_type field, no
+    True/False or Multiple Select vocabulary anywhere, so the model sees exactly the same kind of
+    plain MCQ task the known-good pre-mixed-types implementation gave it.
+    """
+    cognitive_intent = {
+        "easy": "recall",
+        "medium": "relationship_application",
+        "difficult": "multi_fact_reasoning",
+    }[difficulty]
+    evidence = "\n".join(
+        f"{group['slot_id']}|{group.get('topic_name', '')}|{group['evidence_excerpt']}|cognitive_intent={cognitive_intent}"
+        if group.get("topic_name") else f"{group['slot_id']}|{group['evidence_excerpt']}|cognitive_intent={cognitive_intent}"
+        for group in groups
+    )
+    avoid = "\n".join(f"- {stem}" for stem in accepted_stems) if repair else ""
+    repair_lines = []
+    if repair:
+        repair_lines.append(
+            "TARGETED MISSING-SLOT FILL: Return questions only for the listed missing slots. "
+            "For every slot, write a complete standalone question stem ending in a question mark; "
+            "never return a fragment, placeholder, or accepted question."
+        )
+        for group in groups:
+            reasons = (rejection_reasons_by_slot or {}).get(str(group["slot_id"]), [])
+            attempt = int((retry_attempt_by_slot or {}).get(str(group["slot_id"]), 1))
+            if _is_formatting_rejection(reasons):
+                repair_lines.append(
+                    f"{group['slot_id']} attempt {attempt}: the previous question's content was fine but it broke "
+                    "a formatting rule (see its rejection reason below); keep the same question and evidence, and "
+                    "only fix that exact structural problem."
+                )
+            else:
+                repair_lines.append(
+                    f"{group['slot_id']} diversification attempt {attempt}: use a different question angle and "
+                    "formulation from every forbidden question, while staying within this slot's evidence."
+                )
+            if group.get("evidence_rotated"):
+                repair_lines.append(f"{group['slot_id']} uses alternative evidence; base the question on that new evidence.")
+            if group.get("slot_replanned"):
+                repair_lines.append(
+                    f"{group['slot_id']} alone was replanned with unused evidence from the same topic. "
+                    "Keep its requested difficulty and do not use another topic."
+                )
+            if reasons:
+                repair_lines.append(f"{group['slot_id']} previous rejection: {'; '.join(reasons[-3:])}")
+    if avoid:
+        repair_lines.append(
+            f"ACCEPTED STEMS / FORBIDDEN QUESTIONS (all accepted stems; do not repeat or closely paraphrase):\n{avoid}"
+        )
+    repair_line = "\n".join(repair_lines) + ("\n" if repair_lines else "")
+    difficulty_contracts = {
+        "easy": (
+            "EASY QUALITY: Ask direct recall/basic comprehension about one explicit evidence fact. "
+            "Exactly one option must fully answer the stem; every distractor must conflict with or be unsupported by this slot evidence. "
+            "Do not rely on outside-world plausibility. Do not use NOT, EXCEPT, false, incorrect, least, or double negatives. "
+            "If several evidence facts are true, do not make them competing options; the correct option must contain the complete requested set. "
+            "The correct option must match the stem in scope and grammar.\n"
+        ),
+        "medium": (
+            "MEDIUM QUALITY: Require one reasoning step using comparison, cause/effect, interpretation, or application "
+            "within this concept or its closely related slot evidence; do not ask direct recall alone.\n"
+        ),
+        "difficult": (
+            "DIFFICULT QUALITY: Require multi-fact reasoning that combines at least two supported facts already inside "
+            "this same concept slot evidence to diagnose, predict, justify, or select a consequence. "
+            "Do not combine separate concept slots and do not ask direct recall alone.\n"
+        ),
+    }
+    return (
+        f"Write exactly {count} {difficulty} single-answer multiple-choice questions for "
+        f"{topic.get('name') or topic.get('topic_id')}.\n"
+        'JSON only: {"questions":[{"slot_id":"S1","question":"...","options":["...","...","...","..."],"correct_answer":0,"explanation":"..."}]}\n'
+        "For each requested slot_id, return exactly one question grounded only in that slot's own evidence: "
+        "exactly four distinct options and exactly one correct option; correct_answer is 0-3. "
+        "Question <=18 words, each option <=10 words, explanation <=16 words. No markdown or extra fields.\n"
+        f"{difficulty_contracts[difficulty]}{repair_line}EVIDENCE:\n{evidence}"
+    )
+
+
+def _run_document_single_choice_batch(
+    document: dict,
+    difficulty: str,
+    sc_slots: list[dict],
+    owner_id: str,
+    model_id: str,
+    generation_run_id: str,
+    accepted_by_slot: dict[str, dict],
+    accepted_stems: list[str],
+    remaining_slot_ids: set[str],
+    rejection_reasons_by_slot: dict[str, list[str]],
+    results: dict,
+    slot_positions: dict[str, int],
+    authoritative_slots: list[dict],
+) -> tuple[int, dict]:
+    """Dedicated homogeneous single_choice generator: the historically proven pure-MCQ pipeline
+    from 02134eaea7348cf6224a831844e9e817c11d92e5's _run_document_v2_batch/_build_v2_prompt,
+    reinstated because the shared required_type="single_choice" path inherited the mixed-type
+    redesign's heavier per-item schema/prompt (question_type enum, correct_answers array, cross-
+    type vocabulary) unmodified, which measurably under-produces candidates under real model
+    conditions -- see the forensic regression analysis for 02134ea / 9cb4550 / 9e337ea.
+
+    The model is never asked for question_type, correct_answers, or true_false/multi_select
+    vocabulary; only slot_id, question, four options, one scalar correct_answer, and an
+    explanation. Every candidate is still bound ONLY by its own declared slot_id -- an unknown or
+    duplicate slot_id is rejected, never rebound by array position (9e337ea's fix stays in
+    effect). Parsed candidates are normalized into the current internal shape
+    (question_type="single_choice", correct_answers=[correct_answer]) before the same shared
+    _validate_v2_question used by every other question type.
+
+    Deterministic fallback only accepts a candidate whose correct answer is a genuine grounded
+    proposition from the slot's own (or same-topic rotated) evidence -- never the loose term-
+    extraction ("This evidence refers to...") mode _grounded_option_phrases falls back to for
+    thin evidence, and never evidence/chunk_ids borrowed from another topic. A slot that cannot
+    be constructed this way is left missing rather than persisted as a low-quality guess.
+
+    Mutates accepted_by_slot, accepted_stems, remaining_slot_ids, rejection_reasons_by_slot, and
+    results in place (matching this file's existing convention for the special-first batch
+    state). Keeps its own self-contained timings dict (mirroring the other _run_document_*_batch
+    functions) rather than reaching into the caller's, since several of the caller's counters
+    (llm_calls, repair_llm_calls, ...) are plain local variables not yet present as timings keys
+    at the point this runs. Returns (accepted_count, sc_timings) for the caller to fold in.
+    """
+    groups_by_id = {slot["slot_id"]: slot for slot in sc_slots}
+    slot_ids = list(groups_by_id)
+    document_scope = {"topic_id": "document", "name": "Entire document"}
+    retry_attempt_by_slot = {slot_id: 0 for slot_id in slot_ids}
+    used_replan_evidence_by_topic: dict[str, set[str]] = {}
+    for slot in sc_slots:
+        used_replan_evidence_by_topic.setdefault(str(slot.get("topic_id") or "document"), set()).update(
+            str(chunk_id) for chunk_id in slot.get("source_chunk_ids") or [] if chunk_id
+        )
+    accepted_before_call = len(accepted_by_slot)
+    timings = {
+        "llm_calls": 0, "repair_llm_calls": 0, "repair_attempt_count": 0, "fill_attempt_count": 0,
+        "final_fill_llm_calls": 0, "single_choice_generation_llm_calls": 0,
+        "prompt_construction_ms": 0, "initial_batch_generation_ms": 0, "repair_generation_ms": 0,
+        "fill_generation_ms": 0, "model_invocation_ms": 0, "validation_ms": 0,
+        "model_load_ms": 0, "prompt_eval_ms": 0, "token_generation_ms": 0,
+        "prompt_tokens": 0, "output_tokens": 0, "initial_batch_count": 1,
+        "deterministic_fallback_count": 0, "missing_slots_before_each_retry": [],
+    }
+
+    def diversified_slot(slot: dict) -> dict:
+        """Rotate concept evidence, then replan only this slot within its topic."""
+        slot_id = str(slot["slot_id"])
+        attempt = retry_attempt_by_slot[slot_id]
+        variants = list(slot.get("evidence_variants") or [])
+        if attempt >= 2 and variants:
+            variant_index = attempt - 2
+            if variant_index < len(variants):
+                return {**slot, **variants[variant_index], "evidence_rotated": True}
+        if attempt >= 4:
+            topic_id = str(slot.get("topic_id") or "document")
+            used = used_replan_evidence_by_topic.setdefault(topic_id, set())
+            for variant in slot.get("topic_evidence_variants") or []:
+                variant_ids = set(variant.get("source_chunk_ids") or [])
+                if variant_ids and not (variant_ids & used):
+                    used.update(variant_ids)
+                    return {**slot, **variant, "evidence_rotated": True, "slot_replanned": True}
+        return dict(slot)
+
+    def run_sc_call(call_slots: list[dict], phase: str, batch_label: str) -> None:
+        requested = len(call_slots)
+        if not requested:
+            return
+        is_initial_phase = phase == "initial"
+        if not is_initial_phase:
+            for slot in call_slots:
+                retry_attempt_by_slot[str(slot["slot_id"])] += 1
+            call_slots = [diversified_slot(slot) for slot in call_slots]
+        call_slot_ids = {slot["slot_id"] for slot in call_slots}
+        prompt_started = time.perf_counter()
+        prompt = _build_document_single_choice_prompt(
+            document["id"], document_scope, difficulty, call_slots, requested,
+            accepted_stems, not is_initial_phase, rejection_reasons_by_slot, retry_attempt_by_slot,
+        )
+        rejection_counts_before_call = {
+            slot_id: len(rejection_reasons_by_slot.get(slot_id, [])) for slot_id in call_slot_ids
+        }
+        timings["prompt_construction_ms"] += round((time.perf_counter() - prompt_started) * 1000)
+        generation_started = time.perf_counter()
+        timings["llm_calls"] += 1
+        timings["single_choice_generation_llm_calls"] += 1
+        if not is_initial_phase:
+            timings["repair_llm_calls"] += 1
+        if phase == "repair":
+            timings["repair_attempt_count"] += 1
+        elif phase == "fill":
+            timings["fill_attempt_count"] += 1
+            timings["final_fill_llm_calls"] += 1
+        llm = ChatOllama(
+            model=model_id,
+            reasoning=False,
+            temperature=0.1 if is_initial_phase else 0.25,
+            format=_document_single_choice_output_schema(),
+            num_ctx=16384 if requested > 15 else 8192,
+            num_predict=min(4800, max(520, requested * 150)),
+            keep_alive=QUIZ_GENERATION_KEEP_ALIVE,
+            client_kwargs={"timeout": 270},
+        )
+        print(
+            f"[quiz-document-sc-llm] batch={batch_label}, phase={phase}, model={model_id}, "
+            f"requested={requested}, slots={sorted(call_slot_ids)}"
+        )
+        invocation_started = time.perf_counter()
+        invocation_ms = 0
+        try:
+            response = llm.invoke(prompt)
+            invocation_ms = round((time.perf_counter() - invocation_started) * 1000)
+            metadata = getattr(response, "response_metadata", {}) or {}
+            model_load_ms = round(float(metadata.get("load_duration") or 0) / 1_000_000)
+            prompt_eval_ms = round(float(metadata.get("prompt_eval_duration") or 0) / 1_000_000)
+            token_generation_ms = round(float(metadata.get("eval_duration") or 0) / 1_000_000)
+            prompt_tokens = int(metadata.get("prompt_eval_count") or 0)
+            output_tokens = int(metadata.get("eval_count") or 0)
+            timings["model_load_ms"] += model_load_ms
+            timings["prompt_eval_ms"] += prompt_eval_ms
+            timings["token_generation_ms"] += token_generation_ms
+            timings["prompt_tokens"] += prompt_tokens
+            timings["output_tokens"] += output_tokens
+            data = _extract_json(str(response.content))
+            candidates = data.get("questions") if isinstance(data, dict) else None
+            if not isinstance(candidates, list):
+                raise ValueError("Quiz JSON does not contain a questions list.")
+            print(
+                f"[quiz-document-sc-ollama] batch={batch_label}, phase={phase}, returned={len(candidates)}, "
+                f"model_load_ms={model_load_ms}, prompt_eval_ms={prompt_eval_ms}, "
+                f"token_generation_ms={token_generation_ms}, prompt_tokens={prompt_tokens}, "
+                f"output_tokens={output_tokens}"
+            )
+        except Exception as error:
+            invocation_ms = invocation_ms or round((time.perf_counter() - invocation_started) * 1000)
+            candidates = []
+            results["rejected"] += requested
+            reason = f"response: {error}"
+            results["reasons"].append(reason)
+            for slot_id in call_slot_ids:
+                rejection_reasons_by_slot.setdefault(slot_id, []).append(reason)
+        generation_elapsed = round((time.perf_counter() - generation_started) * 1000)
+        timings["model_invocation_ms"] += invocation_ms
+        if is_initial_phase:
+            timings["initial_batch_generation_ms"] += generation_elapsed
+        elif phase == "repair":
+            timings["repair_generation_ms"] += generation_elapsed
+        else:
+            timings["fill_generation_ms"] += generation_elapsed
+
+        validation_started = time.perf_counter()
+        accepted_before = len(accepted_by_slot)
+        for candidate_index, raw in enumerate(candidates):
+            if len(accepted_by_slot) >= len(authoritative_slots):
+                break
+            try:
+                slot_id = str(raw.get("slot_id") or "").strip() if isinstance(raw, dict) else ""
+                if slot_id not in call_slot_ids:
+                    raise ValueError("Question uses a slot_id outside its requested batch.")
+                # Backend normalization into the current internal shape -- the model is never
+                # asked for either field, and any stray value it adds anyway is overridden here.
+                normalized_raw = {
+                    **raw, "question_type": "single_choice",
+                    "correct_answers": [raw.get("correct_answer")],
+                }
+                slot = groups_by_id.get(slot_id) or {}
+                normalized, warnings = _validate_v2_question(
+                    normalized_raw, groups_by_id, remaining_slot_ids, accepted_stems, difficulty,
+                    slot_positions.get(slot_id, len(accepted_by_slot)) + 1,
+                    document_scope, int(slot.get("assessment_capacity", 0)),
+                )
+                accepted_by_slot[normalized["slot_id"]] = normalized
+                accepted_stems.append(normalized["question"])
+                remaining_slot_ids.remove(normalized["slot_id"])
+                results["accepted_with_warnings" if warnings else "accepted"] += 1
+                results["quality_warnings"] += len(warnings)
+                save_quiz_validation_event({
+                    "generation_run_id": generation_run_id,
+                    "owner_id": owner_id,
+                    "document_id": document["id"],
+                    "document_hash": document.get("hash", ""),
+                    "topic_id": normalized["topic_id"],
+                    "topic_schema_version": int(document.get("topic_schema_version", 0)),
+                    "difficulty": difficulty,
+                    "batch_index": batch_label,
+                    "generation_attempt": candidate_index,
+                    "candidate_index": candidate_index,
+                    "generator_model": model_id,
+                    "generation_prompt_version": QUIZ_V2_PROMPT_VERSION,
+                    "validator_model": "deterministic-v2",
+                    "validator_prompt_version": "no-semantic-llm-v2",
+                    "candidate_question": normalized,
+                    "cited_chunk_ids": normalized["source_chunk_ids"],
+                    "evidence_chunk_ids": normalized["source_chunk_ids"],
+                    "hard_passed": True,
+                    "quality_passed": not warnings,
+                    "accepted": True,
+                    "outcome": normalized["validation_outcome"],
+                    "verdict": {"mode": "deterministic", "warnings": warnings},
+                    "rejection_reasons": warnings,
+                    "latency_ms": 0,
+                })
+            except Exception as error:
+                reason = str(error)
+                candidate_slot_id = str(raw.get("slot_id") or "").strip() if isinstance(raw, dict) else ""
+                if candidate_slot_id not in remaining_slot_ids and candidate_index < len(call_slots):
+                    candidate_slot_id = str(call_slots[candidate_index]["slot_id"])
+                if candidate_slot_id in call_slot_ids:
+                    rejection_reasons_by_slot.setdefault(candidate_slot_id, []).append(reason)
+                results["rejected"] += 1
+                results["hard_rejections"] += 1
+                results["reasons"].append(reason)
+                print(f"[quiz-document-sc-validation] discarded candidate: {error}")
+        validation_elapsed = round((time.perf_counter() - validation_started) * 1000)
+        for slot_id in call_slot_ids:
+            if (slot_id in remaining_slot_ids
+                    and len(rejection_reasons_by_slot.get(slot_id, [])) == rejection_counts_before_call[slot_id]):
+                rejection_reasons_by_slot.setdefault(slot_id, []).append(
+                    "Model returned no valid candidate for the requested slot."
+                )
+        timings["validation_ms"] += validation_elapsed
+        print(
+            f"[quiz-document-sc-batch-timing] batch={batch_label}, phase={phase}, requested={requested}, "
+            f"returned={len(candidates)}, accepted={len(accepted_by_slot) - accepted_before}, "
+            f"generation_ms={generation_elapsed}, validation_ms={validation_elapsed}"
+        )
+
+    # One initial homogeneous batch for all remaining content slots (up to 10) -- the historically
+    # proven shape, not a re-derived per-window batch size.
+    run_sc_call(sc_slots, "initial", "sc-initial")
+
+    for phase, retry_limit in (("repair", 2), ("fill", 2)):
+        for retry_index in range(1, retry_limit + 1):
+            missing_slot_ids = [slot_id for slot_id in slot_ids if slot_id in remaining_slot_ids]
+            if not missing_slot_ids:
+                break
+            retry_state = {
+                "phase": phase, "attempt": retry_index, "missing_slots": missing_slot_ids,
+                "rejection_reasons_by_slot": {
+                    slot_id: list(rejection_reasons_by_slot.get(slot_id, [])) for slot_id in missing_slot_ids
+                },
+            }
+            timings["missing_slots_before_each_retry"].append(retry_state)
+            print(f"[quiz-document-sc-retry] {json.dumps(retry_state)}")
+            run_sc_call([groups_by_id[slot_id] for slot_id in missing_slot_ids], phase, f"sc-{phase}-{retry_index}")
+
+    # Deterministic fallback ONLY for a slot whose own (or same-topic rotated) evidence yields a
+    # genuine grounded proposition, and only when the resulting stem/options pass the generic
+    # structural/text-quality gate (_is_clean_grounded_mcq_candidate) -- never raw/header/heading-
+    # like text, never a synthesized (e.g. term-extraction) answer that isn't traceable to the
+    # slot's own evidence, and never evidence or source_chunk_ids borrowed from another topic.
+    # Anything else is left missing rather than persisted as a low-quality guess.
+    fallback_count = 0
+    for fallback_index, slot_id in enumerate(slot_ids):
+        if slot_id not in remaining_slot_ids:
+            continue
+        original_slot = groups_by_id[slot_id]
+        variants = list(original_slot.get("evidence_variants") or [])
+        unused = list(original_slot.get("topic_evidence_variants") or [])
+        chosen = dict(original_slot)
+        if unused:
+            chosen.update(unused[0])
+        elif variants:
+            chosen.update(variants[min(1, len(variants) - 1)])
+        compatible = [variant for variant in [*variants, *unused] if variant.get("evidence_excerpt")]
+        if len(compatible) >= 2:
+            chosen["evidence_excerpt"] = " ".join(
+                str(variant["evidence_excerpt"]) for variant in compatible[:2]
+            )[:560]
+            chosen["source_chunk_ids"] = list(dict.fromkeys(
+                chunk_id for variant in compatible[:2] for chunk_id in variant.get("source_chunk_ids") or []
+            ))
+        chosen["question_type"] = "single_choice"
+        fallback_groups = {slot_id: chosen}
+        try:
+            if not _document_slot_propositions(chosen):
+                # The slot's own (possibly rotated) evidence is raw/header/heading-like rather
+                # than usable prose -- there is no clean fact to build a fallback from.
+                raise ValueError(
+                    "Deterministic fallback source evidence has no usable grounded proposition."
+                )
+            scope_evidence = []
+            for other in authoritative_slots:
+                if str(other.get("topic_id") or "") != str(chosen.get("topic_id") or ""):
+                    continue  # never borrow evidence/chunk_ids from another topic
+                scope_evidence.append(str(other.get("evidence_excerpt") or ""))
+                scope_evidence.extend(
+                    str(variant.get("evidence_excerpt") or "")
+                    for variant in [*(other.get("evidence_variants") or []), *(other.get("topic_evidence_variants") or [])]
+                )
+            raw = _deterministic_grounded_candidate(chosen, fallback_index, scope_evidence)
+            evidence_text = re.sub(r"\s+", " ", str(chosen.get("evidence_excerpt") or "")).strip()
+            if not _is_clean_grounded_mcq_candidate(raw, evidence_text):
+                raise ValueError(
+                    "Deterministic fallback could not produce a clean grounded MCQ (raw/header/"
+                    "fragment-like stem or option, or an ungrounded correct answer) -- refusing "
+                    "to persist a low-quality guess."
+                )
+            normalized, warnings = _validate_v2_question(
+                raw, fallback_groups, remaining_slot_ids, accepted_stems, difficulty,
+                slot_positions[slot_id] + 1, document_scope, int(chosen.get("assessment_capacity", 0)),
+            )
+            accepted_by_slot[slot_id] = normalized
+            accepted_stems.append(normalized["question"])
+            remaining_slot_ids.remove(slot_id)
+            fallback_count += 1
+            results["accepted_with_warnings" if warnings else "accepted"] += 1
+            results["quality_warnings"] += len(warnings)
+            save_quiz_validation_event({
+                "generation_run_id": generation_run_id, "owner_id": owner_id,
+                "document_id": document["id"], "document_hash": document.get("hash", ""),
+                "topic_id": normalized["topic_id"],
+                "topic_schema_version": int(document.get("topic_schema_version", 0)),
+                "difficulty": difficulty, "batch_index": "sc-fallback",
+                "generation_attempt": fallback_index, "candidate_index": fallback_index,
+                "generator_model": "deterministic-grounded-fallback",
+                "generation_prompt_version": QUIZ_V2_PROMPT_VERSION,
+                "validator_model": "deterministic-v2", "validator_prompt_version": "no-semantic-llm-v2",
+                "candidate_question": normalized, "cited_chunk_ids": normalized["source_chunk_ids"],
+                "evidence_chunk_ids": normalized["source_chunk_ids"], "hard_passed": True,
+                "quality_passed": not warnings, "accepted": True,
+                "outcome": normalized["validation_outcome"],
+                "verdict": {"mode": "deterministic-grounded-fallback", "warnings": warnings},
+                "rejection_reasons": warnings, "latency_ms": 0,
+            })
+        except Exception as error:
+            reason = f"deterministic fallback: {error}"
+            rejection_reasons_by_slot.setdefault(slot_id, []).append(reason)
+            results["rejected"] += 1
+            results["hard_rejections"] += 1
+            results["reasons"].append(reason)
+
+    timings["deterministic_fallback_count"] += fallback_count
+    return len(accepted_by_slot) - accepted_before_call, timings
+
+
 def _run_document_special_first_batch(
     document: dict,
     difficulty: str,
@@ -2863,103 +3371,35 @@ def _run_document_special_first_batch(
         groups_by_id[slot_id]["question_type"] = "single_choice"
         retry_attempt_by_slot[slot_id] = 0
 
-    sc_initial_batches = []
-    cursor = 0
-    for size in DOCUMENT_QUIZ_SC_BATCH_SIZES:
-        batch_ids = single_choice_slot_ids[cursor:cursor + size]
-        cursor += size
-        if batch_ids:
-            sc_initial_batches.append(batch_ids)
-    timings["initial_batch_count"] = len(sc_initial_batches)
-    for batch_ids in sc_initial_batches:
-        run_generation_call([groups_by_id[slot_id] for slot_id in batch_ids], "initial", "single_choice")
+    # SC is generated by its own dedicated, historically-proven pure-MCQ pipeline (see
+    # _run_document_single_choice_batch) instead of the shared required_type="single_choice"
+    # branch used by the special types -- that shared path inherited the mixed-question-type
+    # redesign's heavier per-item schema/prompt unmodified, which is the forensic root cause of
+    # SC under-production under real model conditions.
+    sc_rejection_reasons: dict[str, list[str]] = {}
+    _sc_accepted_count, sc_timings = _run_document_single_choice_batch(
+        document, difficulty, [groups_by_id[slot_id] for slot_id in single_choice_slot_ids],
+        owner_id, model_id, generation_run_id, accepted_by_slot, accepted_stems,
+        remaining_slot_ids, sc_rejection_reasons, results, slot_positions, authoritative_slots,
+    )
+    for slot_id, reasons in sc_rejection_reasons.items():
+        rejection_reasons_by_type_slot.setdefault((slot_id, "single_choice"), []).extend(reasons)
 
-    for phase, retry_limit in (("repair", 2), ("fill", 2)):
-        for retry_index in range(1, retry_limit + 1):
-            missing_slot_ids = [slot_id for slot_id in single_choice_slot_ids if slot_id in remaining_slot_ids]
-            if not missing_slot_ids:
-                break
-            retry_state = {
-                "phase": phase, "attempt": retry_index,
-                "missing_slots": missing_slot_ids,
-                "rejection_reasons_by_slot": {
-                    slot_id: list(rejection_reasons_by_type_slot.get((slot_id, "single_choice"), []))
-                    for slot_id in missing_slot_ids
-                },
-            }
-            missing_slots_before_each_retry.append(retry_state)
-            print(f"[quiz-document-retry] {json.dumps(retry_state)}")
-            run_generation_call([groups_by_id[slot_id] for slot_id in missing_slot_ids], phase, "single_choice")
-
-    # Exact count is contractual. Fill only still-missing single_choice slots, preserving all
-    # accepted questions (including every locked multi_select/true_false one -- nothing here ever
-    # deletes an accepted question), and run deterministic candidates through the same
-    # authoritative validator and duplicate checks.
-    for fallback_index, slot_id in enumerate(single_choice_slot_ids):
-        if slot_id not in remaining_slot_ids:
-            continue
-        original_slot = groups_by_id[slot_id]
-        variants = list(original_slot.get("evidence_variants") or [])
-        unused = list(original_slot.get("topic_evidence_variants") or [])
-        chosen = dict(original_slot)
-        if unused:
-            chosen.update(unused[0])
-        elif variants:
-            chosen.update(variants[min(1, len(variants) - 1)])
-        compatible = [variant for variant in [*variants, *unused] if variant.get("evidence_excerpt")]
-        if len(compatible) >= 2:
-            chosen["evidence_excerpt"] = " ".join(
-                str(variant["evidence_excerpt"]) for variant in compatible[:2]
-            )[:560]
-            chosen["source_chunk_ids"] = list(dict.fromkeys(
-                chunk_id for variant in compatible[:2] for chunk_id in variant.get("source_chunk_ids") or []
-            ))
-        chosen["question_type"] = "single_choice"
-        fallback_groups = {**groups_by_id, slot_id: chosen}
-        try:
-            scope_evidence = []
-            for other in authoritative_slots:
-                if str(other.get("topic_id") or "") != str(chosen.get("topic_id") or ""):
-                    continue
-                scope_evidence.append(str(other.get("evidence_excerpt") or ""))
-                scope_evidence.extend(
-                    str(variant.get("evidence_excerpt") or "")
-                    for variant in [*(other.get("evidence_variants") or []), *(other.get("topic_evidence_variants") or [])]
-                )
-            raw = _deterministic_document_candidate(chosen, fallback_index, scope_evidence)
-            normalized, warnings = _validate_v2_question(
-                raw, fallback_groups, remaining_slot_ids, accepted_stems, difficulty,
-                slot_positions[slot_id] + 1, document_scope, int(chosen.get("assessment_capacity", 0)),
-            )
-            accepted_by_slot[slot_id] = normalized
-            accepted_stems.append(normalized["question"])
-            remaining_slot_ids.remove(slot_id)
-            fallback_count += 1
-            results["accepted_with_warnings" if warnings else "accepted"] += 1
-            results["quality_warnings"] += len(warnings)
-            save_quiz_validation_event({
-                "generation_run_id": generation_run_id, "owner_id": owner_id,
-                "document_id": document["id"], "document_hash": document.get("hash", ""),
-                "topic_id": normalized["topic_id"],
-                "topic_schema_version": int(document.get("topic_schema_version", 0)),
-                "difficulty": difficulty, "batch_index": next_batch_index,
-                "generation_attempt": llm_calls + 1, "candidate_index": fallback_index,
-                "generator_model": "deterministic-grounded-fallback",
-                "generation_prompt_version": QUIZ_V2_PROMPT_VERSION,
-                "validator_model": "deterministic-v2", "validator_prompt_version": "no-semantic-llm-v2",
-                "candidate_question": normalized, "cited_chunk_ids": normalized["source_chunk_ids"],
-                "evidence_chunk_ids": normalized["source_chunk_ids"], "hard_passed": True,
-                "quality_passed": not warnings, "accepted": True,
-                "outcome": normalized["validation_outcome"],
-                "verdict": {"mode": "deterministic-grounded-fallback", "warnings": warnings},
-                "rejection_reasons": warnings, "latency_ms": 0,
-            })
-        except Exception as error:
-            reason = f"deterministic fallback: {error}"
-            rejection_reasons_by_type_slot.setdefault((slot_id, "single_choice"), []).append(reason)
-            results["rejected"] += 1
-            results["hard_rejections"] += 1
-            results["reasons"].append(reason)
+    llm_calls += sc_timings["llm_calls"]
+    repair_llm_calls += sc_timings["repair_llm_calls"]
+    repair_attempt_count += sc_timings["repair_attempt_count"]
+    fill_attempt_count += sc_timings["fill_attempt_count"]
+    final_fill_llm_calls += sc_timings["final_fill_llm_calls"]
+    single_choice_generation_llm_calls += sc_timings["single_choice_generation_llm_calls"]
+    fallback_count += sc_timings["deterministic_fallback_count"]
+    missing_slots_before_each_retry.extend(sc_timings["missing_slots_before_each_retry"])
+    timings["initial_batch_count"] = sc_timings["initial_batch_count"]
+    for key in (
+        "prompt_construction_ms", "initial_batch_generation_ms", "repair_generation_ms",
+        "fill_generation_ms", "model_invocation_ms", "validation_ms",
+        "model_load_ms", "prompt_eval_ms", "token_generation_ms", "prompt_tokens", "output_tokens",
+    ):
+        timings[key] += sc_timings[key]
 
     flattened_rejection_reasons_by_slot: dict[str, list[str]] = {slot_id: [] for slot_id in groups_by_id}
     for (slot_id, _question_type), reasons in rejection_reasons_by_type_slot.items():
@@ -2987,7 +3427,7 @@ def _run_document_special_first_batch(
     for question_id, question in enumerate(accepted, start=1):
         question["id"] = question_id
     print(f"[quiz-document-generation-timing] {json.dumps({
-        'initial_batch_count': len(sc_initial_batches),
+        'initial_batch_count': timings['initial_batch_count'],
         'initial_batch_generation_ms': timings['initial_batch_generation_ms'],
         'validation_ms': timings['validation_ms'],
         'repair_ms': timings['repair_ms'],

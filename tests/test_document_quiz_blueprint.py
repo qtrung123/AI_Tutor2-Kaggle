@@ -9,12 +9,16 @@ from unittest.mock import patch
 from backend import quiz_service, quiz_store
 from backend.quiz_service import (
     DOCUMENT_QUIZ_QUESTION_COUNT,
+    _build_document_single_choice_prompt,
     _deterministic_multi_select_candidate,
     _deterministic_true_false_candidate,
+    _document_single_choice_output_schema,
     _document_slot_propositions,
     _document_slot_type_scores,
+    _is_clean_grounded_mcq_candidate,
     _prepare_document_slot_rankings,
     _rank_document_slots_by_type,
+    _run_document_single_choice_batch,
     _run_document_v2_batch,
     _validate_v2_question,
 )
@@ -53,10 +57,12 @@ def default_rankings(slots):
 def candidate_for(slot, question_type):
     phrase = slot["evidence_excerpt"].split(" fact")[0]
     if question_type == "single_choice":
+        # The dedicated SC generator's model-facing contract has no question_type field and a
+        # scalar correct_answer -- see _run_document_single_choice_batch.
         return {
-            "slot_id": slot["slot_id"], "question_type": question_type,
+            "slot_id": slot["slot_id"],
             "question": f"{phrase} fact one is documented for this concept.",
-            "options": [f"{phrase} fact one", "Wrong A", "Wrong B", "Wrong C"], "correct_answers": [0],
+            "options": [f"{phrase} fact one", "Wrong A", "Wrong B", "Wrong C"], "correct_answer": 0,
             "explanation": f"{phrase} fact one is documented.",
         }
     if question_type == "true_false":
@@ -81,11 +87,13 @@ def generic_candidate_for(slot, question_type):
     evidence_words = re.findall(r"[A-Za-z0-9]+", str(slot.get("evidence_excerpt") or ""))[:6]
     anchor = " ".join(evidence_words) or concept
     if question_type == "single_choice":
+        # The dedicated SC generator's model-facing contract has no question_type field and a
+        # scalar correct_answer -- see _run_document_single_choice_batch.
         return {
-            "slot_id": slot["slot_id"], "question_type": question_type,
+            "slot_id": slot["slot_id"],
             "question": f"What does the evidence say about {concept}?",
             "options": [f"{anchor} is documented", "Unrelated claim A", "Unrelated claim B", "Unrelated claim C"],
-            "correct_answers": [0],
+            "correct_answer": 0,
             "explanation": f"{anchor} is directly documented for {concept}.",
         }
     if question_type == "true_false":
@@ -134,10 +142,15 @@ def slots_in_prompt(slots, prompt):
 
 def required_type_of(prompt):
     """Every call in the special-first pipeline asks for exactly one question_type; recover
-    which one from the prompt's explicit type instruction."""
-    for question_type in ("multi_select", "true_false", "single_choice"):
+    which one from the prompt. multi_select/true_false use the shared _build_v2_prompt's explicit
+    type instruction; single_choice uses the dedicated _build_document_single_choice_prompt,
+    which deliberately contains no question_type vocabulary at all -- recognize it by its own
+    distinct wording instead."""
+    for question_type in ("multi_select", "true_false"):
         if f'"question_type":"{question_type}" only' in prompt:
             return question_type
+    if "single-answer multiple-choice questions" in prompt:
+        return "single_choice"
     return None
 
 
@@ -671,8 +684,13 @@ class InfeasibleSlotReassignmentTests(unittest.TestCase):
     def test_generation_reaches_exact_fifteen_even_when_every_llm_response_is_unusable(self):
         """The exact scenario from the bug report: force every LLM batch to fail so every slot
         must go through deterministic fallback, and confirm it no longer stalls short of 15 --
-        proven directly against the special-first pipeline, with no pre-assignment step."""
-        slots = self._weak_field_slots()
+        proven directly against the special-first pipeline, with no pre-assignment step.
+
+        Uses 2 clean propositions per slot (not _weak_field_slots' single-proposition majority)
+        so every slot's fallback is genuinely constructible without ever falling back to the
+        loose term-extraction ("This evidence refers to...") mode the dedicated SC generator
+        now deliberately refuses to persist (see _run_document_single_choice_batch)."""
+        slots = [slot(i, ((i - 1) % 4) + 1, f"Item{i}", 2) for i in range(1, 16)]
 
         def respond(_prompt):
             return []
@@ -1068,7 +1086,7 @@ class SpecialQuotaGateHardeningTests(unittest.TestCase):
         # per candidate slot.
         self.assertEqual(timings["special_generation_llm_calls"], 2)
 
-    def test_d_normal_happy_path_uses_approximately_five_llm_calls_not_per_slot_calls(self):
+    def test_d_normal_happy_path_uses_approximately_four_llm_calls_not_per_slot_calls(self):
         slots = fifteen_slots()
 
         with patch.object(
@@ -1083,12 +1101,14 @@ class SpecialQuotaGateHardeningTests(unittest.TestCase):
             return [candidate_for(s, required_type) for s in requested]
 
         _questions, _validation, timings = run_blueprint(planned_slots, respond, type_rankings=type_rankings)
-        # 1 type-planner call + 1 multi_select batch + 1 true_false batch + 2 single_choice
-        # batches == 5 total, independent of slot count -- never one call per candidate slot.
+        # 1 type-planner call + 1 multi_select batch + 1 true_false batch + 1 dedicated
+        # single_choice batch (the historically proven single-batch-of-up-to-10 shape, see
+        # _run_document_single_choice_batch) == 4 total, independent of slot count -- never one
+        # call per candidate slot.
         total_calls = planning_timings["type_planning_llm_calls"] + timings["llm_calls"]
-        self.assertEqual(total_calls, 5)
+        self.assertEqual(total_calls, 4)
         self.assertEqual(timings["special_generation_llm_calls"], 2)
-        self.assertEqual(timings["single_choice_generation_llm_calls"], 2)
+        self.assertEqual(timings["single_choice_generation_llm_calls"], 1)
         self.assertLess(timings["special_candidate_attempts"], DOCUMENT_QUIZ_QUESTION_COUNT)
 
     def test_e_original_slot_topic_concept_source_metadata_is_preserved(self):
@@ -1108,6 +1128,273 @@ class SpecialQuotaGateHardeningTests(unittest.TestCase):
             self.assertEqual(question["topic_id"], original_slot["topic_id"])
             self.assertEqual(question["concept_id"], original_slot["concept_id"])
             self.assertEqual(question["source_chunk_ids"], original_slot["source_chunk_ids"])
+
+
+def run_sc_batch(sc_slots, respond, authoritative_slots=None):
+    """Drive _run_document_single_choice_batch in isolation, the way the special-first
+    coordinator calls it once the special quota gate has passed."""
+    SequencedOllama.respond = respond
+    accepted_by_slot: dict = {}
+    accepted_stems: list = []
+    remaining_slot_ids = {s["slot_id"] for s in sc_slots}
+    rejection_reasons_by_slot: dict = {}
+    results = {
+        "accepted": 0, "accepted_with_warnings": 0, "rejected": 0,
+        "hard_rejections": 0, "quality_warnings": 0, "reasons": [],
+    }
+    slot_positions = {s["slot_id"]: index for index, s in enumerate(sc_slots)}
+    with patch.object(quiz_service, "ChatOllama", SequencedOllama), \
+         patch.object(quiz_service, "save_quiz_validation_event"):
+        accepted_count, sc_timings = _run_document_single_choice_batch(
+            DOCUMENT, "medium", sc_slots, "owner", "model", "run-id",
+            accepted_by_slot, accepted_stems, remaining_slot_ids, rejection_reasons_by_slot,
+            results, slot_positions, authoritative_slots or sc_slots,
+        )
+    return accepted_count, accepted_by_slot, remaining_slot_ids, rejection_reasons_by_slot, results, sc_timings
+
+
+class DedicatedSingleChoiceGeneratorTests(unittest.TestCase):
+    """Focused regression coverage for the dedicated single_choice generator restored from
+    02134eaea7348cf6224a831844e9e817c11d92e5 (see _run_document_single_choice_batch), added
+    after the forensic regression analysis found the shared required_type="single_choice" path
+    (inherited unmodified prompt/schema weight from the mixed-question-type redesign) measurably
+    under-produces candidates under real model conditions."""
+
+    def _ten_sc_slots(self):
+        return [slot(i, ((i - 1) % 4) + 1, f"Item{i}", 3) for i in range(1, 11)]
+
+    def test_a_prompt_contains_no_special_type_vocabulary(self):
+        slots = self._ten_sc_slots()
+        prompt = _build_document_single_choice_prompt(
+            DOCUMENT["id"], DOCUMENT_SCOPE, "medium", slots, len(slots), [], False,
+        )
+        lowered = prompt.lower()
+        self.assertNotIn("true_false", lowered)
+        self.assertNotIn("multi_select", lowered)
+        self.assertNotIn("single_choice|true_false|multi_select", lowered)
+        self.assertNotIn("true/false", lowered)
+        self.assertNotIn("multiple select", lowered)
+        self.assertIn("write exactly 10", lowered)
+        self.assertIn('"options":["...","...","...","..."]', prompt)
+
+    def test_b_model_facing_schema_has_only_the_minimal_mcq_fields(self):
+        schema = _document_single_choice_output_schema()
+        item_schema = schema["properties"]["questions"]["items"]
+        self.assertEqual(
+            set(item_schema["properties"].keys()),
+            {"slot_id", "question", "options", "correct_answer", "explanation"},
+        )
+        self.assertNotIn("question_type", item_schema["properties"])
+        self.assertNotIn("correct_answers", item_schema["properties"])
+        self.assertEqual(item_schema["properties"]["options"]["minItems"], 4)
+        self.assertEqual(item_schema["properties"]["options"]["maxItems"], 4)
+        self.assertEqual(item_schema["properties"]["correct_answer"]["type"], "integer")
+        self.assertEqual(
+            set(item_schema["required"]),
+            {"slot_id", "question", "options", "correct_answer", "explanation"},
+        )
+
+    def test_c_initial_call_requests_all_ten_remaining_slots_in_one_batch(self):
+        slots = self._ten_sc_slots()
+        captured_requested = []
+
+        def respond(prompt):
+            requested = slots_in_prompt(slots, prompt)
+            captured_requested.append(requested)
+            return [candidate_for(s, "single_choice") for s in requested]
+
+        run_sc_batch(slots, respond)
+        self.assertEqual(len(captured_requested), 1)
+        self.assertEqual({s["slot_id"] for s in captured_requested[0]}, {s["slot_id"] for s in slots})
+
+    def test_d_ten_valid_explicit_slot_ids_are_all_accepted(self):
+        slots = self._ten_sc_slots()
+
+        def respond(prompt):
+            requested = slots_in_prompt(slots, prompt)
+            return [candidate_for(s, "single_choice") for s in requested]
+
+        accepted_count, accepted_by_slot, remaining, _reasons, results, _timings = run_sc_batch(slots, respond)
+        self.assertEqual(accepted_count, 10)
+        self.assertEqual(len(accepted_by_slot), 10)
+        self.assertEqual(remaining, set())
+        self.assertEqual(results["hard_rejections"], 0)
+
+    def _ten_sc_slots_with_empty_evidence(self, empty_slot_ids):
+        """Ten slots where the given slot_ids have no extractable evidence at all, so
+        deterministic fallback cannot rescue them -- isolates repair/fill targeting behavior
+        from the (separately tested) fallback-recovery behavior."""
+        slots = self._ten_sc_slots()
+        for s in slots:
+            if s["slot_id"] in empty_slot_ids:
+                s["evidence_excerpt"] = "   "
+        return slots
+
+    def test_e_partial_success_preserves_accepted_and_targets_only_missing_slots(self):
+        missing_ids = {"S8", "S9", "S10"}
+        slots = self._ten_sc_slots_with_empty_evidence(missing_ids)
+        capture = []
+
+        def respond(prompt):
+            requested = slots_in_prompt(slots, prompt)
+            capture.append({s["slot_id"] for s in requested})
+            return [candidate_for(s, "single_choice") for s in requested if s["slot_id"] not in missing_ids]
+
+        _accepted_count, accepted_by_slot, remaining, _reasons, _results, _timings = run_sc_batch(slots, respond)
+        self.assertEqual(set(accepted_by_slot.keys()), {s["slot_id"] for s in slots} - missing_ids)
+        self.assertEqual(remaining, missing_ids)
+        # The initial call requested all 10; the very next (repair) call must ask ONLY for the
+        # 3 still-missing slots -- accepted questions are never regenerated.
+        self.assertEqual(capture[0], {s["slot_id"] for s in slots})
+        self.assertEqual(capture[1], missing_ids)
+
+    def test_f_unknown_or_wrong_slot_id_is_rejected_never_positionally_rebound(self):
+        slots = self._ten_sc_slots_with_empty_evidence({"S1"})
+
+        def respond(prompt):
+            requested = slots_in_prompt(slots, prompt)
+            candidates = []
+            for index, s in enumerate(requested):
+                if index == 0:
+                    bad = candidate_for(s, "single_choice")
+                    bad["slot_id"] = "S999"  # unknown slot_id
+                    candidates.append(bad)
+                    continue
+                candidates.append(candidate_for(s, "single_choice"))
+            return candidates
+
+        _accepted_count, accepted_by_slot, remaining, _reasons, results, _timings = run_sc_batch(slots, respond)
+        self.assertGreater(results["hard_rejections"], 0)
+        # S1's own evidence is empty, so it cannot be rescued by fallback either -- it must stay
+        # missing, never silently filled by the bogus S999 candidate via array position, and
+        # S999 itself must never appear as an accepted slot.
+        self.assertNotIn("S1", accepted_by_slot)
+        self.assertIn("S1", remaining)
+        self.assertNotIn("S999", accepted_by_slot)
+
+    def test_g_accepted_sc_question_is_normalized_to_current_internal_shape(self):
+        slots = self._ten_sc_slots()
+
+        def respond(prompt):
+            requested = slots_in_prompt(slots, prompt)
+            return [candidate_for(s, "single_choice") for s in requested]
+
+        _accepted_count, accepted_by_slot, _remaining, _reasons, _results, _timings = run_sc_batch(slots, respond)
+        self.assertEqual(len(accepted_by_slot), 10)
+        for normalized in accepted_by_slot.values():
+            self.assertEqual(normalized["question_type"], "single_choice")
+            self.assertEqual(len(normalized["correct_answers"]), 1)
+            self.assertIn(normalized["correct_answers"][0], {"A", "B", "C", "D"})
+
+    def test_h_fallback_never_attaches_a_source_chunk_id_from_another_topic(self):
+        topic_a_slots = [slot(i, 1, f"AItem{i}", 2) for i in range(1, 4)]
+        topic_b_slots = [slot(i, 2, f"BItem{i}", 2) for i in range(4, 7)]
+        all_slots = topic_a_slots + topic_b_slots
+
+        def respond(_prompt):
+            return []  # every live attempt fails; only deterministic fallback can accept
+
+        _accepted_count, accepted_by_slot, _remaining, _reasons, _results, timings = run_sc_batch(
+            all_slots, respond, authoritative_slots=all_slots,
+        )
+        self.assertGreater(timings["deterministic_fallback_count"], 0)
+        topic_a_ids = {"S1", "S2", "S3"}
+        topic_a_chunk_ids = {s["source_chunk_ids"][0] for s in topic_a_slots}
+        topic_b_chunk_ids = {s["source_chunk_ids"][0] for s in topic_b_slots}
+        for slot_id, normalized in accepted_by_slot.items():
+            own_chunk_ids, foreign_chunk_ids = (
+                (topic_a_chunk_ids, topic_b_chunk_ids) if slot_id in topic_a_ids
+                else (topic_b_chunk_ids, topic_a_chunk_ids)
+            )
+            self.assertFalse(set(normalized["source_chunk_ids"]) & foreign_chunk_ids)
+
+    def test_i_full_special_first_pipeline_still_reaches_exact_fifteen_ten_three_two(self):
+        slots = fifteen_slots()
+        rankings = default_rankings(slots)
+
+        def respond(prompt):
+            required_type = required_type_of(prompt)
+            requested = slots_in_prompt(slots, prompt)
+            return [candidate_for(s, required_type) for s in requested]
+
+        questions, _validation, _timings = run_blueprint(slots, respond, type_rankings=rankings)
+        self.assertEqual(len(questions), 15)
+        self.assertEqual(
+            Counter(q["question_type"] for q in questions),
+            {"single_choice": 10, "true_false": 3, "multi_select": 2},
+        )
+
+
+class DeterministicSCFallbackQualityTests(unittest.TestCase):
+    """Generic structural/text-quality gate for the dedicated SC deterministic fallback (see
+    _is_clean_grounded_mcq_candidate) -- reuses _looks_like_raw_chunk/_looks_like_heading_fragment
+    and _normalize_question_key instead of special-casing specific garbage phrases like
+    "This evidence refers to..." or a particular document's header text."""
+
+    def _clean_raw_candidate(self):
+        return {
+            "slot_id": "S1",
+            "question": "Which documented statement best explains 'Concept 1'?",
+            "options": [
+                "Item1 fact one is documented.",
+                "Item1 fact two is documented.",
+                "Item1 fact three is documented.",
+                "Item2 fact one is documented.",
+            ],
+            "correct_answer": 0,
+            "explanation": "This answer is directly supported by the evidence about Concept 1.",
+        }
+
+    def test_clean_grounded_candidate_passes_the_quality_gate(self):
+        raw = self._clean_raw_candidate()
+        evidence = "Item1 fact one is documented. Item1 fact two is documented. Item1 fact three is documented."
+        self.assertTrue(_is_clean_grounded_mcq_candidate(raw, evidence))
+
+    def test_heading_like_option_is_rejected(self):
+        raw = self._clean_raw_candidate()
+        raw["options"][1] = "Section 3.2 Overview"
+        evidence = "Item1 fact one is documented. Item1 fact two is documented. Item1 fact three is documented."
+        self.assertFalse(_is_clean_grounded_mcq_candidate(raw, evidence))
+
+    def test_ungrounded_synthesized_correct_answer_is_rejected(self):
+        """The generic gate must reject a synthesized template answer (the tell of the loose
+        term-extraction mode) purely because it can't be traced back to the evidence -- not
+        because of the specific wording "This evidence refers to..."."""
+        raw = self._clean_raw_candidate()
+        raw["options"][0] = 'This evidence refers to "Item1".'
+        evidence = "Item1 fact one is documented. Item1 fact two is documented. Item1 fact three is documented."
+        self.assertFalse(_is_clean_grounded_mcq_candidate(raw, evidence))
+
+    def test_broken_ocr_header_evidence_leaves_slot_missing_rather_than_fallback(self):
+        slots = [{
+            "slot_id": "S1", "topic_id": "topic_1", "topic_name": "Topic 1",
+            "concept_id": "aconcept_1", "name": "Concept 1", "concept_plan_id": "plan_1",
+            "source_subtopic_ids": ["sub_1"], "concept_origin": "structural",
+            "source_chunk_ids": ["chunk_1"], "assessment_capacity": 5,
+            "evidence_excerpt": "PAGE 47 3.2 MEMORY MANAGEMENT OVERVIEW CONTINUED FROM PREVIOUS PAGE",
+            "evidence_variants": [], "topic_evidence_variants": [],
+        }]
+
+        def respond(_prompt):
+            return []  # every live attempt fails; fallback must refuse this evidence too
+
+        _accepted_count, accepted_by_slot, remaining, _reasons, _results, timings = run_sc_batch(slots, respond)
+        self.assertEqual(accepted_by_slot, {})
+        self.assertEqual(remaining, {"S1"})
+        self.assertEqual(timings["deterministic_fallback_count"], 0)
+
+    def test_clean_proposition_based_fallback_still_succeeds(self):
+        # Same topic, so pooled same-topic evidence supplies enough distinct grounded phrases
+        # (9 total) for a full 4-option MCQ without ever needing the term-extraction mode.
+        slots = [slot(i, 1, f"Item{i}", 3) for i in range(1, 4)]
+
+        def respond(_prompt):
+            return []  # every live attempt fails; fallback must construct a clean MCQ
+
+        _accepted_count, accepted_by_slot, remaining, _reasons, _results, timings = run_sc_batch(slots, respond)
+        self.assertEqual(len(accepted_by_slot), 3)
+        self.assertEqual(remaining, set())
+        self.assertEqual(timings["deterministic_fallback_count"], 3)
 
 
 if __name__ == "__main__":
