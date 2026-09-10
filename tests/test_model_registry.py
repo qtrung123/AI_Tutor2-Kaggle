@@ -88,9 +88,9 @@ class ModelRegistryTests(unittest.TestCase):
         startup = (ROOT / "deployment" / "start_kaggle.sh").read_text(encoding="utf-8")
         notebook = (ROOT / "kaggle_run.ipynb").read_text(encoding="utf-8")
 
-        self.assertEqual(quiz.count("reasoning=False"), 4)
+        self.assertEqual(quiz.count("reasoning=False"), 5)
         self.assertIn('QUIZ_GENERATION_KEEP_ALIVE = "5m"', quiz)
-        self.assertEqual(quiz.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 4)
+        self.assertEqual(quiz.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 5)
         self.assertIn('OLLAMA_QWEN3_4B_MODEL="${OLLAMA_QWEN3_4B_MODEL:-hf.co/Qwen/Qwen3-4B-GGUF:Q4_K_M}"', startup)
         self.assertIn('"think": False', startup)
         self.assertIn('"keep_alive": 0', startup)

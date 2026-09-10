@@ -246,7 +246,7 @@ class QuizRetakeFlowTests(unittest.TestCase):
                  "metadata": {"chunk_id": "chunk_1"},
              }]), \
              patch.object(
-                 quiz_service, "_plan_document_slot_types",
+                 quiz_service, "_plan_document_slot_rankings",
                  return_value=(None, {"type_planning_llm_calls": 0, "type_planning_ms": 0}),
              ), \
              patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated_batch), \

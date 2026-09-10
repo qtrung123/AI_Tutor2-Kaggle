@@ -141,10 +141,15 @@ class TopicV2Phase2Tests(unittest.TestCase):
                     "concept_plan_id": f"plan-{topic['topic_id']}", "assessment_capacity": 4,
                     "allocated_questions": 0, "concepts": concepts}
         def generated(_document, _difficulty, slots, _owner, _model, requested, _run_id, **_kwargs):
+            # No slot carries a pre-assigned question_type (see _run_document_v2_batch's
+            # special-first pipeline) -- fabricate the fixed 2 multi_select / 3 true_false /
+            # 10 single_choice split here by position instead.
             questions = [{
                 "id": index + 1, "slot_id": slot["slot_id"],
                 "question": f"Which supported concept applies in case {index + 1}?",
-                "question_type": slot.get("question_type", "single_choice"),
+                "question_type": (
+                    "multi_select" if index < 2 else "true_false" if index < 5 else "single_choice"
+                ),
                 "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
                 "topic_id": slot["topic_id"], "topic_name": slot["topic_name"],
                 "concept_id": slot["concept_id"], "concept_name": slot["name"],
@@ -165,7 +170,7 @@ class TopicV2Phase2Tests(unittest.TestCase):
                  patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
                  patch.object(quiz_service, "build_topic_plan", side_effect=plan), \
                  patch.object(
-                     quiz_service, "_plan_document_slot_types",
+                     quiz_service, "_plan_document_slot_rankings",
                      return_value=(None, {"type_planning_llm_calls": 0, "type_planning_ms": 0}),
                  ), \
                  patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated) as batch, \
@@ -178,7 +183,7 @@ class TopicV2Phase2Tests(unittest.TestCase):
             self.assertEqual(represented, {"a", "b", "c", "d"})
             self.assertEqual(batch.call_count, 1)
             batch_kwargs = batch.call_args.kwargs
-            self.assertEqual(batch_kwargs.get("fixed_type_batches"), quiz_service.DOCUMENT_QUIZ_BATCH_PLAN)
+            self.assertTrue(batch_kwargs.get("special_first"))
             timings = result["assessment_plan"]["timings_ms"]
             for key in (
                 "concept_planning_ms", "allocation_ms", "prompt_construction_ms",
@@ -217,7 +222,7 @@ class TopicV2Phase2Tests(unittest.TestCase):
              patch.object(quiz_service, "build_topic_plan", return_value=plan), \
              patch.object(quiz_service, "resolve_concept_evidence", return_value=[evidence]), \
              patch.object(
-                 quiz_service, "_plan_document_slot_types",
+                 quiz_service, "_plan_document_slot_rankings",
                  return_value=(None, {"type_planning_llm_calls": 0, "type_planning_ms": 0}),
              ), \
              patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated), \

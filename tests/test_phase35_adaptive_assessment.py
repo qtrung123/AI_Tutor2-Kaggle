@@ -162,9 +162,14 @@ class AdaptiveAssessmentTests(unittest.TestCase):
             return plan
 
         def generated(_document, difficulty, slots, _owner, _model, requested, _run_id, **_kwargs):
+            # No slot carries a pre-assigned question_type (see _run_document_v2_batch's
+            # special-first pipeline) -- fabricate the fixed 2 multi_select / 3 true_false /
+            # 10 single_choice split here by position instead.
             questions = [{
                 "id": index + 1, "slot_id": slot["slot_id"],
-                "question_type": slot.get("question_type", "single_choice"),
+                "question_type": (
+                    "multi_select" if index < 2 else "true_false" if index < 5 else "single_choice"
+                ),
                 "question": f"Question for {slot['name']} case {index + 1}?",
                 "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
                 "topic_id": slot["topic_id"], "topic_name": slot["topic_name"],
@@ -190,7 +195,7 @@ class AdaptiveAssessmentTests(unittest.TestCase):
              patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
              patch.object(quiz_service, "build_topic_plan", side_effect=planned), \
              patch.object(
-                 quiz_service, "_plan_document_slot_types",
+                 quiz_service, "_plan_document_slot_rankings",
                  return_value=(None, {"type_planning_llm_calls": 0, "type_planning_ms": 0}),
              ), \
              patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated) as generator, \

@@ -66,16 +66,23 @@ QUIZ_V2_ALLOWED_QUESTION_COUNTS = {12, 15}
 QUIZ_V2_DISTINCT_CONCEPT_LIMIT = 5
 QUIZ_GENERATION_KEEP_ALIVE = "5m"
 
-# Document-scope quizzes use a fixed, backend-authoritative blueprint: the model never
-# chooses the type mix. Order matters for _assign_document_slot_types's deterministic pick.
+# Document-scope quizzes use a fixed, backend-authoritative blueprint: the model never chooses
+# the type mix. Unlike a pre-assignment scheme, no slot is stamped with a question_type before
+# generation -- _run_document_v2_batch decides each slot's final type special-first: it locks
+# exactly 2 multi_select and 3 true_false by generating small ranked candidate WINDOWS in one
+# homogeneous batch call each (generate -> targeted repair only for candidates the model actually
+# attempted -> next ranked window -> constructible fallback), gated by a hard quota check before
+# any single_choice slot is even assigned. See DOCUMENT_QUIZ_SPECIAL_TYPE_PLAN,
+# DOCUMENT_QUIZ_SPECIAL_CANDIDATE_WINDOW, and DOCUMENT_QUIZ_SC_BATCH_SIZES.
 DOCUMENT_QUIZ_QUESTION_COUNT = 15
 DOCUMENT_QUIZ_TYPE_COUNTS = (("multi_select", 2), ("true_false", 3), ("single_choice", 10))
-DOCUMENT_QUIZ_BATCH_PLAN = (
-    ("single_choice", 5), ("single_choice", 5), ("true_false", 3), ("multi_select", 2),
-)
-# Bounded count of question_type swaps _run_document_v2_batch may perform when a special-type
-# slot is still missing after repair+fill are exhausted (see type_alternates).
-DOCUMENT_TYPE_SWAP_BUDGET = 2
+# Special types are locked in this order, before any single_choice slot is even assigned.
+DOCUMENT_QUIZ_SPECIAL_TYPE_PLAN = (("multi_select", 2), ("true_false", 3))
+# How many ranked candidates are generated together in one homogeneous batch call per special
+# type, before checking whether the quota is met and (if not) moving to the next window.
+DOCUMENT_QUIZ_SPECIAL_CANDIDATE_WINDOW = {"multi_select": 4, "true_false": 5}
+# Once the 10 remaining content slots are assigned single_choice, they generate in two batches.
+DOCUMENT_QUIZ_SC_BATCH_SIZES = (5, 5)
 
 
 class QuizGenerationError(ValueError):
@@ -1051,16 +1058,6 @@ _FORMAT_REJECTION_MARKERS = (
 )
 
 
-def _is_type_specific_rejection_reason(reason: str) -> bool:
-    """True for a rejection tied to the OLD question_type's structural contract (e.g. a
-    multi_select answer-count error, or a type-mismatch message). Used to drop stale history
-    after a type swap so the new type's repair prompt isn't primed with errors that no longer
-    apply to it.
-    """
-    lowered = reason.lower()
-    return any(marker in lowered for marker in _FORMAT_REJECTION_MARKERS)
-
-
 def _is_formatting_rejection(reasons: list[str]) -> bool:
     """True when the slot's latest rejection was a structural/format mistake, not a content problem.
 
@@ -1980,74 +1977,48 @@ def _rank_document_slots_by_type(slots: list[dict]) -> dict[str, list[str]]:
     }
 
 
-def _assign_document_slot_types(slots: list[dict]) -> list[dict]:
-    """Deterministic ranking-only fallback: always stamps exactly the fixed 10/3/2 split, never
-    hard-gated on proposition feasibility. Semantic suitability is the LLM type planner's job
-    (see _plan_document_slot_types); this is only its fallback when that call is unavailable or
-    returns something unusable, so a valid document is never blocked by a text heuristic.
-    """
-    ranked = _rank_document_slots_by_type(slots)
-    type_counts = dict(DOCUMENT_QUIZ_TYPE_COUNTS)
-    multi_select_ids = set(ranked["multi_select"][:type_counts["multi_select"]])
-    true_false_ids = set(
-        [sid for sid in ranked["true_false"] if sid not in multi_select_ids][:type_counts["true_false"]]
-    )
-    assigned = []
-    for slot in slots:
-        slot_id = str(slot["slot_id"])
-        if slot_id in multi_select_ids:
-            question_type = "multi_select"
-        elif slot_id in true_false_ids:
-            question_type = "true_false"
-        else:
-            question_type = "single_choice"
-        assigned.append({**slot, "question_type": question_type})
-    return assigned
-
-
-DOCUMENT_TYPE_PLANNER_PROMPT_VERSION = "document_type_planner_v1"
+DOCUMENT_TYPE_PLANNER_PROMPT_VERSION = "document_type_planner_v2_rankings"
 
 
 def _document_type_planner_schema() -> dict:
     return {
         "type": "object",
         "properties": {
-            "multi_select": {"type": "array", "items": {"type": "string"}},
-            "true_false": {"type": "array", "items": {"type": "string"}},
-            "multi_select_alternates": {"type": "array", "items": {"type": "string"}},
-            "true_false_alternates": {"type": "array", "items": {"type": "string"}},
+            "multi_select_ranked": {"type": "array", "items": {"type": "string"}},
+            "true_false_ranked": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["multi_select", "true_false", "multi_select_alternates", "true_false_alternates"],
+        "required": ["multi_select_ranked", "true_false_ranked"],
     }
 
 
 def _document_type_planner_prompt(slots: list[dict]) -> str:
-    type_counts = dict(DOCUMENT_QUIZ_TYPE_COUNTS)
     lines = "\n".join(
         f"{slot['slot_id']}|{slot.get('topic_name', '')}: {slot.get('name', '')}|"
         f"{_sanitize_fallback_evidence(str(slot.get('evidence_excerpt') or ''))[:220]}"
         for slot in slots
     )
     return (
-        "Rank these evidence slots by fit for two special quiz question types. Do not write "
-        "any questions.\n"
-        'JSON only: {"multi_select":["Sx","Sy"],"true_false":["Sa","Sb","Sc"],'
-        '"multi_select_alternates":["..."],"true_false_alternates":["..."]}\n'
-        f"multi_select needs evidence with two or more independently correct statements; pick "
-        f"exactly {type_counts['multi_select']} slot_ids. true_false needs evidence stating one "
-        f"clear factual proposition, rule, or relationship; pick exactly {type_counts['true_false']} "
-        "slot_ids, distinct from the multi_select picks. Only use the slot_ids listed below. List "
-        "3-5 more alternates per type, ranked best first, for use if a primary pick fails.\n"
+        "Rank ALL of these evidence slots by fit for two special quiz question types, best fit "
+        "first. Do not write any questions.\n"
+        'JSON only: {"multi_select_ranked":["Sx","Sy",...],"true_false_ranked":["Sa","Sb",...]}\n'
+        "multi_select needs evidence with two or more independently correct statements -- rank "
+        "every slot_id best-to-worst fit for multi_select. true_false needs evidence stating one "
+        "clear factual proposition, rule, or relationship -- rank every slot_id best-to-worst fit "
+        "for true_false, independently of the multi_select ranking (do not exclude a slot from "
+        "one ranking just because it ranks well in the other). Include every slot_id exactly once "
+        "in each ranking. Only use the slot_ids listed below.\n"
         f"SLOTS:\n{lines}"
     )
 
 
-def _plan_document_slot_types(slots: list[dict], model_id: str) -> tuple[dict | None, dict]:
-    """One small, question-free LLM call: which slots best fit multi_select/true_false.
+def _plan_document_slot_rankings(slots: list[dict], model_id: str) -> tuple[dict | None, dict]:
+    """One small, question-free LLM call: rank every slot by fit for multi_select/true_false.
 
     Returns (result, timings). result is None -- triggering the deterministic ranking fallback,
-    never a hard failure -- if the call errors, the JSON is malformed, or every referenced
-    slot_id fails to resolve to one of the given slots.
+    never a hard failure -- if the call errors, the JSON is malformed, or it names no known
+    slot_id in either ranking. This never assigns a question_type to anything; it only orders the
+    walk that _run_document_v2_batch performs to lock special-type questions before any
+    single_choice slot exists (see DOCUMENT_QUIZ_SPECIAL_TYPE_PLAN).
     """
     known_ids = {str(slot["slot_id"]) for slot in slots}
     timings = {"type_planning_llm_calls": 0, "type_planning_ms": 0}
@@ -2056,7 +2027,7 @@ def _plan_document_slot_types(slots: list[dict], model_id: str) -> tuple[dict | 
         llm = ChatOllama(
             model=model_id, reasoning=False, temperature=0.1,
             format=_document_type_planner_schema(),
-            num_ctx=4096, num_predict=220,
+            num_ctx=4096, num_predict=320,
             keep_alive=QUIZ_GENERATION_KEEP_ALIVE, client_kwargs={"timeout": 90},
         )
         timings["type_planning_llm_calls"] = 1
@@ -2070,7 +2041,7 @@ def _plan_document_slot_types(slots: list[dict], model_id: str) -> tuple[dict | 
     if not isinstance(data, dict):
         return None, timings
 
-    def clean_ids(raw_ids: object) -> list[str]:
+    def clean_ranking(raw_ids: object) -> list[str]:
         if not isinstance(raw_ids, list):
             return []
         seen: list[str] = []
@@ -2080,94 +2051,47 @@ def _plan_document_slot_types(slots: list[dict], model_id: str) -> tuple[dict | 
                 seen.append(slot_id)
         return seen
 
-    multi_select = clean_ids(data.get("multi_select"))
-    true_false = [slot_id for slot_id in clean_ids(data.get("true_false")) if slot_id not in multi_select]
-    multi_select_alternates = [
-        slot_id for slot_id in clean_ids(data.get("multi_select_alternates")) if slot_id not in multi_select
-    ]
-    true_false_alternates = [
-        slot_id for slot_id in clean_ids(data.get("true_false_alternates"))
-        if slot_id not in true_false and slot_id not in multi_select
-    ]
-    if not multi_select and not true_false:
+    multi_select_ranked = clean_ranking(data.get("multi_select_ranked"))
+    true_false_ranked = clean_ranking(data.get("true_false_ranked"))
+    if not multi_select_ranked and not true_false_ranked:
         return None, timings
-    return {
-        "multi_select": multi_select, "true_false": true_false,
-        "multi_select_alternates": multi_select_alternates, "true_false_alternates": true_false_alternates,
-    }, timings
+    return {"multi_select": multi_select_ranked, "true_false": true_false_ranked}, timings
 
 
-def _resolve_document_slot_types(
-    slots: list[dict], planner_result: dict | None,
-) -> tuple[list[dict], dict[str, list[str]]]:
-    """Stamp question_type on all 15 slots -- always exactly the fixed 10/3/2 -- preferring the
-    LLM type planner's picks, backfilled first from its own ranked alternates and then from the
-    deterministic ranking so a short/partial planner result never blocks generation. Also
-    returns each type's ranked alternate slot_ids (planner alternates first, then the rest of
-    the deterministic ranking) for type-swap recovery during generation.
+def _resolve_document_slot_rankings(slots: list[dict], planner_result: dict | None) -> dict[str, list[str]]:
+    """Merge the LLM planner's ranking (if any) with the full deterministic ranking so every
+    slot_id is present, best-first, in both type rankings -- the planner's semantic judgment
+    always comes first; the vocabulary-free heuristic ranking only ever backfills slot_ids the
+    planner omitted, or replaces it outright when the call was unavailable or malformed.
+
+    This assigns nothing and gates nothing -- it is purely the walk order
+    _run_document_v2_batch uses to lock special-type questions before any single_choice slot is
+    assigned (see that function's special-first generation).
     """
-    type_counts = dict(DOCUMENT_QUIZ_TYPE_COUNTS)
     fallback_ranked = _rank_document_slots_by_type(slots)
     known_ids = {str(slot["slot_id"]) for slot in slots}
 
-    def known_only(raw_ids) -> list[str]:
-        return [str(sid) for sid in (raw_ids or []) if str(sid) in known_ids]
+    def merged(planner_ids: list[str], fallback_ids: list[str]) -> list[str]:
+        return list(dict.fromkeys([
+            *[sid for sid in planner_ids if sid in known_ids],
+            *fallback_ids,
+        ]))
 
-    planner_multi_select = known_only((planner_result or {}).get("multi_select"))
-    planner_true_false = known_only((planner_result or {}).get("true_false"))
-    planner_ms_alternates = known_only((planner_result or {}).get("multi_select_alternates"))
-    planner_tf_alternates = known_only((planner_result or {}).get("true_false_alternates"))
-
-    def backfill(primary: list[str], needed: int, alternates_pool: list[str], fallback_pool: list[str], exclude: set[str]) -> list[str]:
-        chosen = [sid for sid in dict.fromkeys(primary) if sid not in exclude]
-        for pool in (alternates_pool, fallback_pool):
-            for sid in pool:
-                if len(chosen) >= needed:
-                    break
-                if sid not in chosen and sid not in exclude:
-                    chosen.append(sid)
-        return chosen[:needed]
-
-    multi_select_ids = backfill(
-        planner_multi_select, type_counts["multi_select"], planner_ms_alternates,
-        fallback_ranked["multi_select"], set(),
-    )
-    true_false_ids = backfill(
-        planner_true_false, type_counts["true_false"], planner_tf_alternates,
-        fallback_ranked["true_false"], set(multi_select_ids),
-    )
-
-    chosen_ids = set(multi_select_ids) | set(true_false_ids)
-    alternates = {
-        "multi_select": [
-            sid for sid in dict.fromkeys([*planner_ms_alternates, *fallback_ranked["multi_select"]])
-            if sid not in chosen_ids
-        ],
-        "true_false": [
-            sid for sid in dict.fromkeys([*planner_tf_alternates, *fallback_ranked["true_false"]])
-            if sid not in chosen_ids
-        ],
+    planner_multi_select = list((planner_result or {}).get("multi_select") or [])
+    planner_true_false = list((planner_result or {}).get("true_false") or [])
+    return {
+        "multi_select": merged(planner_multi_select, fallback_ranked["multi_select"]),
+        "true_false": merged(planner_true_false, fallback_ranked["true_false"]),
     }
 
-    assigned = []
-    for slot in slots:
-        slot_id = str(slot["slot_id"])
-        if slot_id in multi_select_ids:
-            question_type = "multi_select"
-        elif slot_id in true_false_ids:
-            question_type = "true_false"
-        else:
-            question_type = "single_choice"
-        assigned.append({**slot, "question_type": question_type})
-    return assigned, alternates
 
+def _document_structural_problems(slots: list[dict]) -> list[str]:
+    """Enumerate structural-only, type-agnostic content-slot violations, or [] if none.
 
-def _document_structural_blueprint_problems(slots: list[dict]) -> list[str]:
-    """Enumerate structural-only blueprint violations, or [] if none.
-
-    Deliberately does NOT judge whether a slot's evidence is "suitable" for its assigned type --
-    that is the LLM type planner's call (with heuristic ranking as its own fallback); this only
-    guards the hard structural contract that generation and persistence depend on.
+    Deliberately does NOT judge whether a slot's evidence is "suitable" for any question type,
+    and does NOT check a type mix -- no slot has a question_type yet at this stage. Each slot's
+    final type is decided during special-first generation (see _run_document_v2_batch), based on
+    which candidates are genuinely constructible, not by a pre-generation heuristic gate.
     """
     problems = []
     if len(slots) != DOCUMENT_QUIZ_QUESTION_COUNT:
@@ -2175,14 +2099,6 @@ def _document_structural_blueprint_problems(slots: list[dict]) -> list[str]:
     slot_ids = [str(slot.get("slot_id")) for slot in slots]
     if len(set(slot_ids)) != len(slot_ids):
         problems.append("slot_ids are not unique")
-    counts: dict[str, int] = {}
-    for slot in slots:
-        question_type = str(slot.get("question_type") or "")
-        counts[question_type] = counts.get(question_type, 0) + 1
-    for question_type, needed in DOCUMENT_QUIZ_TYPE_COUNTS:
-        found = counts.get(question_type, 0)
-        if found != needed:
-            problems.append(f"expected {needed} {question_type} slots, found {found}")
     for slot in slots:
         if not slot.get("source_chunk_ids"):
             problems.append(f"{slot.get('slot_id')} has no authoritative source_chunk_ids")
@@ -2191,17 +2107,18 @@ def _document_structural_blueprint_problems(slots: list[dict]) -> list[str]:
     return problems
 
 
-def _validate_document_structural_blueprint(slots: list[dict]) -> None:
-    """Structural-only pre-generation gate: exact slot/type counts, unique ids, and authoritative
-    evidence/provenance on every slot. Never rejects a blueprint just because a deterministic
-    heuristic judged TF/MS evidence "unsuitable" for its assigned type.
+def _validate_document_structural_problems(slots: list[dict]) -> None:
+    """Structural-only pre-generation gate: exact slot count, unique ids, and authoritative
+    evidence/provenance on every slot. Never rejects a document for "unsuitable" evidence -- that
+    is decided by which candidates are genuinely constructible during generation, not here.
     """
-    problems = _document_structural_blueprint_problems(slots)
+    problems = _document_structural_problems(slots)
     if not problems:
         return
     raise QuizGenerationError(
-        "The fixed document quiz blueprint (10 single_choice / 3 true_false / 2 multi_select) "
-        "is structurally invalid: " + "; ".join(problems),
+        "The document quiz's 15 content slots (later split 2 multi_select / 3 true_false / "
+        "10 single_choice by special-first generation) are structurally invalid: "
+        + "; ".join(problems),
         stage="blueprint",
         valid_questions=0,
         target_questions=DOCUMENT_QUIZ_QUESTION_COUNT,
@@ -2211,8 +2128,8 @@ def _validate_document_structural_blueprint(slots: list[dict]) -> None:
 
 def _verify_final_document_quiz_contract(questions: list[dict]) -> None:
     """Last gate before persistence: the accepted questions must still satisfy the exact
-    document blueprint contract (unique slot_ids, exactly 10/3/2) after generation, repair, type
-    swaps, and fallback -- never persist a quiz that drifted from it.
+    document blueprint contract (unique slot_ids, exactly 10/3/2) after special-first generation,
+    repair, and fallback -- never persist a quiz that drifted from it.
     """
     problems = []
     if len(questions) != DOCUMENT_QUIZ_QUESTION_COUNT:
@@ -2239,22 +2156,21 @@ def _verify_final_document_quiz_contract(questions: list[dict]) -> None:
     )
 
 
-def _prepare_document_slot_blueprint(
+def _prepare_document_slot_rankings(
     slots: list[dict], model_id: str,
 ) -> tuple[list[dict], dict[str, list[str]], dict]:
-    """Decide each of the 15 content slots' question_type via ONE small, question-free LLM call
-    (semantic suitability is the model's job), with deterministic ranking as a pure fallback
-    that never blocks. Returns (typed_slots, alternates_by_type, timings).
+    """Rank all 15 content slots for multi_select/true_false fit via ONE small, question-free LLM
+    call (semantic suitability is the model's job), with deterministic ranking as a pure backfill
+    that never blocks. Returns (slots, type_rankings, timings).
 
-    typed_slots always has the exact 10 single_choice / 3 true_false / 2 multi_select split,
-    validated only structurally before generation -- never rejected for "unsuitable" evidence.
-    alternates_by_type carries ranked backup slot_ids per special type for type-swap recovery
-    during generation (see _run_document_v2_batch).
+    No slot is stamped with a question_type here -- slots pass through unchanged. type_rankings
+    only orders the special-first walk _run_document_v2_batch performs to lock exactly 2
+    multi_select and 3 true_false questions before any single_choice slot is even assigned.
     """
-    planner_result, timings = _plan_document_slot_types(slots, model_id)
-    assigned, alternates = _resolve_document_slot_types(slots, planner_result)
-    _validate_document_structural_blueprint(assigned)
-    return assigned, alternates, timings
+    _validate_document_structural_problems(slots)
+    planner_result, timings = _plan_document_slot_rankings(slots, model_id)
+    type_rankings = _resolve_document_slot_rankings(slots, planner_result)
+    return slots, type_rankings, timings
 
 
 def _document_batch_output_schema() -> dict:
@@ -2431,7 +2347,7 @@ def _deterministic_multi_select_candidate(
     if not evidence or not slot.get("source_chunk_ids"):
         raise ValueError("Deterministic fallback requires grounded evidence and provenance.")
     # Correct answers must be clean, independent, non-heading/non-fragment propositions -- the
-    # same suitability bar _assign_document_slot_types used to route this slot to multi_select
+    # same suitability bar the deterministic ranking uses to prioritize a slot for multi_select
     # in the first place, not the looser term-extraction fallback used only for distractors.
     own_options = _document_slot_propositions(slot)
     if len(own_options) < 2:
@@ -2465,7 +2381,7 @@ def _deterministic_document_candidate(slot: dict, ordinal: int, alternative_evid
     return _deterministic_grounded_candidate(slot, ordinal, alternative_evidence)
 
 
-def _run_document_v2_batch(
+def _run_document_special_first_batch(
     document: dict,
     difficulty: str,
     planned_slots: list[dict],
@@ -2473,21 +2389,638 @@ def _run_document_v2_batch(
     model_id: str,
     question_count: int,
     generation_run_id: str,
-    fixed_type_batches: tuple[tuple[str, int], ...] | None = None,
-    type_alternates: dict[str, list[str]] | None = None,
+    type_rankings: dict[str, list[str]] | None = None,
 ) -> tuple[list[dict], dict, dict]:
-    """Generate document slots in bounded batches, then repair only missing slots.
+    """Special-first document generation for the fixed 10 single_choice / 3 true_false /
+    2 multi_select document quiz blueprint (see _run_document_v2_batch, which dispatches here
+    when special_first=True; the generic mixed-type mode lives in _run_document_generic_batch).
 
-    When fixed_type_batches is given, planned_slots must already carry an authoritative
-    "question_type" per slot (see _assign_document_slot_types): the initial batches and every
-    repair/fill call are grouped to be homogeneous by that type instead of one generic mixed
-    batch, and the model is told exactly which single type each call must return.
+    No slot is pre-stamped with a question_type. Instead, exactly 2 multi_select and then
+    exactly 3 true_false questions are LOCKED first, by walking each type's ranked slot list
+    (best evidence fit first, from type_rankings / _prepare_document_slot_rankings): for each
+    ranked slot, generate -> one targeted repair -> if still unusable, move on to the next ranked
+    slot without marking this one missing or consuming its content. Only once locking is done are
+    the 10 remaining content slots assigned single_choice, generated in two batches of 5.
 
-    type_alternates (multi_select/true_false -> ranked backup slot_ids, from
-    _prepare_document_slot_blueprint) enables bounded type-swap recovery: if a special-type slot
-    is still missing after repair+fill are exhausted, its question_type ownership is traded with
-    a ranked single_choice alternate -- never its content/evidence -- before falling back to
-    deterministic generation. See DOCUMENT_TYPE_SWAP_BUDGET.
+    There is no post-hoc type-swap: an accepted single_choice question is never deleted to rescue
+    a struggling special-type slot. Rejection-reason history is scoped to (slot_id, attempted
+    question_type), so a slot that fails as multi_select starts its later true_false/single_choice
+    attempts with a clean prompt history.
+    """
+    batch_started = time.perf_counter()
+    authoritative_slots = planned_slots[:question_count]
+    groups_by_id = {slot["slot_id"]: slot for slot in authoritative_slots}
+    slot_positions = {slot["slot_id"]: index for index, slot in enumerate(authoritative_slots)}
+    remaining_slot_ids = set(groups_by_id)
+    locked_slot_ids: set[str] = set()
+    accepted_by_slot: dict[str, dict] = {}
+    accepted_stems: list[str] = []
+    results = {
+        "accepted": 0, "accepted_with_warnings": 0, "rejected": 0,
+        "hard_rejections": 0, "quality_warnings": 0, "reasons": [],
+    }
+    timings = {
+        "prompt_construction_ms": 0, "initial_batch_generation_ms": 0,
+        "validation_ms": 0, "repair_ms": 0, "model_load_ms": 0,
+        "prompt_eval_ms": 0, "token_generation_ms": 0,
+        "prompt_tokens": 0, "output_tokens": 0,
+        "model_invocation_ms": 0, "repair_generation_ms": 0,
+        "fill_generation_ms": 0,
+        "initial_batch_count": 0, "initial_batches": [],
+    }
+    llm_calls = 0
+    repair_llm_calls = 0
+    repair_attempt_count = 0
+    fill_attempt_count = 0
+    final_fill_llm_calls = 0
+    fallback_count = 0
+    next_batch_index = 1
+    missing_slots_before_each_retry = []
+    # Special-first metrics (see DOCUMENT_QUIZ_SPECIAL_CANDIDATE_WINDOW): batched windows, not
+    # one call per slot, so these track real work done rather than a per-slot call count.
+    special_candidate_attempts = 0
+    special_generation_llm_calls = 0
+    rejected_special_candidates = 0
+    single_choice_generation_llm_calls = 0
+    special_attempted_slot_ids: dict[str, set[str]] = {"multi_select": set(), "true_false": set()}
+    # Scoped by (slot_id, attempted_question_type): a failed multi_select attempt's history never
+    # leaks into that same slot's later true_false or single_choice prompt.
+    rejection_reasons_by_type_slot: dict[tuple[str, str], list[str]] = {}
+    retry_attempt_by_slot = {slot_id: 0 for slot_id in groups_by_id}
+    used_replan_evidence_by_topic: dict[str, set[str]] = {}
+    for slot in authoritative_slots:
+        used_replan_evidence_by_topic.setdefault(str(slot.get("topic_id") or "document"), set()).update(
+            str(chunk_id) for chunk_id in slot.get("source_chunk_ids") or [] if chunk_id
+        )
+    candidate_stems_by_attempt = []
+    document_scope = {"topic_id": "document", "name": "Entire document"}
+
+    def diversified_slot(slot: dict) -> dict:
+        """Rotate concept evidence, then replan only this slot within its topic."""
+        slot_id = str(slot["slot_id"])
+        attempt = retry_attempt_by_slot[slot_id]
+        variants = list(slot.get("evidence_variants") or [])
+        if attempt >= 2 and variants:
+            variant_index = attempt - 2
+            if variant_index < len(variants):
+                return {**slot, **variants[variant_index], "evidence_rotated": True}
+        if attempt >= 4:
+            topic_id = str(slot.get("topic_id") or "document")
+            used = used_replan_evidence_by_topic.setdefault(topic_id, set())
+            for variant in slot.get("topic_evidence_variants") or []:
+                variant_ids = set(variant.get("source_chunk_ids") or [])
+                if variant_ids and not (variant_ids & used):
+                    used.update(variant_ids)
+                    return {**slot, **variant, "evidence_rotated": True, "slot_replanned": True}
+        return dict(slot)
+
+    def run_generation_call(
+        call_slots: list[dict], phase: str, required_type: str, max_new_accepts: int | None = None,
+    ) -> tuple[set[str], set[str]]:
+        """phase is "initial"/"repair"/"fill" for the single_choice batch/repair/fill cadence, or
+        "special_initial"/"special_repair" for one homogeneous batched window of ranked special
+        candidates. required_type is always given -- every call in this function asks for exactly
+        one type, stamped onto call_slots here (never pre-stamped on the shared slot dict) so a
+        slot's eventual type is decided only by which attempt actually succeeds.
+
+        max_new_accepts bounds how many candidates from THIS call may be accepted -- a window can
+        be larger than the remaining quota (e.g. a 4-slot multi_select window with only 1 slot
+        still needed), and once the cap is hit the rest are left completely untouched (not
+        rejected, not attempted) so they stay fully available for the next type or single_choice.
+
+        Returns (attempted_slot_ids, accepted_slot_ids): attempted is every call_slot_id the
+        model actually produced a candidate for (valid or not) -- used by the special-first
+        window walk to targeted-repair only "promising" candidates, never slots the model simply
+        never answered.
+        """
+        nonlocal llm_calls, repair_llm_calls, repair_attempt_count, fill_attempt_count, final_fill_llm_calls
+        nonlocal next_batch_index, special_candidate_attempts, special_generation_llm_calls
+        nonlocal rejected_special_candidates, single_choice_generation_llm_calls
+        batch_index = next_batch_index
+        next_batch_index += 1
+        attempt_started = time.perf_counter()
+        requested = len(call_slots)
+        if not requested:
+            return set(), set()
+        is_initial_phase = phase in ("initial", "special_initial")
+        is_special_phase = phase in ("special_initial", "special_repair")
+        if is_special_phase:
+            special_generation_llm_calls += 1
+            special_candidate_attempts += requested
+        elif phase in ("initial", "repair", "fill"):
+            single_choice_generation_llm_calls += 1
+        if not is_initial_phase:
+            for slot in call_slots:
+                retry_attempt_by_slot[str(slot["slot_id"])] += 1
+            call_slots = [diversified_slot(slot) for slot in call_slots]
+        call_slots = [{**slot, "question_type": required_type} for slot in call_slots]
+        call_slot_ids = {slot["slot_id"] for slot in call_slots}
+        validation_groups = {**groups_by_id, **{slot["slot_id"]: slot for slot in call_slots}}
+        prompt_started = time.perf_counter()
+        prompt = _build_v2_prompt(
+            document["id"], document_scope, difficulty, call_slots, requested,
+            accepted_stems, not is_initial_phase,
+            {slot_id: rejection_reasons_by_type_slot.get((slot_id, required_type), []) for slot_id in call_slot_ids},
+            retry_attempt_by_slot, required_type,
+        )
+        rejection_counts_before_call = {
+            slot_id: len(rejection_reasons_by_type_slot.get((slot_id, required_type), []))
+            for slot_id in call_slot_ids
+        }
+        timings["prompt_construction_ms"] += round((time.perf_counter() - prompt_started) * 1000)
+        generation_started = time.perf_counter()
+        llm_calls += 1
+        if not is_initial_phase:
+            repair_llm_calls += 1
+        if phase == "repair":
+            repair_attempt_count += 1
+        elif phase == "fill":
+            fill_attempt_count += 1
+        if phase == "fill":
+            final_fill_llm_calls += 1
+        llm = ChatOllama(
+            model=model_id,
+            reasoning=False,
+            temperature=0.1 if is_initial_phase else 0.25,
+            format=_document_batch_output_schema_for_type(required_type),
+            num_ctx=16384 if requested > 15 else 8192,
+            num_predict=min(4800, max(520, requested * 150)),
+            keep_alive=QUIZ_GENERATION_KEEP_ALIVE,
+            client_kwargs={"timeout": 270},
+        )
+        print(
+            f"[quiz-document-llm] attempt={llm_calls}, phase={phase}, batch={batch_index}, "
+            f"type={required_type}, model={model_id}, requested={requested}, slots={len(call_slots)}"
+        )
+        invocation_started = time.perf_counter()
+        invocation_ms = 0
+        try:
+            response = llm.invoke(prompt)
+            invocation_ms = round((time.perf_counter() - invocation_started) * 1000)
+            metadata = getattr(response, "response_metadata", {}) or {}
+            model_load_ms = round(float(metadata.get("load_duration") or 0) / 1_000_000)
+            prompt_eval_ms = round(float(metadata.get("prompt_eval_duration") or 0) / 1_000_000)
+            token_generation_ms = round(float(metadata.get("eval_duration") or 0) / 1_000_000)
+            prompt_tokens = int(metadata.get("prompt_eval_count") or 0)
+            output_tokens = int(metadata.get("eval_count") or 0)
+            timings["model_load_ms"] += model_load_ms
+            timings["prompt_eval_ms"] += prompt_eval_ms
+            timings["token_generation_ms"] += token_generation_ms
+            timings["prompt_tokens"] += prompt_tokens
+            timings["output_tokens"] += output_tokens
+            data = _extract_json(str(response.content))
+            candidates = data.get("questions") if isinstance(data, dict) else None
+            if not isinstance(candidates, list):
+                raise ValueError("Quiz JSON does not contain a questions list.")
+            candidate_stems_by_attempt.append({
+                "attempt": llm_calls, "phase": phase, "required_type": required_type,
+                "slot_ids": [str(slot["slot_id"]) for slot in call_slots],
+                "stems": [
+                    _clean_inline_text(candidate.get("question", ""))
+                    for candidate in candidates if isinstance(candidate, dict)
+                ],
+            })
+            print(f"[quiz-document-candidate-stems] {json.dumps(candidate_stems_by_attempt[-1])}")
+            print(
+                f"[quiz-document-ollama] attempt={llm_calls}, phase={phase}, batch={batch_index}, "
+                f"returned={len(candidates)}, "
+                f"model_load_ms={model_load_ms}, prompt_eval_ms={prompt_eval_ms}, "
+                f"token_generation_ms={token_generation_ms}, prompt_tokens={prompt_tokens}, "
+                f"output_tokens={output_tokens}"
+            )
+        except Exception as error:
+            invocation_ms = invocation_ms or round((time.perf_counter() - invocation_started) * 1000)
+            candidates = []
+            results["rejected"] += requested
+            reason = f"response: {error}"
+            results["reasons"].append(reason)
+            for slot_id in call_slot_ids:
+                rejection_reasons_by_type_slot.setdefault((slot_id, required_type), []).append(reason)
+            if is_special_phase:
+                rejected_special_candidates += requested
+        generation_elapsed = round((time.perf_counter() - generation_started) * 1000)
+        timings["model_invocation_ms"] += invocation_ms
+        if is_initial_phase:
+            timings["initial_batch_generation_ms"] += generation_elapsed
+        elif phase in ("repair", "special_repair"):
+            timings["repair_generation_ms"] += generation_elapsed
+        else:
+            timings["fill_generation_ms"] += generation_elapsed
+
+        validation_started = time.perf_counter()
+        accepted_before = len(accepted_by_slot)
+        attempted_this_call: set[str] = set()
+        accepted_this_call: set[str] = set()
+        deferred_by_cap_slot_ids: set[str] = set()
+        for candidate_index, raw in enumerate(candidates):
+            if len(accepted_by_slot) >= question_count:
+                break
+            if max_new_accepts is not None and len(accepted_this_call) >= max_new_accepts:
+                deferred_by_cap_slot_ids.update(
+                    str(remaining.get("slot_id") or remaining.get("concept_id") or "").strip()
+                    for remaining in candidates[candidate_index:] if isinstance(remaining, dict)
+                )
+                break
+            try:
+                slot_id = str(raw.get("slot_id") or raw.get("concept_id") or "").strip() if isinstance(raw, dict) else ""
+                if slot_id not in call_slot_ids:
+                    raise ValueError("Question uses a slot_id outside its requested batch.")
+                attempted_this_call.add(slot_id)
+                slot = validation_groups.get(slot_id) or {}
+                normalized, warnings = _validate_v2_question(
+                    raw, validation_groups, remaining_slot_ids, accepted_stems, difficulty,
+                    slot_positions.get(slot_id, len(accepted_by_slot)) + 1,
+                    document_scope, int(slot.get("assessment_capacity", 0)),
+                )
+                accepted_by_slot[normalized["slot_id"]] = normalized
+                accepted_this_call.add(normalized["slot_id"])
+                accepted_stems.append(normalized["question"])
+                remaining_slot_ids.remove(normalized["slot_id"])
+                groups_by_id[normalized["slot_id"]]["question_type"] = required_type
+                results["accepted_with_warnings" if warnings else "accepted"] += 1
+                results["quality_warnings"] += len(warnings)
+                save_quiz_validation_event({
+                    "generation_run_id": generation_run_id,
+                    "owner_id": owner_id,
+                    "document_id": document["id"],
+                    "document_hash": document.get("hash", ""),
+                    "topic_id": normalized["topic_id"],
+                    "topic_schema_version": int(document.get("topic_schema_version", 0)),
+                    "difficulty": difficulty,
+                    "batch_index": batch_index,
+                    "generation_attempt": llm_calls,
+                    "candidate_index": candidate_index,
+                    "generator_model": model_id,
+                    "generation_prompt_version": QUIZ_V2_PROMPT_VERSION,
+                    "validator_model": "deterministic-v2",
+                    "validator_prompt_version": "no-semantic-llm-v2",
+                    "candidate_question": normalized,
+                    "cited_chunk_ids": normalized["source_chunk_ids"],
+                    "evidence_chunk_ids": normalized["source_chunk_ids"],
+                    "hard_passed": True,
+                    "quality_passed": not warnings,
+                    "accepted": True,
+                    "outcome": normalized["validation_outcome"],
+                    "verdict": {"mode": "deterministic", "warnings": warnings},
+                    "rejection_reasons": warnings,
+                    "latency_ms": 0,
+                })
+            except Exception as error:
+                reason = str(error)
+                candidate_slot_id = str(raw.get("slot_id") or raw.get("concept_id") or "").strip() if isinstance(raw, dict) else ""
+                if candidate_slot_id not in remaining_slot_ids and candidate_index < len(call_slots):
+                    candidate_slot_id = str(call_slots[candidate_index]["slot_id"])
+                if candidate_slot_id in call_slot_ids:
+                    attempted_this_call.add(candidate_slot_id)
+                    rejection_reasons_by_type_slot.setdefault((candidate_slot_id, required_type), []).append(reason)
+                results["rejected"] += 1
+                results["hard_rejections"] += 1
+                results["reasons"].append(reason)
+                if is_special_phase:
+                    rejected_special_candidates += 1
+                print(f"[quiz-document-validation] discarded candidate: {error}")
+        validation_elapsed = round((time.perf_counter() - validation_started) * 1000)
+        for slot_id in call_slot_ids:
+            if slot_id in deferred_by_cap_slot_ids:
+                continue  # not rejected -- deliberately left unprocessed once the quota cap hit
+            key = (slot_id, required_type)
+            if (slot_id in remaining_slot_ids
+                    and len(rejection_reasons_by_type_slot.get(key, [])) == rejection_counts_before_call[slot_id]):
+                rejection_reasons_by_type_slot.setdefault(key, []).append(
+                    "Model returned no valid candidate for the requested slot."
+                )
+        if is_special_phase and required_type in special_attempted_slot_ids:
+            special_attempted_slot_ids[required_type].update(attempted_this_call)
+        timings["validation_ms"] += validation_elapsed
+        call_elapsed = round((time.perf_counter() - attempt_started) * 1000)
+        if not is_initial_phase:
+            timings["repair_ms"] += round((time.perf_counter() - attempt_started) * 1000)
+        batch_timing = {
+            "batch_index": batch_index, "phase": phase, "required_type": required_type, "requested": requested,
+            "returned": len(candidates), "accepted": len(accepted_by_slot) - accepted_before,
+            "generation_ms": generation_elapsed, "validation_ms": validation_elapsed,
+            "total_ms": call_elapsed,
+        }
+        if phase == "initial":
+            timings["initial_batches"].append(batch_timing)
+        print(f"[quiz-document-batch-timing] {json.dumps(batch_timing)}")
+        return attempted_this_call, accepted_this_call
+
+    def constructible_special_fallback(slot_id: str, question_type: str) -> bool:
+        """Last resort for one (slot, special_type) pair: only ever locks the slot if a genuinely
+        constructible candidate can be built from its own evidence and pass the full validator --
+        never fabricates a fact just to hit the count."""
+        nonlocal fallback_count
+        slot = groups_by_id[slot_id]
+        stamped = {**slot, "question_type": question_type}
+        try:
+            raw = (
+                _deterministic_multi_select_candidate(stamped, 0)
+                if question_type == "multi_select"
+                else _deterministic_true_false_candidate(stamped, 0)
+            )
+            normalized, warnings = _validate_v2_question(
+                raw, {**groups_by_id, slot_id: stamped}, remaining_slot_ids, accepted_stems,
+                difficulty, slot_positions[slot_id] + 1, document_scope,
+                int(slot.get("assessment_capacity", 0)),
+            )
+        except Exception as error:
+            rejection_reasons_by_type_slot.setdefault((slot_id, question_type), []).append(
+                f"deterministic fallback: {error}"
+            )
+            return False
+        accepted_by_slot[slot_id] = normalized
+        accepted_stems.append(normalized["question"])
+        remaining_slot_ids.discard(slot_id)
+        groups_by_id[slot_id]["question_type"] = question_type
+        results["accepted_with_warnings" if warnings else "accepted"] += 1
+        results["quality_warnings"] += len(warnings)
+        fallback_count += 1
+        return True
+
+    def lock_special_type(question_type: str, needed: int, ranked_ids: list[str]) -> None:
+        """Special-first locking, BATCHED: walk ranked_ids in small homogeneous windows (see
+        DOCUMENT_QUIZ_SPECIAL_CANDIDATE_WINDOW) -- generate the whole window in ONE batch call,
+        lock whatever validates, then one targeted-repair batch call for only the candidates the
+        model actually attempted but got wrong (never for a slot it silently skipped). A slot
+        that still fails moves on with the next window without being marked missing or consumed:
+        its content/evidence is untouched and it remains fully available to the next special type
+        or to single_choice afterward. Only once the ranking is exhausted does it fall back to a
+        genuinely-constructible deterministic candidate, tried in the same rank order, for
+        whichever slots are still needed. Normal path: 1 window call (+ a repair call only if
+        that window came up short), not one call per candidate slot.
+        """
+        def locked_count() -> int:
+            return sum(
+                1 for sid in locked_slot_ids
+                if groups_by_id[sid].get("question_type") == question_type
+            )
+
+        window_size = DOCUMENT_QUIZ_SPECIAL_CANDIDATE_WINDOW[question_type]
+        available_ids = [sid for sid in ranked_ids if sid in groups_by_id]
+        tried_and_failed: list[str] = []
+        cursor = 0
+        while locked_count() < needed and cursor < len(available_ids):
+            window_ids = [
+                sid for sid in available_ids[cursor:cursor + window_size]
+                if sid not in locked_slot_ids
+            ]
+            cursor += window_size
+            if not window_ids:
+                continue
+            for sid in window_ids:
+                retry_attempt_by_slot[sid] = 0
+            _attempted, accepted_ids = run_generation_call(
+                [dict(groups_by_id[sid]) for sid in window_ids], "special_initial", question_type,
+                max_new_accepts=needed - locked_count(),
+            )
+            locked_slot_ids.update(accepted_ids)
+            if locked_count() >= needed:
+                break
+            failed_ids = [sid for sid in window_ids if sid not in accepted_ids]
+            # Targeted repair only for candidates the model actually attempted but got wrong --
+            # a slot it silently skipped gets no repair call here, it just waits for the next
+            # window or the ranked-order fallback below.
+            promising_ids = [sid for sid in failed_ids if sid in _attempted]
+            if promising_ids:
+                _repair_attempted, repair_accepted = run_generation_call(
+                    [dict(groups_by_id[sid]) for sid in promising_ids], "special_repair", question_type,
+                    max_new_accepts=needed - locked_count(),
+                )
+                locked_slot_ids.update(repair_accepted)
+                failed_ids = [sid for sid in failed_ids if sid not in repair_accepted]
+            tried_and_failed.extend(failed_ids)
+        for slot_id in tried_and_failed:
+            if locked_count() >= needed:
+                return
+            if slot_id in locked_slot_ids:
+                continue
+            if constructible_special_fallback(slot_id, question_type):
+                locked_slot_ids.add(slot_id)
+
+    # Phase 1: lock the special types FIRST, before any single_choice slot is even assigned.
+    for special_type, needed in DOCUMENT_QUIZ_SPECIAL_TYPE_PLAN:
+        ranked_ids = list((type_rankings or {}).get(special_type) or [])
+        fallback_ranked = _rank_document_slots_by_type(authoritative_slots)[special_type]
+        ranked_ids = list(dict.fromkeys([*ranked_ids, *fallback_ranked]))
+        lock_special_type(special_type, needed, ranked_ids)
+
+    # HARD SPECIAL-QUOTA GATE: never continue into single_choice generation -- and never persist
+    # a 13/15 or 14/15 quiz -- because a special type came up short. Both quotas must be exactly
+    # met, with 5 distinct locked slot_ids between them, before any single_choice slot exists.
+    required_special_counts = dict(DOCUMENT_QUIZ_SPECIAL_TYPE_PLAN)
+    locked_by_type = {
+        type_name: sorted(
+            sid for sid in locked_slot_ids if groups_by_id[sid].get("question_type") == type_name
+        )
+        for type_name in required_special_counts
+    }
+    quota_problems = [
+        f"{type_name}: required {required_special_counts[type_name]}, locked {len(locked_ids)} "
+        f"{locked_ids}; attempted {sorted(special_attempted_slot_ids.get(type_name, set()))}"
+        for type_name, locked_ids in locked_by_type.items()
+        if len(locked_ids) != required_special_counts[type_name]
+    ]
+    all_locked_special_ids = [sid for ids in locked_by_type.values() for sid in ids]
+    if not quota_problems and len(set(all_locked_special_ids)) != len(all_locked_special_ids):
+        quota_problems.append(f"locked slot_ids overlap between special types: {all_locked_special_ids}")
+    if quota_problems:
+        quota_rejection_reasons = {
+            sid: (
+                rejection_reasons_by_type_slot.get((sid, "multi_select"), [])
+                + rejection_reasons_by_type_slot.get((sid, "true_false"), [])
+            )
+            for type_name in required_special_counts
+            for sid in special_attempted_slot_ids.get(type_name, set())
+        }
+        raise QuizGenerationError(
+            "Document quiz special-type quota not met before single_choice generation: "
+            + "; ".join(quota_problems),
+            stage="blueprint",
+            valid_questions=len(accepted_by_slot),
+            target_questions=DOCUMENT_QUIZ_QUESTION_COUNT,
+            failure_summary=quota_problems,
+            missing_slots=sorted(remaining_slot_ids),
+            rejection_reasons_by_slot=quota_rejection_reasons,
+        )
+
+    # Phase 2: only now, with the special quota gate passed, do the remaining content slots
+    # become single_choice -- exactly 10 of them, never silently truncated.
+    single_choice_slot_ids = [
+        slot["slot_id"] for slot in authoritative_slots if slot["slot_id"] not in locked_slot_ids
+    ]
+    sc_quota = dict(DOCUMENT_QUIZ_TYPE_COUNTS)["single_choice"]
+    if len(single_choice_slot_ids) != sc_quota:
+        raise QuizGenerationError(
+            f"Document quiz single_choice pool is {len(single_choice_slot_ids)} slots after the "
+            f"special-type quota gate passed, expected exactly {sc_quota}.",
+            stage="blueprint",
+            valid_questions=len(accepted_by_slot),
+            target_questions=DOCUMENT_QUIZ_QUESTION_COUNT,
+            failure_summary=[f"single_choice pool size mismatch: {len(single_choice_slot_ids)} != {sc_quota}"],
+        )
+    for slot_id in single_choice_slot_ids:
+        groups_by_id[slot_id]["question_type"] = "single_choice"
+        retry_attempt_by_slot[slot_id] = 0
+
+    sc_initial_batches = []
+    cursor = 0
+    for size in DOCUMENT_QUIZ_SC_BATCH_SIZES:
+        batch_ids = single_choice_slot_ids[cursor:cursor + size]
+        cursor += size
+        if batch_ids:
+            sc_initial_batches.append(batch_ids)
+    timings["initial_batch_count"] = len(sc_initial_batches)
+    for batch_ids in sc_initial_batches:
+        run_generation_call([groups_by_id[slot_id] for slot_id in batch_ids], "initial", "single_choice")
+
+    for phase, retry_limit in (("repair", 2), ("fill", 2)):
+        for retry_index in range(1, retry_limit + 1):
+            missing_slot_ids = [slot_id for slot_id in single_choice_slot_ids if slot_id in remaining_slot_ids]
+            if not missing_slot_ids:
+                break
+            retry_state = {
+                "phase": phase, "attempt": retry_index,
+                "missing_slots": missing_slot_ids,
+                "rejection_reasons_by_slot": {
+                    slot_id: list(rejection_reasons_by_type_slot.get((slot_id, "single_choice"), []))
+                    for slot_id in missing_slot_ids
+                },
+            }
+            missing_slots_before_each_retry.append(retry_state)
+            print(f"[quiz-document-retry] {json.dumps(retry_state)}")
+            run_generation_call([groups_by_id[slot_id] for slot_id in missing_slot_ids], phase, "single_choice")
+
+    # Exact count is contractual. Fill only still-missing single_choice slots, preserving all
+    # accepted questions (including every locked multi_select/true_false one -- nothing here ever
+    # deletes an accepted question), and run deterministic candidates through the same
+    # authoritative validator and duplicate checks.
+    for fallback_index, slot_id in enumerate(single_choice_slot_ids):
+        if slot_id not in remaining_slot_ids:
+            continue
+        original_slot = groups_by_id[slot_id]
+        variants = list(original_slot.get("evidence_variants") or [])
+        unused = list(original_slot.get("topic_evidence_variants") or [])
+        chosen = dict(original_slot)
+        if unused:
+            chosen.update(unused[0])
+        elif variants:
+            chosen.update(variants[min(1, len(variants) - 1)])
+        compatible = [variant for variant in [*variants, *unused] if variant.get("evidence_excerpt")]
+        if len(compatible) >= 2:
+            chosen["evidence_excerpt"] = " ".join(
+                str(variant["evidence_excerpt"]) for variant in compatible[:2]
+            )[:560]
+            chosen["source_chunk_ids"] = list(dict.fromkeys(
+                chunk_id for variant in compatible[:2] for chunk_id in variant.get("source_chunk_ids") or []
+            ))
+        chosen["question_type"] = "single_choice"
+        fallback_groups = {**groups_by_id, slot_id: chosen}
+        try:
+            scope_evidence = []
+            for other in authoritative_slots:
+                if str(other.get("topic_id") or "") != str(chosen.get("topic_id") or ""):
+                    continue
+                scope_evidence.append(str(other.get("evidence_excerpt") or ""))
+                scope_evidence.extend(
+                    str(variant.get("evidence_excerpt") or "")
+                    for variant in [*(other.get("evidence_variants") or []), *(other.get("topic_evidence_variants") or [])]
+                )
+            raw = _deterministic_document_candidate(chosen, fallback_index, scope_evidence)
+            normalized, warnings = _validate_v2_question(
+                raw, fallback_groups, remaining_slot_ids, accepted_stems, difficulty,
+                slot_positions[slot_id] + 1, document_scope, int(chosen.get("assessment_capacity", 0)),
+            )
+            accepted_by_slot[slot_id] = normalized
+            accepted_stems.append(normalized["question"])
+            remaining_slot_ids.remove(slot_id)
+            fallback_count += 1
+            results["accepted_with_warnings" if warnings else "accepted"] += 1
+            results["quality_warnings"] += len(warnings)
+            save_quiz_validation_event({
+                "generation_run_id": generation_run_id, "owner_id": owner_id,
+                "document_id": document["id"], "document_hash": document.get("hash", ""),
+                "topic_id": normalized["topic_id"],
+                "topic_schema_version": int(document.get("topic_schema_version", 0)),
+                "difficulty": difficulty, "batch_index": next_batch_index,
+                "generation_attempt": llm_calls + 1, "candidate_index": fallback_index,
+                "generator_model": "deterministic-grounded-fallback",
+                "generation_prompt_version": QUIZ_V2_PROMPT_VERSION,
+                "validator_model": "deterministic-v2", "validator_prompt_version": "no-semantic-llm-v2",
+                "candidate_question": normalized, "cited_chunk_ids": normalized["source_chunk_ids"],
+                "evidence_chunk_ids": normalized["source_chunk_ids"], "hard_passed": True,
+                "quality_passed": not warnings, "accepted": True,
+                "outcome": normalized["validation_outcome"],
+                "verdict": {"mode": "deterministic-grounded-fallback", "warnings": warnings},
+                "rejection_reasons": warnings, "latency_ms": 0,
+            })
+        except Exception as error:
+            reason = f"deterministic fallback: {error}"
+            rejection_reasons_by_type_slot.setdefault((slot_id, "single_choice"), []).append(reason)
+            results["rejected"] += 1
+            results["hard_rejections"] += 1
+            results["reasons"].append(reason)
+
+    flattened_rejection_reasons_by_slot: dict[str, list[str]] = {slot_id: [] for slot_id in groups_by_id}
+    for (slot_id, _question_type), reasons in rejection_reasons_by_type_slot.items():
+        flattened_rejection_reasons_by_slot.setdefault(slot_id, []).extend(reasons)
+
+    timings["llm_calls"] = llm_calls
+    timings["repair_llm_calls"] = repair_llm_calls
+    timings["repair_attempt_count"] = repair_attempt_count
+    timings["fill_attempt_count"] = fill_attempt_count
+    timings["missing_slots_before_each_retry"] = missing_slots_before_each_retry
+    timings["rejection_reasons_by_slot"] = flattened_rejection_reasons_by_slot
+    timings["final_fill_llm_calls"] = final_fill_llm_calls
+    timings["candidate_stems_by_attempt"] = candidate_stems_by_attempt
+    timings["deterministic_fallback_count"] = fallback_count
+    timings["initial_generation_ms"] = timings["initial_batch_generation_ms"]
+    timings["total_quiz_generation_ms"] = round((time.perf_counter() - batch_started) * 1000)
+    # Special-first metrics: batched windows, so these reflect real work, not one call per slot.
+    timings["special_candidate_attempts"] = special_candidate_attempts
+    timings["special_generation_llm_calls"] = special_generation_llm_calls
+    timings["rejected_special_candidates"] = rejected_special_candidates
+    timings["locked_multi_select_slot_ids"] = locked_by_type["multi_select"]
+    timings["locked_true_false_slot_ids"] = locked_by_type["true_false"]
+    timings["single_choice_generation_llm_calls"] = single_choice_generation_llm_calls
+    accepted = [accepted_by_slot[slot["slot_id"]] for slot in authoritative_slots if slot["slot_id"] in accepted_by_slot]
+    for question_id, question in enumerate(accepted, start=1):
+        question["id"] = question_id
+    print(f"[quiz-document-generation-timing] {json.dumps({
+        'initial_batch_count': len(sc_initial_batches),
+        'initial_batch_generation_ms': timings['initial_batch_generation_ms'],
+        'validation_ms': timings['validation_ms'],
+        'repair_ms': timings['repair_ms'],
+        'llm_calls': llm_calls,
+        'repair_llm_calls': repair_llm_calls,
+        'repair_attempt_count': repair_attempt_count,
+        'fill_attempt_count': fill_attempt_count,
+        'missing_slots_before_each_retry': missing_slots_before_each_retry,
+        'final_fill_llm_calls': final_fill_llm_calls,
+        'special_candidate_attempts': special_candidate_attempts,
+        'special_generation_llm_calls': special_generation_llm_calls,
+        'rejected_special_candidates': rejected_special_candidates,
+        'single_choice_generation_llm_calls': single_choice_generation_llm_calls,
+        'accepted': len(accepted),
+    })}")
+    return accepted, results, timings
+
+
+def _run_document_generic_batch(
+    document: dict,
+    difficulty: str,
+    planned_slots: list[dict],
+    owner_id: str,
+    model_id: str,
+    question_count: int,
+    generation_run_id: str,
+) -> tuple[list[dict], dict, dict]:
+    """Generic mixed-type document batch generation: the model chooses each question's type
+    freely (single_choice/true_false/multi_select, no fixed ratio), in batches of up to 10, with
+    up to 2 repair rounds and 2 fill rounds for whatever slots are still missing, then
+    deterministic grounded fallback for anything left. This is the general-purpose document
+    batch generator for arbitrary question counts; the fixed 10/3/2 document quiz blueprint uses
+    the special-first pipeline instead (see _run_document_special_first_batch).
     """
     batch_started = time.perf_counter()
     authoritative_slots = planned_slots[:question_count]
@@ -2721,27 +3254,15 @@ def _run_document_v2_batch(
             timings["initial_batches"].append(batch_timing)
         print(f"[quiz-document-batch-timing] {json.dumps(batch_timing)}")
 
-    if fixed_type_batches:
-        pools: dict[str, list[dict]] = {}
-        for slot in authoritative_slots:
-            pools.setdefault(str(slot.get("question_type") or "single_choice"), []).append(slot)
-        initial_batches = []
-        for qtype, size in fixed_type_batches:
-            pool = pools.get(qtype, [])
-            batch_slots, pools[qtype] = pool[:size], pool[size:]
-            if batch_slots:
-                initial_batches.append((batch_slots, qtype))
-    else:
-        initial_batches = [
-            (authoritative_slots[index:index + 10], None)
-            for index in range(0, len(authoritative_slots), 10)
-        ]
+    initial_batches = [
+        authoritative_slots[index:index + 10]
+        for index in range(0, len(authoritative_slots), 10)
+    ]
     timings["initial_batch_count"] = len(initial_batches)
-    for batch_index, (batch_slots, required_type) in enumerate(initial_batches, start=1):
-        run_generation_call(batch_slots, "initial", batch_index, required_type)
+    for batch_index, batch_slots in enumerate(initial_batches, start=1):
+        run_generation_call(batch_slots, "initial", batch_index)
 
     next_batch_index = len(initial_batches) + 1
-    retry_types = ("single_choice", "true_false", "multi_select") if fixed_type_batches else (None,)
     for phase, retry_limit in (("repair", 2), ("fill", 2)):
         for retry_index in range(1, retry_limit + 1):
             missing_slots = [slot for slot in authoritative_slots if slot["slot_id"] in remaining_slot_ids]
@@ -2757,73 +3278,8 @@ def _run_document_v2_batch(
             }
             missing_slots_before_each_retry.append(retry_state)
             print(f"[quiz-document-retry] {json.dumps(retry_state)}")
-            for required_type in retry_types:
-                call_slots = (
-                    [slot for slot in missing_slots if str(slot.get("question_type") or "single_choice") == required_type]
-                    if required_type else missing_slots
-                )
-                if not call_slots:
-                    continue
-                run_generation_call(call_slots, phase, next_batch_index, required_type)
-                next_batch_index += 1
-
-    # Type-swap recovery: repair+fill are exhausted. A special-type slot that is STILL missing
-    # never stays permanently stuck as that type -- trade question_type ownership (never
-    # content/evidence) with a ranked single_choice alternate, then make one bounded targeted
-    # generation attempt for exactly the slots whose type just changed. Content stays bound to
-    # its own slot_id throughout; only which type each slot_id is asked to produce changes.
-    type_swap_count = 0
-    if fixed_type_batches and type_alternates:
-        for special_type in ("multi_select", "true_false"):
-            if type_swap_count >= DOCUMENT_TYPE_SWAP_BUDGET:
-                break
-            alternates = list(type_alternates.get(special_type) or [])
-            still_missing = [
-                slot_id for slot_id in list(remaining_slot_ids)
-                if str(groups_by_id[slot_id].get("question_type")) == special_type
-            ]
-            for slot_id in still_missing:
-                if type_swap_count >= DOCUMENT_TYPE_SWAP_BUDGET:
-                    break
-                alt_id = next(
-                    (
-                        aid for aid in alternates
-                        if aid in groups_by_id and groups_by_id[aid].get("question_type") == "single_choice"
-                    ),
-                    None,
-                )
-                if alt_id is None:
-                    continue
-                alternates.remove(alt_id)
-                groups_by_id[slot_id]["question_type"] = "single_choice"
-                groups_by_id[alt_id]["question_type"] = special_type
-                if alt_id not in remaining_slot_ids:
-                    accepted_by_slot.pop(alt_id, None)
-                    remaining_slot_ids.add(alt_id)
-                # Both slots now owe a different type's contract than whatever earlier rejection
-                # reasons were recorded for them -- drop only the stale type-specific ones (e.g.
-                # "multi_select requires...") so the next repair prompt isn't primed with errors
-                # that no longer apply; generic history (duplicates, grounding) is still useful.
-                for affected_id in (slot_id, alt_id):
-                    rejection_reasons_by_slot[affected_id] = [
-                        reason for reason in rejection_reasons_by_slot.get(affected_id, [])
-                        if not _is_type_specific_rejection_reason(reason)
-                    ]
-                type_swap_count += 1
-                print(
-                    f"[quiz-document-type-swap] {slot_id} -> single_choice, {alt_id} -> {special_type}"
-                )
-        if type_swap_count:
-            for required_type in ("single_choice", "true_false", "multi_select"):
-                swapped_missing = [
-                    slot for slot in authoritative_slots
-                    if slot["slot_id"] in remaining_slot_ids
-                    and str(slot.get("question_type")) == required_type
-                ]
-                if not swapped_missing:
-                    continue
-                run_generation_call(swapped_missing, "repair", next_batch_index, required_type)
-                next_batch_index += 1
+            run_generation_call(missing_slots, phase, next_batch_index)
+            next_batch_index += 1
 
     # Exact count is contractual. Fill only still-missing slots, preserving all
     # accepted questions, and run deterministic candidates through the same
@@ -2903,7 +3359,6 @@ def _run_document_v2_batch(
     timings["final_fill_llm_calls"] = final_fill_llm_calls
     timings["candidate_stems_by_attempt"] = candidate_stems_by_attempt
     timings["deterministic_fallback_count"] = fallback_count
-    timings["type_swap_count"] = type_swap_count
     timings["initial_generation_ms"] = timings["initial_batch_generation_ms"]
     timings["total_quiz_generation_ms"] = round((time.perf_counter() - batch_started) * 1000)
     accepted = [accepted_by_slot[slot["slot_id"]] for slot in authoritative_slots if slot["slot_id"] in accepted_by_slot]
@@ -2923,6 +3378,31 @@ def _run_document_v2_batch(
         'accepted': len(accepted),
     })}")
     return accepted, results, timings
+
+
+def _run_document_v2_batch(
+    document: dict,
+    difficulty: str,
+    planned_slots: list[dict],
+    owner_id: str,
+    model_id: str,
+    question_count: int,
+    generation_run_id: str,
+    special_first: bool = False,
+    type_rankings: dict[str, list[str]] | None = None,
+) -> tuple[list[dict], dict, dict]:
+    """Dispatch to the fixed-blueprint special-first pipeline (special_first=True, used by the
+    document quiz's exact 10/3/2 blueprint -- see generate_quiz) or the generic mixed-type batch
+    generator (special_first=False, default -- arbitrary question counts, model chooses each
+    question's type freely)."""
+    if special_first:
+        return _run_document_special_first_batch(
+            document, difficulty, planned_slots, owner_id, model_id, question_count,
+            generation_run_id, type_rankings=type_rankings,
+        )
+    return _run_document_generic_batch(
+        document, difficulty, planned_slots, owner_id, model_id, question_count, generation_run_id,
+    )
 
 
 def generate_quiz(
@@ -3050,7 +3530,7 @@ def generate_quiz(
     generation_run_id = str(uuid4())
     slot_started = time.perf_counter()
     planned_slots = _document_v2_slots(planned_topics, topic_lookup, topic_chunks)
-    planned_slots, type_alternates, type_planning_timings = _prepare_document_slot_blueprint(
+    planned_slots, type_rankings, type_planning_timings = _prepare_document_slot_rankings(
         planned_slots, model_id,
     )
     timings.update(type_planning_timings)
@@ -3061,7 +3541,7 @@ def generate_quiz(
     )
     questions, validation_results, batch_timings = _run_document_v2_batch(
         document, difficulty, planned_slots, owner_id, model_id, question_count, generation_run_id,
-        fixed_type_batches=DOCUMENT_QUIZ_BATCH_PLAN, type_alternates=type_alternates,
+        special_first=True, type_rankings=type_rankings,
     )
     timings.update(batch_timings)
 
