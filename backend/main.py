@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -44,6 +45,7 @@ from backend.summary_service import generate_document_summary
 from backend.summary_store import delete_document_summaries
 from backend.flashcard_service import authoritative_card_fields, generate_flashcards
 from backend.flashcard_store import add_flashcard, delete_document_flashcards, delete_flashcard, update_flashcard
+from backend import study_planner_service, study_planner_store
 from config import AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE, AUTH_SESSION_DAYS, CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL, QUIZ_DEFAULT_GENERATION_MODEL
 from backend.auth_store import (
     authenticate_user,
@@ -156,6 +158,43 @@ class FlashcardUpdateRequest(BaseModel):
     front: Optional[str] = Field(default=None, min_length=1, max_length=1000)
     back: Optional[str] = Field(default=None, min_length=1, max_length=4000)
     is_favorite: Optional[bool] = None
+
+
+class StudyTaskCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    document_id: Optional[str] = None
+    deadline: str
+    estimated_minutes: int = Field(gt=0, le=100_000)
+
+
+class StudyTaskUpdateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    document_id: Optional[str] = None
+    deadline: Optional[str] = None
+    estimated_minutes: Optional[int] = Field(default=None, gt=0, le=100_000)
+    remaining_minutes: Optional[int] = Field(default=None, ge=0, le=100_000)
+    status: Optional[str] = None
+
+
+class AvailabilityChangeRequest(BaseModel):
+    start_at: str
+    end_at: str
+    date: Optional[str] = None
+    is_recurring: bool = False
+    day_of_week: Optional[int] = Field(default=None, ge=0, le=6)
+
+
+class StudyBlockUpdateRequest(BaseModel):
+    start_at: Optional[str] = None
+    end_at: Optional[str] = None
+    status: Optional[str] = None
+
+
+class StudyPlanGenerateRequest(BaseModel):
+    # Naive local datetime (no timezone/UTC suffix) from the browser's own clock -- the planner
+    # never assumes the server's timezone is the user's. Falls back to the server's local clock
+    # only when the caller has none (e.g. a direct API call).
+    local_now: Optional[str] = None
 
 
 class QuizGenerateRequest(BaseModel):
@@ -969,3 +1008,131 @@ def conversation_message(conversation_id: str, request: ConversationMessageReque
             status_code=500,
             detail=f"Could not answer this conversation. Original error: {error}",
         ) from error
+
+
+# ---------------------------------------------------------------------------
+# Study Planner (Phase 1 / MVP) -- owner-scoped tasks, availability, and study blocks.
+# ---------------------------------------------------------------------------
+
+@app.post("/api/planner/tasks")
+def planner_create_task(request: StudyTaskCreateRequest, current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        return study_planner_service.create_task(
+            current_user["id"], request.title, request.deadline, request.estimated_minutes,
+            document_id=request.document_id,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/planner/tasks")
+def planner_list_tasks(current_user: dict = Depends(require_current_user)) -> list[dict]:
+    return study_planner_store.list_tasks(current_user["id"])
+
+
+@app.patch("/api/planner/tasks/{task_id}")
+def planner_update_task(task_id: str, request: StudyTaskUpdateRequest,
+                        current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        return study_planner_store.update_task(current_user["id"], task_id, request.model_dump(exclude_none=True))
+    except ValueError as error:
+        raise HTTPException(
+            status_code=404 if str(error) == "Study task not found." else 400, detail=str(error)
+        ) from error
+
+
+@app.delete("/api/planner/tasks/{task_id}")
+def planner_delete_task(task_id: str, current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        study_planner_store.delete_task(current_user["id"], task_id)
+        return {"deleted": task_id}
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.get("/api/planner/availability")
+def planner_list_availability(current_user: dict = Depends(require_current_user)) -> list[dict]:
+    return study_planner_store.list_availability(current_user["id"])
+
+
+@app.post("/api/planner/availability")
+def planner_add_availability(request: AvailabilityChangeRequest,
+                             current_user: dict = Depends(require_current_user)) -> list[dict]:
+    try:
+        return study_planner_store.add_availability(
+            current_user["id"], request.start_at, request.end_at, date=request.date,
+            is_recurring=request.is_recurring, day_of_week=request.day_of_week,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/planner/availability/remove")
+def planner_remove_availability(request: AvailabilityChangeRequest,
+                                current_user: dict = Depends(require_current_user)) -> list[dict]:
+    try:
+        return study_planner_store.remove_availability(
+            current_user["id"], request.start_at, request.end_at, date=request.date,
+            is_recurring=request.is_recurring, day_of_week=request.day_of_week,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/planner/blocks")
+def planner_list_blocks(task_id: Optional[str] = None,
+                        current_user: dict = Depends(require_current_user)) -> list[dict]:
+    return study_planner_store.list_blocks(current_user["id"], task_id=task_id)
+
+
+@app.patch("/api/planner/blocks/{block_id}")
+def planner_update_block(block_id: str, request: StudyBlockUpdateRequest,
+                         current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        result = None
+        if request.start_at or request.end_at:
+            result = study_planner_service.edit_block(
+                current_user["id"], block_id, start_at=request.start_at, end_at=request.end_at,
+            )
+        if request.status:
+            result = study_planner_store.update_block(current_user["id"], block_id, {"status": request.status})
+        if result is None:
+            raise ValueError("No block changes supplied.")
+        return result
+    except ValueError as error:
+        raise HTTPException(
+            status_code=404 if str(error) == "Study block not found." else 400, detail=str(error)
+        ) from error
+
+
+@app.delete("/api/planner/blocks/{block_id}")
+def planner_delete_block(block_id: str, current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        study_planner_store.delete_block(current_user["id"], block_id)
+        return {"deleted": block_id}
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.post("/api/planner/tasks/{task_id}/generate")
+def planner_generate_schedule(task_id: str, request: StudyPlanGenerateRequest,
+                              current_user: dict = Depends(require_current_user)) -> dict:
+    """Deterministically (no LLM) schedule this task's remaining minutes into suggested study
+    blocks -- only inside the owner's selected availability, never after the deadline, never in
+    the past, never overlapping an already-busy block. Returns a structured on_track/
+    schedule_risk result."""
+    try:
+        now = datetime.fromisoformat(request.local_now) if request.local_now else None
+        return study_planner_service.generate_schedule(current_user["id"], task_id, now=now)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=404 if str(error) == "Study task not found." else 400, detail=str(error)
+        ) from error
+
+
+@app.post("/api/planner/tasks/{task_id}/accept")
+def planner_accept_plan(task_id: str, current_user: dict = Depends(require_current_user)) -> list[dict]:
+    try:
+        return study_planner_service.accept_plan(current_user["id"], task_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error

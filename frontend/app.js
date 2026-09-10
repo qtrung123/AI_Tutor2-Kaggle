@@ -1,6 +1,7 @@
 const pageTitles = {
   overview: "Study sessions",
-  session: "Study Session"
+  session: "Study Session",
+  planner: "Study Planner"
 };
 
 const API_BASE_URL = (
@@ -30,6 +31,9 @@ const RECOMMENDATIONS_API_URL = apiUrl("/api/recommendations");
 const MODELS_API_URL = apiUrl("/api/models");
 const SUMMARY_API_BASE_URL = apiUrl("/api/summary");
 const FLASHCARDS_API_BASE_URL = apiUrl("/api/flashcards");
+const PLANNER_TASKS_API_URL = apiUrl("/api/planner/tasks");
+const PLANNER_AVAILABILITY_API_URL = apiUrl("/api/planner/availability");
+const PLANNER_BLOCKS_API_URL = apiUrl("/api/planner/blocks");
 const RECOMMENDATIONS_OVERVIEW_LIMIT = Number(window.APP_CONFIG?.RECOMMENDATIONS_OVERVIEW_LIMIT || 4);
 
 const initialState = {
@@ -72,6 +76,15 @@ let flashcardFlipped = false;
 let flashcardTopicFilter = "all";
 let loadedFlashcardKey = "";
 let flashcardLanguage = localStorage.getItem("aiTutorFlashcardLanguage") || "auto";
+
+let plannerLoaded = false;
+let plannerTasks = [];
+let plannerAvailability = [];
+let plannerBlocks = [];
+let plannerSelectedTaskId = "";
+let plannerMode = "available";
+let plannerWeekStart = plannerMondayOf(new Date());
+let plannerDrag = null;
 
 const navItems = document.querySelectorAll(".nav-item");
 const views = document.querySelectorAll(".view");
@@ -212,6 +225,33 @@ const flashcardTopicTitle = document.getElementById("flashcard-topic-title");
 const flashcardPosition = document.getElementById("flashcard-position");
 const favoriteFlashcardButton = document.getElementById("favorite-flashcard");
 let flashcardManager = null;
+
+const plannerView = document.getElementById("planner-view");
+if (plannerView) {
+  plannerView.innerHTML = `<div class="planner-shell"><div class="planner-toolbar"><div><p class="eyebrow">Study Planner</p><h2>Plan your study time</h2></div></div><div class="planner-layout"><article class="panel planner-tasks-panel"><div class="panel-heading"><div><p>Study Tasks</p><h2>Your tasks</h2></div><button class="primary-button" id="planner-new-task-button" type="button">+ New Task</button></div><form id="planner-task-form" class="planner-task-form" hidden><label>Task name<input id="planner-task-title" type="text" maxlength="200" required></label><label>Linked Study Session / Document (optional)<select id="planner-task-document"><option value="">None</option></select></label><label>Deadline<input id="planner-task-deadline" type="date" required></label><label class="planner-duration-field">Estimated study time<span class="planner-duration-inputs"><input id="planner-task-hours" type="number" min="0" max="500" value="1"> h<input id="planner-task-minutes" type="number" min="0" max="59" step="5" value="0"> m</span></label><div class="planner-task-form-actions"><button class="primary-button" type="submit">Create Task</button><button class="text-button" id="planner-cancel-task" type="button">Cancel</button></div></form><div id="planner-task-list" class="planner-task-list"></div><div id="planner-task-empty" class="empty-state">No study tasks yet. Create one to get started.</div></article><article class="panel planner-calendar-panel"><div class="panel-heading"><div><p>Weekly availability</p><h2 id="planner-week-label">This week</h2></div><div class="planner-calendar-actions"><button class="secondary-button" id="planner-prev-week" type="button">‹ Prev</button><button class="secondary-button" id="planner-next-week" type="button">Next ›</button><label class="planner-repeat-toggle"><input type="checkbox" id="planner-repeat-weekly">Repeat weekly</label><div class="planner-mode-toggle"><button class="secondary-button active" id="planner-mode-available" type="button">Mark Available</button><button class="secondary-button" id="planner-mode-erase" type="button">Erase</button></div></div></div><div id="planner-task-actions" class="planner-task-actions" hidden><span id="planner-buffer-badge" class="planner-buffer-badge"></span><button class="secondary-button" id="planner-generate-button" type="button">Generate Study Plan</button><button class="primary-button" id="planner-accept-button" type="button" disabled>Accept Plan</button></div><div id="planner-calendar" class="planner-calendar"></div><div class="planner-legend"><span class="planner-legend-item"><i class="planner-swatch planner-swatch-available"></i>Available</span><span class="planner-legend-item"><i class="planner-swatch planner-swatch-suggested"></i>Suggested block</span><span class="planner-legend-item"><i class="planner-swatch planner-swatch-confirmed"></i>Confirmed block</span></div></article></div></div>`;
+}
+const plannerNewTaskButton = document.getElementById("planner-new-task-button");
+const plannerTaskForm = document.getElementById("planner-task-form");
+const plannerTaskTitleInput = document.getElementById("planner-task-title");
+const plannerTaskDocumentSelect = document.getElementById("planner-task-document");
+const plannerTaskDeadlineInput = document.getElementById("planner-task-deadline");
+const plannerTaskHoursInput = document.getElementById("planner-task-hours");
+const plannerTaskMinutesInput = document.getElementById("planner-task-minutes");
+const plannerCancelTaskButton = document.getElementById("planner-cancel-task");
+const plannerTaskList = document.getElementById("planner-task-list");
+const plannerTaskEmpty = document.getElementById("planner-task-empty");
+const plannerWeekLabel = document.getElementById("planner-week-label");
+const plannerPrevWeekButton = document.getElementById("planner-prev-week");
+const plannerNextWeekButton = document.getElementById("planner-next-week");
+const plannerRepeatWeeklyCheckbox = document.getElementById("planner-repeat-weekly");
+const plannerModeAvailableButton = document.getElementById("planner-mode-available");
+const plannerModeEraseButton = document.getElementById("planner-mode-erase");
+const plannerTaskActions = document.getElementById("planner-task-actions");
+const plannerBufferBadge = document.getElementById("planner-buffer-badge");
+const plannerGenerateButton = document.getElementById("planner-generate-button");
+const plannerAcceptButton = document.getElementById("planner-accept-button");
+const plannerCalendar = document.getElementById("planner-calendar");
+
 const authScreen = document.getElementById("auth-screen");
 const appShell = document.getElementById("app-shell");
 const authForm = document.getElementById("auth-form");
@@ -325,6 +365,7 @@ function setPage(page) {
   views.forEach((view) => view.classList.toggle("active", view.id === `${page}-view`));
   pageTitle.textContent = pageTitles[page];
   if (pageTitles[page]) showToast(`Opened ${pageTitles[page]}`);
+  if (page === "planner") loadPlannerData();
 }
 
 async function loadGenerationModels() {
@@ -3179,6 +3220,465 @@ quizProgressClose.addEventListener("click", () => setQuizProgressDrawerOpen(fals
 quizProgressBackdrop.addEventListener("click", () => setQuizProgressDrawerOpen(false));
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") setQuizProgressDrawerOpen(false);
+});
+
+// ---------------------------------------------------------------------------
+// Study Planner (Phase 1 / MVP)
+// ---------------------------------------------------------------------------
+
+const PLANNER_DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const PLANNER_GRID_START_MINUTE = 6 * 60;
+const PLANNER_GRID_END_MINUTE = 23 * 60;
+const PLANNER_CELL_MINUTES = 30;
+let plannerScheduleResults = {};
+
+function plannerMondayOf(reference) {
+  const date = new Date(reference);
+  date.setHours(0, 0, 0, 0);
+  const offset = (date.getDay() + 6) % 7; // getDay(): 0=Sun..6=Sat -> offset from Monday
+  date.setDate(date.getDate() - offset);
+  return date;
+}
+
+function plannerDateKey(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function plannerLocalIso(date) {
+  // Naive LOCAL datetime string (no timezone/UTC suffix) -- matches how every planner time is
+  // stored (see study_planner_service.compute_schedule). Deliberately NOT toISOString(), which
+  // is UTC and would silently misrepresent "now" for a user/server in different timezones.
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${plannerDateKey(date)}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function plannerToMinutes(hhmm) {
+  const [hour, minute] = hhmm.split(":").map(Number);
+  return hour * 60 + minute;
+}
+
+function plannerMinutesToLabel(minutes) {
+  const hour = Math.floor(minutes / 60), minute = minutes % 60;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function plannerFormatDuration(totalMinutes) {
+  const minutes = Math.max(0, Math.round(totalMinutes));
+  const hours = Math.floor(minutes / 60), remainder = minutes % 60;
+  if (hours && remainder) return `${hours}h ${remainder}m`;
+  if (hours) return `${hours}h`;
+  return `${remainder}m`;
+}
+
+function plannerFormatDateLabel(date) {
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function plannerWeekDates() {
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(plannerWeekStart);
+    date.setDate(date.getDate() + index);
+    return date;
+  });
+}
+
+async function loadPlannerData() {
+  try {
+    const [tasks, availability, blocks] = await Promise.all([
+      fetchJson(PLANNER_TASKS_API_URL),
+      fetchJson(PLANNER_AVAILABILITY_API_URL),
+      fetchJson(PLANNER_BLOCKS_API_URL),
+    ]);
+    plannerTasks = tasks; plannerAvailability = availability; plannerBlocks = blocks;
+    plannerLoaded = true;
+    if (plannerSelectedTaskId && !plannerTasks.some((task) => task.task_id === plannerSelectedTaskId)) {
+      plannerSelectedTaskId = "";
+    }
+    renderPlannerTasks();
+    renderPlannerCalendar();
+    updatePlannerTaskActions();
+  } catch (error) {
+    showToast(error.message || "Could not load Study Planner data");
+  }
+}
+
+function renderPlannerTasks() {
+  if (!plannerTaskList) return;
+  plannerTaskList.innerHTML = "";
+  if (plannerTaskEmpty) plannerTaskEmpty.hidden = plannerTasks.length > 0;
+  plannerTasks.forEach((task) => {
+    const row = document.createElement("article");
+    row.className = "planner-task-row";
+    row.classList.toggle("active", task.task_id === plannerSelectedTaskId);
+    const title = document.createElement("strong");
+    title.textContent = task.title;
+    const meta = document.createElement("span");
+    meta.textContent = `Due ${task.deadline} · ${plannerFormatDuration(task.remaining_minutes)} left`;
+    const linkedDocument = indexedDocuments.find((doc) => doc.id === task.document_id);
+    const docLine = document.createElement("small");
+    docLine.textContent = task.document_id ? (linkedDocument ? linkedDocument.title : task.document_id) : "No linked document";
+    const deleteButton = document.createElement("button");
+    deleteButton.className = "text-button danger-button planner-task-delete";
+    deleteButton.type = "button";
+    deleteButton.textContent = "Delete";
+    deleteButton.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      if (!window.confirm(`Delete task "${task.title}"? Its study blocks will also be removed.`)) return;
+      try {
+        await fetchJson(`${PLANNER_TASKS_API_URL}/${encodeURIComponent(task.task_id)}`, { method: "DELETE" });
+        if (plannerSelectedTaskId === task.task_id) plannerSelectedTaskId = "";
+        delete plannerScheduleResults[task.task_id];
+        await loadPlannerData();
+        showToast("Task deleted");
+      } catch (error) {
+        showToast(error.message || "Could not delete task");
+      }
+    });
+    row.append(title, meta, docLine, deleteButton);
+    row.addEventListener("click", () => {
+      plannerSelectedTaskId = task.task_id;
+      renderPlannerTasks();
+      renderPlannerCalendar();
+      updatePlannerTaskActions();
+    });
+    plannerTaskList.appendChild(row);
+  });
+}
+
+function updatePlannerTaskActions() {
+  if (!plannerTaskActions) return;
+  const task = plannerTasks.find((item) => item.task_id === plannerSelectedTaskId);
+  plannerTaskActions.hidden = !task;
+  if (!task) return;
+  const hasSuggested = plannerBlocks.some((block) => block.task_id === task.task_id && block.status === "suggested");
+  plannerAcceptButton.disabled = !hasSuggested;
+  const result = plannerScheduleResults[task.task_id];
+  if (result) {
+    plannerBufferBadge.hidden = false;
+    plannerBufferBadge.textContent = result.status === "schedule_risk"
+      ? `Schedule Risk · short ${plannerFormatDuration(result.shortage_minutes)}`
+      : `On Track · buffer ${plannerFormatDuration(result.study_buffer)}`;
+    plannerBufferBadge.classList.toggle("risk", result.status === "schedule_risk");
+    plannerBufferBadge.classList.toggle("on-track", result.status !== "schedule_risk");
+  } else {
+    plannerBufferBadge.hidden = true;
+  }
+}
+
+function plannerAvailabilityCoversDate(slot, dateKey, weekday) {
+  return slot.is_recurring ? slot.day_of_week === weekday : slot.date === dateKey;
+}
+
+function plannerIsMinuteAvailable(dateKey, weekday, minute) {
+  return plannerAvailability.some((slot) => {
+    if (!plannerAvailabilityCoversDate(slot, dateKey, weekday)) return false;
+    return minute >= plannerToMinutes(slot.start_at) && minute < plannerToMinutes(slot.end_at);
+  });
+}
+
+function plannerBlockAt(dateKey, minute) {
+  return plannerBlocks.find((block) => {
+    if (block.status === "suggested" && block.task_id !== plannerSelectedTaskId) return false;
+    if (block.status === "missed") return false;
+    if (block.start_at.slice(0, 10) !== dateKey) return false;
+    const start = plannerToMinutes(block.start_at.slice(11, 16));
+    const end = plannerToMinutes(block.end_at.slice(11, 16));
+    return minute >= start && minute < end;
+  });
+}
+
+function renderPlannerCalendar() {
+  if (!plannerCalendar) return;
+  const weekDates = plannerWeekDates();
+  if (plannerWeekLabel) {
+    plannerWeekLabel.textContent = `${plannerFormatDateLabel(weekDates[0])} – ${plannerFormatDateLabel(weekDates[6])}`;
+  }
+  plannerCalendar.innerHTML = "";
+
+  const header = document.createElement("div");
+  header.className = "planner-grid-header";
+  header.appendChild(document.createElement("div")).className = "planner-grid-corner";
+  weekDates.forEach((date) => {
+    const cell = document.createElement("div");
+    cell.className = "planner-grid-day-label";
+    cell.textContent = `${PLANNER_DAY_LABELS[(date.getDay() + 6) % 7]} ${date.getDate()}`;
+    header.appendChild(cell);
+  });
+  plannerCalendar.appendChild(header);
+
+  const body = document.createElement("div");
+  body.className = "planner-grid-body";
+  for (let minute = PLANNER_GRID_START_MINUTE; minute < PLANNER_GRID_END_MINUTE; minute += PLANNER_CELL_MINUTES) {
+    const rowLabel = document.createElement("div");
+    rowLabel.className = "planner-grid-time-label";
+    if (minute % 60 === 0) rowLabel.textContent = plannerMinutesToLabel(minute);
+    body.appendChild(rowLabel);
+    weekDates.forEach((date) => {
+      const dateKey = plannerDateKey(date);
+      const weekday = (date.getDay() + 6) % 7;
+      const cell = document.createElement("button");
+      cell.type = "button";
+      cell.className = "planner-cell";
+      cell.dataset.date = dateKey;
+      cell.dataset.weekday = String(weekday);
+      cell.dataset.minute = String(minute);
+      cell.setAttribute("aria-label", `${dateKey} ${plannerMinutesToLabel(minute)}`);
+      cell.classList.toggle("available", plannerIsMinuteAvailable(dateKey, weekday, minute));
+      const block = plannerBlockAt(dateKey, minute);
+      if (block) {
+        cell.classList.add(block.status === "suggested" ? "block-suggested" : "block-confirmed");
+        if (plannerMinutesToLabel(minute) === block.start_at.slice(11, 16)) {
+          const label = document.createElement("span");
+          label.className = "planner-cell-block-label";
+          label.textContent = block.title;
+          cell.appendChild(label);
+          cell.title = `${block.title} (${block.start_at.slice(11, 16)}–${block.end_at.slice(11, 16)})`;
+        }
+        cell.addEventListener("click", (event) => {
+          event.stopPropagation();
+          openPlannerBlockEditor(block);
+        });
+      } else {
+        cell.addEventListener("mousedown", () => plannerStartDrag(cell));
+        cell.addEventListener("mouseenter", () => { if (plannerDrag) plannerExtendDrag(cell); });
+      }
+      body.appendChild(cell);
+    });
+  }
+  plannerCalendar.appendChild(body);
+}
+
+function plannerStartDrag(cell) {
+  const minute = Number(cell.dataset.minute);
+  plannerDrag = {
+    date: cell.dataset.date, weekday: Number(cell.dataset.weekday),
+    start: minute, end: minute + PLANNER_CELL_MINUTES, mode: plannerMode,
+  };
+  cell.classList.add("dragging");
+}
+
+function plannerExtendDrag(cell) {
+  if (!plannerDrag || cell.dataset.date !== plannerDrag.date) return;
+  const minute = Number(cell.dataset.minute);
+  plannerDrag.start = Math.min(plannerDrag.start, minute);
+  plannerDrag.end = Math.max(plannerDrag.end, minute + PLANNER_CELL_MINUTES);
+  document.querySelectorAll(`.planner-cell[data-date="${plannerDrag.date}"]`).forEach((element) => {
+    const elementMinute = Number(element.dataset.minute);
+    element.classList.toggle("dragging", elementMinute >= plannerDrag.start && elementMinute < plannerDrag.end);
+  });
+}
+
+async function plannerFinishDrag() {
+  if (!plannerDrag) return;
+  const drag = plannerDrag;
+  plannerDrag = null;
+  document.querySelectorAll(".planner-cell.dragging").forEach((element) => element.classList.remove("dragging"));
+  const payload = {
+    start_at: plannerMinutesToLabel(drag.start), end_at: plannerMinutesToLabel(drag.end),
+    is_recurring: Boolean(plannerRepeatWeeklyCheckbox?.checked),
+  };
+  if (payload.is_recurring) payload.day_of_week = drag.weekday; else payload.date = drag.date;
+  const url = drag.mode === "erase" ? `${PLANNER_AVAILABILITY_API_URL}/remove` : PLANNER_AVAILABILITY_API_URL;
+  try {
+    plannerAvailability = await fetchJson(url, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    renderPlannerCalendar();
+  } catch (error) {
+    showToast(error.message || "Could not update availability");
+  }
+}
+
+let plannerBlockEditor = null;
+let plannerEditingBlock = null;
+
+function plannerBuildBlockEditor() {
+  plannerBlockEditor = document.createElement("div");
+  plannerBlockEditor.className = "planner-block-editor-backdrop";
+  plannerBlockEditor.innerHTML = `<section class="planner-block-editor" role="dialog" aria-modal="true"><h2 id="planner-block-editor-title">Edit study block</h2><label>Start time<input id="planner-block-editor-start" type="time" step="60"></label><label>End time<input id="planner-block-editor-end" type="time" step="60"></label><p class="planner-block-editor-error" id="planner-block-editor-error" hidden></p><div class="planner-block-editor-actions"><button class="text-button danger-button" id="planner-block-editor-delete" type="button">Delete</button><button class="text-button" id="planner-block-editor-cancel" type="button">Cancel</button><button class="primary-button" id="planner-block-editor-save" type="button">Save</button></div></section>`;
+  document.body.appendChild(plannerBlockEditor);
+  plannerBlockEditor.addEventListener("click", (event) => {
+    if (event.target === plannerBlockEditor) closePlannerBlockEditor();
+  });
+  document.getElementById("planner-block-editor-cancel").addEventListener("click", closePlannerBlockEditor);
+  document.getElementById("planner-block-editor-delete").addEventListener("click", async () => {
+    if (!plannerEditingBlock) return;
+    if (!window.confirm(`Delete "${plannerEditingBlock.title}"?`)) return;
+    const deleted = await plannerDeleteBlock(plannerEditingBlock.block_id);
+    if (deleted) closePlannerBlockEditor();
+  });
+  document.getElementById("planner-block-editor-save").addEventListener("click", async () => {
+    if (!plannerEditingBlock) return;
+    const startTime = document.getElementById("planner-block-editor-start").value;
+    const endTime = document.getElementById("planner-block-editor-end").value;
+    const errorElement = document.getElementById("planner-block-editor-error");
+    if (!startTime || !endTime) {
+      errorElement.hidden = false;
+      errorElement.textContent = "Enter both a start and end time.";
+      return;
+    }
+    const dateKey = plannerEditingBlock.start_at.slice(0, 10);
+    const updated = await plannerUpdateBlock(plannerEditingBlock.block_id, {
+      start_at: `${dateKey}T${startTime}:00`, end_at: `${dateKey}T${endTime}:00`,
+    });
+    if (updated) closePlannerBlockEditor();
+  });
+}
+
+function openPlannerBlockEditor(block) {
+  plannerEditingBlock = block;
+  if (!plannerBlockEditor) plannerBuildBlockEditor();
+  document.getElementById("planner-block-editor-title").textContent = `${block.title} · ${block.start_at.slice(0, 10)}`;
+  document.getElementById("planner-block-editor-start").value = block.start_at.slice(11, 16);
+  document.getElementById("planner-block-editor-end").value = block.end_at.slice(11, 16);
+  const errorElement = document.getElementById("planner-block-editor-error");
+  errorElement.hidden = true;
+  errorElement.textContent = "";
+  plannerBlockEditor.classList.add("open");
+}
+
+function closePlannerBlockEditor() {
+  plannerEditingBlock = null;
+  plannerBlockEditor?.classList.remove("open");
+}
+
+function plannerShowBlockEditorError(message) {
+  const errorElement = document.getElementById("planner-block-editor-error");
+  if (errorElement) {
+    errorElement.hidden = false;
+    errorElement.textContent = message;
+  } else {
+    showToast(message);
+  }
+}
+
+async function plannerUpdateBlock(blockId, changes) {
+  try {
+    await fetchJson(`${PLANNER_BLOCKS_API_URL}/${encodeURIComponent(blockId)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes),
+    });
+    plannerBlocks = await fetchJson(PLANNER_BLOCKS_API_URL);
+    renderPlannerCalendar();
+    updatePlannerTaskActions();
+    showToast("Study block updated");
+    return true;
+  } catch (error) {
+    plannerShowBlockEditorError(error.message || "Could not update study block");
+    return false;
+  }
+}
+
+async function plannerDeleteBlock(blockId) {
+  try {
+    await fetchJson(`${PLANNER_BLOCKS_API_URL}/${encodeURIComponent(blockId)}`, { method: "DELETE" });
+    plannerBlocks = plannerBlocks.filter((block) => block.block_id !== blockId);
+    renderPlannerCalendar();
+    updatePlannerTaskActions();
+    showToast("Study block deleted");
+    return true;
+  } catch (error) {
+    plannerShowBlockEditorError(error.message || "Could not delete study block");
+    return false;
+  }
+}
+
+plannerNewTaskButton?.addEventListener("click", () => {
+  plannerTaskForm.hidden = !plannerTaskForm.hidden;
+  if (!plannerTaskForm.hidden) {
+    plannerTaskDocumentSelect.innerHTML = "";
+    plannerTaskDocumentSelect.add(new Option("None", ""));
+    indexedDocuments.forEach((doc) => plannerTaskDocumentSelect.add(new Option(doc.title, doc.id)));
+    plannerTaskTitleInput.focus();
+  }
+});
+plannerCancelTaskButton?.addEventListener("click", () => {
+  plannerTaskForm.hidden = true;
+  plannerTaskForm.reset();
+});
+plannerTaskForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const hours = Number(plannerTaskHoursInput.value || 0);
+  const minutes = Number(plannerTaskMinutesInput.value || 0);
+  const estimatedMinutes = hours * 60 + minutes;
+  if (estimatedMinutes <= 0) {
+    showToast("Estimated study time must be greater than zero");
+    return;
+  }
+  try {
+    const task = await fetchJson(PLANNER_TASKS_API_URL, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: plannerTaskTitleInput.value.trim(),
+        document_id: plannerTaskDocumentSelect.value || null,
+        deadline: plannerTaskDeadlineInput.value,
+        estimated_minutes: estimatedMinutes,
+      }),
+    });
+    plannerTaskForm.hidden = true;
+    plannerTaskForm.reset();
+    plannerSelectedTaskId = task.task_id;
+    await loadPlannerData();
+    showToast("Task created");
+  } catch (error) {
+    showToast(error.message || "Could not create task");
+  }
+});
+
+plannerPrevWeekButton?.addEventListener("click", () => {
+  plannerWeekStart.setDate(plannerWeekStart.getDate() - 7);
+  renderPlannerCalendar();
+});
+plannerNextWeekButton?.addEventListener("click", () => {
+  plannerWeekStart.setDate(plannerWeekStart.getDate() + 7);
+  renderPlannerCalendar();
+});
+plannerModeAvailableButton?.addEventListener("click", () => {
+  plannerMode = "available";
+  plannerModeAvailableButton.classList.add("active");
+  plannerModeEraseButton?.classList.remove("active");
+});
+plannerModeEraseButton?.addEventListener("click", () => {
+  plannerMode = "erase";
+  plannerModeEraseButton.classList.add("active");
+  plannerModeAvailableButton?.classList.remove("active");
+});
+document.addEventListener("mouseup", () => { if (plannerDrag) plannerFinishDrag(); });
+
+plannerGenerateButton?.addEventListener("click", async () => {
+  if (!plannerSelectedTaskId) return;
+  plannerGenerateButton.disabled = true;
+  try {
+    const result = await fetchJson(
+      `${PLANNER_TASKS_API_URL}/${encodeURIComponent(plannerSelectedTaskId)}/generate`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ local_now: plannerLocalIso(new Date()) }),
+      },
+    );
+    plannerScheduleResults[plannerSelectedTaskId] = result;
+    plannerBlocks = await fetchJson(PLANNER_BLOCKS_API_URL);
+    renderPlannerCalendar();
+    updatePlannerTaskActions();
+    showToast(result.status === "schedule_risk" ? "Schedule risk: not enough availability" : "Study plan generated");
+  } catch (error) {
+    showToast(error.message || "Could not generate study plan");
+  } finally {
+    plannerGenerateButton.disabled = false;
+  }
+});
+plannerAcceptButton?.addEventListener("click", async () => {
+  if (!plannerSelectedTaskId) return;
+  try {
+    await fetchJson(`${PLANNER_TASKS_API_URL}/${encodeURIComponent(plannerSelectedTaskId)}/accept`, { method: "POST" });
+    plannerBlocks = await fetchJson(PLANNER_BLOCKS_API_URL);
+    renderPlannerCalendar();
+    updatePlannerTaskActions();
+    showToast("Plan accepted");
+  } catch (error) {
+    showToast(error.message || "Could not accept plan");
+  }
 });
 
 async function initializeApplication() {
