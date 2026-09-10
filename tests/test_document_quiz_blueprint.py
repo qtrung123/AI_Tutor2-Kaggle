@@ -19,6 +19,7 @@ from backend.quiz_service import (
     _prepare_document_slot_rankings,
     _rank_document_slots_by_type,
     _run_document_single_choice_batch,
+    _run_document_single_choice_quiz,
     _run_document_v2_batch,
     _validate_v2_question,
 )
@@ -452,7 +453,12 @@ class FallbackProvenanceIsolationTests(unittest.TestCase):
 
 
 class ExactRecoveryAfterMalformedOutputTests(unittest.TestCase):
-    def test_exact_fifteen_recovery_after_a_fully_malformed_initial_response(self):
+    def test_special_types_still_recover_via_fallback_but_sc_no_longer_does(self):
+        """multi_select/true_false still have their own deterministic fallback (untouched dead
+        code, not reachable from generate_quiz); the dedicated SC generator's fallback was
+        removed for document production (see _run_document_single_choice_batch), so completely
+        malformed single_choice responses now leave those 10 slots missing instead of being
+        rescued -- only the 5 special-type slots recover."""
         slots = fifteen_slots()
         rankings = default_rankings(slots)
 
@@ -460,15 +466,14 @@ class ExactRecoveryAfterMalformedOutputTests(unittest.TestCase):
             required_type = required_type_of(prompt)
             requested = slots_in_prompt(slots, prompt)
             # Every attempt comes back completely unusable (no real question content the
-            # validator can accept); repair/fill and deterministic fallback must still recover
-            # the exact count without ever reassigning a slot's already-locked type.
+            # validator can accept).
             return [{"slot_id": s["slot_id"], "question_type": required_type} for s in requested]
 
         questions, validation, timings = run_blueprint(slots, respond, type_rankings=rankings)
-        self.assertEqual(len(questions), 15)
+        self.assertEqual(len(questions), 5)
         self.assertEqual(
             Counter(q["question_type"] for q in questions),
-            {"single_choice": 10, "true_false": 3, "multi_select": 2},
+            {"true_false": 3, "multi_select": 2},
         )
         self.assertGreater(validation["hard_rejections"], 0)
         self.assertGreater(timings["deterministic_fallback_count"], 0)
@@ -485,7 +490,7 @@ class GenerateQuizDocumentContractTests(unittest.TestCase):
         self.database_patch.stop()
         self.temp_dir.cleanup()
 
-    def test_document_scope_always_uses_fixed_fifteen_regardless_of_requested_count(self):
+    def test_document_scope_respects_requested_count_and_is_all_single_choice(self):
         document = {
             "id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 2,
             "topics": [{"topic_id": "topic_a", "name": "A"}],
@@ -515,49 +520,36 @@ class GenerateQuizDocumentContractTests(unittest.TestCase):
 
         captured = {}
 
-        def fake_batch(_document, _difficulty, planned_slots, _owner, _model, question_count, _run_id, **kwargs):
+        def fake_quiz(_document, _difficulty, planned_slots, _owner, _model, question_count, _run_id):
             captured["question_count"] = question_count
-            captured["type_rankings"] = kwargs.get("type_rankings")
             captured["planned_slots"] = planned_slots
             questions = [{
                 "id": index + 1, "slot_id": s["slot_id"], "question": f"Question {index + 1}?",
                 "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
-                "correct_answers": ["A"],
-                "question_type": (
-                    "multi_select" if index < 2 else "true_false" if index < 5 else "single_choice"
-                ),
+                "correct_answers": ["A"], "question_type": "single_choice",
                 "topic_id": s["topic_id"], "topic_name": s["topic_name"],
                 "concept_id": s["concept_id"], "concept_name": s["name"],
                 "assessment_capacity": s["assessment_capacity"], "difficulty": "easy",
                 "explanation": "Explained.", "source_chunk_ids": s["source_chunk_ids"],
                 "validation_outcome": "accepted",
             } for index, s in enumerate(planned_slots)]
-            return questions, {"accepted": 15, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}, {"llm_calls": 4}
+            return questions, {"accepted": 12, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}, {
+                "llm_calls": 2, "rejection_reasons_by_slot": {},
+            }
 
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
              patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
              patch.object(quiz_service, "build_topic_plan", side_effect=planned), \
-             patch.object(
-                 quiz_service, "_plan_document_slot_rankings",
-                 return_value=(None, {"type_planning_llm_calls": 0, "type_planning_ms": 0}),
-             ), \
-             patch.object(quiz_service, "_run_document_v2_batch", side_effect=fake_batch):
+             patch.object(quiz_service, "_run_document_single_choice_quiz", side_effect=fake_quiz):
             result = quiz_service.generate_quiz("doc.pdf", "easy", "document", question_count=12)
 
-        self.assertEqual(captured["question_count"], DOCUMENT_QUIZ_QUESTION_COUNT)
-        self.assertEqual(len(captured["planned_slots"]), 15)
-        # No slot is pre-stamped with a question_type before generation -- the special-first walk
-        # inside _run_document_v2_batch is what decides each slot's final type.
-        self.assertTrue(all("question_type" not in s for s in captured["planned_slots"]))
-        self.assertIsNotNone(captured["type_rankings"])
-        self.assertEqual(set(captured["type_rankings"].keys()), {"multi_select", "true_false"})
-        self.assertEqual(result["question_count"], 15)
-        self.assertEqual(result["assessment_plan"]["target_questions"], 15)
-        self.assertEqual(
-            result["assessment_plan"]["type_distribution"],
-            {"single_choice": 10, "true_false": 3, "multi_select": 2},
-        )
+        self.assertEqual(captured["question_count"], 12)
+        self.assertEqual(len(captured["planned_slots"]), 12)
+        self.assertEqual(result["question_count"], 12)
+        self.assertEqual(result["assessment_plan"]["target_questions"], 12)
+        self.assertEqual(result["assessment_plan"]["type_distribution"], {"single_choice": 12})
+        self.assertTrue(all(q["question_type"] == "single_choice" for q in result["questions"]))
 
 
 class SuitabilityScoringTests(unittest.TestCase):
@@ -681,27 +673,24 @@ class InfeasibleSlotReassignmentTests(unittest.TestCase):
             )
             self.assertGreaterEqual(len(normalized["correct_answers"]), 2)
 
-    def test_generation_reaches_exact_fifteen_even_when_every_llm_response_is_unusable(self):
-        """The exact scenario from the bug report: force every LLM batch to fail so every slot
-        must go through deterministic fallback, and confirm it no longer stalls short of 15 --
-        proven directly against the special-first pipeline, with no pre-assignment step.
-
-        Uses 2 clean propositions per slot (not _weak_field_slots' single-proposition majority)
-        so every slot's fallback is genuinely constructible without ever falling back to the
-        loose term-extraction ("This evidence refers to...") mode the dedicated SC generator
-        now deliberately refuses to persist (see _run_document_single_choice_batch)."""
+    def test_special_types_reach_their_quota_via_fallback_while_sc_stays_missing(self):
+        """multi_select/true_false's own deterministic fallback (untouched dead code) still
+        reaches its 5-slot quota when every LLM batch fails; the dedicated SC generator no
+        longer has a deterministic fallback for document production, so its 10 slots stay
+        missing instead of being filled with a low-quality guess (see
+        _run_document_single_choice_batch)."""
         slots = [slot(i, ((i - 1) % 4) + 1, f"Item{i}", 2) for i in range(1, 16)]
 
         def respond(_prompt):
             return []
 
         questions, _validation, timings = run_blueprint(slots, respond)
-        self.assertEqual(len(questions), 15)
+        self.assertEqual(len(questions), 5)
         self.assertEqual(
             Counter(q["question_type"] for q in questions),
-            {"single_choice": 10, "true_false": 3, "multi_select": 2},
+            {"true_false": 3, "multi_select": 2},
         )
-        self.assertEqual(timings["deterministic_fallback_count"], 15)
+        self.assertEqual(timings["deterministic_fallback_count"], 5)
 
 
 class TypePlannerOverridesWeakHeuristicTests(unittest.TestCase):
@@ -850,19 +839,25 @@ class NoRawMultiSelectFallbackJunkTests(unittest.TestCase):
 
 
 class FrontendDocumentBlueprintTests(unittest.TestCase):
-    def test_frontend_fixes_document_count_and_shows_type_breakdown(self):
+    def test_frontend_lets_document_scope_choose_twelve_or_fifteen(self):
         script = Path("frontend/app.js").read_text(encoding="utf-8")
-        self.assertIn("const DOCUMENT_QUIZ_QUESTION_COUNT = 15;", script)
-        self.assertIn('if (selectedAssessmentScope() === "document") return DOCUMENT_QUIZ_QUESTION_COUNT;', script)
-        self.assertIn("if (quizQuestionCountField) quizQuestionCountField.hidden = !topicMode;", script)
+        self.assertNotIn("DOCUMENT_QUIZ_QUESTION_COUNT", script)
+        self.assertIn(
+            "function selectedQuestionCount() {\n"
+            "  const value = Number(quizQuestionCountSelect?.value || 12);\n"
+            "  return [12, 15].includes(value) ? value : 12;\n"
+            "}",
+            script,
+        )
+        self.assertNotIn("quizQuestionCountField.hidden = !topicMode;", script)
         self.assertIn("function documentQuizTypeBreakdown(quiz)", script)
         self.assertIn('`${quiz.questions.length} questions · ${parts.join(" · ")}`', script)
         self.assertIn("Multiple Choice", script)
-        self.assertIn("Multiple Select", script)
-        # Delete/Regenerate/Retake actions must remain untouched by the document blueprint change.
+        # Delete/Regenerate/Retake actions must remain available.
         self.assertIn('["Delete Quiz", "text-button danger-button", callbacks.remove]', script)
         self.assertIn("regenerate: regenerateAssessmentQuiz", script)
         self.assertIn("retake: resetAssessmentQuiz", script)
+        self.assertIn('id="delete-quiz-button"', (Path("frontend") / "index.html").read_text(encoding="utf-8"))
 
 
 class CrossDomainEvidenceRegressionTests(unittest.TestCase):
@@ -1286,27 +1281,24 @@ class DedicatedSingleChoiceGeneratorTests(unittest.TestCase):
             self.assertEqual(len(normalized["correct_answers"]), 1)
             self.assertIn(normalized["correct_answers"][0], {"A", "B", "C", "D"})
 
-    def test_h_fallback_never_attaches_a_source_chunk_id_from_another_topic(self):
+    def test_h_no_deterministic_fallback_ever_accepts_across_topics_or_at_all(self):
+        """Deterministic/templated fallback is removed from document production (see the
+        recovery-order docstring on _run_document_single_choice_batch): when every live LLM
+        attempt fails, slots are left missing -- never silently filled via
+        _deterministic_grounded_candidate or evidence borrowed from another topic."""
         topic_a_slots = [slot(i, 1, f"AItem{i}", 2) for i in range(1, 4)]
         topic_b_slots = [slot(i, 2, f"BItem{i}", 2) for i in range(4, 7)]
         all_slots = topic_a_slots + topic_b_slots
 
         def respond(_prompt):
-            return []  # every live attempt fails; only deterministic fallback can accept
+            return []  # every live attempt fails; no fallback can rescue any slot
 
-        _accepted_count, accepted_by_slot, _remaining, _reasons, _results, timings = run_sc_batch(
+        _accepted_count, accepted_by_slot, remaining, _reasons, _results, timings = run_sc_batch(
             all_slots, respond, authoritative_slots=all_slots,
         )
-        self.assertGreater(timings["deterministic_fallback_count"], 0)
-        topic_a_ids = {"S1", "S2", "S3"}
-        topic_a_chunk_ids = {s["source_chunk_ids"][0] for s in topic_a_slots}
-        topic_b_chunk_ids = {s["source_chunk_ids"][0] for s in topic_b_slots}
-        for slot_id, normalized in accepted_by_slot.items():
-            own_chunk_ids, foreign_chunk_ids = (
-                (topic_a_chunk_ids, topic_b_chunk_ids) if slot_id in topic_a_ids
-                else (topic_b_chunk_ids, topic_a_chunk_ids)
-            )
-            self.assertFalse(set(normalized["source_chunk_ids"]) & foreign_chunk_ids)
+        self.assertEqual(accepted_by_slot, {})
+        self.assertEqual(remaining, {s["slot_id"] for s in all_slots})
+        self.assertEqual(timings["deterministic_fallback_count"], 0)
 
     def test_i_full_special_first_pipeline_still_reaches_exact_fifteen_ten_three_two(self):
         slots = fifteen_slots()
@@ -1383,18 +1375,136 @@ class DeterministicSCFallbackQualityTests(unittest.TestCase):
         self.assertEqual(remaining, {"S1"})
         self.assertEqual(timings["deterministic_fallback_count"], 0)
 
-    def test_clean_proposition_based_fallback_still_succeeds(self):
-        # Same topic, so pooled same-topic evidence supplies enough distinct grounded phrases
-        # (9 total) for a full 4-option MCQ without ever needing the term-extraction mode.
+    def test_no_deterministic_fallback_slots_stay_missing_when_every_llm_attempt_fails(self):
+        """Document production no longer falls back to deterministic/templated construction
+        (spec: quality-first -- never fabricate a low-quality question just to reach the
+        requested count). Even evidence rich enough for the old fallback to have succeeded on
+        must now leave every slot missing after bounded LLM-only recovery is exhausted."""
         slots = [slot(i, 1, f"Item{i}", 3) for i in range(1, 4)]
 
         def respond(_prompt):
-            return []  # every live attempt fails; fallback must construct a clean MCQ
+            return []  # every live attempt fails; no fallback follows
 
         _accepted_count, accepted_by_slot, remaining, _reasons, _results, timings = run_sc_batch(slots, respond)
-        self.assertEqual(len(accepted_by_slot), 3)
-        self.assertEqual(remaining, set())
-        self.assertEqual(timings["deterministic_fallback_count"], 3)
+        self.assertEqual(accepted_by_slot, {})
+        self.assertEqual(remaining, {s["slot_id"] for s in slots})
+        self.assertEqual(timings["deterministic_fallback_count"], 0)
+
+
+class DocumentSingleChoiceOrchestratorBatchingTests(unittest.TestCase):
+    """Spec: document quizzes batch as 15 = 10 + 5 and 12 = 10 + 2 (see
+    _run_document_single_choice_quiz), preserving valid candidates from each batch."""
+
+    def _run(self, slots, question_count, respond):
+        SequencedOllama.respond = respond
+        with patch.object(quiz_service, "ChatOllama", SequencedOllama), \
+             patch.object(quiz_service, "save_quiz_validation_event"):
+            return _run_document_single_choice_quiz(
+                DOCUMENT, "medium", slots, "owner", "model", question_count, "run-id",
+            )
+
+    def test_fifteen_questions_batch_as_ten_plus_five(self):
+        slots = [slot(i, ((i - 1) % 4) + 1, f"Item{i}") for i in range(1, 16)]
+        batch_sizes = []
+
+        def respond(prompt):
+            requested = slots_in_prompt(slots, prompt)
+            batch_sizes.append(len(requested))
+            return [candidate_for(s, "single_choice") for s in requested]
+
+        questions, _results, timings = self._run(slots, 15, respond)
+        self.assertEqual(len(questions), 15)
+        self.assertEqual(batch_sizes, [10, 5])
+        self.assertEqual(timings["initial_batch_count"], 2)
+
+    def test_twelve_questions_batch_as_ten_plus_two(self):
+        slots = [slot(i, ((i - 1) % 4) + 1, f"Item{i}") for i in range(1, 13)]
+        batch_sizes = []
+
+        def respond(prompt):
+            requested = slots_in_prompt(slots, prompt)
+            batch_sizes.append(len(requested))
+            return [candidate_for(s, "single_choice") for s in requested]
+
+        questions, _results, timings = self._run(slots, 12, respond)
+        self.assertEqual(len(questions), 12)
+        self.assertEqual(batch_sizes, [10, 2])
+        self.assertEqual(timings["initial_batch_count"], 2)
+
+    def test_valid_candidates_from_the_first_batch_are_never_regenerated(self):
+        """The second (5-question) batch must never re-request slots already accepted in the
+        first (10-question) batch -- recovery/batching operates only on missing slot_ids."""
+        slots = [slot(i, ((i - 1) % 4) + 1, f"Item{i}") for i in range(1, 16)]
+        requested_batches = []
+
+        def respond(prompt):
+            requested = slots_in_prompt(slots, prompt)
+            requested_batches.append({s["slot_id"] for s in requested})
+            return [candidate_for(s, "single_choice") for s in requested]
+
+        questions, _results, _timings = self._run(slots, 15, respond)
+        self.assertEqual(len(questions), 15)
+        first_batch, second_batch = requested_batches[0], requested_batches[1]
+        self.assertEqual(first_batch, {f"S{i}" for i in range(1, 11)})
+        self.assertEqual(second_batch, {f"S{i}" for i in range(11, 16)})
+        self.assertFalse(first_batch & second_batch)
+
+
+class GroundingRobustnessTests(unittest.TestCase):
+    """Spec: grounding must tolerate CamelCase concept/evidence identifiers (split into words
+    before comparison, per _expand_camel_case/_grounding_tokens) while still hard-failing a
+    candidate with no meaningful support from either the assigned concept or its evidence."""
+
+    def _group(self, name, evidence_excerpt):
+        return {
+            "slot_id": "S1", "topic_id": "topic_1", "topic_name": "Topic 1",
+            "concept_id": "aconcept_1", "name": name, "concept_plan_id": "plan_1",
+            "source_subtopic_ids": ["sub_1"], "concept_origin": "structural",
+            "source_chunk_ids": ["chunk_1"], "assessment_capacity": 5,
+            "evidence_excerpt": evidence_excerpt,
+        }
+
+    def test_camel_case_concept_name_does_not_cause_false_grounding_rejection(self):
+        group = self._group(
+            "PageReplacementAlgorithms",
+            "PageReplacementAlgorithms decide which MemoryManagement frame to evict when "
+            "physical memory is full.",
+        )
+        raw = {
+            "slot_id": "S1", "question_type": "single_choice",
+            "question": "Which strategy determines the page replacement algorithm's frame eviction choice?",
+            "options": [
+                "The page replacement algorithm evicts the frame chosen by its eviction policy",
+                "Unrelated fact about disk formatting",
+                "Unrelated fact about network routing",
+                "Unrelated fact about user authentication",
+            ],
+            "correct_answers": [0],
+            "explanation": "The page replacement algorithm's memory management policy picks the frame to evict.",
+        }
+        normalized, _warnings = _validate_v2_question(
+            raw, {"S1": group}, {"S1"}, [], "medium", 1, DOCUMENT_SCOPE, 5,
+        )
+        self.assertEqual(normalized["slot_id"], "S1")
+
+    def test_unrelated_question_still_fails_grounding(self):
+        group = self._group(
+            "PageReplacementAlgorithms",
+            "PageReplacementAlgorithms decide which MemoryManagement frame to evict when "
+            "physical memory is full.",
+        )
+        raw = {
+            "slot_id": "S1", "question_type": "single_choice",
+            "question": "Which spice is commonly used in traditional Italian tomato sauce recipes?",
+            "options": [
+                "Basil is the traditional herb", "Cardamom is uncommon in this dish",
+                "Cinnamon is not typically used here", "Turmeric is not typically used here",
+            ],
+            "correct_answers": [0],
+            "explanation": "Basil is the classic herb used in Italian tomato sauce.",
+        }
+        with self.assertRaisesRegex(ValueError, "does not appear to test"):
+            _validate_v2_question(raw, {"S1": group}, {"S1"}, [], "medium", 1, DOCUMENT_SCOPE, 5)
 
 
 if __name__ == "__main__":

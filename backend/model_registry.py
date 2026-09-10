@@ -9,14 +9,22 @@ QWEN_3B_OLLAMA_MODEL = os.getenv(
     "OLLAMA_QWEN_3B_MODEL",
     "hf.co/Qwen/Qwen2.5-3B-Instruct-GGUF:Q4_K_M",
 )
+# Kept resolvable (but no longer offered in quiz model selection, and no longer configured by
+# kaggle_run.ipynb or start_kaggle.sh) for backward compatibility with any external deployment
+# that still sets OLLAMA_GENERATION_MODELS/OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL to qwen3-4b.
 QWEN3_4B_OLLAMA_MODEL = os.getenv(
     "OLLAMA_QWEN3_4B_MODEL",
     "hf.co/Qwen/Qwen3-4B-GGUF:Q4_K_M",
+)
+QWEN3_8B_OLLAMA_MODEL = os.getenv(
+    "OLLAMA_QWEN3_8B_MODEL",
+    "hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M",
 )
 _BUILT_INS = {
     "qwen-2.5-7b": {"id": "qwen-2.5-7b", "label": "Qwen 2.5 7B", "ollama_model": QWEN_OLLAMA_MODEL},
     "qwen-2.5-3b": {"id": "qwen-2.5-3b", "label": "Qwen 2.5 3B", "ollama_model": QWEN_3B_OLLAMA_MODEL},
     "qwen3-4b": {"id": "qwen3-4b", "label": "Qwen3 4B", "ollama_model": QWEN3_4B_OLLAMA_MODEL},
+    "qwen3-8b": {"id": "qwen3-8b", "label": "Qwen3 8B", "ollama_model": QWEN3_8B_OLLAMA_MODEL},
 }
 
 

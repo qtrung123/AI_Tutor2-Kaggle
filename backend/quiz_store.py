@@ -882,6 +882,9 @@ def delete_document_quiz_data(document_id: str, owner_id: str = LEGACY_USER_ID) 
         connection.execute("DELETE FROM quiz_explanations WHERE owner_id = ? AND document_id = ?", (owner_id, document_id))
         connection.execute("DELETE FROM topic_mastery WHERE student_id = ? AND document_id = ?", (owner_id, document_id))
         connection.execute("DELETE FROM quiz_validation_events WHERE owner_id = ? AND document_id = ?", (owner_id, document_id))
+        # Otherwise a re-upload of a document with the same document_id (filename) reuses this
+        # cached concept plan instead of building a fresh one from the newly indexed content.
+        connection.execute("DELETE FROM concept_plan_cache WHERE owner_id = ? AND document_id = ?", (owner_id, document_id))
 
 
 def delete_document_attempts(

@@ -9,17 +9,17 @@ FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 PUBLIC_PORT="${PUBLIC_PORT:-7860}"
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
 OLLAMA_CHAT_MODEL="${OLLAMA_CHAT_MODEL:-hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M}"
-OLLAMA_QWEN3_4B_MODEL="${OLLAMA_QWEN3_4B_MODEL:-hf.co/Qwen/Qwen3-4B-GGUF:Q4_K_M}"
+OLLAMA_QWEN3_8B_MODEL="${OLLAMA_QWEN3_8B_MODEL:-hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M}"
 OLLAMA_GENERATION_MODELS="${OLLAMA_GENERATION_MODELS:-}"
-for required_model_id in qwen-2.5-7b qwen3-4b; do
+for required_model_id in qwen-2.5-7b qwen3-8b; do
   case ",$OLLAMA_GENERATION_MODELS," in
     *",$required_model_id,"*) ;;
     *) OLLAMA_GENERATION_MODELS="${OLLAMA_GENERATION_MODELS:+$OLLAMA_GENERATION_MODELS,}$required_model_id" ;;
   esac
 done
 DEFAULT_MODEL="${OLLAMA_DEFAULT_GENERATION_MODEL:-qwen-2.5-7b}"
-QUIZ_DEFAULT_MODEL="${OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL:-qwen3-4b}"
-AVAILABLE_MODELS="${AVAILABLE_MODELS:-$OLLAMA_CHAT_MODEL,$OLLAMA_QWEN3_4B_MODEL}"
+QUIZ_DEFAULT_MODEL="${OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL:-qwen3-8b}"
+AVAILABLE_MODELS="${AVAILABLE_MODELS:-$OLLAMA_CHAT_MODEL,$OLLAMA_QWEN3_8B_MODEL}"
 PRELOAD_ALL_MODELS="${PRELOAD_ALL_MODELS:-false}"
 OLLAMA_EMBEDDING_MODEL="${OLLAMA_EMBEDDING_MODEL:-bge-m3}"
 GGUF_MODEL_PATH="${GGUF_MODEL_PATH:-}"
@@ -27,7 +27,7 @@ RECREATE_OLLAMA_MODEL="${RECREATE_OLLAMA_MODEL:-0}"
 REBUILD_CHROMA_ON_EMBEDDING_CHANGE="${REBUILD_CHROMA_ON_EMBEDDING_CHANGE:-1}"
 
 export PROJECT_ROOT BACKEND_PORT FRONTEND_PORT PUBLIC_PORT OLLAMA_HOST
-export OLLAMA_CHAT_MODEL OLLAMA_QWEN3_4B_MODEL OLLAMA_GENERATION_MODELS OLLAMA_DEFAULT_GENERATION_MODEL="$DEFAULT_MODEL"
+export OLLAMA_CHAT_MODEL OLLAMA_QWEN3_8B_MODEL OLLAMA_GENERATION_MODELS OLLAMA_DEFAULT_GENERATION_MODEL="$DEFAULT_MODEL"
 export OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL="$QUIZ_DEFAULT_MODEL" OLLAMA_EMBEDDING_MODEL
 export AI_TUTOR_DATA_DIR="${AI_TUTOR_DATA_DIR:-$PROJECT_ROOT/data}"
 export AI_TUTOR_VECTORSTORE_DIR="${AI_TUTOR_VECTORSTORE_DIR:-$PROJECT_ROOT/vectorstore}"
@@ -140,7 +140,7 @@ PY
 
 warm_models_once() {
   local key marker
-  key="$(printf '%s\n%s\n%s\n' "$OLLAMA_CHAT_MODEL" "$OLLAMA_QWEN3_4B_MODEL" "$OLLAMA_EMBEDDING_MODEL" | sha256sum | awk '{print $1}')"
+  key="$(printf '%s\n%s\n%s\n' "$OLLAMA_CHAT_MODEL" "$OLLAMA_QWEN3_8B_MODEL" "$OLLAMA_EMBEDDING_MODEL" | sha256sum | awk '{print $1}')"
   marker="$RUNTIME_DIR/models-warmed-$key"
   if [[ -f "$marker" ]]; then
     log "Model warmup already completed in this runtime"
@@ -153,7 +153,7 @@ warm_models_once() {
   log "Warming quiz model without keeping it resident"
   curl --fail --silent --show-error --max-time 600 \
     -H 'Content-Type: application/json' "$OLLAMA_HOST/api/generate" \
-    -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_QWEN3_4B_MODEL"], "prompt": "Reply with {} only.", "stream": False, "think": False, "format": "json", "keep_alive": 0}))')" >/dev/null
+    -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_QWEN3_8B_MODEL"], "prompt": "Reply with {} only.", "stream": False, "think": False, "format": "json", "keep_alive": 0}))')" >/dev/null
   log "Warming embedding model"
   curl --fail --silent --show-error --max-time 180 \
     -H 'Content-Type: application/json' "$OLLAMA_HOST/api/embed" \
@@ -188,11 +188,11 @@ elif [[ "$RECREATE_OLLAMA_MODEL" == "1" ]] || ! ollama_has_model "$OLLAMA_CHAT_M
   ollama create "$OLLAMA_CHAT_MODEL" -f "$MODELFILE" >>"$LOG_DIR/ollama.log" 2>&1
 fi
 
-if ! ollama_has_model "$OLLAMA_QWEN3_4B_MODEL"; then
-  log "Pulling quiz model $OLLAMA_QWEN3_4B_MODEL"
-  ollama pull "$OLLAMA_QWEN3_4B_MODEL" >>"$LOG_DIR/ollama.log" 2>&1
+if ! ollama_has_model "$OLLAMA_QWEN3_8B_MODEL"; then
+  log "Pulling quiz model $OLLAMA_QWEN3_8B_MODEL"
+  ollama pull "$OLLAMA_QWEN3_8B_MODEL" >>"$LOG_DIR/ollama.log" 2>&1
 else
-  log "Quiz model already exists: $OLLAMA_QWEN3_4B_MODEL"
+  log "Quiz model already exists: $OLLAMA_QWEN3_8B_MODEL"
 fi
 
 if [[ "$PRELOAD_ALL_MODELS" == "true" || "$PRELOAD_ALL_MODELS" == "1" ]]; then

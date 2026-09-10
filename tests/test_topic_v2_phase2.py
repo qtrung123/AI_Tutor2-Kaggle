@@ -119,9 +119,10 @@ class TopicV2Phase2Tests(unittest.TestCase):
         self.assertEqual(sum(counts.values()), 10)
         self.assertTrue(all(count >= 1 for count in counts.values()))
 
-    def test_document_generation_always_uses_the_fixed_fifteen_question_cap(self):
-        """Document scope ignores any requested question_count and always plans/generates
-        exactly the fixed 15-question blueprint (see DOCUMENT_QUIZ_QUESTION_COUNT)."""
+    def test_document_generation_uses_requested_question_count_all_single_choice(self):
+        """Document scope respects the requested 12/15 question_count (default 12) and produces
+        an all-single_choice quiz -- no type planner, no special-type quota (see
+        _run_document_single_choice_quiz)."""
         topics = [{"topic_id": name, "name": name, "subtopics": []} for name in ("a", "b", "c", "d")]
         document = {"id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 3, "topics": topics}
         def chunks(_document_id, topic_id, _owner):
@@ -141,15 +142,11 @@ class TopicV2Phase2Tests(unittest.TestCase):
                     "concept_plan_id": f"plan-{topic['topic_id']}", "assessment_capacity": 4,
                     "allocated_questions": 0, "concepts": concepts}
         def generated(_document, _difficulty, slots, _owner, _model, requested, _run_id, **_kwargs):
-            # No slot carries a pre-assigned question_type (see _run_document_v2_batch's
-            # special-first pipeline) -- fabricate the fixed 2 multi_select / 3 true_false /
-            # 10 single_choice split here by position instead.
+            # Every slot is single_choice -- the sole production path for document quizzes.
             questions = [{
                 "id": index + 1, "slot_id": slot["slot_id"],
                 "question": f"Which supported concept applies in case {index + 1}?",
-                "question_type": (
-                    "multi_select" if index < 2 else "true_false" if index < 5 else "single_choice"
-                ),
+                "question_type": "single_choice",
                 "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
                 "topic_id": slot["topic_id"], "topic_name": slot["topic_name"],
                 "concept_id": slot["concept_id"], "concept_name": slot["name"],
@@ -161,29 +158,26 @@ class TopicV2Phase2Tests(unittest.TestCase):
             return questions, {"accepted": requested, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}, {
                 "llm_calls": 1, "prompt_construction_ms": 1, "initial_batch_generation_ms": 2,
                 "validation_ms": 1, "repair_ms": 0, "prompt_tokens": 100, "output_tokens": 200,
+                "rejection_reasons_by_slot": {},
             }
         for requested in (None, 12, 15):
+            expected_count = requested or 12
             with self.subTest(question_count=requested), \
                  patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
                  patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
                  patch.object(quiz_service, "get_quiz", return_value=None), \
                  patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
                  patch.object(quiz_service, "build_topic_plan", side_effect=plan), \
-                 patch.object(
-                     quiz_service, "_plan_document_slot_rankings",
-                     return_value=(None, {"type_planning_llm_calls": 0, "type_planning_ms": 0}),
-                 ), \
-                 patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated) as batch, \
+                 patch.object(quiz_service, "_run_document_single_choice_quiz", side_effect=generated) as batch, \
                  patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, value, _o: value):
                 kwargs = {"question_count": requested} if requested is not None else {}
                 result = quiz_service.generate_quiz("doc.pdf", "easy", "document", **kwargs)
-            self.assertEqual(result["question_count"], quiz_service.DOCUMENT_QUIZ_QUESTION_COUNT)
-            self.assertEqual(result["assessment_plan"]["target_questions"], quiz_service.DOCUMENT_QUIZ_QUESTION_COUNT)
+            self.assertEqual(result["question_count"], expected_count)
+            self.assertEqual(result["assessment_plan"]["target_questions"], expected_count)
             represented = {question["topic_id"] for question in result["questions"]}
             self.assertEqual(represented, {"a", "b", "c", "d"})
+            self.assertTrue(all(question["question_type"] == "single_choice" for question in result["questions"]))
             self.assertEqual(batch.call_count, 1)
-            batch_kwargs = batch.call_args.kwargs
-            self.assertTrue(batch_kwargs.get("special_first"))
             timings = result["assessment_plan"]["timings_ms"]
             for key in (
                 "concept_planning_ms", "allocation_ms", "prompt_construction_ms",
@@ -213,7 +207,7 @@ class TopicV2Phase2Tests(unittest.TestCase):
         def generated(*_args, **_kwargs):
             return ([{"id": index + 1, "question": f"Grounded question {index + 1}?"} for index in range(9)],
                     {"accepted": 9, "accepted_with_warnings": 0, "rejected": 1,
-                     "reasons": ["bounded repair exhausted"]}, {"llm_calls": 3})
+                     "reasons": ["bounded repair exhausted"]}, {"llm_calls": 3, "rejection_reasons_by_slot": {}})
 
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
@@ -221,19 +215,13 @@ class TopicV2Phase2Tests(unittest.TestCase):
              patch.object(quiz_service, "get_topic_chunks", return_value=[evidence]), \
              patch.object(quiz_service, "build_topic_plan", return_value=plan), \
              patch.object(quiz_service, "resolve_concept_evidence", return_value=[evidence]), \
-             patch.object(
-                 quiz_service, "_plan_document_slot_rankings",
-                 return_value=(None, {"type_planning_llm_calls": 0, "type_planning_ms": 0}),
-             ), \
-             patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated), \
+             patch.object(quiz_service, "_run_document_single_choice_quiz", side_effect=generated), \
              patch.object(quiz_service, "save_quiz") as save:
             with self.assertRaises(quiz_service.QuizGenerationError) as raised:
-                # Document scope always overrides to the fixed 15-question blueprint, so this
-                # requested value is intentionally ignored -- the fixture below still expects 15.
                 quiz_service.generate_quiz("doc.pdf", "easy", "document", question_count=12)
-        self.assertEqual(raised.exception.detail["requested_count"], quiz_service.DOCUMENT_QUIZ_QUESTION_COUNT)
+        self.assertEqual(raised.exception.detail["requested_count"], 12)
         self.assertEqual(raised.exception.detail["valid_count"], 9)
-        self.assertEqual(raised.exception.detail["missing_count"], quiz_service.DOCUMENT_QUIZ_QUESTION_COUNT - 9)
+        self.assertEqual(raised.exception.detail["missing_count"], 12 - 9)
         self.assertTrue(raised.exception.detail["failure_summary"])
         save.assert_not_called()
 
@@ -322,6 +310,18 @@ class TopicV2Phase2Tests(unittest.TestCase):
             _plan, timing = quiz_service._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
         self.assertEqual(build.call_count, 2)
         self.assertTrue(timing["cache_hit"])
+
+    def test_deleting_a_document_clears_its_concept_plan_cache(self):
+        """A re-upload of the same filename after Delete Document must not reuse a stale cached
+        concept plan (see delete_document_quiz_data)."""
+        document = {"id": "doc.pdf", "hash": "hash-v1", "topic_schema_version": 3}
+        planned = [{"name": "Scheduling", "source_subtopic_ids": ["sub_a"], "source_chunk_ids": ["c1"]}]
+        with patch("backend.assessment_planner._plan_seeds", return_value=planned), \
+             patch.object(quiz_service, "build_topic_plan", wraps=assessment_planner.build_topic_plan) as build:
+            quiz_service._get_or_build_topic_plan(document, TOPIC, CHUNKS, "local_student")
+            quiz_store.delete_document_quiz_data("doc.pdf", "local_student")
+            quiz_service._get_or_build_topic_plan(document, TOPIC, CHUNKS, "local_student")
+        self.assertEqual(build.call_count, 2)
 
     def test_stale_plan_rows_do_not_affect_historical_quiz_reads(self):
         quiz_store.save_quiz("doc.pdf", "easy", question("historical-quiz", "historical-plan"))

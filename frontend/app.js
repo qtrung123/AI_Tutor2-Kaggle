@@ -96,11 +96,11 @@ const quizDifficultySelect = document.getElementById("quiz-difficulty-select");
 let quizQuestionCountSelect = document.getElementById("quiz-question-count-select");
 let quizQuestionCountField = document.getElementById("quiz-question-count-field");
 let quizModelSelect = document.getElementById("quiz-model-select");
-const DOCUMENT_QUIZ_QUESTION_COUNT = 15;
 const generateQuizButton = document.getElementById("generate-quiz-button");
 const resetQuizButton = document.getElementById("reset-quiz-button");
 resetQuizButton.textContent = "Retake Quiz";
 const newQuizButton = document.getElementById("new-quiz-button");
+const deleteQuizButton = document.getElementById("delete-quiz-button");
 const reviewQuizButton = document.createElement("button");
 reviewQuizButton.className = "text-button";
 reviewQuizButton.type = "button";
@@ -791,6 +791,12 @@ async function deleteUploadedSource(source, button) {
   if (!title) {
     return;
   }
+  if (!window.confirm(
+    `Delete "${title}"? This permanently removes the document, its quizzes, attempts, summaries, `
+    + "flashcards, and progress data. This cannot be undone."
+  )) {
+    return;
+  }
 
   button.disabled = true;
   button.textContent = "Deleting";
@@ -1204,6 +1210,9 @@ function updateAssessmentSummary() {
   if (newQuizButton) {
     newQuizButton.disabled = !hasQuiz;
   }
+  if (deleteQuizButton) {
+    deleteQuizButton.disabled = !hasQuiz;
+  }
 }
 
 function getSelectedQuizStatus() {
@@ -1216,7 +1225,6 @@ function selectedDifficulty() {
 }
 
 function selectedQuestionCount() {
-  if (selectedAssessmentScope() === "document") return DOCUMENT_QUIZ_QUESTION_COUNT;
   const value = Number(quizQuestionCountSelect?.value || 12);
   return [12, 15].includes(value) ? value : 12;
 }
@@ -1233,7 +1241,7 @@ function selectedQuizGenerationRequest() {
     topic_id: assessmentScope === "topic" ? selectedTopicId() : null,
     difficulty: selectedDifficulty(),
     question_count: selectedQuestionCount(),
-    model_id: quizModelSelect?.value || "qwen3-4b"
+    model_id: quizModelSelect?.value || "qwen3-8b"
   };
 }
 
@@ -1483,8 +1491,16 @@ function renderDashboard() {
       const gap = document.createElement("small"); gap.textContent = `${gapCount} knowledge gap${gapCount === 1 ? "" : "s"}`;
       copy.append(title, meta, gap); const action = document.createElement("button"); action.className = "text-button"; action.type = "button"; action.textContent = "Open session →";
       action.addEventListener("click", () => openStudySession(material.document_id));
+      const deleteButton = document.createElement("button");
+      deleteButton.className = "text-button danger-button study-session-delete-button";
+      deleteButton.type = "button";
+      deleteButton.textContent = "Delete";
+      deleteButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        deleteUploadedSource({ title: material.document_id }, deleteButton);
+      });
       row.addEventListener("click", (event) => { if (!event.target.closest("button")) openStudySession(material.document_id); });
-      row.append(copy, action); overviewMaterialsList.appendChild(row);
+      row.append(copy, action, deleteButton); overviewMaterialsList.appendChild(row);
     });
   }
   renderSidebarRecentDocuments(materials);
@@ -1699,7 +1715,6 @@ function updateTopicOptions() {
 function updateAssessmentScope() {
   const topicMode = selectedAssessmentScope() === "topic";
   if (quizTopicField) quizTopicField.hidden = !topicMode;
-  if (quizQuestionCountField) quizQuestionCountField.hidden = !topicMode;
 }
 
 async function handleQuizDocumentChange() {
@@ -1723,6 +1738,7 @@ function setAssessmentLoading(isLoading) {
   generateQuizButton.disabled = isLoading;
   newQuizButton.disabled = isLoading;
   resetQuizButton.disabled = isLoading;
+  if (deleteQuizButton) deleteQuizButton.disabled = isLoading;
   [quizDocumentSelect, quizScopeSelect, quizTopicSelect, quizDifficultySelect,
     quizQuestionCountSelect, quizModelSelect].forEach((control) => {
     if (control) control.disabled = isLoading;
@@ -3015,6 +3031,7 @@ document.addEventListener("keydown", (event) => {
 generateQuizButton.addEventListener("click", generateAssessmentQuiz);
 newQuizButton.addEventListener("click", regenerateAssessmentQuiz);
 resetQuizButton.addEventListener("click", resetAssessmentQuiz);
+deleteQuizButton?.addEventListener("click", deleteAssessmentQuiz);
 reviewQuizButton.addEventListener("click", () => {
   if (currentAttempt?.completed) renderAssessmentQuiz();
 });
@@ -3102,8 +3119,8 @@ function openQuizCreateDialog() {
     caption.textContent = "Quiz model";
     quizModelSelect = document.createElement("select");
     quizModelSelect.id = "quiz-model-select";
-    quizModelSelect.add(new Option("Qwen3-4B (Fast)", "qwen3-4b", true, true));
-    quizModelSelect.add(new Option("Qwen2.5-7B (Higher Quality)", "qwen-2.5-7b"));
+    quizModelSelect.add(new Option("Qwen3-8B (Higher Quality)", "qwen3-8b", true, true));
+    quizModelSelect.add(new Option("Qwen2.5-7B (Stable)", "qwen-2.5-7b"));
     label.append(caption, quizModelSelect);
     generateQuizButton.before(label);
   }

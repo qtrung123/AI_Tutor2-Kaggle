@@ -178,9 +178,7 @@ class QuizRetakeFlowTests(unittest.TestCase):
                 {
                     "id": index,
                     "slot_id": f"S{index}",
-                    "question_type": (
-                        "single_choice" if index <= 10 else "true_false" if index <= 13 else "multi_select"
-                    ),
+                    "question_type": "single_choice",
                     "question": f"Grounded embedded-systems question {index}?",
                     "options": ["A. Alpha", "B. Beta", "C. Gamma", "D. Delta"],
                     "correct_answer": "A",
@@ -222,10 +220,10 @@ class QuizRetakeFlowTests(unittest.TestCase):
             for topic_id, offset in (("topic_1", 0), ("topic_2", 6))
         }
 
-        def generated_batch(_document, _difficulty, _slots, _owner, _model, _count, _run_id, **_kwargs):
+        def generated_batch(_document, _difficulty, _slots, _owner, _model, _count, _run_id):
             return quiz["questions"], {
                 "accepted": 15, "accepted_with_warnings": 0, "rejected": 0, "reasons": [],
-            }, {"llm_calls": 1}
+            }, {"llm_calls": 1, "rejection_reasons_by_slot": {}}
 
         with patch.object(quiz_service, "_document_lookup", return_value={document["id"]: document}), \
              patch.object(quiz_service, "get_topic_chunks", return_value=[{
@@ -245,11 +243,7 @@ class QuizRetakeFlowTests(unittest.TestCase):
                  ),
                  "metadata": {"chunk_id": "chunk_1"},
              }]), \
-             patch.object(
-                 quiz_service, "_plan_document_slot_rankings",
-                 return_value=(None, {"type_planning_llm_calls": 0, "type_planning_ms": 0}),
-             ), \
-             patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated_batch), \
+             patch.object(quiz_service, "_run_document_single_choice_quiz", side_effect=generated_batch), \
              patch.object(quiz_service, "uuid4", return_value="document-batch-15"):
             generated = quiz_service.generate_quiz(
                 "Embedded Systems.pdf", "easy", "document", owner_id=LEGACY_USER_ID, question_count=15,
@@ -280,7 +274,7 @@ class QuizRetakeFlowTests(unittest.TestCase):
             "A. Alpha", "B. Beta", "C. Gamma", "D. Delta",
         ])
 
-        answers = {str(index): (["A", "B"] if index > 13 else "A") for index in range(1, 16)}
+        answers = {str(index): "A" for index in range(1, 16)}
         completed = submit_quiz_attempt(
             "Embedded Systems.pdf", "easy", "document", answers,
             LEGACY_USER_ID, quiz_id="document-batch-15",

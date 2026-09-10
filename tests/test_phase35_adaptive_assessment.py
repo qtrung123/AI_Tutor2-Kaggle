@@ -161,15 +161,11 @@ class AdaptiveAssessmentTests(unittest.TestCase):
                 concept["source_chunk_ids"] = [f"{topic['topic_id']}_1"]
             return plan
 
-        def generated(_document, difficulty, slots, _owner, _model, requested, _run_id, **_kwargs):
-            # No slot carries a pre-assigned question_type (see _run_document_v2_batch's
-            # special-first pipeline) -- fabricate the fixed 2 multi_select / 3 true_false /
-            # 10 single_choice split here by position instead.
+        def generated(_document, difficulty, slots, _owner, _model, requested, _run_id):
+            # Every slot is single_choice -- the sole production path for document quizzes.
             questions = [{
                 "id": index + 1, "slot_id": slot["slot_id"],
-                "question_type": (
-                    "multi_select" if index < 2 else "true_false" if index < 5 else "single_choice"
-                ),
+                "question_type": "single_choice",
                 "question": f"Question for {slot['name']} case {index + 1}?",
                 "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
                 "topic_id": slot["topic_id"], "topic_name": slot["topic_name"],
@@ -179,7 +175,9 @@ class AdaptiveAssessmentTests(unittest.TestCase):
                 "explanation": "Supported.", "source_chunk_ids": slot["source_chunk_ids"],
                 "validation_outcome": "accepted",
             } for index, slot in enumerate(slots)]
-            return questions, {"accepted": requested, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}, {"llm_calls": 1}
+            return questions, {"accepted": requested, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}, {
+                "llm_calls": 1, "rejection_reasons_by_slot": {},
+            }
 
         def chunks(document_id, topic_id, owner_id):
             return [{
@@ -194,15 +192,11 @@ class AdaptiveAssessmentTests(unittest.TestCase):
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
              patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
              patch.object(quiz_service, "build_topic_plan", side_effect=planned), \
-             patch.object(
-                 quiz_service, "_plan_document_slot_rankings",
-                 return_value=(None, {"type_planning_llm_calls": 0, "type_planning_ms": 0}),
-             ), \
-             patch.object(quiz_service, "_run_document_v2_batch", side_effect=generated) as generator, \
+             patch.object(quiz_service, "_run_document_single_choice_quiz", side_effect=generated) as generator, \
              patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _owner: quiz):
             result = quiz_service.generate_quiz("doc.pdf", "easy", "document")
 
-        self.assertEqual(result["question_count"], 15)
+        self.assertEqual(result["question_count"], 12)
         self.assertEqual(generator.call_count, 1)
         self.assertEqual({question["topic_id"] for question in result["questions"]}, {"topic_a", "topic_b"})
         self.assertTrue(all(question["concept_id"] for question in result["questions"]))
