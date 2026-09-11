@@ -34,6 +34,20 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _add_column_if_missing(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    """Additive-migration helper: ALTER TABLE ... ADD COLUMN, tolerant of two requests racing to
+    apply the same migration on a fresh database (each of loadPlannerData's parallel GETs calls
+    initialize_study_planner_store independently). The PRAGMA table_info check above already
+    avoids this in the common case, but does not make the check-then-ALTER atomic, so a
+    'duplicate column' error from a concurrent winner is swallowed here rather than surfacing as
+    a 500 to the user."""
+    try:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    except sqlite3.OperationalError as error:
+        if "duplicate column name" not in str(error):
+            raise
+
+
 def initialize_study_planner_store() -> None:
     initialize_auth_store()
     with _connect() as connection:
@@ -103,11 +117,21 @@ def initialize_study_planner_store() -> None:
         # Additive migration: completion tracking on study_blocks (Phase 3).
         existing_columns = {row["name"] for row in connection.execute("PRAGMA table_info(study_blocks)")}
         if "completion_status" not in existing_columns:
-            connection.execute(
-                "ALTER TABLE study_blocks ADD COLUMN completion_status TEXT NOT NULL DEFAULT 'scheduled'"
+            _add_column_if_missing(
+                connection, "study_blocks", "completion_status", "TEXT NOT NULL DEFAULT 'scheduled'"
             )
         if "completed_at" not in existing_columns:
-            connection.execute("ALTER TABLE study_blocks ADD COLUMN completed_at TEXT")
+            _add_column_if_missing(connection, "study_blocks", "completed_at", "TEXT")
+        # Additive migration: learning context on study_blocks (AI Study Planning Agent).
+        if "objective" not in existing_columns:
+            _add_column_if_missing(connection, "study_blocks", "objective", "TEXT")
+        if "study_goal" not in existing_columns:
+            _add_column_if_missing(connection, "study_blocks", "study_goal", "TEXT")
+        # Additive migration: optional topic-level linking on study_tasks (in addition to
+        # document-level linking) so a task can scope its generated plan to a single topic.
+        existing_task_columns = {row["name"] for row in connection.execute("PRAGMA table_info(study_tasks)")}
+        if "topic_id" not in existing_task_columns:
+            _add_column_if_missing(connection, "study_tasks", "topic_id", "TEXT")
 
 
 # ---------------------------------------------------------------------------
@@ -117,22 +141,22 @@ def initialize_study_planner_store() -> None:
 def _task(row: sqlite3.Row) -> dict:
     return {
         "task_id": row["task_id"], "owner_id": row["owner_id"], "title": row["title"],
-        "document_id": row["document_id"], "deadline": row["deadline"],
+        "document_id": row["document_id"], "topic_id": row["topic_id"], "deadline": row["deadline"],
         "estimated_minutes": row["estimated_minutes"], "remaining_minutes": row["remaining_minutes"],
         "status": row["status"], "created_at": row["created_at"],
     }
 
 
 def create_task(owner_id: str, title: str, deadline: str, estimated_minutes: int,
-                document_id: str | None = None) -> dict:
+                document_id: str | None = None, topic_id: str | None = None) -> dict:
     initialize_study_planner_store()
     task_id, created_at = str(uuid4()), utc_now_iso()
     with _connect() as connection:
         connection.execute(
-            """INSERT INTO study_tasks (task_id, owner_id, title, document_id, deadline,
+            """INSERT INTO study_tasks (task_id, owner_id, title, document_id, topic_id, deadline,
                estimated_minutes, remaining_minutes, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)""",
-            (task_id, owner_id, title, document_id, deadline, estimated_minutes,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)""",
+            (task_id, owner_id, title, document_id, topic_id, deadline, estimated_minutes,
              estimated_minutes, created_at),
         )
     return get_task(owner_id, task_id)
@@ -158,7 +182,7 @@ def get_task(owner_id: str, task_id: str) -> dict | None:
 
 def update_task(owner_id: str, task_id: str, changes: dict) -> dict:
     initialize_study_planner_store()
-    allowed = {"title", "document_id", "deadline", "estimated_minutes", "remaining_minutes", "status"}
+    allowed = {"title", "document_id", "topic_id", "deadline", "estimated_minutes", "remaining_minutes", "status"}
     fields = [(key, changes[key]) for key in allowed if key in changes]
     if not fields:
         raise ValueError("No task changes supplied.")
@@ -302,6 +326,7 @@ def _block(row: sqlite3.Row) -> dict:
         "actual_minutes": row["actual_minutes"], "status": row["status"],
         "locked": bool(row["locked"]), "created_at": row["created_at"],
         "completion_status": row["completion_status"], "completed_at": row["completed_at"],
+        "objective": row["objective"], "study_goal": row["study_goal"],
     }
 
 
@@ -316,10 +341,12 @@ def create_blocks(owner_id: str, task_id: str, blocks: list[dict]) -> list[dict]
             block_ids.append(block_id)
             connection.execute(
                 """INSERT INTO study_blocks (block_id, owner_id, task_id, document_id, topic_id,
-                   title, start_at, end_at, planned_minutes, actual_minutes, status, locked, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'suggested', 0, ?)""",
+                   title, start_at, end_at, planned_minutes, actual_minutes, status, locked, created_at,
+                   objective, study_goal)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'suggested', 0, ?, ?, ?)""",
                 (block_id, owner_id, task_id, block.get("document_id"), block.get("topic_id"),
-                 block["title"], block["start_at"], block["end_at"], block["planned_minutes"], created_at),
+                 block["title"], block["start_at"], block["end_at"], block["planned_minutes"], created_at,
+                 block.get("objective"), block.get("study_goal")),
             )
     with _connect() as connection:
         rows = connection.execute(

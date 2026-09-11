@@ -164,6 +164,7 @@ class FlashcardUpdateRequest(BaseModel):
 class StudyTaskCreateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     document_id: Optional[str] = None
+    topic_id: Optional[str] = None
     deadline: str
     estimated_minutes: int = Field(gt=0, le=100_000)
 
@@ -171,6 +172,7 @@ class StudyTaskCreateRequest(BaseModel):
 class StudyTaskUpdateRequest(BaseModel):
     title: Optional[str] = Field(default=None, min_length=1, max_length=200)
     document_id: Optional[str] = None
+    topic_id: Optional[str] = None
     deadline: Optional[str] = None
     estimated_minutes: Optional[int] = Field(default=None, gt=0, le=100_000)
     remaining_minutes: Optional[int] = Field(default=None, ge=0, le=100_000)
@@ -1029,7 +1031,7 @@ def planner_create_task(request: StudyTaskCreateRequest, current_user: dict = De
     try:
         return study_planner_service.create_task(
             current_user["id"], request.title, request.deadline, request.estimated_minutes,
-            document_id=request.document_id,
+            document_id=request.document_id, topic_id=request.topic_id,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error

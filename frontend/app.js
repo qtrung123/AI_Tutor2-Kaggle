@@ -86,6 +86,8 @@ let plannerSelectedTaskId = "";
 let plannerMode = "available";
 let plannerWeekStart = plannerMondayOf(new Date());
 let plannerDrag = null;
+let plannerBlockDrag = null;
+let plannerSuppressNextBlockClick = false;
 
 const navItems = document.querySelectorAll(".nav-item");
 const views = document.querySelectorAll(".view");
@@ -229,12 +231,14 @@ let flashcardManager = null;
 
 const plannerView = document.getElementById("planner-view");
 if (plannerView) {
-  plannerView.innerHTML = `<div class="planner-shell"><div class="planner-toolbar"><div><p class="eyebrow">Study Planner</p><h2>Plan your study time</h2></div></div><div class="planner-layout"><article class="panel planner-tasks-panel"><div class="panel-heading"><div><p>Study Tasks</p><h2>Your tasks</h2></div><button class="primary-button" id="planner-new-task-button" type="button">+ New Task</button></div><form id="planner-task-form" class="planner-task-form" hidden><label>Task name<input id="planner-task-title" type="text" maxlength="200" required></label><label>Linked Study Session / Document (optional)<select id="planner-task-document"><option value="">None</option></select></label><label>Deadline<input id="planner-task-deadline" type="date" required></label><label class="planner-duration-field">Estimated study time<span class="planner-duration-inputs"><input id="planner-task-hours" type="number" min="0" max="500" value="1"> h<input id="planner-task-minutes" type="number" min="0" max="59" step="5" value="0"> m</span></label><div class="planner-task-form-actions"><button class="primary-button" type="submit">Create Task</button><button class="text-button" id="planner-cancel-task" type="button">Cancel</button></div></form><div id="planner-task-list" class="planner-task-list"></div><div id="planner-task-empty" class="empty-state">No study tasks yet. Create one to get started.</div></article><article class="panel planner-calendar-panel"><div class="panel-heading"><div><p>Weekly availability</p><h2 id="planner-week-label">This week</h2></div><div class="planner-calendar-actions"><button class="secondary-button" id="planner-prev-week" type="button">‹ Prev</button><button class="secondary-button" id="planner-next-week" type="button">Next ›</button><label class="planner-repeat-toggle"><input type="checkbox" id="planner-repeat-weekly">Repeat weekly</label><div class="planner-mode-toggle"><button class="secondary-button active" id="planner-mode-available" type="button">Mark Available</button><button class="secondary-button" id="planner-mode-erase" type="button">Erase</button></div></div></div><div id="planner-task-actions" class="planner-task-actions" hidden><span id="planner-buffer-badge" class="planner-buffer-badge"></span><button class="secondary-button" id="planner-generate-button" type="button">Generate Study Plan</button><button class="primary-button" id="planner-accept-button" type="button" disabled>Accept Plan</button></div><div id="planner-calendar" class="planner-calendar"></div><div class="planner-legend"><span class="planner-legend-item"><i class="planner-swatch planner-swatch-available"></i>Available</span><span class="planner-legend-item"><i class="planner-swatch planner-swatch-suggested"></i>Suggested block</span><span class="planner-legend-item"><i class="planner-swatch planner-swatch-confirmed"></i>Confirmed block</span></div></article></div></div>`;
+  plannerView.innerHTML = `<div class="planner-shell"><div class="planner-toolbar"><div><p class="eyebrow">Study Planner</p><h2>Plan your study time</h2></div></div><div class="planner-layout"><article class="panel planner-tasks-panel"><div class="panel-heading"><div><p>Study Tasks</p><h2>Your tasks</h2></div><button class="primary-button" id="planner-new-task-button" type="button">+ New Task</button></div><form id="planner-task-form" class="planner-task-form" hidden><label>Task name<input id="planner-task-title" type="text" maxlength="200" required></label><label>Linked Study Session / Document (optional)<select id="planner-task-document"><option value="">None</option></select></label><label id="planner-task-topic-field" hidden>Focus on one topic (optional)<select id="planner-task-topic"><option value="">Whole document</option></select></label><label>Deadline<input id="planner-task-deadline" type="date" required></label><label class="planner-duration-field">Estimated study time<span class="planner-duration-inputs"><input id="planner-task-hours" type="number" min="0" max="500" value="1"> h<input id="planner-task-minutes" type="number" min="0" max="59" step="5" value="0"> m</span></label><div class="planner-task-form-actions"><button class="primary-button" type="submit">Create Task</button><button class="text-button" id="planner-cancel-task" type="button">Cancel</button></div></form><div id="planner-task-list" class="planner-task-list"></div><div id="planner-task-empty" class="empty-state">No study tasks yet. Create one to get started.</div></article><article class="panel planner-calendar-panel"><div class="panel-heading"><div><p>Weekly availability</p><h2 id="planner-week-label">This week</h2></div><div class="planner-calendar-actions"><button class="secondary-button" id="planner-prev-week" type="button">‹ Prev</button><button class="secondary-button" id="planner-next-week" type="button">Next ›</button><label class="planner-repeat-toggle"><input type="checkbox" id="planner-repeat-weekly">Repeat weekly</label><div class="planner-mode-toggle"><button class="secondary-button active" id="planner-mode-available" type="button">Mark Available</button><button class="secondary-button" id="planner-mode-erase" type="button">Erase</button></div></div></div><div id="planner-task-actions" class="planner-task-actions" hidden><span id="planner-buffer-badge" class="planner-buffer-badge"></span><button class="secondary-button" id="planner-generate-button" type="button">Generate Study Plan</button><button class="primary-button" id="planner-accept-button" type="button" disabled>Accept Plan</button></div><div id="planner-calendar" class="planner-calendar"></div><div class="planner-legend"><span class="planner-legend-item"><i class="planner-swatch planner-swatch-available"></i>Available</span><span class="planner-legend-item"><i class="planner-swatch planner-swatch-suggested"></i>Suggested block</span><span class="planner-legend-item"><i class="planner-swatch planner-swatch-confirmed"></i>Confirmed block</span></div></article></div></div>`;
 }
 const plannerNewTaskButton = document.getElementById("planner-new-task-button");
 const plannerTaskForm = document.getElementById("planner-task-form");
 const plannerTaskTitleInput = document.getElementById("planner-task-title");
 const plannerTaskDocumentSelect = document.getElementById("planner-task-document");
+const plannerTaskTopicField = document.getElementById("planner-task-topic-field");
+const plannerTaskTopicSelect = document.getElementById("planner-task-topic");
 const plannerTaskDeadlineInput = document.getElementById("planner-task-deadline");
 const plannerTaskHoursInput = document.getElementById("planner-task-hours");
 const plannerTaskMinutesInput = document.getElementById("planner-task-minutes");
@@ -614,6 +618,7 @@ async function openStudySession(documentId, tab = "material", topicId = "") {
   if (topicId && topicId !== "document") { quizScopeSelect.value = "topic"; quizTopicSelect.value = topicId; }
   else quizScopeSelect.value = "document";
   updateAssessmentScope();
+  flashcardTopicFilter = topicId && topicId !== "document" ? topicId : "all";
   await Promise.all([loadSelectedQuiz(), loadQuizHistory(documentId)]);
   renderSessionProgress(documentId);
   setPage("session");
@@ -3587,12 +3592,36 @@ function renderPlannerCalendar() {
         cell.classList.add(block.status === "suggested" ? "block-suggested" : "block-confirmed");
         if (block.completion_status === "completed") cell.classList.add("block-completed");
         if (block.completion_status === "skipped") cell.classList.add("block-skipped");
-        if (plannerMinutesToLabel(minute) === block.start_at.slice(11, 16)) {
+        const isStartCell = plannerMinutesToLabel(minute) === block.start_at.slice(11, 16);
+        const isEndCell = plannerMinutesToLabel(minute + PLANNER_CELL_MINUTES) === block.end_at.slice(11, 16);
+        if (isStartCell) {
           const label = document.createElement("span");
           label.className = "planner-cell-block-label";
           label.textContent = block.completion_status === "completed" ? `✓ ${block.title}` : block.title;
           cell.appendChild(label);
           cell.title = plannerBlockTooltip(block);
+        }
+        // Drag/resize on the grid is scoped to still-suggested blocks only -- once a block is
+        // confirmed (via Accept Plan) or completed/missed, it is edited (if at all) through the
+        // block editor modal, not by dragging it around the calendar.
+        const draggable = block.status === "suggested" && block.completion_status !== "completed";
+        if (draggable) {
+          cell.classList.add("block-draggable");
+          cell.addEventListener("mousedown", (event) => {
+            event.stopPropagation();
+            plannerStartBlockDrag(block, cell, "move");
+          });
+          if (isEndCell) {
+            const handle = document.createElement("span");
+            handle.className = "planner-block-resize-handle";
+            handle.title = "Drag to resize";
+            handle.addEventListener("mousedown", (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              plannerStartBlockDrag(block, cell, "resize");
+            });
+            cell.appendChild(handle);
+          }
         }
         cell.addEventListener("click", (event) => {
           event.stopPropagation();
@@ -3600,8 +3629,11 @@ function renderPlannerCalendar() {
         });
       } else {
         cell.addEventListener("mousedown", () => plannerStartDrag(cell));
-        cell.addEventListener("mouseenter", () => { if (plannerDrag) plannerExtendDrag(cell); });
       }
+      cell.addEventListener("mouseenter", () => {
+        if (plannerDrag) plannerExtendDrag(cell);
+        if (plannerBlockDrag) plannerUpdateBlockDragPreview(cell);
+      });
       body.appendChild(cell);
     });
   }
@@ -3649,24 +3681,105 @@ async function plannerFinishDrag() {
   }
 }
 
+// Drag-to-move and drag-to-resize for study blocks directly on the calendar grid. Movement is
+// constrained to the block's own date column (matching the availability drag above, and the
+// backend's edit_block rule that a block must start and end on the same day) -- only the time
+// (vertical axis) changes via direct drag; moving a block to a different day still works via the
+// block editor modal's start/end time fields.
+const PLANNER_MIN_BLOCK_DRAG_MINUTES = PLANNER_CELL_MINUTES;
+
+function plannerStartBlockDrag(block, cell, mode) {
+  plannerSuppressNextBlockClick = false;
+  const startMinute = plannerToMinutes(block.start_at.slice(11, 16));
+  const endMinute = plannerToMinutes(block.end_at.slice(11, 16));
+  const cellMinute = Number(cell.dataset.minute);
+  plannerBlockDrag = {
+    block, mode, dateKey: cell.dataset.date,
+    duration: endMinute - startMinute,
+    cursorOffset: mode === "move" ? cellMinute - startMinute : 0,
+    previewStart: startMinute, previewEnd: endMinute, moved: false,
+  };
+}
+
+function plannerClearBlockDragPreview() {
+  document.querySelectorAll(".planner-cell.block-drag-preview").forEach((element) => element.classList.remove("block-drag-preview"));
+}
+
+function plannerUpdateBlockDragPreview(cell) {
+  const drag = plannerBlockDrag;
+  if (!drag || cell.dataset.date !== drag.dateKey) return;
+  const minute = Number(cell.dataset.minute);
+  if (drag.mode === "move") {
+    let start = minute - drag.cursorOffset;
+    start = Math.max(PLANNER_GRID_START_MINUTE, Math.min(start, PLANNER_GRID_END_MINUTE - drag.duration));
+    drag.previewStart = start;
+    drag.previewEnd = start + drag.duration;
+  } else {
+    let end = minute + PLANNER_CELL_MINUTES;
+    end = Math.max(drag.previewStart + PLANNER_MIN_BLOCK_DRAG_MINUTES, Math.min(end, PLANNER_GRID_END_MINUTE));
+    drag.previewEnd = end;
+  }
+  drag.moved = true;
+  plannerClearBlockDragPreview();
+  document.querySelectorAll(`.planner-cell[data-date="${drag.dateKey}"]`).forEach((element) => {
+    const elementMinute = Number(element.dataset.minute);
+    element.classList.toggle("block-drag-preview", elementMinute >= drag.previewStart && elementMinute < drag.previewEnd);
+  });
+}
+
+async function plannerPersistBlockDrag(blockId, changes) {
+  try {
+    await fetchJson(`${PLANNER_BLOCKS_API_URL}/${encodeURIComponent(blockId)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes),
+    });
+    plannerBlocks = await fetchJson(PLANNER_BLOCKS_API_URL);
+    showToast("Study block updated");
+  } catch (error) {
+    showToast(error.message || "Could not move study block");
+  } finally {
+    renderPlannerCalendar();
+    updatePlannerTaskActions();
+  }
+}
+
+async function plannerFinishBlockDrag() {
+  if (!plannerBlockDrag) return;
+  const drag = plannerBlockDrag;
+  plannerBlockDrag = null;
+  plannerClearBlockDragPreview();
+  const originalStart = plannerToMinutes(drag.block.start_at.slice(11, 16));
+  const originalEnd = plannerToMinutes(drag.block.end_at.slice(11, 16));
+  if (!drag.moved || (drag.previewStart === originalStart && drag.previewEnd === originalEnd)) return;
+  plannerSuppressNextBlockClick = true;
+  await plannerPersistBlockDrag(drag.block.block_id, {
+    start_at: `${drag.dateKey}T${plannerMinutesToLabel(drag.previewStart)}:00`,
+    end_at: `${drag.dateKey}T${plannerMinutesToLabel(drag.previewEnd)}:00`,
+  });
+}
+
 let plannerBlockEditor = null;
 let plannerEditingBlock = null;
 
 function plannerBuildBlockEditor() {
   plannerBlockEditor = document.createElement("div");
   plannerBlockEditor.className = "planner-block-editor-backdrop";
-  plannerBlockEditor.innerHTML = `<section class="planner-block-editor" role="dialog" aria-modal="true"><h2 id="planner-block-editor-title">Edit study block</h2><p class="planner-block-editor-meta" id="planner-block-editor-meta" hidden></p><p class="planner-block-editor-progress" id="planner-block-editor-progress" hidden></p><p class="planner-block-editor-completed" id="planner-block-editor-completed" hidden>Completed</p><label>Start time<input id="planner-block-editor-start" type="time" step="60"></label><label>End time<input id="planner-block-editor-end" type="time" step="60"></label><p class="planner-block-editor-error" id="planner-block-editor-error" hidden></p><div class="planner-block-editor-actions"><button class="text-button danger-button" id="planner-block-editor-delete" type="button">Delete</button><button class="text-button" id="planner-block-editor-open" type="button" hidden>Open study material</button><button class="text-button" id="planner-block-editor-cancel" type="button">Cancel</button><button class="primary-button" id="planner-block-editor-complete" type="button">Complete</button><button class="primary-button" id="planner-block-editor-save" type="button">Save</button></div></section>`;
+  plannerBlockEditor.innerHTML = `<section class="planner-block-editor" role="dialog" aria-modal="true"><h2 id="planner-block-editor-title">Edit study block</h2><dl class="planner-block-editor-context" id="planner-block-editor-context" hidden><div id="planner-block-editor-material-row" hidden><dt>Material</dt><dd id="planner-block-editor-material"></dd></div><div id="planner-block-editor-topic-row" hidden><dt>Topic</dt><dd id="planner-block-editor-topic"></dd></div><div id="planner-block-editor-goal-row" hidden><dt>Study goal</dt><dd id="planner-block-editor-goal"></dd></div><div id="planner-block-editor-objective-row" hidden><dt>Objective</dt><dd id="planner-block-editor-objective"></dd></div></dl><p class="planner-block-editor-progress" id="planner-block-editor-progress" hidden></p><p class="planner-block-editor-completed" id="planner-block-editor-completed" hidden>Completed</p><label>Start time<input id="planner-block-editor-start" type="time" step="60"></label><label>End time<input id="planner-block-editor-end" type="time" step="60"></label><p class="planner-block-editor-error" id="planner-block-editor-error" hidden></p><div class="planner-block-editor-quick-actions" id="planner-block-editor-quick-actions" hidden><button class="text-button" id="planner-block-editor-open" type="button" hidden>Open material</button><button class="text-button" id="planner-block-editor-quiz" type="button" hidden>Quiz</button><button class="text-button" id="planner-block-editor-flashcards" type="button" hidden>Flashcards</button><button class="text-button" id="planner-block-editor-tutor" type="button" hidden>AI Tutor</button></div><div class="planner-block-editor-actions"><button class="text-button danger-button" id="planner-block-editor-delete" type="button">Delete</button><button class="text-button" id="planner-block-editor-cancel" type="button">Cancel</button><button class="primary-button" id="planner-block-editor-complete" type="button">Complete</button><button class="primary-button" id="planner-block-editor-save" type="button">Save</button></div></section>`;
   document.body.appendChild(plannerBlockEditor);
   plannerBlockEditor.addEventListener("click", (event) => {
     if (event.target === plannerBlockEditor) closePlannerBlockEditor();
   });
   document.getElementById("planner-block-editor-cancel").addEventListener("click", closePlannerBlockEditor);
-  document.getElementById("planner-block-editor-open").addEventListener("click", () => {
+  const openBlockStudySession = (tab, focusChat) => {
     if (!plannerEditingBlock?.document_id) return;
     const { document_id: documentId, topic_id: topicId } = plannerEditingBlock;
     closePlannerBlockEditor();
-    openStudySession(documentId, "material", topicId || "");
-  });
+    openStudySession(documentId, tab, topicId || "");
+    if (focusChat) window.requestAnimationFrame(() => chatInput?.focus());
+  };
+  document.getElementById("planner-block-editor-open").addEventListener("click", () => openBlockStudySession("material", false));
+  document.getElementById("planner-block-editor-quiz").addEventListener("click", () => openBlockStudySession("quiz", false));
+  document.getElementById("planner-block-editor-flashcards").addEventListener("click", () => openBlockStudySession("flashcards", false));
+  document.getElementById("planner-block-editor-tutor").addEventListener("click", () => openBlockStudySession("material", true));
   document.getElementById("planner-block-editor-delete").addEventListener("click", async () => {
     if (!plannerEditingBlock) return;
     if (!window.confirm(`Delete "${plannerEditingBlock.title}"?`)) return;
@@ -3700,17 +3813,32 @@ function openPlannerBlockEditor(block) {
   plannerEditingBlock = block;
   if (!plannerBlockEditor) plannerBuildBlockEditor();
   document.getElementById("planner-block-editor-title").textContent = `${block.title} · ${block.start_at.slice(0, 10)}`;
-  const metaElement = document.getElementById("planner-block-editor-meta");
-  if (block.document_id) {
-    const linkedDocument = indexedDocuments.find((doc) => doc.id === block.document_id);
-    const documentLabel = linkedDocument ? linkedDocument.title : block.document_id;
-    const topicLabel = plannerTopicLabel(block.document_id, block.topic_id);
-    metaElement.textContent = topicLabel ? `${documentLabel} · ${topicLabel}` : documentLabel;
-    metaElement.hidden = false;
-  } else {
-    metaElement.hidden = true;
-  }
+
+  const contextElement = document.getElementById("planner-block-editor-context");
+  const materialRow = document.getElementById("planner-block-editor-material-row");
+  const topicRow = document.getElementById("planner-block-editor-topic-row");
+  const goalRow = document.getElementById("planner-block-editor-goal-row");
+  const objectiveRow = document.getElementById("planner-block-editor-objective-row");
+  const linkedDocument = block.document_id ? indexedDocuments.find((doc) => doc.id === block.document_id) : null;
+  const documentLabel = linkedDocument ? linkedDocument.title : block.document_id;
+  const topicLabel = plannerTopicLabel(block.document_id, block.topic_id);
+  materialRow.hidden = !block.document_id;
+  if (block.document_id) document.getElementById("planner-block-editor-material").textContent = documentLabel;
+  topicRow.hidden = !topicLabel;
+  if (topicLabel) document.getElementById("planner-block-editor-topic").textContent = topicLabel;
+  goalRow.hidden = !block.study_goal;
+  if (block.study_goal) document.getElementById("planner-block-editor-goal").textContent = block.study_goal;
+  objectiveRow.hidden = !block.objective;
+  if (block.objective) document.getElementById("planner-block-editor-objective").textContent = block.objective;
+  contextElement.hidden = !(block.document_id || block.study_goal || block.objective);
+
+  const quickActions = document.getElementById("planner-block-editor-quick-actions");
   document.getElementById("planner-block-editor-open").hidden = !block.document_id;
+  document.getElementById("planner-block-editor-quiz").hidden = !block.document_id;
+  document.getElementById("planner-block-editor-flashcards").hidden = !block.document_id;
+  document.getElementById("planner-block-editor-tutor").hidden = !block.document_id;
+  quickActions.hidden = !block.document_id;
+
   document.getElementById("planner-block-editor-start").value = block.start_at.slice(11, 16);
   document.getElementById("planner-block-editor-end").value = block.end_at.slice(11, 16);
   const errorElement = document.getElementById("planner-block-editor-error");
@@ -3799,15 +3927,28 @@ async function plannerDeleteBlock(blockId) {
   }
 }
 
+function plannerRefreshTaskTopicOptions() {
+  if (!plannerTaskTopicSelect) return;
+  const documentId = plannerTaskDocumentSelect.value;
+  const linkedDocument = indexedDocuments.find((doc) => doc.id === documentId);
+  const topics = linkedDocument?.topics || [];
+  plannerTaskTopicField.hidden = !documentId || !topics.length;
+  plannerTaskTopicSelect.innerHTML = "";
+  plannerTaskTopicSelect.add(new Option("Whole document", ""));
+  topics.forEach((topic) => plannerTaskTopicSelect.add(new Option(topic.name, topic.topic_id)));
+}
+
 plannerNewTaskButton?.addEventListener("click", () => {
   plannerTaskForm.hidden = !plannerTaskForm.hidden;
   if (!plannerTaskForm.hidden) {
     plannerTaskDocumentSelect.innerHTML = "";
     plannerTaskDocumentSelect.add(new Option("None", ""));
     indexedDocuments.forEach((doc) => plannerTaskDocumentSelect.add(new Option(doc.title, doc.id)));
+    plannerRefreshTaskTopicOptions();
     plannerTaskTitleInput.focus();
   }
 });
+plannerTaskDocumentSelect?.addEventListener("change", plannerRefreshTaskTopicOptions);
 plannerCancelTaskButton?.addEventListener("click", () => {
   plannerTaskForm.hidden = true;
   plannerTaskForm.reset();
@@ -3827,6 +3968,7 @@ plannerTaskForm?.addEventListener("submit", async (event) => {
       body: JSON.stringify({
         title: plannerTaskTitleInput.value.trim(),
         document_id: plannerTaskDocumentSelect.value || null,
+        topic_id: plannerTaskTopicSelect?.value || null,
         deadline: plannerTaskDeadlineInput.value,
         estimated_minutes: estimatedMinutes,
       }),
@@ -3859,7 +4001,15 @@ plannerModeEraseButton?.addEventListener("click", () => {
   plannerModeEraseButton.classList.add("active");
   plannerModeAvailableButton?.classList.remove("active");
 });
-document.addEventListener("mouseup", () => { if (plannerDrag) plannerFinishDrag(); });
+document.addEventListener("mouseup", () => {
+  if (plannerDrag) plannerFinishDrag();
+  if (plannerBlockDrag) plannerFinishBlockDrag();
+});
+document.addEventListener("click", (event) => {
+  if (!plannerSuppressNextBlockClick) return;
+  plannerSuppressNextBlockClick = false;
+  event.stopPropagation();
+}, true);
 
 plannerGenerateButton?.addEventListener("click", async () => {
   if (!plannerSelectedTaskId) return;

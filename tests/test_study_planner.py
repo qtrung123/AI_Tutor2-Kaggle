@@ -49,6 +49,18 @@ class StudyPlannerTests(unittest.TestCase):
         study_planner_store.delete_task(self.alice, task["task_id"])
         self.assertIsNone(study_planner_store.get_task(self.alice, task["task_id"]))
 
+    def test_concurrent_first_migration_does_not_raise(self):
+        """Two requests racing to migrate the same fresh database (e.g. loadPlannerData's
+        parallel GETs each calling initialize_study_planner_store) must not surface a 500 --
+        a 'duplicate column' OperationalError from losing the race is expected and swallowed."""
+        import sqlite3
+
+        study_planner_store.initialize_study_planner_store()
+        with study_planner_store._connect() as connection:
+            with self.assertRaises(sqlite3.OperationalError):
+                connection.execute("ALTER TABLE study_blocks ADD COLUMN objective TEXT")
+            study_planner_store._add_column_if_missing(connection, "study_blocks", "objective", "TEXT")
+
     def test_availability_persists_merges_and_erases_correctly(self):
         study_planner_store.add_availability(self.alice, "18:00", "19:00", date="2026-09-14")
         study_planner_store.add_availability(self.alice, "19:00", "20:00", date="2026-09-14")  # adjacent -> merges
@@ -350,6 +362,100 @@ class StudyPlannerDocumentAwareTests(unittest.TestCase):
         with first, second:
             study_planner_service.ensure_study_plan_items(self.alice, task)
         self.assertEqual(study_planner_store.list_plan_items(self.bob, task["task_id"]), [])
+
+
+class StudyPlannerLearningContextTests(unittest.TestCase):
+    """AI Study Planning Agent: topic-level task linking and learning-context fields
+    (objective/study_goal) auto-populated on generated study blocks."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db = Path(self.temp.name) / "planner.db"
+        self.patches = [
+            patch.object(auth_store, "DATABASE_PATH", self.db),
+            patch.object(study_planner_store, "DATABASE_PATH", self.db),
+        ]
+        for item in self.patches:
+            item.start()
+        self.alice = auth_store.create_user("Alice", "alice-context@example.com", "long-password-a")["id"]
+        self.document = {
+            "id": "notes.pdf",
+            "topics": [
+                {"topic_id": "topic-a", "name": "Topic A", "subtopics": [{"subtopic_id": "s1", "name": "Sub A1"}]},
+                {"topic_id": "topic-b", "name": "Topic B", "subtopics": [{"subtopic_id": "s2", "name": "Sub B1"}]},
+            ],
+        }
+
+    def tearDown(self):
+        for item in reversed(self.patches):
+            item.stop()
+        self.temp.cleanup()
+
+    def _document_patches(self):
+        return (
+            patch.object(study_planner_service, "get_indexed_document", return_value=self.document),
+            patch.object(study_planner_service, "get_topic_chunks", return_value=[{"content": "x" * 10}]),
+        )
+
+    def test_create_task_with_topic_id_requires_document_id(self):
+        with self.assertRaises(ValueError):
+            study_planner_service.create_task(self.alice, "Prep", "2026-09-20", 60, topic_id="topic-a")
+
+    def test_create_task_rejects_topic_id_not_in_document(self):
+        first, second = self._document_patches()
+        with first, second, self.assertRaises(ValueError):
+            study_planner_service.create_task(
+                self.alice, "Prep", "2026-09-20", 60, document_id="notes.pdf", topic_id="not-a-real-topic",
+            )
+
+    def test_create_task_persists_topic_id(self):
+        first, second = self._document_patches()
+        with first, second:
+            task = study_planner_service.create_task(
+                self.alice, "Prep", "2026-09-20", 60, document_id="notes.pdf", topic_id="topic-a",
+            )
+        self.assertEqual(task["topic_id"], "topic-a")
+        self.assertEqual(study_planner_store.get_task(self.alice, task["task_id"])["topic_id"], "topic-a")
+
+    def test_topic_scoped_task_generates_plan_items_for_only_that_topic(self):
+        first, second = self._document_patches()
+        with first, second:
+            task = study_planner_service.create_task(
+                self.alice, "Prep", "2026-09-20", 90, document_id="notes.pdf", topic_id="topic-b",
+            )
+            items = study_planner_service.ensure_study_plan_items(self.alice, task)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["topic_id"], "topic-b")
+        self.assertEqual(items[0]["estimated_minutes"], 90)
+
+    def test_document_scoped_task_without_topic_id_still_splits_across_all_topics(self):
+        first, second = self._document_patches()
+        with first, second:
+            task = study_planner_service.create_task(self.alice, "Prep", "2026-09-20", 90, document_id="notes.pdf")
+            items = study_planner_service.ensure_study_plan_items(self.alice, task)
+        self.assertEqual({item["topic_id"] for item in items}, {"topic-a", "topic-b"})
+
+    def test_document_topic_blocks_carry_objective_and_study_goal(self):
+        study_planner_store.add_availability(self.alice, "18:00", "20:00", date="2026-09-14")
+        first, second = self._document_patches()
+        with first, second:
+            task = study_planner_service.create_task(
+                self.alice, "Ace the midterm", "2026-09-14", 60, document_id="notes.pdf", topic_id="topic-a",
+            )
+            result = study_planner_service.generate_schedule(self.alice, task["task_id"], now=EARLY_MORNING)
+        self.assertTrue(result["blocks"])
+        for block in result["blocks"]:
+            self.assertEqual(block["study_goal"], "Ace the midterm")
+            self.assertIn("Topic A", block["objective"])
+
+    def test_plain_task_blocks_carry_a_generic_objective_and_study_goal(self):
+        study_planner_store.add_availability(self.alice, "18:00", "19:00", date="2026-09-14")
+        task = study_planner_service.create_task(self.alice, "Read chapter 3", "2026-09-14", 30)
+        result = study_planner_service.generate_schedule(self.alice, task["task_id"], now=EARLY_MORNING)
+        self.assertTrue(result["blocks"])
+        block = result["blocks"][0]
+        self.assertEqual(block["study_goal"], "Read chapter 3")
+        self.assertIn("Read chapter 3", block["objective"])
 
 
 class StudyPlannerCompletionTests(unittest.TestCase):
@@ -898,6 +1004,42 @@ class StudyPlannerFrontendTests(unittest.TestCase):
         self.assertIn("planner-task-progress", script)
         self.assertIn("Regenerate Study Plan", script)
         self.assertIn("/regenerate", script)
+
+    def test_task_form_supports_linking_a_topic_within_a_document(self):
+        script = Path("frontend/app.js").read_text(encoding="utf-8")
+        self.assertIn('id="planner-task-topic-field"', script)
+        self.assertIn('id="planner-task-topic"', script)
+        self.assertIn("function plannerRefreshTaskTopicOptions", script)
+        self.assertIn("topic_id: plannerTaskTopicSelect", script)
+
+    def test_block_editor_shows_material_topic_objective_and_goal(self):
+        script = Path("frontend/app.js").read_text(encoding="utf-8")
+        self.assertIn('id="planner-block-editor-material"', script)
+        self.assertIn('id="planner-block-editor-topic"', script)
+        self.assertIn('id="planner-block-editor-objective"', script)
+        self.assertIn('id="planner-block-editor-goal"', script)
+        self.assertIn("block.objective", script)
+        self.assertIn("block.study_goal", script)
+
+    def test_block_editor_has_quiz_flashcards_and_ai_tutor_actions(self):
+        script = Path("frontend/app.js").read_text(encoding="utf-8")
+        self.assertIn('id="planner-block-editor-open"', script)
+        self.assertIn('id="planner-block-editor-quiz"', script)
+        self.assertIn('id="planner-block-editor-flashcards"', script)
+        self.assertIn('id="planner-block-editor-tutor"', script)
+        self.assertIn("openBlockStudySession", script)
+
+    def test_blocks_support_drag_move_and_resize_on_the_calendar(self):
+        script = Path("frontend/app.js").read_text(encoding="utf-8")
+        self.assertIn("function plannerStartBlockDrag", script)
+        self.assertIn("function plannerUpdateBlockDragPreview", script)
+        self.assertIn("function plannerFinishBlockDrag", script)
+        self.assertIn("planner-block-resize-handle", script)
+        self.assertIn('plannerStartBlockDrag(block, cell, "resize")', script)
+        self.assertIn('plannerStartBlockDrag(block, cell, "move")', script)
+        # Drag/resize is scoped to still-suggested blocks -- a confirmed/completed/missed block
+        # is only edited through the block editor modal, never dragged on the grid.
+        self.assertIn('block.status === "suggested" && block.completion_status !== "completed"', script)
 
 
 if __name__ == "__main__":

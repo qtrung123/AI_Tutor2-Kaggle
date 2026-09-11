@@ -193,6 +193,25 @@ def _combine(day: date, minute_of_day: int) -> str:
     return datetime(day.year, day.month, day.day, hour, minute).isoformat()
 
 
+def _default_block_objective(task: dict) -> str:
+    """Deterministic, LLM-free learning objective for a block that isn't tied to a specific
+    document topic (either a plain task, or a document-linked task whose document has no
+    extractable topics yet)."""
+    title = task["title"]
+    if task.get("document_id"):
+        return f'Review material for "{title}" and reinforce what you have covered so far.'
+    return f'Make focused progress on "{title}".'
+
+
+def _plan_item_objective(item: dict) -> str:
+    """Deterministic learning objective for a block generated from a per-topic study plan item
+    (see ensure_study_plan_items) -- derived from the item's own title, never an LLM call."""
+    label = item["title"]
+    if label.startswith("Study "):
+        label = label[len("Study "):]
+    return f"Build understanding of {label}, then check your progress with a quiz or flashcards."
+
+
 def compute_schedule(task: dict, availability: list[dict], existing_blocks: list[dict],
                       now: datetime | None = None) -> dict:
     """Pure scheduling computation (no persistence) -- used directly by generate_schedule and
@@ -218,6 +237,7 @@ def compute_schedule(task: dict, availability: list[dict], existing_blocks: list
     available_minutes = total_free_minutes(free_by_date)
     allocations, shortage = allocate_blocks(required_minutes, free_by_date)
     study_buffer = available_minutes - required_minutes
+    objective = _default_block_objective(task)
     blocks = [
         {
             "title": f"{task['title']} - Session {index}",
@@ -225,6 +245,7 @@ def compute_schedule(task: dict, availability: list[dict], existing_blocks: list
             "start_at": _combine(allocation["date"], allocation["start_minute"]),
             "end_at": _combine(allocation["date"], allocation["end_minute"]),
             "planned_minutes": allocation["planned_minutes"],
+            "objective": objective, "study_goal": task["title"],
         }
         for index, allocation in enumerate(allocations, start=1)
     ]
@@ -240,7 +261,7 @@ def compute_schedule(task: dict, availability: list[dict], existing_blocks: list
 # ---------------------------------------------------------------------------
 
 def create_task(owner_id: str, title: str, deadline: str, estimated_minutes: int,
-                 document_id: str | None = None) -> dict:
+                 document_id: str | None = None, topic_id: str | None = None) -> dict:
     title = str(title or "").strip()
     if not title:
         raise ValueError("Task title is required.")
@@ -251,8 +272,16 @@ def create_task(owner_id: str, title: str, deadline: str, estimated_minutes: int
     estimated_minutes = int(estimated_minutes)
     if not 0 < estimated_minutes <= MAX_ESTIMATED_MINUTES:
         raise ValueError("estimated_minutes must be a positive number of minutes.")
+    document_id = document_id or None
+    topic_id = topic_id or None
+    if topic_id and not document_id:
+        raise ValueError("topic_id requires a linked document_id.")
+    if topic_id:
+        document = get_indexed_document(owner_id, document_id)
+        if not document or not any(str(topic.get("topic_id")) == topic_id for topic in document.get("topics") or []):
+            raise ValueError("topic_id does not belong to the linked document.")
     return study_planner_store.create_task(
-        owner_id, title, deadline, estimated_minutes, document_id=document_id or None,
+        owner_id, title, deadline, estimated_minutes, document_id=document_id, topic_id=topic_id,
     )
 
 
@@ -305,6 +334,15 @@ def ensure_study_plan_items(owner_id: str, task: dict) -> list[dict]:
     if not document:
         return []
     topics = [topic for topic in document.get("topics") or [] if topic.get("topic_id")]
+    task_topic_id = task.get("topic_id")
+    if task_topic_id:
+        # Task was created scoped to a single topic (see create_task) -- restrict the generated
+        # plan to that topic instead of splitting estimated_minutes across the whole document.
+        # If the topic can no longer be found (e.g. the document was re-indexed), fall back to
+        # the full-document split below rather than silently producing zero study plan items.
+        scoped_topics = [topic for topic in topics if str(topic["topic_id"]) == task_topic_id]
+        if scoped_topics:
+            topics = scoped_topics
     if not topics:
         return []
     scores = []
@@ -355,8 +393,11 @@ def compute_schedule_for_document_task(
             "deadline": task["deadline"], "remaining_minutes": item["remaining_minutes"],
         }
         item_result = compute_schedule(pseudo_task, availability, running_busy, now=now)
+        item_objective = _plan_item_objective(item)
         for block in item_result["blocks"]:
             block["topic_id"] = item["topic_id"]
+            block["objective"] = item_objective
+            block["study_goal"] = task["title"]
         all_blocks.extend(item_result["blocks"])
         running_busy = running_busy + [
             {**block, "status": "confirmed", "locked": True} for block in item_result["blocks"]
