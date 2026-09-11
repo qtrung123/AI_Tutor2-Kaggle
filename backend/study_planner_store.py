@@ -503,6 +503,33 @@ def delete_plan_items_for_task(owner_id: str, task_id: str) -> None:
         )
 
 
+def decrement_plan_item_remaining_minutes(owner_id: str, task_id: str, document_id: str, topic_id: str,
+                                           minutes: int) -> dict | None:
+    """Roll a completed block's actual_minutes off its matching study_plan_item's
+    remaining_minutes, floored at 0 -- mirrors _decrement_task_remaining_minutes at the task
+    level, but keeps the per-topic figure that ensure_study_plan_items/regeneration reads in
+    sync too, so a regenerate after completion never re-schedules minutes already done. Returns
+    the updated item, or None when no plan item matches (e.g. a plain task-level block)."""
+    initialize_study_planner_store()
+    with _connect() as connection:
+        row = connection.execute(
+            """SELECT * FROM study_plan_items
+               WHERE owner_id=? AND task_id=? AND document_id=? AND topic_id=?""",
+            (owner_id, task_id, document_id, topic_id),
+        ).fetchone()
+        if not row:
+            return None
+        new_remaining = max(0, int(row["remaining_minutes"]) - int(minutes))
+        connection.execute(
+            "UPDATE study_plan_items SET remaining_minutes=? WHERE item_id=?",
+            (new_remaining, row["item_id"]),
+        )
+        updated = connection.execute(
+            "SELECT * FROM study_plan_items WHERE item_id=?", (row["item_id"],),
+        ).fetchone()
+    return _plan_item(updated)
+
+
 def sum_estimated_minutes_for_topic(owner_id: str, document_id: str, topic_id: str) -> int:
     """Total planned minutes for one topic across every study plan item ever created for it,
     regardless of which task the item belongs to."""

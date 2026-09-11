@@ -841,6 +841,128 @@ class StudyPlannerRegenerateTests(unittest.TestCase):
             self.assertFalse(overlaps, f"Regenerated block {block} overlaps completed block {still}")
 
 
+class StudyPlannerPlanItemRemainingMinutesTests(unittest.TestCase):
+    """QA-discovered gap: completing a document/topic-linked block rolled its minutes off the
+    parent task's remaining_minutes but never off its matching study_plan_item's
+    remaining_minutes. Since ensure_study_plan_items reuses that per-item figure verbatim on
+    every later generate/regenerate, the stale value made a regenerate after completion
+    re-schedule minutes that were already done. topic_progress accumulation (covered by
+    StudyPlannerCompletionTests) must stay unaffected by this fix."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db = Path(self.temp.name) / "planner.db"
+        self.patches = [
+            patch.object(auth_store, "DATABASE_PATH", self.db),
+            patch.object(study_planner_store, "DATABASE_PATH", self.db),
+        ]
+        for item in self.patches:
+            item.start()
+        self.alice = auth_store.create_user("Alice", "alice-planitem-min@example.com", "long-password-a")["id"]
+        self.bob = auth_store.create_user("Bob", "bob-planitem-min@example.com", "long-password-b")["id"]
+
+    def tearDown(self):
+        for item in reversed(self.patches):
+            item.stop()
+        self.temp.cleanup()
+
+    def _task_with_plan_item(self, estimated_minutes=90):
+        task = study_planner_service.create_task(
+            self.alice, "Prep", "2026-09-20", estimated_minutes, document_id="notes.pdf",
+        )
+        study_planner_store.create_plan_items(self.alice, task["task_id"], [{
+            "document_id": "notes.pdf", "topic_id": "topic-a", "title": "Study Topic A",
+            "estimated_minutes": estimated_minutes, "remaining_minutes": estimated_minutes, "priority": 0,
+        }])
+        return task
+
+    def _block(self, task_id, start_at, end_at, planned_minutes):
+        block, = study_planner_store.create_blocks(self.alice, task_id, [{
+            "document_id": "notes.pdf", "topic_id": "topic-a", "title": "Session",
+            "start_at": start_at, "end_at": end_at, "planned_minutes": planned_minutes,
+        }])
+        return block
+
+    def _plan_item(self, owner_id, task_id):
+        items = study_planner_store.list_plan_items(owner_id, task_id)
+        self.assertEqual(len(items), 1)
+        return items[0]
+
+    def test_complete_block_decreases_plan_item_remaining_minutes(self):
+        task = self._task_with_plan_item(estimated_minutes=90)
+        block = self._block(task["task_id"], "2026-09-14T18:00:00", "2026-09-14T18:30:00", 30)
+        study_planner_service.complete_block(self.alice, block["block_id"], actual_minutes=30)
+        self.assertEqual(self._plan_item(self.alice, task["task_id"])["remaining_minutes"], 60)
+
+    def test_completing_multiple_blocks_accumulates_and_floors_at_zero(self):
+        task = self._task_with_plan_item(estimated_minutes=50)
+        first = self._block(task["task_id"], "2026-09-14T18:00:00", "2026-09-14T18:30:00", 30)
+        second = self._block(task["task_id"], "2026-09-14T19:00:00", "2026-09-14T19:30:00", 30)
+
+        study_planner_service.complete_block(self.alice, first["block_id"], actual_minutes=30)
+        self.assertEqual(self._plan_item(self.alice, task["task_id"])["remaining_minutes"], 20)
+
+        # Second block's actual_minutes (30) overshoots the 20 minutes left -- must floor at 0,
+        # never go negative.
+        study_planner_service.complete_block(self.alice, second["block_id"], actual_minutes=30)
+        self.assertEqual(self._plan_item(self.alice, task["task_id"])["remaining_minutes"], 0)
+
+    def test_plan_item_decrement_does_not_affect_topic_progress(self):
+        task = self._task_with_plan_item(estimated_minutes=90)
+        block = self._block(task["task_id"], "2026-09-14T18:00:00", "2026-09-14T18:30:00", 30)
+        study_planner_service.complete_block(self.alice, block["block_id"], actual_minutes=30)
+        progress = study_planner_store.get_topic_progress(self.alice, "notes.pdf", "topic-a")
+        self.assertEqual(progress["completed_minutes"], 30)
+        self.assertEqual(progress["planned_minutes"], 90)
+
+    def test_plan_item_decrement_is_owner_scoped(self):
+        task = self._task_with_plan_item(estimated_minutes=90)
+        block = self._block(task["task_id"], "2026-09-14T18:00:00", "2026-09-14T18:30:00", 30)
+        study_planner_service.complete_block(self.alice, block["block_id"], actual_minutes=30)
+        self.assertEqual(study_planner_store.list_plan_items(self.bob, task["task_id"]), [])
+
+    def test_non_document_task_completion_has_no_plan_item_to_touch(self):
+        task = study_planner_service.create_task(self.alice, "Plain task", "2026-09-20", 60)
+        block, = study_planner_store.create_blocks(self.alice, task["task_id"], [{
+            "document_id": None, "topic_id": None, "title": "Session",
+            "start_at": "2026-09-14T18:00:00", "end_at": "2026-09-14T18:30:00", "planned_minutes": 30,
+        }])
+        # Must not raise even though there is no study_plan_item at all for this task.
+        study_planner_service.complete_block(self.alice, block["block_id"], actual_minutes=30)
+        self.assertEqual(study_planner_store.list_plan_items(self.alice, task["task_id"]), [])
+
+    def test_regenerate_after_completion_does_not_overschedule(self):
+        document = {
+            "id": "notes.pdf",
+            "topics": [{"topic_id": "topic-a", "name": "Topic A", "subtopics": []}],
+        }
+        first, second = (
+            patch.object(study_planner_service, "get_indexed_document", return_value=document),
+            patch.object(study_planner_service, "get_topic_chunks", return_value=[{"content": "x" * 10}]),
+        )
+        with first, second:
+            task = study_planner_service.create_task(
+                self.alice, "Prep", "2026-09-14", 120, document_id="notes.pdf", topic_id="topic-a",
+            )
+            # Deliberately more availability (4h) than the task needs (2h) so an over-scheduling
+            # regression shows up as extra scheduled minutes, not merely a false "schedule_risk"
+            # capped by availability.
+            study_planner_store.add_availability(self.alice, "18:00", "22:00", date="2026-09-14")
+            initial = study_planner_service.generate_schedule(self.alice, task["task_id"], now=EARLY_MORNING)
+            self.assertTrue(initial["blocks"])
+            completed_block = initial["blocks"][0]
+            study_planner_service.complete_block(
+                self.alice, completed_block["block_id"], actual_minutes=completed_block["planned_minutes"],
+            )
+
+            regenerated = study_planner_service.regenerate_schedule(self.alice, task["task_id"], now=EARLY_MORNING)
+
+        self.assertEqual(regenerated["required_minutes"], 120 - completed_block["planned_minutes"])
+        all_blocks = study_planner_store.list_blocks(self.alice, task["task_id"])
+        total_scheduled_minutes = sum(block["planned_minutes"] for block in all_blocks)
+        self.assertLessEqual(total_scheduled_minutes, 120)
+
+
 class StudyPlannerRemainingMinutesTests(unittest.TestCase):
     """Completing a block rolls its actual_minutes off the parent task's remaining_minutes,
     floored at 0. topic_progress accumulation (covered by StudyPlannerCompletionTests) is

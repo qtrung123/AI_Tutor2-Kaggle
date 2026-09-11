@@ -532,6 +532,12 @@ def complete_block(owner_id: str, block_id: str, actual_minutes: int | None = No
             planned_minutes=planned_minutes, completed_minutes_delta=minutes,
             last_studied_at=completed_at,
         )
+        # Keep the per-topic study_plan_item's remaining_minutes in sync with completion, too --
+        # ensure_study_plan_items reuses this figure verbatim on every later generate/regenerate,
+        # so without this a regenerate would keep re-scheduling minutes already completed.
+        study_planner_store.decrement_plan_item_remaining_minutes(
+            owner_id, block["task_id"], block["document_id"], block["topic_id"], minutes,
+        )
     _decrement_task_remaining_minutes(owner_id, block["task_id"], minutes)
     _maybe_complete_task(owner_id, block["task_id"])
     return updated
