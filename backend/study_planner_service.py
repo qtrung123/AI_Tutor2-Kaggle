@@ -1,13 +1,18 @@
-"""Study Planner business logic (Phase 1 / MVP): interval math, the deterministic scheduler,
-and the Study Buffer calculation. Persistence lives in study_planner_store.py.
+"""Study Planner business logic: interval math, the deterministic scheduler, and the Study
+Buffer calculation (Phase 1), plus document-aware study plan items (Phase 2). Persistence lives
+in study_planner_store.py.
 
 Deliberately LLM-free -- the scheduler only ever places blocks inside user-selected
-availability, never after the deadline, and never overlapping an already-busy block.
+availability, never after the deadline, and never overlapping an already-busy block. Phase 2
+reuses the Phase 1 scheduler (compute_schedule) completely unchanged, once per study plan item,
+instead of modifying its algorithm.
 """
 
 from datetime import date, datetime, timedelta
 
-from backend import study_planner_store
+from backend import quiz_store, study_planner_store
+from backend.indexed_document_store import get_indexed_document
+from backend.quiz_service import get_topic_chunks
 
 MIN_BLOCK_MINUTES = 30
 PREFERRED_BLOCK_MINUTES = 60
@@ -98,7 +103,15 @@ def free_minutes_by_date(
 
     busy_by_date: dict[str, list[tuple[int, int]]] = {}
     for block in existing_blocks:
-        if block["status"] not in {"confirmed", "completed"} and not block.get("locked"):
+        # A block is busy if it's confirmed/locked (Phase 1 rule, unchanged) OR -- Phase 3 --
+        # already completed, regardless of its (possibly still 'suggested', never-accepted)
+        # status/locked flags. A completed block is never touched by regeneration's cleanup, so
+        # it must also never be treated as free time a regenerated block can be placed into.
+        is_busy = (
+            block["status"] in {"confirmed", "completed"} or block.get("locked")
+            or block.get("completion_status") == "completed"
+        )
+        if not is_busy:
             continue
         busy_by_date.setdefault(block["start_at"][:10], []).append(
             (_datetime_minute_of_day(block["start_at"]), _datetime_minute_of_day(block["end_at"]))
@@ -243,13 +256,134 @@ def create_task(owner_id: str, title: str, deadline: str, estimated_minutes: int
     )
 
 
-def generate_schedule(owner_id: str, task_id: str, now: datetime | None = None) -> dict:
+def _topic_workload_score(topic: dict, chunks: list[dict]) -> float:
+    """Deterministic, LLM-free workload signal for one document topic: how many concepts
+    (subtopics), how many indexed chunks, and a lightly-normalized content size (chars / 500, so
+    it contributes on roughly the same scale as the counts rather than swamping them)."""
+    concept_count = len(topic.get("subtopics") or [])
+    chunk_count = len(chunks)
+    content_chars = sum(len(str(chunk.get("content") or "")) for chunk in chunks)
+    return concept_count + chunk_count + (content_chars / 500)
+
+
+def allocate_topic_minutes(scores: list[float], total_minutes: int) -> list[int]:
+    """Deterministic largest-remainder apportionment: split `total_minutes` across topics in
+    proportion to their workload score, while guaranteeing the allocations sum to EXACTLY
+    total_minutes (never more, never less) -- ties broken by list order for determinism.
+    """
+    count = len(scores)
+    if count == 0 or total_minutes <= 0:
+        return [0] * count
+    total_score = sum(scores)
+    if total_score <= 0:
+        base, remainder = divmod(total_minutes, count)
+        return [base + (1 if index < remainder else 0) for index in range(count)]
+    raw = [total_minutes * score / total_score for score in scores]
+    floors = [int(value) for value in raw]
+    remainder = total_minutes - sum(floors)
+    order = sorted(range(count), key=lambda index: (-(raw[index] - floors[index]), index))
+    for index in order[:remainder]:
+        floors[index] += 1
+    return floors
+
+
+def ensure_study_plan_items(owner_id: str, task: dict) -> list[dict]:
+    """For a document-linked task: one study_plan_item per document topic, with the task's
+    estimated_minutes split across topics by deterministic workload score (never an LLM). Items
+    are created ONCE per task and reused on later regenerations so partial progress
+    (remaining_minutes) is never reset by re-clicking Generate Study Plan. Returns [] when the
+    task has no document, or the document has no extractable topics (caller falls back to the
+    plain per-task scheduling path in that case).
+    """
+    document_id = task.get("document_id")
+    if not document_id:
+        return []
+    existing = study_planner_store.list_plan_items(owner_id, task["task_id"])
+    if existing:
+        return existing
+    document = get_indexed_document(owner_id, document_id)
+    if not document:
+        return []
+    topics = [topic for topic in document.get("topics") or [] if topic.get("topic_id")]
+    if not topics:
+        return []
+    scores = []
+    for topic in topics:
+        chunks = get_topic_chunks(document_id, str(topic["topic_id"]), owner_id)
+        scores.append(_topic_workload_score(topic, chunks))
+    allocations = allocate_topic_minutes(scores, int(task["estimated_minutes"]))
+    items = [
+        {
+            "document_id": document_id, "topic_id": str(topic["topic_id"]),
+            "title": f"Study {topic.get('name') or topic['topic_id']}",
+            "estimated_minutes": minutes, "remaining_minutes": minutes, "priority": index,
+        }
+        for index, (topic, minutes) in enumerate(zip(topics, allocations))
+    ]
+    return study_planner_store.create_plan_items(owner_id, task["task_id"], items)
+
+
+def compute_schedule_for_document_task(
+    task: dict, items: list[dict], availability: list[dict], existing_blocks: list[dict],
+    now: datetime | None = None,
+) -> dict:
+    """Schedules a document-linked task's study plan items through the UNCHANGED
+    compute_schedule -- once per item -- threading each item's newly-placed blocks forward as
+    busy so later items never overlap earlier ones. available_minutes/study_buffer are computed
+    once over the whole deadline window (the same Phase 1 semantics), not summed per item.
+    """
+    now = now or datetime.now()
+    today = now.date()
+    deadline = date.fromisoformat(task["deadline"])
+    required_minutes = sum(int(item["remaining_minutes"]) for item in items)
+    if deadline < today:
+        return {
+            "status": "schedule_risk", "available_minutes": 0, "required_minutes": required_minutes,
+            "study_buffer": -required_minutes, "shortage_minutes": required_minutes, "blocks": [],
+        }
+    available_minutes = total_free_minutes(
+        free_minutes_by_date(today, deadline, availability, existing_blocks, now=now)
+    )
+
+    running_busy = list(existing_blocks)
+    all_blocks: list[dict] = []
+    for item in items:
+        if int(item["remaining_minutes"]) <= 0:
+            continue
+        pseudo_task = {
+            "title": item["title"], "document_id": item["document_id"],
+            "deadline": task["deadline"], "remaining_minutes": item["remaining_minutes"],
+        }
+        item_result = compute_schedule(pseudo_task, availability, running_busy, now=now)
+        for block in item_result["blocks"]:
+            block["topic_id"] = item["topic_id"]
+        all_blocks.extend(item_result["blocks"])
+        running_busy = running_busy + [
+            {**block, "status": "confirmed", "locked": True} for block in item_result["blocks"]
+        ]
+
+    scheduled_minutes = sum(block["planned_minutes"] for block in all_blocks)
+    shortage_minutes = max(0, required_minutes - scheduled_minutes)
+    return {
+        "status": "schedule_risk" if shortage_minutes > 0 else "on_track",
+        "available_minutes": available_minutes, "required_minutes": required_minutes,
+        "study_buffer": available_minutes - required_minutes,
+        "shortage_minutes": shortage_minutes, "blocks": all_blocks,
+    }
+
+
+def generate_schedule(owner_id: str, task_id: str, now: datetime | None = None,
+                       reason: str = "initial") -> dict:
     task = study_planner_store.get_task(owner_id, task_id)
     if not task:
         raise ValueError("Study task not found.")
     availability = study_planner_store.list_availability(owner_id)
     existing_blocks = study_planner_store.list_blocks(owner_id)  # shared calendar, all tasks
-    result = compute_schedule(task, availability, existing_blocks, now=now)
+    items = ensure_study_plan_items(owner_id, task) if task.get("document_id") else []
+    result = (
+        compute_schedule_for_document_task(task, items, availability, existing_blocks, now=now)
+        if items else compute_schedule(task, availability, existing_blocks, now=now)
+    )
     # Replace this task's still-unlocked suggested blocks with the fresh plan. Confirmed,
     # completed, missed, and locked blocks are never silently touched.
     study_planner_store.delete_unlocked_suggested_blocks_for_task(owner_id, task_id)
@@ -257,8 +391,17 @@ def generate_schedule(owner_id: str, task_id: str, now: datetime | None = None) 
         study_planner_store.create_blocks(owner_id, task_id, result["blocks"])
         if result["blocks"] else []
     )
-    study_planner_store.record_schedule_run(owner_id, task_id, reason="initial")
+    study_planner_store.record_schedule_run(owner_id, task_id, reason=reason)
     return {**result, "blocks": saved_blocks}
+
+
+def regenerate_schedule(owner_id: str, task_id: str, now: datetime | None = None) -> dict:
+    """Orchestration-only re-run of generate_schedule for a task that may already have blocks:
+    removes stale suggested/unlocked blocks (never a completed, confirmed, or locked one), then
+    schedules fresh blocks with the UNCHANGED scheduler over current availability. No scheduling,
+    workload-allocation, or availability-calculation logic is touched -- this only decides which
+    already-persisted blocks are cleared before generate_schedule runs."""
+    return generate_schedule(owner_id, task_id, now=now, reason="regenerate")
 
 
 def accept_plan(owner_id: str, task_id: str) -> list[dict]:
@@ -315,3 +458,141 @@ def edit_block(owner_id: str, block_id: str, start_at: str | None = None,
 
 def study_buffer_status(study_buffer: int) -> str:
     return "on_track" if study_buffer >= 0 else "schedule_risk"
+
+
+# ---------------------------------------------------------------------------
+# Completion tracking (Phase 3: progress tracking, prep for adaptive scheduling)
+# ---------------------------------------------------------------------------
+
+def complete_block(owner_id: str, block_id: str, actual_minutes: int | None = None) -> dict:
+    """Mark a study block completed and roll its minutes into the related topic's progress
+    (when the block is tied to a document/topic -- a plain task-level block has neither and is
+    marked completed with no topic_progress side effect). Idempotent guard: a block already
+    completed cannot be completed again, so its minutes are never double-counted."""
+    block = study_planner_store.get_block(owner_id, block_id)
+    if not block:
+        raise ValueError("Study block not found.")
+    if block["completion_status"] == "completed":
+        raise ValueError("Study block is already completed.")
+    minutes = int(actual_minutes) if actual_minutes is not None else block["planned_minutes"]
+    if minutes < 0:
+        raise ValueError("actual_minutes must not be negative.")
+    completed_at = study_planner_store.utc_now_iso()
+    updated = study_planner_store.update_block(
+        owner_id, block_id,
+        {"completion_status": "completed", "completed_at": completed_at, "actual_minutes": minutes},
+    )
+    if block["document_id"] and block["topic_id"]:
+        planned_minutes = study_planner_store.sum_estimated_minutes_for_topic(
+            owner_id, block["document_id"], block["topic_id"],
+        )
+        study_planner_store.upsert_topic_progress(
+            owner_id, block["document_id"], block["topic_id"],
+            planned_minutes=planned_minutes, completed_minutes_delta=minutes,
+            last_studied_at=completed_at,
+        )
+    _decrement_task_remaining_minutes(owner_id, block["task_id"], minutes)
+    _maybe_complete_task(owner_id, block["task_id"])
+    return updated
+
+
+def _decrement_task_remaining_minutes(owner_id: str, task_id: str, minutes: int) -> None:
+    """Roll a completed block's actual_minutes off its parent task's remaining_minutes, floored
+    at 0 (a block that ran long must never push remaining_minutes negative)."""
+    task = study_planner_store.get_task(owner_id, task_id)
+    if not task:
+        return
+    new_remaining = max(0, int(task["remaining_minutes"]) - int(minutes))
+    study_planner_store.update_task(owner_id, task_id, {"remaining_minutes": new_remaining})
+
+
+def _maybe_complete_task(owner_id: str, task_id: str) -> None:
+    """Task lifecycle: an active task is marked completed once every one of its study blocks has
+    completion_status == 'completed'. Never touches the scheduler or any other planner flow --
+    purely a status flip layered on top of it. A task with no blocks yet is never auto-completed,
+    and a task already completed/otherwise not active is left alone."""
+    task = study_planner_store.get_task(owner_id, task_id)
+    if not task or task["status"] != "active":
+        return
+    blocks = study_planner_store.list_blocks(owner_id, task_id)
+    if blocks and all(block["completion_status"] == "completed" for block in blocks):
+        study_planner_store.update_task(owner_id, task_id, {"status": "completed"})
+
+
+def skip_block(owner_id: str, block_id: str) -> dict:
+    """Mark a study block skipped -- never contributes to topic_progress."""
+    block = study_planner_store.get_block(owner_id, block_id)
+    if not block:
+        raise ValueError("Study block not found.")
+    if block["completion_status"] == "completed":
+        raise ValueError("Cannot skip an already-completed study block.")
+    return study_planner_store.update_block(
+        owner_id, block_id,
+        {"completion_status": "skipped", "completed_at": study_planner_store.utc_now_iso()},
+    )
+
+
+def update_block_actual_minutes(owner_id: str, block_id: str, actual_minutes: int) -> dict:
+    """Record/adjust actual_minutes on a block without changing its completion state -- e.g.
+    logging time spent so far, or correcting the figure before completion. Once a block is
+    completed its actual_minutes is locked (that figure already rolled into topic_progress, and
+    editing it here would silently drift the two out of sync -- no adaptive rescheduling yet)."""
+    actual_minutes = int(actual_minutes)
+    if actual_minutes < 0:
+        raise ValueError("actual_minutes must not be negative.")
+    block = study_planner_store.get_block(owner_id, block_id)
+    if not block:
+        raise ValueError("Study block not found.")
+    if block["completion_status"] == "completed":
+        raise ValueError("Cannot modify actual_minutes on a completed study block.")
+    return study_planner_store.update_block(owner_id, block_id, {"actual_minutes": actual_minutes})
+
+
+def get_topic_mastery_for_planning(owner_id: str, document_id: str, topic_id: str) -> dict | None:
+    """Read-only extension point for future adaptive scheduling: exposes the existing quiz
+    topic-mastery score (already computed and stored by the quiz feature) in the minimal shape
+    the planner needs, without redesigning or duplicating quiz_store's topic_mastery table."""
+    mastery = quiz_store.get_topic_mastery(owner_id, document_id, topic_id)
+    if not mastery:
+        return None
+    return {
+        "owner_id": owner_id, "document_id": document_id, "topic_id": topic_id,
+        "mastery_score": mastery.get("mastery_score"),
+    }
+
+
+def get_task_progress(owner_id: str, task_id: str) -> dict:
+    """Read-only rollup for one task's task card: minutes completed vs. minutes actually
+    scheduled (the sum of its own blocks' planned_minutes, not the task's original estimate --
+    that estimate may not be fully schedulable), plus, for a document-linked task, how many of
+    its topics are themselves fully studied (per topic_progress). Never touches scheduling."""
+    task = study_planner_store.get_task(owner_id, task_id)
+    if not task:
+        raise ValueError("Study task not found.")
+    blocks = study_planner_store.list_blocks(owner_id, task_id)
+    planned_minutes = sum(int(block["planned_minutes"]) for block in blocks)
+    completed_minutes = sum(
+        int(block["actual_minutes"] if block["actual_minutes"] is not None else block["planned_minutes"])
+        for block in blocks if block["completion_status"] == "completed"
+    )
+    completed_minutes = min(completed_minutes, planned_minutes) if planned_minutes > 0 else completed_minutes
+    progress_percent = (
+        min(100.0, round(completed_minutes / planned_minutes * 100, 2)) if planned_minutes > 0 else 0.0
+    )
+    topic_count = None
+    completed_topic_count = None
+    if task.get("document_id"):
+        topic_ids = {item["topic_id"] for item in study_planner_store.list_plan_items(owner_id, task_id)}
+        topic_count = len(topic_ids)
+        completed_topic_count = sum(
+            1 for topic_id in topic_ids
+            if (progress := study_planner_store.get_topic_progress(owner_id, task["document_id"], topic_id))
+            and progress["planned_minutes"] > 0
+            and progress["completed_minutes"] >= progress["planned_minutes"]
+        )
+    return {
+        "task_id": task_id, "status": task["status"],
+        "planned_minutes": planned_minutes, "completed_minutes": completed_minutes,
+        "progress_percent": progress_percent,
+        "topic_count": topic_count, "completed_topic_count": completed_topic_count,
+    }

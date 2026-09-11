@@ -78,8 +78,36 @@ def initialize_study_planner_store() -> None:
                 FOREIGN KEY (task_id) REFERENCES study_tasks(task_id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_schedule_runs_task ON schedule_runs(task_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS study_plan_items (
+                item_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+                document_id TEXT NOT NULL, topic_id TEXT NOT NULL, title TEXT NOT NULL,
+                estimated_minutes INTEGER NOT NULL, remaining_minutes INTEGER NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (owner_id) REFERENCES users(id),
+                FOREIGN KEY (task_id) REFERENCES study_tasks(task_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_study_plan_items_task
+                ON study_plan_items(task_id, priority, created_at);
+
+            CREATE TABLE IF NOT EXISTS topic_progress (
+                owner_id TEXT NOT NULL, document_id TEXT NOT NULL, topic_id TEXT NOT NULL,
+                planned_minutes INTEGER NOT NULL DEFAULT 0, completed_minutes INTEGER NOT NULL DEFAULT 0,
+                progress_percent REAL NOT NULL DEFAULT 0, last_studied_at TEXT,
+                PRIMARY KEY (owner_id, document_id, topic_id),
+                FOREIGN KEY (owner_id) REFERENCES users(id)
+            );
             """
         )
+        # Additive migration: completion tracking on study_blocks (Phase 3).
+        existing_columns = {row["name"] for row in connection.execute("PRAGMA table_info(study_blocks)")}
+        if "completion_status" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE study_blocks ADD COLUMN completion_status TEXT NOT NULL DEFAULT 'scheduled'"
+            )
+        if "completed_at" not in existing_columns:
+            connection.execute("ALTER TABLE study_blocks ADD COLUMN completed_at TEXT")
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +301,7 @@ def _block(row: sqlite3.Row) -> dict:
         "start_at": row["start_at"], "end_at": row["end_at"], "planned_minutes": row["planned_minutes"],
         "actual_minutes": row["actual_minutes"], "status": row["status"],
         "locked": bool(row["locked"]), "created_at": row["created_at"],
+        "completion_status": row["completion_status"], "completed_at": row["completed_at"],
     }
 
 
@@ -326,20 +355,24 @@ def get_block(owner_id: str, block_id: str) -> dict | None:
 
 
 def delete_unlocked_suggested_blocks_for_task(owner_id: str, task_id: str) -> None:
-    """Clear out a task's stale suggested blocks before writing a fresh plan. Never touches a
-    confirmed/completed/missed block, and never touches a locked block (the user pinned it with
-    a manual move/resize) even if it is still technically 'suggested'."""
+    """Clear out a task's stale suggested blocks before writing a fresh plan (used by both the
+    initial generate and a later regenerate). Never touches a confirmed/completed/missed block,
+    never touches a locked block (the user pinned it with a manual move/resize), and never
+    touches a block whose completion_status is 'completed' even in the edge case where it is
+    still technically status='suggested' and unlocked."""
     initialize_study_planner_store()
     with _connect() as connection:
         connection.execute(
-            "DELETE FROM study_blocks WHERE owner_id=? AND task_id=? AND status='suggested' AND locked=0",
+            "DELETE FROM study_blocks WHERE owner_id=? AND task_id=? AND status='suggested' "
+            "AND locked=0 AND completion_status != 'completed'",
             (owner_id, task_id),
         )
 
 
 def update_block(owner_id: str, block_id: str, changes: dict) -> dict:
     initialize_study_planner_store()
-    allowed = {"start_at", "end_at", "planned_minutes", "actual_minutes", "status", "locked", "title"}
+    allowed = {"start_at", "end_at", "planned_minutes", "actual_minutes", "status", "locked", "title",
+               "completion_status", "completed_at"}
     fields = [(key, changes[key]) for key in allowed if key in changes]
     if not fields:
         raise ValueError("No block changes supplied.")
@@ -391,3 +424,158 @@ def record_schedule_run(owner_id: str, task_id: str, reason: str = "initial") ->
         )
     return {"schedule_run_id": schedule_run_id, "owner_id": owner_id, "task_id": task_id,
             "reason": reason, "created_at": created_at}
+
+
+# ---------------------------------------------------------------------------
+# Study plan items (Phase 2: document-aware planning -- one per document topic)
+# ---------------------------------------------------------------------------
+
+def _plan_item(row: sqlite3.Row) -> dict:
+    return {
+        "item_id": row["item_id"], "task_id": row["task_id"], "owner_id": row["owner_id"],
+        "document_id": row["document_id"], "topic_id": row["topic_id"], "title": row["title"],
+        "estimated_minutes": row["estimated_minutes"], "remaining_minutes": row["remaining_minutes"],
+        "priority": row["priority"], "status": row["status"], "created_at": row["created_at"],
+    }
+
+
+def create_plan_items(owner_id: str, task_id: str, items: list[dict]) -> list[dict]:
+    """Persist a freshly computed set of study plan items (one per document topic) for a task."""
+    initialize_study_planner_store()
+    created_at = utc_now_iso()
+    item_ids = []
+    with _connect() as connection:
+        for item in items:
+            item_id = str(uuid4())
+            item_ids.append(item_id)
+            connection.execute(
+                """INSERT INTO study_plan_items (item_id, task_id, owner_id, document_id, topic_id,
+                   title, estimated_minutes, remaining_minutes, priority, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)""",
+                (item_id, task_id, owner_id, item["document_id"], item["topic_id"], item["title"],
+                 item["estimated_minutes"], item["remaining_minutes"], int(item.get("priority", 0)), created_at),
+            )
+    return list_plan_items(owner_id, task_id)
+
+
+def list_plan_items(owner_id: str, task_id: str) -> list[dict]:
+    initialize_study_planner_store()
+    with _connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM study_plan_items WHERE owner_id=? AND task_id=? ORDER BY priority, created_at",
+            (owner_id, task_id),
+        ).fetchall()
+    return [_plan_item(row) for row in rows]
+
+
+def delete_plan_items_for_task(owner_id: str, task_id: str) -> None:
+    initialize_study_planner_store()
+    with _connect() as connection:
+        connection.execute(
+            "DELETE FROM study_plan_items WHERE owner_id=? AND task_id=?", (owner_id, task_id),
+        )
+
+
+def sum_estimated_minutes_for_topic(owner_id: str, document_id: str, topic_id: str) -> int:
+    """Total planned minutes for one topic across every study plan item ever created for it,
+    regardless of which task the item belongs to."""
+    initialize_study_planner_store()
+    with _connect() as connection:
+        row = connection.execute(
+            """SELECT COALESCE(SUM(estimated_minutes), 0) AS total FROM study_plan_items
+               WHERE owner_id=? AND document_id=? AND topic_id=?""",
+            (owner_id, document_id, topic_id),
+        ).fetchone()
+    return int(row["total"])
+
+
+# ---------------------------------------------------------------------------
+# Topic progress (Phase 3: completion tracking)
+# ---------------------------------------------------------------------------
+
+def _topic_progress(row: sqlite3.Row) -> dict:
+    return {
+        "owner_id": row["owner_id"], "document_id": row["document_id"], "topic_id": row["topic_id"],
+        "planned_minutes": row["planned_minutes"], "completed_minutes": row["completed_minutes"],
+        "progress_percent": row["progress_percent"], "last_studied_at": row["last_studied_at"],
+    }
+
+
+def get_topic_progress(owner_id: str, document_id: str, topic_id: str) -> dict | None:
+    initialize_study_planner_store()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM topic_progress WHERE owner_id=? AND document_id=? AND topic_id=?",
+            (owner_id, document_id, topic_id),
+        ).fetchone()
+    return _topic_progress(row) if row else None
+
+
+def list_topic_progress(owner_id: str, document_id: str | None = None) -> list[dict]:
+    initialize_study_planner_store()
+    with _connect() as connection:
+        if document_id:
+            rows = connection.execute(
+                "SELECT * FROM topic_progress WHERE owner_id=? AND document_id=?",
+                (owner_id, document_id),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT * FROM topic_progress WHERE owner_id=?", (owner_id,),
+            ).fetchall()
+    return [_topic_progress(row) for row in rows]
+
+
+def upsert_topic_progress(owner_id: str, document_id: str, topic_id: str, planned_minutes: int,
+                           completed_minutes_delta: int, last_studied_at: str) -> dict:
+    """Add completed_minutes_delta to this topic's running total (creating the row on first use),
+    refresh planned_minutes to the latest known total, and recompute progress_percent. Both
+    completed_minutes and progress_percent are capped at planned_minutes / 100% -- a block whose
+    actual_minutes overshoots its planned allocation can never make a topic look more than fully
+    studied."""
+    initialize_study_planner_store()
+    with _connect() as connection:
+        connection.execute(
+            """INSERT INTO topic_progress
+                   (owner_id, document_id, topic_id, planned_minutes, completed_minutes,
+                    progress_percent, last_studied_at)
+               VALUES (?, ?, ?, ?, ?, 0, ?)
+               ON CONFLICT(owner_id, document_id, topic_id) DO UPDATE SET
+                   planned_minutes=excluded.planned_minutes,
+                   completed_minutes=topic_progress.completed_minutes + excluded.completed_minutes,
+                   last_studied_at=excluded.last_studied_at""",
+            (owner_id, document_id, topic_id, planned_minutes, max(completed_minutes_delta, 0),
+             last_studied_at),
+        )
+        completed_minutes = connection.execute(
+            "SELECT completed_minutes FROM topic_progress WHERE owner_id=? AND document_id=? AND topic_id=?",
+            (owner_id, document_id, topic_id),
+        ).fetchone()["completed_minutes"]
+        capped_completed_minutes = min(completed_minutes, planned_minutes) if planned_minutes > 0 else 0
+        progress_percent = (
+            min(100.0, round(capped_completed_minutes / planned_minutes * 100, 2)) if planned_minutes > 0 else 0.0
+        )
+        connection.execute(
+            """UPDATE topic_progress SET completed_minutes=?, progress_percent=?
+               WHERE owner_id=? AND document_id=? AND topic_id=?""",
+            (capped_completed_minutes, progress_percent, owner_id, document_id, topic_id),
+        )
+    return get_topic_progress(owner_id, document_id, topic_id)
+
+
+# ---------------------------------------------------------------------------
+# Development reset -- current user's planner data only
+# ---------------------------------------------------------------------------
+
+def reset_planner_data(owner_id: str) -> None:
+    """Delete only this owner's Study Planner data (tasks, availability, blocks, schedule runs,
+    plan items, topic progress). Never touches any other feature's tables -- documents, quiz,
+    flashcards, and chat history all live in separate stores this function never opens."""
+    initialize_study_planner_store()
+    with _connect() as connection:
+        connection.execute("DELETE FROM study_blocks WHERE owner_id=?", (owner_id,))
+        connection.execute("DELETE FROM schedule_runs WHERE owner_id=?", (owner_id,))
+        connection.execute("DELETE FROM study_plan_items WHERE owner_id=?", (owner_id,))
+        connection.execute("DELETE FROM study_tasks WHERE owner_id=?", (owner_id,))
+        connection.execute("DELETE FROM availability_slots WHERE owner_id=?", (owner_id,))
+        connection.execute("DELETE FROM topic_progress WHERE owner_id=?", (owner_id,))

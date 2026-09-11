@@ -188,6 +188,11 @@ class StudyBlockUpdateRequest(BaseModel):
     start_at: Optional[str] = None
     end_at: Optional[str] = None
     status: Optional[str] = None
+    actual_minutes: Optional[int] = None
+
+
+class StudyBlockCompleteRequest(BaseModel):
+    actual_minutes: Optional[int] = None
 
 
 class StudyPlanGenerateRequest(BaseModel):
@@ -1085,6 +1090,13 @@ def planner_list_blocks(task_id: Optional[str] = None,
     return study_planner_store.list_blocks(current_user["id"], task_id=task_id)
 
 
+@app.get("/api/planner/tasks/{task_id}/items")
+def planner_list_plan_items(task_id: str, current_user: dict = Depends(require_current_user)) -> list[dict]:
+    """Document-aware study plan items (Phase 2) for one task -- one per document topic, or an
+    empty list for a task with no linked document (or none generated yet)."""
+    return study_planner_store.list_plan_items(current_user["id"], task_id)
+
+
 @app.patch("/api/planner/blocks/{block_id}")
 def planner_update_block(block_id: str, request: StudyBlockUpdateRequest,
                          current_user: dict = Depends(require_current_user)) -> dict:
@@ -1096,6 +1108,10 @@ def planner_update_block(block_id: str, request: StudyBlockUpdateRequest,
             )
         if request.status:
             result = study_planner_store.update_block(current_user["id"], block_id, {"status": request.status})
+        if request.actual_minutes is not None:
+            result = study_planner_service.update_block_actual_minutes(
+                current_user["id"], block_id, request.actual_minutes,
+            )
         if result is None:
             raise ValueError("No block changes supplied.")
         return result
@@ -1130,9 +1146,71 @@ def planner_generate_schedule(task_id: str, request: StudyPlanGenerateRequest,
         ) from error
 
 
+@app.post("/api/planner/tasks/{task_id}/regenerate")
+def planner_regenerate_schedule(task_id: str, request: StudyPlanGenerateRequest,
+                                current_user: dict = Depends(require_current_user)) -> dict:
+    """Orchestration-only re-run of the plan for a task that may already have blocks: removes
+    stale suggested/unlocked blocks, keeps every completed/confirmed/locked block untouched, and
+    reschedules with the unchanged scheduler over current availability."""
+    try:
+        now = datetime.fromisoformat(request.local_now) if request.local_now else None
+        return study_planner_service.regenerate_schedule(current_user["id"], task_id, now=now)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=404 if str(error) == "Study task not found." else 400, detail=str(error)
+        ) from error
+
+
 @app.post("/api/planner/tasks/{task_id}/accept")
 def planner_accept_plan(task_id: str, current_user: dict = Depends(require_current_user)) -> list[dict]:
     try:
         return study_planner_service.accept_plan(current_user["id"], task_id)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.post("/api/planner/blocks/{block_id}/complete")
+def planner_complete_block(block_id: str, request: StudyBlockCompleteRequest,
+                           current_user: dict = Depends(require_current_user)) -> dict:
+    """Mark a study block completed and roll its minutes into the linked topic's progress."""
+    try:
+        return study_planner_service.complete_block(
+            current_user["id"], block_id, actual_minutes=request.actual_minutes,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=404 if str(error) == "Study block not found." else 400, detail=str(error)
+        ) from error
+
+
+@app.post("/api/planner/blocks/{block_id}/skip")
+def planner_skip_block(block_id: str, current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        return study_planner_service.skip_block(current_user["id"], block_id)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=404 if str(error) == "Study block not found." else 400, detail=str(error)
+        ) from error
+
+
+@app.get("/api/planner/topic-progress")
+def planner_list_topic_progress(document_id: Optional[str] = None,
+                                current_user: dict = Depends(require_current_user)) -> list[dict]:
+    return study_planner_store.list_topic_progress(current_user["id"], document_id=document_id)
+
+
+@app.get("/api/planner/tasks/{task_id}/progress")
+def planner_get_task_progress(task_id: str, current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        return study_planner_service.get_task_progress(current_user["id"], task_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.post("/api/planner/reset")
+def planner_reset(current_user: dict = Depends(require_current_user)) -> dict:
+    """Development/testing helper: wipes only the current user's Study Planner data (tasks,
+    availability, blocks, plan items, topic progress). Never touches documents, quiz, flashcards,
+    or chat history."""
+    study_planner_store.reset_planner_data(current_user["id"])
+    return {"reset": True}
