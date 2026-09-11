@@ -1424,7 +1424,7 @@ function dashboardAction(label, page, className = "continue-item", onClick = nul
 
 function applySessionLibraryFilters() {
   const query = (sessionSearchInput?.value || "").trim().toLowerCase();
-  const rows = [...overviewMaterialsList.querySelectorAll(".study-session-card")];
+  const rows = [...overviewMaterialsList.querySelectorAll(".subject-card")];
   rows.forEach((row) => { row.hidden = Boolean(query && !row.dataset.title.includes(query)); });
   const sortMode = sessionSortSelect?.value || "name";
   rows.sort((a, b) => sortMode === "topics"
@@ -1521,36 +1521,107 @@ function renderDashboard() {
     continueLearningList.appendChild(dashboardAction(metrics.documents ? "Start a grounded quiz" : "Add your first material", metrics.documents ? "practice" : "materials"));
   }
 
-  overviewMaterialsList.innerHTML = "";
   const materials = dashboardData.materials || [];
-  if (!materials.length) {
-    const empty = document.createElement("div"); empty.className = "empty-state"; empty.textContent = "No indexed documents yet."; overviewMaterialsList.appendChild(empty);
-  } else {
-    materials.forEach((material) => {
-      const row = document.createElement("article"); row.className = "study-session-card";
-      row.dataset.title = (material.document_name || "").toLowerCase();
-      row.dataset.topicCount = String(material.topic_count || 0);
-      const copy = document.createElement("div"); const title = document.createElement("strong"); title.textContent = material.document_name;
-      const meta = document.createElement("span"); meta.textContent = `${material.topic_count} topics · ${material.assessed_topic_count} assessed`;
-      const gapCount = knowledgeGaps.filter((gap) => gap.document_id === material.document_id).length;
-      const gap = document.createElement("small"); gap.textContent = `${gapCount} knowledge gap${gapCount === 1 ? "" : "s"}`;
-      copy.append(title, meta, gap); const action = document.createElement("button"); action.className = "text-button"; action.type = "button"; action.textContent = "Open session →";
-      action.addEventListener("click", () => openStudySession(material.document_id));
-      const deleteButton = document.createElement("button");
-      deleteButton.className = "text-button danger-button study-session-delete-button";
-      deleteButton.type = "button";
-      deleteButton.textContent = "Delete";
-      deleteButton.addEventListener("click", (event) => {
-        event.stopPropagation();
-        deleteUploadedSource({ title: material.document_id }, deleteButton);
-      });
-      row.addEventListener("click", (event) => { if (!event.target.closest("button")) openStudySession(material.document_id); });
-      row.append(copy, action, deleteButton); overviewMaterialsList.appendChild(row);
-    });
-  }
+  renderSubjectCards(dashboardData.subjects || []);
   renderSidebarRecentDocuments(materials);
   applySessionLibraryFilters();
   renderRecommendations();
+}
+
+function subjectQuickActionButton(label, onClick, title) {
+  const button = document.createElement("button");
+  button.className = "text-button subject-quick-action";
+  button.type = "button";
+  button.textContent = label;
+  if (title) button.title = title;
+  button.addEventListener("click", (event) => { event.stopPropagation(); onClick(); });
+  return button;
+}
+
+function renderSubjectCards(subjects) {
+  overviewMaterialsList.innerHTML = "";
+  if (!subjects.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No indexed documents yet.";
+    overviewMaterialsList.appendChild(empty);
+    return;
+  }
+  subjects.forEach((subject) => {
+    const card = document.createElement("article");
+    card.className = "subject-card";
+    card.dataset.title = (subject.subject_name || "").toLowerCase();
+    card.dataset.topicCount = String(subject.topic_count || 0);
+
+    const header = document.createElement("div");
+    header.className = "subject-card-header";
+    const title = document.createElement("strong");
+    title.textContent = subject.subject_name;
+    const meta = document.createElement("span");
+    const documentCount = subject.document_count || 0;
+    const topicCount = subject.topic_count || 0;
+    meta.textContent = `${documentCount} document${documentCount === 1 ? "" : "s"} · ${topicCount} topic${topicCount === 1 ? "" : "s"}`;
+    header.append(title, meta);
+
+    const progress = document.createElement("div");
+    progress.className = "subject-progress";
+    if (subject.progress_percent == null) {
+      progress.textContent = "No assessed topics yet";
+    } else {
+      const percent = Math.round(subject.progress_percent);
+      const track = document.createElement("div"); track.className = "subject-progress-track";
+      const bar = document.createElement("span"); bar.className = "subject-progress-bar"; bar.style.width = `${percent}%`;
+      track.appendChild(bar);
+      const label = document.createElement("small"); label.textContent = `${percent}% assessed`;
+      progress.append(track, label);
+    }
+
+    const primaryDocumentId = subject.primary_document_id;
+    const primaryMaterial = (dashboardData.materials || []).find((item) => item.document_id === primaryDocumentId);
+    const primaryDocumentLabel = primaryMaterial ? primaryMaterial.document_name : primaryDocumentId;
+    // Quiz/Flashcards/AI Tutor are intentionally document-scoped -- they open the existing,
+    // unmodified per-document session for this subject's primary (most recently updated)
+    // document. There is no subject-wide generation; the tooltip makes that scoping explicit
+    // when a subject groups more than one document.
+    const actions = document.createElement("div");
+    actions.className = "subject-quick-actions";
+    actions.append(
+      subjectQuickActionButton("Quiz", () => openStudySession(primaryDocumentId, "quiz"),
+        `Opens Quiz for ${primaryDocumentLabel}`),
+      subjectQuickActionButton("Flashcards", () => openStudySession(primaryDocumentId, "flashcards"),
+        `Opens Flashcards for ${primaryDocumentLabel}`),
+      subjectQuickActionButton("AI Tutor", () => openStudySession(primaryDocumentId, "material"),
+        `Opens AI Tutor for ${primaryDocumentLabel}`),
+      subjectQuickActionButton("Study Planner", () => setPage("planner")),
+    );
+
+    const documentsList = document.createElement("div");
+    documentsList.className = "subject-documents";
+    (subject.document_ids || []).forEach((documentId) => {
+      const material = (dashboardData.materials || []).find((item) => item.document_id === documentId);
+      const row = document.createElement("div");
+      row.className = "subject-document-row";
+      const label = document.createElement("span");
+      label.textContent = material ? material.document_name : documentId;
+      const openButton = document.createElement("button");
+      openButton.className = "text-button"; openButton.type = "button"; openButton.textContent = "Open →";
+      openButton.addEventListener("click", (event) => { event.stopPropagation(); openStudySession(documentId); });
+      const deleteButton = document.createElement("button");
+      deleteButton.className = "text-button danger-button"; deleteButton.type = "button"; deleteButton.textContent = "Delete";
+      deleteButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        deleteUploadedSource({ title: documentId }, deleteButton);
+      });
+      row.append(label, openButton, deleteButton);
+      documentsList.appendChild(row);
+    });
+
+    card.append(header, progress, actions, documentsList);
+    card.addEventListener("click", (event) => {
+      if (!event.target.closest("button") && primaryDocumentId) openStudySession(primaryDocumentId);
+    });
+    overviewMaterialsList.appendChild(card);
+  });
 }
 
 async function loadDashboard() {

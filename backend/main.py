@@ -46,6 +46,7 @@ from backend.summary_store import delete_document_summaries
 from backend.flashcard_service import authoritative_card_fields, generate_flashcards
 from backend.flashcard_store import add_flashcard, delete_document_flashcards, delete_flashcard, update_flashcard
 from backend import study_planner_service, study_planner_store
+from backend.subject_grouping import group_documents_into_subjects
 from config import AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE, AUTH_SESSION_DAYS, CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL, QUIZ_DEFAULT_GENERATION_MODEL
 from backend.auth_store import (
     authenticate_user,
@@ -892,9 +893,13 @@ def topic_mastery(
 
 @app.get("/api/dashboard")
 def learning_dashboard(current_user: dict = Depends(require_current_user)) -> dict:
-    """Return the real project state used by the Overview and mastery UI."""
+    """Return the real project state used by the Overview and mastery UI. Adds a subject-grouped
+    view of the existing "materials" rows for the Overview's subject cards -- a pure, read-only
+    aggregation; build_learning_dashboard's own quiz/mastery computation is untouched."""
     try:
-        return build_learning_dashboard(current_user["id"])
+        dashboard = build_learning_dashboard(current_user["id"])
+        dashboard["subjects"] = group_documents_into_subjects(dashboard.get("materials") or [])
+        return dashboard
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Could not load dashboard: {error}") from error
 
