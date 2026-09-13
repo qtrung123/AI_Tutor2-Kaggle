@@ -21,6 +21,7 @@ from backend.quiz_store import (
     list_document_quizzes,
     list_completed_answer_snapshots,
     list_quiz_history as load_quiz_history,
+    get_quiz_titles,
     get_quiz_history_attempt,
     invalidate_document_quizzes_for_topic_schema,
     quiz_cache_key,
@@ -1495,6 +1496,7 @@ def _generate_topic_quiz_v2(
     model_id: str,
     regenerate: bool,
     question_count: int = 10,
+    quiz_title: str | None = None,
 ) -> dict:
     total_started = time.perf_counter()
     timings = {}
@@ -1812,7 +1814,7 @@ def _generate_topic_quiz_v2(
         "quiz_id": str(uuid4()),
         "document_id": document["id"],
         "document_hash": document.get("hash", ""),
-        "title": document.get("title", document["id"]),
+        "title": quiz_title or document.get("title", document["id"]),
         "difficulty": difficulty,
         "topic_id": str(topic["topic_id"]),
         "topic_name": str(topic.get("name") or topic["topic_id"]),
@@ -3930,6 +3932,21 @@ def _run_document_v2_batch(
     )
 
 
+def _resolve_quiz_title(quiz_name: str | None, previous_title: str | None, fallback: str) -> str:
+    """Pick the quiz's display name without ever touching generation input.
+
+    An explicit custom name always wins (trimmed). Otherwise a regeneration
+    keeps whatever name the quiz already had, so regenerating a custom-named
+    quiz cannot silently rename it. A brand-new quiz with no name falls back
+    to the document's own title.
+    """
+    trimmed_name = str(quiz_name or "").strip()
+    if trimmed_name:
+        return trimmed_name
+    trimmed_previous = str(previous_title or "").strip()
+    return trimmed_previous or fallback
+
+
 def generate_quiz(
     document_id: str,
     difficulty: str,
@@ -3939,6 +3956,7 @@ def generate_quiz(
     owner_id: str = LEGACY_USER_ID,
     model_id: str = CHAT_MODEL,
     question_count: int = 12,
+    quiz_name: str | None = None,
 ) -> dict:
     """
     Generate or load the persistent quiz for one indexed document.
@@ -3968,9 +3986,9 @@ def generate_quiz(
     topic_schema_version = int(document.get("topic_schema_version", 0))
     invalidate_document_quizzes_for_topic_schema(document_id, topic_schema_version, owner_id)
     cache_key = quiz_cache_key(document_id, difficulty, scope_topic_id, owner_id)
+    saved_quiz = get_quiz(document_id, difficulty, scope_topic_id, owner_id)
 
     if not regenerate:
-        saved_quiz = get_quiz(document_id, difficulty, scope_topic_id, owner_id)
         saved_target = int((saved_quiz or {}).get("assessment_plan", {}).get(
             "target_questions", (saved_quiz or {}).get("question_count", 10)
         ))
@@ -3987,6 +4005,10 @@ def generate_quiz(
     else:
         print(f"[quiz-cache] key={cache_key} MISS (regenerate)")
 
+    quiz_title = _resolve_quiz_title(
+        quiz_name, (saved_quiz or {}).get("title"), document.get("title", document_id)
+    )
+
     if assessment_scope == "topic":
         return _generate_topic_quiz_v2(
             document=document,
@@ -3996,6 +4018,7 @@ def generate_quiz(
             model_id=model_id,
             regenerate=regenerate,
             question_count=question_count,
+            quiz_title=quiz_title,
         )
 
     timings: dict[str, object] = {}
@@ -4091,7 +4114,7 @@ def generate_quiz(
         "quiz_id": str(uuid4()),
         "document_id": document_id,
         "document_hash": document.get("hash", ""),
-        "title": document.get("title", document_id),
+        "title": quiz_title,
         "difficulty": difficulty,
         "topic_id": scope_topic_id,
         "topic_name": "Entire document",
@@ -4416,8 +4439,10 @@ def list_completed_quiz_attempts(
     student_id: str = LEGACY_USER_ID,
 ) -> list[dict]:
     """Return compact summaries for the Quiz History UI."""
+    attempts = load_quiz_history(document_id, difficulty, student_id)
+    titles = get_quiz_titles([attempt.get("quiz_id") for attempt in attempts], student_id)
     summaries = []
-    for attempt in load_quiz_history(document_id, difficulty, student_id):
+    for attempt in attempts:
         total = int(attempt.get("total", 0))
         score = int(attempt.get("score", 0))
         summaries.append(
@@ -4425,6 +4450,7 @@ def list_completed_quiz_attempts(
                 "attempt_id": attempt.get("attempt_id"),
                 "quiz_id": attempt.get("quiz_id"),
                 "document_id": attempt.get("document_id"),
+                "title": titles.get(attempt.get("quiz_id")) or "Untitled Quiz",
                 "difficulty": attempt.get("difficulty", "medium"),
                 "topic_id": attempt.get("topic_id") or "document",
                 "topic_name": next((result.get("topic_name") for result in attempt.get("question_results", []) if result.get("topic_name")), ""),

@@ -205,7 +205,8 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         self.assertIn("question_count", QuizGenerateRequest.model_fields)
         self.assertIn("question_count", QuizRegenerateRequest.model_fields)
         self.assertEqual(QuizGenerateRequest(
-            document_id="doc.pdf", assessment_scope="topic", topic_id="topic_a", difficulty="easy"
+            document_id="doc.pdf", assessment_scope="topic", topic_id="topic_a", difficulty="easy",
+            quiz_name="Sample Quiz",
         ).question_count, 12)
         frontend = (Path(__file__).parents[1] / "frontend" / "app.js").read_text(encoding="utf-8")
         self.assertIn("quizQuestionCountSelect", frontend)

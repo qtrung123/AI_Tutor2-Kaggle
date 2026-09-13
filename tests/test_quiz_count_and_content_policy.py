@@ -26,6 +26,7 @@ class QuizCountAndContentPolicyTests(unittest.TestCase):
             required = {"difficulty": "easy", "assessment_scope": "document"}
             if model is QuizGenerateRequest:
                 required["document_id"] = "lecture.pdf"
+                required["quiz_name"] = "Sample Quiz"
             self.assertEqual(model(**required).question_count, 12)
             for count in (12, 15):
                 self.assertEqual(model(**required, question_count=count).question_count, count)

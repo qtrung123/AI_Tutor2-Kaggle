@@ -851,7 +851,7 @@ class FrontendDocumentBlueprintTests(unittest.TestCase):
         )
         self.assertNotIn("quizQuestionCountField.hidden = !topicMode;", script)
         self.assertIn("function documentQuizTypeBreakdown(quiz)", script)
-        self.assertIn('`${quiz.questions.length} questions · ${parts.join(" · ")}`', script)
+        self.assertIn('`${quizName} · ${quiz.questions.length} questions · ${parts.join(" · ")}`', script)
         self.assertIn("Multiple Choice", script)
         # Delete/Regenerate/Retake actions must remain available.
         self.assertIn('["Delete Quiz", "text-button danger-button", callbacks.remove]', script)

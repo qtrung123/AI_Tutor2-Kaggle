@@ -1,7 +1,8 @@
 const pageTitles = {
   overview: "Study sessions",
   session: "Study Session",
-  planner: "Study Planner"
+  planner: "Study Planner",
+  "model-comparison": "Model Comparison"
 };
 
 const API_BASE_URL = (
@@ -35,6 +36,7 @@ const PLANNER_TASKS_API_URL = apiUrl("/api/planner/tasks");
 const PLANNER_AVAILABILITY_API_URL = apiUrl("/api/planner/availability");
 const PLANNER_BLOCKS_API_URL = apiUrl("/api/planner/blocks");
 const PLANNER_TOPIC_PROGRESS_API_URL = apiUrl("/api/planner/topic-progress");
+const ADMIN_QUIZ_MODEL_COMPARISON_API_URL = apiUrl("/api/admin/quiz-model-comparison");
 const RECOMMENDATIONS_OVERVIEW_LIMIT = Number(window.APP_CONFIG?.RECOMMENDATIONS_OVERVIEW_LIMIT || 4);
 
 const initialState = {
@@ -105,6 +107,7 @@ const sourceList = document.getElementById("source-list");
 const sourceFileInput = document.getElementById("source-file-input");
 const uploadSourceButton = document.getElementById("upload-source-button");
 const uploadStatus = document.getElementById("upload-status");
+const quizNameInput = document.getElementById("quiz-name-input");
 const quizDocumentSelect = document.getElementById("quiz-document-select");
 const quizTopicSelect = document.getElementById("quiz-topic-select");
 const quizScopeSelect = document.getElementById("quiz-scope-select");
@@ -301,12 +304,14 @@ function showAuthenticatedShell(user) {
   profileEmail.textContent = user.email;
   profileAvatar.textContent = (user.display_name || user.email || "U").trim().charAt(0).toUpperCase();
   if (homeGreeting) homeGreeting.textContent = `Hello, ${user.display_name || "there"}!`;
+  document.getElementById("admin-model-comparison-nav")?.toggleAttribute("hidden", !user.is_admin);
 }
 
 function showAuthentication() {
   currentUser = null;
   appShell.hidden = true;
   authScreen.hidden = false;
+  document.getElementById("admin-model-comparison-nav")?.setAttribute("hidden", "");
   authPassword.value = "";
   setAuthMode("login");
 }
@@ -371,6 +376,7 @@ function setPage(page) {
   pageTitle.textContent = pageTitles[page];
   if (pageTitles[page]) showToast(`Opened ${pageTitles[page]}`);
   if (page === "planner") loadPlannerData();
+  if (page === "model-comparison") loadQuizModelComparison();
 }
 
 async function loadGenerationModels() {
@@ -399,6 +405,110 @@ function renderModelSelector() {
   }
   select.innerHTML = "";
   generationModels.forEach((model) => select.add(new Option(model.label, model.id, false, model.id === selectedModelId)));
+}
+
+function formatBenchmarkPercent(value) {
+  return typeof value === "number" ? `${Math.round(value * 100)}%` : "—";
+}
+
+function formatBenchmarkSeconds(value) {
+  return typeof value === "number" ? `${value.toFixed(1)}s` : "—";
+}
+
+function formatBenchmarkNumber(value, digits = 1) {
+  return typeof value === "number" ? value.toFixed(digits) : "—";
+}
+
+function formatBenchmarkVram(value) {
+  return typeof value === "number" ? `${Math.round(value).toLocaleString()} MB` : "—";
+}
+
+async function loadQuizModelComparison() {
+  const view = document.getElementById("model-comparison-view");
+  if (!view) return;
+  view.innerHTML = '<div class="empty-state">Loading benchmark results…</div>';
+  try {
+    const data = await fetchJson(ADMIN_QUIZ_MODEL_COMPARISON_API_URL);
+    renderQuizModelComparison(view, data);
+  } catch (error) {
+    view.innerHTML = "";
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = error.message || "Could not load the Quiz model comparison.";
+    view.appendChild(empty);
+  }
+}
+
+function renderQuizModelComparison(view, data) {
+  view.innerHTML = "";
+  const panel = document.createElement("article");
+  panel.className = "panel model-comparison-panel";
+
+  const heading = document.createElement("div");
+  heading.className = "panel-heading";
+  heading.innerHTML = "<div><p>Admin only</p><h2>Quiz Model Comparison</h2></div>";
+  panel.appendChild(heading);
+
+  const lastRun = document.createElement("p");
+  lastRun.className = "muted";
+  lastRun.textContent = data.generated_at
+    ? `Last benchmark: ${new Date(data.generated_at).toLocaleString()}`
+    : "Last benchmark: not run yet";
+  panel.appendChild(lastRun);
+
+  const wrap = document.createElement("div");
+  wrap.className = "summary-table-wrap";
+  const table = document.createElement("table");
+  table.className = "summary-table";
+  const thead = document.createElement("thead");
+  thead.innerHTML = (
+    "<tr><th>Model</th><th>Success Rate</th><th>Valid Question Rate</th><th>Grounding</th>"
+    + "<th>Avg Latency</th><th>Avg Retry</th><th>VRAM</th><th>Questions/min</th></tr>"
+  );
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  (data.models || []).forEach((model) => {
+    const row = document.createElement("tr");
+
+    const nameCell = document.createElement("td");
+    nameCell.appendChild(document.createTextNode(`${model.label} `));
+    const badge = document.createElement("span");
+    const isProduction = model.status === "current_production";
+    badge.className = `soft-badge ${isProduction ? "production" : "candidate"}`;
+    badge.textContent = isProduction ? "Current Production" : "Benchmark Candidate";
+    nameCell.appendChild(badge);
+    row.appendChild(nameCell);
+
+    [
+      formatBenchmarkPercent(model.success_rate),
+      formatBenchmarkPercent(model.valid_question_rate),
+      formatBenchmarkPercent(model.grounding_rate),
+      formatBenchmarkSeconds(model.avg_latency_seconds),
+      formatBenchmarkNumber(model.avg_retries),
+      formatBenchmarkVram(model.vram_mb),
+      formatBenchmarkNumber(model.questions_per_minute),
+    ].forEach((text) => {
+      const cell = document.createElement("td");
+      cell.textContent = text;
+      row.appendChild(cell);
+    });
+
+    if (!model.measured) row.classList.add("model-comparison-unmeasured");
+    tbody.appendChild(row);
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  panel.appendChild(wrap);
+
+  if (!(data.models || []).some((model) => model.measured)) {
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent = "No benchmark data yet. Run the offline Quiz model benchmark script to populate this table.";
+    panel.appendChild(note);
+  }
+
+  view.appendChild(panel);
 }
 
 function setSessionTab(tab) {
@@ -1283,6 +1393,10 @@ function selectedTopicId() {
   return selectedAssessmentScope() === "document" ? "document" : (quizTopicSelect?.value || "");
 }
 
+function selectedQuizName() {
+  return (quizNameInput?.value || "").trim();
+}
+
 function selectedQuizGenerationRequest() {
   const assessmentScope = selectedAssessmentScope();
   return {
@@ -1291,6 +1405,7 @@ function selectedQuizGenerationRequest() {
     topic_id: assessmentScope === "topic" ? selectedTopicId() : null,
     difficulty: selectedDifficulty(),
     question_count: selectedQuestionCount(),
+    quiz_name: selectedQuizName(),
     model_id: quizModelSelect?.value || "qwen3-8b"
   };
 }
@@ -1860,7 +1975,7 @@ function setAssessmentLoading(isLoading) {
   newQuizButton.disabled = isLoading;
   resetQuizButton.disabled = isLoading;
   if (deleteQuizButton) deleteQuizButton.disabled = isLoading;
-  [quizDocumentSelect, quizScopeSelect, quizTopicSelect, quizDifficultySelect,
+  [quizNameInput, quizDocumentSelect, quizScopeSelect, quizTopicSelect, quizDifficultySelect,
     quizQuestionCountSelect, quizModelSelect].forEach((control) => {
     if (control) control.disabled = isLoading;
   });
@@ -2130,14 +2245,17 @@ function renderQuizHistory() {
     card.className = "quiz-history-card";
     const info = document.createElement("div");
     const title = document.createElement("strong");
+    title.textContent = (attempt.title || "").trim() || "Untitled Quiz";
     const scopeName = attempt.topic_id === "document" ? "Entire Document" : (attempt.topic_name || attempt.topic_id || "Topic");
-    title.textContent = `${scopeName} · ${attempt.difficulty}`;
+    const meta = document.createElement("small");
+    meta.className = "quiz-history-meta";
+    meta.textContent = `${scopeName} · ${attempt.difficulty}`;
     const date = document.createElement("small");
     date.textContent = attempt.completed_at ? `Latest activity ${new Date(attempt.completed_at).toLocaleString()}` : "Activity time unavailable";
     const scope = document.createElement("span");
     scope.className = "quiz-history-scope";
     scope.textContent = `${attempt.total} questions · ${group.attempts.length} attempt${group.attempts.length === 1 ? "" : "s"}`;
-    info.append(title, scope, date);
+    info.append(title, meta, scope, date);
 
     const score = document.createElement("div");
     score.className = "quiz-history-score";
@@ -2317,6 +2435,11 @@ async function generateAssessmentQuiz() {
   }
 
   const generationRequest = selectedQuizGenerationRequest();
+  if (!generationRequest.quiz_name) {
+    showToast("Enter a quiz name");
+    quizNameInput?.focus();
+    return;
+  }
   const requestedQuizKey = quizGenerationRequestKey(generationRequest);
   setAssessmentLoading(true);
   quizList.innerHTML = "";
@@ -2332,6 +2455,7 @@ async function generateAssessmentQuiz() {
     quizAnswers = {};
     quizExplanations = {};
     quizQuestionIndex = 0;
+    if (quizNameInput) quizNameInput.value = "";
     await loadQuizStatuses();
     updateDifficultyOptions();
     closeQuizCreateDialog();
@@ -2889,14 +3013,15 @@ function documentQuizTypeBreakdown(quiz) {
 
 function assessmentTitleText(quiz) {
   if (!quiz?.questions?.length) return "Assessment Agent";
+  const quizName = (quiz.title || "").trim() || "Untitled Quiz";
   if (quiz.assessment_scope === "document") {
     const distribution = documentQuizTypeBreakdown(quiz);
     const parts = ["single_choice", "true_false", "multi_select"]
       .filter((questionType) => distribution[questionType])
       .map((questionType) => `${distribution[questionType]} ${quizTypeLabel(questionType)}`);
-    return `${quiz.questions.length} questions · ${parts.join(" · ")}`;
+    return `${quizName} · ${quiz.questions.length} questions · ${parts.join(" · ")}`;
   }
-  return `${quiz.questions.length} ${quiz.difficulty} questions from ${quiz.document_id}`;
+  return `${quizName} · ${quiz.questions.length} ${quiz.difficulty} questions from ${quiz.document_id}`;
 }
 
 function renderAssessmentQuiz() {
@@ -3240,6 +3365,7 @@ function updateQuizLandingLayout() {
 
 function openQuizCreateDialog() {
   if (!assessmentControl) return;
+  if (quizNameInput) quizNameInput.value = "";
   if (!quizModelSelect) {
     const label = document.createElement("label");
     const caption = document.createElement("span");

@@ -7,7 +7,7 @@ from uuid import uuid4
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
 
-from config import AUTH_SESSION_DAYS, DATABASE_PATH, LEGACY_USER_EMAIL
+from config import ADMIN_EMAILS, AUTH_SESSION_DAYS, DATABASE_PATH, LEGACY_USER_EMAIL
 
 
 LEGACY_USER_ID = "local_student"
@@ -83,6 +83,11 @@ def initialize_auth_store() -> None:
 
 def normalize_email(email: str) -> str:
     return str(email).strip().lower()
+
+
+def is_admin_email(email: str) -> bool:
+    """Admin status is an env-configured allowlist, not a stored user attribute."""
+    return normalize_email(email) in ADMIN_EMAILS
 
 
 def create_user(display_name: str, email: str, password: str) -> dict:

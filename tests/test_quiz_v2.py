@@ -154,19 +154,19 @@ class QuizV2Tests(unittest.TestCase):
         self.assertIn("model_id", QuizRegenerateRequest.model_fields)
         request = QuizGenerateRequest(
             document_id="lecture.pdf", assessment_scope="topic", topic_id="topic_001",
-            difficulty="easy", model_id="qwen-2.5-3b",
+            difficulty="easy", model_id="qwen-2.5-3b", quiz_name="Sample Quiz",
         )
         self.assertEqual(request.model_id, "qwen-2.5-3b")
         self.assertEqual(request.question_count, 12)
         for count in (12, 15):
             self.assertEqual(QuizGenerateRequest(
                 document_id="lecture.pdf", assessment_scope="topic", topic_id="topic_001",
-                difficulty="easy", question_count=count,
+                difficulty="easy", question_count=count, quiz_name="Sample Quiz",
             ).question_count, count)
         with self.assertRaises(ValueError):
             QuizGenerateRequest(
                 document_id="lecture.pdf", assessment_scope="topic", topic_id="topic_001",
-                difficulty="easy", question_count=5,
+                difficulty="easy", question_count=5, quiz_name="Sample Quiz",
             )
         frontend = Path("frontend/app.js").read_text(encoding="utf-8")
         self.assertIn("[12, 15].includes(value)", frontend)

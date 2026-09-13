@@ -588,6 +588,26 @@ def save_quiz(document_id: str, difficulty: str, quiz: dict, owner_id: str = LEG
         return _insert_quiz(connection, document_id, difficulty, quiz, owner_id)
 
 
+def get_quiz_titles(quiz_ids: list[str], owner_id: str = LEGACY_USER_ID) -> dict[str, str]:
+    """Batch-load quiz custom names/titles by id for history and list displays.
+
+    Looks up by owner + quiz_id regardless of is_active, so a quiz that was
+    superseded (invalidated topic schema) or is only reachable through
+    completed attempt history still resolves its name correctly.
+    """
+    initialize_quiz_store()
+    unique_ids = sorted({str(quiz_id) for quiz_id in quiz_ids if quiz_id})
+    if not unique_ids:
+        return {}
+    with _connect() as connection:
+        placeholders = ",".join("?" for _ in unique_ids)
+        rows = connection.execute(
+            f"SELECT quiz_id, title FROM quizzes WHERE owner_id = ? AND quiz_id IN ({placeholders})",
+            (owner_id, *unique_ids),
+        ).fetchall()
+    return {row["quiz_id"]: row["title"] for row in rows}
+
+
 def list_document_quizzes(document_id: str, owner_id: str = LEGACY_USER_ID) -> dict[str, dict]:
     initialize_quiz_store()
     with _connect() as connection:

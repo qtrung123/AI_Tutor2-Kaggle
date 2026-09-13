@@ -47,12 +47,14 @@ from backend.flashcard_service import authoritative_card_fields, generate_flashc
 from backend.flashcard_store import add_flashcard, delete_document_flashcards, delete_flashcard, update_flashcard
 from backend import study_planner_service, study_planner_store
 from backend.subject_grouping import group_documents_into_subjects
+from backend.model_comparison_service import get_quiz_model_comparison
 from config import AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE, AUTH_SESSION_DAYS, CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL, QUIZ_DEFAULT_GENERATION_MODEL
 from backend.auth_store import (
     authenticate_user,
     create_session,
     create_user,
     get_user_for_session,
+    is_admin_email,
     revoke_session,
 )
 
@@ -213,6 +215,7 @@ class QuizGenerateRequest(BaseModel):
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
     question_count: Literal[12, 15] = 12
     model_id: Optional[str] = None
+    quiz_name: str = Field(min_length=1, max_length=200)
 
 
 class QuizRegenerateRequest(BaseModel):
@@ -222,6 +225,9 @@ class QuizRegenerateRequest(BaseModel):
     assessment_scope: str = Field(pattern="^(topic|document)$")
     topic_id: Optional[str] = None
     question_count: Literal[12, 15] = 12
+    # Omitted or blank keeps the quiz's existing name; regeneration must never
+    # silently rename a quiz the user already gave a custom name.
+    quiz_name: Optional[str] = Field(default=None, max_length=200)
 
 
 class QuizProgressRequest(BaseModel):
@@ -303,6 +309,17 @@ def require_current_user(request: Request) -> dict:
     return user
 
 
+def require_admin_user(current_user: dict = Depends(require_current_user)) -> dict:
+    if not is_admin_email(current_user["email"]):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return current_user
+
+
+def _with_admin_flag(user: dict) -> dict:
+    """Attach the (env-configured, never stored) admin flag to a public user payload."""
+    return {**user, "is_admin": is_admin_email(user["email"])}
+
+
 def _validate_email(email: str) -> str:
     import re
     normalized = email.strip().lower()
@@ -353,7 +370,7 @@ def auth_signup(request: SignupRequest, response: Response) -> dict:
         user = create_user(display_name, _validate_email(request.email), request.password)
         token, _session = create_session(user["id"])
         _set_session_cookie(response, token)
-        return user
+        return _with_admin_flag(user)
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 
@@ -365,7 +382,7 @@ def auth_login(request: LoginRequest, response: Response) -> dict:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     token, _session = create_session(user["id"])
     _set_session_cookie(response, token)
-    return user
+    return _with_admin_flag(user)
 
 
 @app.post("/api/auth/logout")
@@ -377,7 +394,17 @@ def auth_logout(request: Request, response: Response) -> dict:
 
 @app.get("/api/auth/me")
 def auth_me(current_user: dict = Depends(require_current_user)) -> dict:
-    return current_user
+    return _with_admin_flag(current_user)
+
+
+@app.get("/api/admin/quiz-model-comparison")
+def admin_quiz_model_comparison(_admin: dict = Depends(require_admin_user)) -> dict:
+    """Admin-only: the latest offline Quiz model benchmark results.
+
+    Reads whatever was last stored by the benchmark script/notebook. Never
+    runs a benchmark and never touches the Quiz generation pipeline.
+    """
+    return get_quiz_model_comparison()
 
 
 @app.get("/")
@@ -756,6 +783,10 @@ def quiz_generate(request: QuizGenerateRequest, current_user: dict = Depends(req
     if not request.document_id.strip():
         raise HTTPException(status_code=400, detail="document_id is required.")
 
+    quiz_name = request.quiz_name.strip()
+    if not quiz_name:
+        raise HTTPException(status_code=400, detail="quiz_name must not be empty or whitespace-only.")
+
     try:
         print(
             f"[quiz-api] document_id={request.document_id}, "
@@ -769,6 +800,7 @@ def quiz_generate(request: QuizGenerateRequest, current_user: dict = Depends(req
             question_count=request.question_count,
             owner_id=current_user["id"],
             model_id=resolve_generation_model(request.model_id or QUIZ_DEFAULT_GENERATION_MODEL),
+            quiz_name=quiz_name,
         )
         return QuizGenerateResponse(**result)
     except QuizGenerationError as error:
@@ -869,6 +901,7 @@ def quiz_regenerate(document_id: str, request: QuizRegenerateRequest, current_us
             regenerate=True,
             owner_id=current_user["id"],
             model_id=resolve_generation_model(getattr(request, "model_id", None) or QUIZ_DEFAULT_GENERATION_MODEL),
+            quiz_name=(request.quiz_name or "").strip() or None,
         )
         return QuizGenerateResponse(**result)
     except QuizGenerationError as error:

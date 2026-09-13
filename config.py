@@ -19,11 +19,23 @@ AUTH_COOKIE_NAME = os.getenv("AI_TUTOR_AUTH_COOKIE_NAME", "ai_tutor_session")
 AUTH_SESSION_DAYS = int(os.getenv("AI_TUTOR_AUTH_SESSION_DAYS", "14"))
 AUTH_COOKIE_SECURE = os.getenv("AI_TUTOR_AUTH_COOKIE_SECURE", "false").lower() in {"1", "true", "yes", "on"}
 LEGACY_USER_EMAIL = os.getenv("AI_TUTOR_LEGACY_EMAIL", "legacy-local@invalid.local")
+# Comma-separated allowlist of admin emails. Empty by default: nobody is an admin
+# until an operator explicitly configures this. There is no self-serve way to
+# become an admin from the app.
+ADMIN_EMAILS = frozenset(
+    email.strip().lower() for email in os.getenv("AI_TUTOR_ADMIN_EMAILS", "").split(",") if email.strip()
+)
 
 # Read once by the SQLite migration so existing local quiz data is preserved.
 LEGACY_GENERATED_QUIZZES_PATH = DATA_DIR / "generated_quizzes.json"
 LEGACY_QUIZ_ATTEMPTS_PATH = DATA_DIR / "quiz_attempts.json"
 LEGACY_QUIZ_EXPLANATIONS_PATH = DATA_DIR / "quiz_explanations.json"
+
+# Written offline by the Quiz model benchmark script/notebook, never by a live
+# web request. The admin Model Comparison tab only reads this file.
+QUIZ_MODEL_BENCHMARK_RESULTS_PATH = _env_path(
+    "AI_TUTOR_QUIZ_MODEL_BENCHMARK_RESULTS_PATH", DATA_DIR / "quiz_model_benchmark_results.json"
+)
 
 COLLECTION_NAME = "study_documents"
 
