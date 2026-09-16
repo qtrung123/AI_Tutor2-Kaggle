@@ -47,6 +47,7 @@ from backend.assessment_planner import (
 from backend.quiz_options import canonicalize_option, strip_leading_option_label
 from backend.mastery_service import calculate_mastery, recompute_topic_mastery
 from backend.rag_service import explain_quiz_answer
+from backend import quiz_diagnostics
 from backend.auth_store import LEGACY_USER_ID
 from backend.indexed_document_store import list_indexed_documents as load_owned_documents
 from backend.ingest import migrate_legacy_vector_ownership
@@ -1417,8 +1418,16 @@ def _validate_v2_question(
         )
     explanation = _clean_inline_text(raw.get("explanation", ""))
     _reject_unsafe_final_text(explanation, field="Explanation")
+    # This is the pipeline's only "semantic-like" grounding check today; it is deterministic
+    # token-overlap arithmetic, not an LLM call (see backend/quiz_validation.py's LLM-based
+    # semantic validator, which exists but is not on this live code path). Timed separately from
+    # the rest of _validate_v2_question's structural checks purely for diagnostic visibility.
+    _semantic_check_started = time.perf_counter()
     concept_overlap, evidence_overlap = _concept_grounding_overlap(
         stem, option_bodies, answer_index, explanation, group,
+    )
+    quiz_diagnostics.get_current().add_stage_ms(
+        "semantic_validation_ms", (time.perf_counter() - _semantic_check_started) * 1000
     )
     if concept_overlap == 0.0 and evidence_overlap == 0.0:
         raise ValueError("Question does not appear to test the assigned slot's concept or evidence.")
@@ -1498,6 +1507,7 @@ def _generate_topic_quiz_v2(
     question_count: int = 10,
     quiz_title: str | None = None,
 ) -> dict:
+    diag = quiz_diagnostics.get_current()
     total_started = time.perf_counter()
     timings = {}
     llm_calls = 0
@@ -1505,6 +1515,7 @@ def _generate_topic_quiz_v2(
 
     stage_started = time.perf_counter()
     chunks = get_schema_topic_evidence(document["id"], topic, owner_id)
+    diag.record_retrieved_chunks(chunks)
     topic_plan, plan_cache_timing = _get_or_build_topic_plan(document, topic, chunks, owner_id)
     timings["concept_plan_cache_hit"] = plan_cache_timing["cache_hit"]
     timings["concept_plan_cache_lookup_ms"] = plan_cache_timing["lookup_ms"]
@@ -1566,6 +1577,13 @@ def _generate_topic_quiz_v2(
             }
             missing_slots_before_each_retry.append(retry_state)
             print(f"[quiz-v2-retry] {json.dumps(retry_state)}")
+            for slot in available_groups:
+                slot_reasons = rejection_reasons_by_slot[slot["slot_id"]]
+                diag.record_retry(
+                    concept_id=slot["slot_id"], original_attempt=1, retry_attempt=retry_attempt,
+                    reason=slot_reasons[-1] if slot_reasons else f"missing after {phase} window",
+                    stage="generation_call" if slot_reasons and slot_reasons[-1].startswith("response:") else "validation",
+                )
         if phase == "repair":
             repair_attempt_count += 1
         elif phase == "fill":
@@ -1578,6 +1596,13 @@ def _generate_topic_quiz_v2(
             slot["slot_id"]: len(rejection_reasons_by_slot[slot["slot_id"]])
             for slot in available_groups
         }
+        diag.record_context(
+            stage="repair" if phase != "initial" else "generator",
+            num_chunks=len(available_groups),
+            total_chars=sum(len(str(group.get("evidence_excerpt") or "")) for group in available_groups),
+            prompt=prompt,
+            concept_id=",".join(sorted(group["slot_id"] for group in available_groups))[:120],
+        )
         stage_started = time.perf_counter()
         llm_calls += 1
         if phase == "fill":
@@ -1639,6 +1664,14 @@ def _generate_topic_quiz_v2(
             candidates = data.get("questions") if isinstance(data, dict) else None
             if not isinstance(candidates, list):
                 raise ValueError("Quiz JSON does not contain a questions list.")
+            diag.record_llm_call(
+                stage="generator" if phase == "initial" else "repair", model=model_id,
+                elapsed_ms=call_invocation_ms, success=True,
+                concept_id=",".join(sorted(group["slot_id"] for group in available_groups))[:120],
+                attempt=attempt_index + 1,
+                input_tokens=int(metadata["prompt_eval_count"]) if "prompt_eval_count" in metadata else None,
+                output_tokens=int(metadata["eval_count"]) if "eval_count" in metadata else None,
+            )
         except Exception as error:
             call_invocation_ms = call_invocation_ms or round((time.perf_counter() - invocation_started) * 1000)
             candidates = []
@@ -1647,6 +1680,12 @@ def _generate_topic_quiz_v2(
             validation_results["reasons"].append(reason)
             for slot in available_groups:
                 rejection_reasons_by_slot[slot["slot_id"]].append(reason)
+            diag.record_llm_call(
+                stage="generator" if phase == "initial" else "repair", model=model_id,
+                elapsed_ms=call_invocation_ms, success=False,
+                concept_id=",".join(sorted(group["slot_id"] for group in available_groups))[:120],
+                attempt=attempt_index + 1, exception_type=type(error).__name__, reason=str(error)[:200],
+            )
         elapsed = round((time.perf_counter() - stage_started) * 1000)
         generation_ms += elapsed
         model_invocation_ms += call_invocation_ms
@@ -1791,6 +1830,7 @@ def _generate_topic_quiz_v2(
         timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
         timings["total_request_ms"] = timings["total_ms"]
         print(f"[quiz-v2-timing] {json.dumps({**timings, 'llm_calls': llm_calls})}")
+        diag.absorb_pipeline_timings({**timings, "llm_calls": llm_calls})
         missing = question_count - len(accepted)
         summary = list(dict.fromkeys(validation_results["reasons"]))[-10:]
         if not summary:
@@ -1858,6 +1898,10 @@ def _generate_topic_quiz_v2(
     timings["total_request_ms"] = timings["total_ms"]
     saved["assessment_plan"]["timings_ms"] = timings
     print(f"[quiz-v2-timing] {json.dumps({**timings, 'llm_calls': llm_calls, 'questions': len(accepted)})}")
+    # Diagnostics-only view: llm_calls lives in a separate local variable here (not in the
+    # persisted timings dict), so pass a throwaway merged copy rather than mutating `timings`
+    # itself -- the object actually saved into assessment_plan.timings_ms stays unchanged.
+    diag.absorb_pipeline_timings({**timings, "llm_calls": llm_calls})
     return saved
 
 
@@ -2620,6 +2664,7 @@ def _run_document_single_choice_batch(
     (llm_calls, repair_llm_calls, ...) are plain local variables not yet present as timings keys
     at the point this runs. Returns (accepted_count, sc_timings) for the caller to fold in.
     """
+    diag = quiz_diagnostics.get_current()
     groups_by_id = {slot["slot_id"]: slot for slot in sc_slots}
     slot_ids = list(groups_by_id)
     document_scope = {"topic_id": "document", "name": "Entire document"}
@@ -2660,6 +2705,16 @@ def _run_document_single_choice_batch(
                 retry_attempt_by_slot[str(slot["slot_id"])] += 1
             call_slots = [diversified_slot(slot, phase) for slot in call_slots]
         call_slot_ids = {slot["slot_id"] for slot in call_slots}
+        if not is_initial_phase:
+            for slot_id in sorted(call_slot_ids):
+                prior_reasons = rejection_reasons_by_slot.get(slot_id) or []
+                diag.record_retry(
+                    concept_id=slot_id,
+                    original_attempt=1,
+                    retry_attempt=retry_attempt_by_slot.get(slot_id, 1),
+                    reason=prior_reasons[-1] if prior_reasons else f"missing after {phase} window",
+                    stage="generation_call" if prior_reasons and prior_reasons[-1].startswith("response:") else "validation",
+                )
         prompt_started = time.perf_counter()
         prompt = _build_document_single_choice_prompt(
             document["id"], document_scope, difficulty, call_slots, requested,
@@ -2669,6 +2724,13 @@ def _run_document_single_choice_batch(
             slot_id: len(rejection_reasons_by_slot.get(slot_id, [])) for slot_id in call_slot_ids
         }
         timings["prompt_construction_ms"] += round((time.perf_counter() - prompt_started) * 1000)
+        diag.record_context(
+            stage="repair" if not is_initial_phase else "generator",
+            num_chunks=len(call_slots),
+            total_chars=sum(len(str(slot.get("evidence_excerpt") or "")) for slot in call_slots),
+            prompt=prompt,
+            concept_id=",".join(sorted(call_slot_ids))[:120],
+        )
         generation_started = time.perf_counter()
         timings["llm_calls"] += 1
         timings["single_choice_generation_llm_calls"] += 1
@@ -2695,6 +2757,9 @@ def _run_document_single_choice_batch(
         )
         invocation_started = time.perf_counter()
         invocation_ms = 0
+        call_stage = "generator" if is_initial_phase else "repair"
+        # 1 (initial) + however many repair/fill rounds this slot has already been through.
+        call_attempt = 1 + retry_attempt_by_slot.get(next(iter(call_slot_ids), ""), 0)
         try:
             response = llm.invoke(prompt)
             invocation_ms = round((time.perf_counter() - invocation_started) * 1000)
@@ -2719,6 +2784,12 @@ def _run_document_single_choice_batch(
                 f"token_generation_ms={token_generation_ms}, prompt_tokens={prompt_tokens}, "
                 f"output_tokens={output_tokens}"
             )
+            diag.record_llm_call(
+                stage=call_stage, model=model_id, elapsed_ms=invocation_ms, success=True,
+                concept_id=",".join(sorted(call_slot_ids))[:120], attempt=call_attempt,
+                input_tokens=int(metadata["prompt_eval_count"]) if "prompt_eval_count" in metadata else None,
+                output_tokens=int(metadata["eval_count"]) if "eval_count" in metadata else None,
+            )
         except Exception as error:
             invocation_ms = invocation_ms or round((time.perf_counter() - invocation_started) * 1000)
             candidates = []
@@ -2727,6 +2798,11 @@ def _run_document_single_choice_batch(
             results["reasons"].append(reason)
             for slot_id in call_slot_ids:
                 rejection_reasons_by_slot.setdefault(slot_id, []).append(reason)
+            diag.record_llm_call(
+                stage=call_stage, model=model_id, elapsed_ms=invocation_ms, success=False,
+                concept_id=",".join(sorted(call_slot_ids))[:120], attempt=call_attempt,
+                exception_type=type(error).__name__, reason=str(error)[:200],
+            )
         generation_elapsed = round((time.perf_counter() - generation_started) * 1000)
         timings["model_invocation_ms"] += invocation_ms
         if is_initial_phase:
@@ -3959,12 +4035,58 @@ def generate_quiz(
     quiz_name: str | None = None,
 ) -> dict:
     """
+    Public entry point for Quiz generation.
+
+    This is a thin instrumentation wrapper around _generate_quiz() -- it does not
+    change generation behavior, prompts, models, retries, validation, or output.
+    It only opens a request-scoped performance diagnostics recorder (see
+    backend/quiz_diagnostics.py) and logs a [QUIZ][SUMMARY] line before
+    returning/raising exactly what _generate_quiz() returned/raised.
+    """
+    request_id = str(uuid4())
+    with quiz_diagnostics.start_run(
+        request_id=request_id, document_id=document_id, assessment_scope=assessment_scope,
+        topic_id=topic_id, difficulty=difficulty, question_count=question_count, model_id=model_id,
+    ) as diag:
+        diag.log_start()
+        try:
+            result = _generate_quiz(
+                document_id, difficulty, assessment_scope, topic_id, regenerate,
+                owner_id, model_id, question_count, quiz_name,
+            )
+            questions = result.get("questions") or []
+            diag.set_counts(
+                requested_questions=question_count,
+                generated_questions=len(questions),
+                validated_questions=len(questions),
+            )
+            return result
+        except Exception as error:
+            diag.record_failure(type(error).__name__, str(error))
+            raise
+        finally:
+            diag.log_summary()
+
+
+def _generate_quiz(
+    document_id: str,
+    difficulty: str,
+    assessment_scope: str,
+    topic_id: str | None = None,
+    regenerate: bool = False,
+    owner_id: str = LEGACY_USER_ID,
+    model_id: str = CHAT_MODEL,
+    question_count: int = 12,
+    quiz_name: str | None = None,
+) -> dict:
+    """
     Generate or load the persistent quiz for one indexed document.
 
     If a quiz already exists, it is returned as-is so reloads or future visits do
     not create a different quiz. Passing regenerate=True intentionally replaces
     the saved quiz.
     """
+    diag = quiz_diagnostics.get_current()
     request_started = time.perf_counter()
     known_documents = _document_lookup(owner_id)
     if document_id not in known_documents:
@@ -3985,8 +4107,10 @@ def generate_quiz(
     scope_topic_id = str(topic_id) if assessment_scope == "topic" else "document"
     topic_schema_version = int(document.get("topic_schema_version", 0))
     invalidate_document_quizzes_for_topic_schema(document_id, topic_schema_version, owner_id)
+    cache_lookup_started = time.perf_counter()
     cache_key = quiz_cache_key(document_id, difficulty, scope_topic_id, owner_id)
     saved_quiz = get_quiz(document_id, difficulty, scope_topic_id, owner_id)
+    diag.set_stage_ms("cache_lookup_ms", (time.perf_counter() - cache_lookup_started) * 1000)
 
     if not regenerate:
         saved_target = int((saved_quiz or {}).get("assessment_plan", {}).get(
@@ -3997,13 +4121,17 @@ def generate_quiz(
         saved_exact = int((saved_quiz or {}).get("question_count", 0)) == question_count == len(saved_questions)
         if saved_quiz and saved_exact and saved_target == question_count and saved_planner == PLANNER_VERSION:
             print(f"[quiz-cache] key={cache_key} HIT")
+            diag.set_counts(cache_hit=True, requested_questions=question_count,
+                             generated_questions=len(saved_questions), validated_questions=len(saved_questions))
             return saved_quiz
         if saved_quiz:
             print(f"[quiz-cache] key={cache_key} MISS (planner/count compatibility)")
         else:
             print(f"[quiz-cache] key={cache_key} MISS")
+        diag.set_counts(cache_hit=False)
     else:
         print(f"[quiz-cache] key={cache_key} MISS (regenerate)")
+        diag.set_counts(cache_hit=False)
 
     quiz_title = _resolve_quiz_title(
         quiz_name, (saved_quiz or {}).get("title"), document.get("title", document_id)
@@ -4061,6 +4189,7 @@ def generate_quiz(
     timings["concept_plan_cache_lookup_ms"] = sum(plan_cache_lookup_by_topic.values())
     timings["concept_plan_cache_hits"] = plan_cache_hits
     timings["concept_plan_cache_misses"] = plan_cache_misses
+    diag.record_retrieved_chunks([chunk for chunks in topic_chunks.values() for chunk in chunks])
 
     allocation_started = time.perf_counter()
     allocation = allocate_document_topics(topic_plans, cap=question_count)
@@ -4091,6 +4220,7 @@ def generate_quiz(
             summary = [f"No grounded evidence or valid question was available for {missing} remaining slots."]
         timings["total_request_ms"] = round((time.perf_counter() - request_started) * 1000)
         print(f"[quiz-document-timing] {json.dumps({**timings, 'valid_questions': len(questions)})}")
+        diag.absorb_pipeline_timings(timings)
         raise QuizGenerationError(
             f"Quiz generation requested {question_count} questions but produced {len(questions)} valid questions; "
             f"{missing} questions are still missing after bounded targeted repair.",
@@ -4145,6 +4275,7 @@ def generate_quiz(
     timings["total_request_ms"] = round((time.perf_counter() - request_started) * 1000)
     saved["assessment_plan"]["timings_ms"] = timings
     print(f"[quiz-document-timing] {json.dumps({**timings, 'valid_questions': len(questions)})}")
+    diag.absorb_pipeline_timings(timings)
     return saved
 
 

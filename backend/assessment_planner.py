@@ -2,8 +2,11 @@ import difflib
 import hashlib
 import json
 import re
+import time
 
 from langchain_ollama import ChatOllama
+
+from backend import quiz_diagnostics
 
 from config import (
     AUTO_QUIZ_MAX_DOCUMENT,
@@ -304,9 +307,32 @@ ALLOWED SUBTOPIC IDS: {json.dumps(seed_ids, ensure_ascii=False)}
 CONTEXT:
 {_planner_context(seeds)}
 """.strip()
-    response = ChatOllama(
-        model=CHAT_MODEL, temperature=0, format="json", num_ctx=8192, keep_alive=0,
-    ).invoke(prompt)
+    diag = quiz_diagnostics.get_current()
+    diag.record_context(
+        stage="planner",
+        num_chunks=sum(len(seed.get("chunks") or []) for seed in seeds),
+        total_chars=sum(len(str(chunk.get("content") or "")) for seed in seeds for chunk in (seed.get("chunks") or [])),
+        prompt=prompt,
+        concept_id=topic_name,
+    )
+    _call_started = time.perf_counter()
+    try:
+        response = ChatOllama(
+            model=CHAT_MODEL, temperature=0, format="json", num_ctx=8192, keep_alive=0,
+        ).invoke(prompt)
+    except Exception as error:
+        diag.record_llm_call(
+            stage="planner", model=CHAT_MODEL, elapsed_ms=(time.perf_counter() - _call_started) * 1000,
+            success=False, concept_id=topic_name, exception_type=type(error).__name__, reason=str(error)[:200],
+        )
+        raise
+    metadata = getattr(response, "response_metadata", {}) or {}
+    diag.record_llm_call(
+        stage="planner", model=CHAT_MODEL, elapsed_ms=(time.perf_counter() - _call_started) * 1000,
+        success=True, concept_id=topic_name,
+        input_tokens=int(metadata["prompt_eval_count"]) if "prompt_eval_count" in metadata else None,
+        output_tokens=int(metadata["eval_count"]) if "eval_count" in metadata else None,
+    )
     data = _parse_json(response.content)
     return data.get("concepts") if isinstance(data.get("concepts"), list) else []
 
