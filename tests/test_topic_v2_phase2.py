@@ -186,7 +186,11 @@ class TopicV2Phase2Tests(unittest.TestCase):
             ):
                 self.assertIn(key, timings)
 
-    def test_document_partial_generation_fails_without_persistence(self):
+    def test_document_partial_generation_persists_partial_quiz(self):
+        """Quiz Generation V2: a document-scope candidate pool that falls short of
+        question_count after bounded repair/fill is persisted as a partial quiz
+        (status="partial") instead of failing the whole request closed, as long as at least
+        one valid, structurally sound question was produced (spec case C/D)."""
         topic = {"topic_id": "a", "name": "A", "subtopics": []}
         document = {"id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 3, "topics": [topic]}
         evidence = chunk(
@@ -204,10 +208,23 @@ class TopicV2Phase2Tests(unittest.TestCase):
             "concept_plan_id": "plan-a", "assessment_capacity": 1,
             "allocated_questions": 0, "concepts": [concept],
         }
-        def generated(*_args, **_kwargs):
-            return ([{"id": index + 1, "question": f"Grounded question {index + 1}?"} for index in range(9)],
-                    {"accepted": 9, "accepted_with_warnings": 0, "rejected": 1,
-                     "reasons": ["bounded repair exhausted"]}, {"llm_calls": 3, "rejection_reasons_by_slot": {}})
+        def generated(_document, _difficulty, slots, _owner, _model, _requested, _run_id, **_kwargs):
+            # Bounded repair/fill only reached 9 of the 12 requested slots -- the remaining 3
+            # stay missing rather than being papered over by a fabricated fallback.
+            questions = [{
+                "id": index + 1, "slot_id": slot["slot_id"],
+                "question": f"Which supported concept applies in case {index + 1}?",
+                "question_type": "single_choice",
+                "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
+                "topic_id": slot["topic_id"], "topic_name": slot["topic_name"],
+                "concept_id": slot["concept_id"], "concept_name": slot["name"],
+                "concept_plan_id": slot["concept_plan_id"], "source_subtopic_ids": [],
+                "concept_origin": slot["concept_origin"], "assessment_capacity": slot["assessment_capacity"],
+                "difficulty": "easy", "explanation": "The evidence supports this.",
+                "source_chunk_ids": slot["source_chunk_ids"],
+            } for index, slot in enumerate(slots[:9])]
+            return questions, {"accepted": 9, "accepted_with_warnings": 0, "rejected": 1,
+                                "reasons": ["bounded repair exhausted"]}, {"llm_calls": 3, "rejection_reasons_by_slot": {}}
 
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
@@ -216,14 +233,16 @@ class TopicV2Phase2Tests(unittest.TestCase):
              patch.object(quiz_service, "build_topic_plan", return_value=plan), \
              patch.object(quiz_service, "resolve_concept_evidence", return_value=[evidence]), \
              patch.object(quiz_service, "_run_document_single_choice_quiz", side_effect=generated), \
-             patch.object(quiz_service, "save_quiz") as save:
-            with self.assertRaises(quiz_service.QuizGenerationError) as raised:
-                quiz_service.generate_quiz("doc.pdf", "easy", "document", question_count=12)
-        self.assertEqual(raised.exception.detail["requested_count"], 12)
-        self.assertEqual(raised.exception.detail["valid_count"], 9)
-        self.assertEqual(raised.exception.detail["missing_count"], 12 - 9)
-        self.assertTrue(raised.exception.detail["failure_summary"])
-        save.assert_not_called()
+             patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, value, _o: value) as save:
+            result = quiz_service.generate_quiz("doc.pdf", "easy", "document", question_count=12)
+        self.assertEqual(result["question_count"], 9)
+        self.assertEqual(len(result["questions"]), 9)
+        self.assertEqual(result["assessment_plan"]["status"], "partial")
+        self.assertTrue(result["assessment_plan"]["partial"])
+        self.assertEqual(result["assessment_plan"]["requested_count"], 12)
+        self.assertEqual(result["assessment_plan"]["actual_count"], 9)
+        self.assertEqual(result["assessment_plan"]["missing_count"], 3)
+        save.assert_called_once()
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

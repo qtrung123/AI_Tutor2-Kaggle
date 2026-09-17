@@ -68,6 +68,14 @@ QUIZ_V2_ALLOWED_QUESTION_COUNTS = {12, 15}
 QUIZ_V2_DISTINCT_CONCEPT_LIMIT = 5
 QUIZ_GENERATION_KEEP_ALIVE = "5m"
 
+# Quiz Generation V2 candidate-pool sizing: the initial generation call asks for more candidates
+# than requested (a buffer) so validation/duplicate rejection still leaves enough good candidates
+# to select the best `question_count` from. Bounded repair/fill rounds after that only chase the
+# base requested count, never the buffer -- see _generate_topic_quiz_v2.
+QUIZ_V2_CANDIDATE_BUFFER_MIN = 3
+QUIZ_V2_CANDIDATE_BUFFER_MAX = 6
+QUIZ_V2_CANDIDATE_BUFFER_RATIO = 0.3
+
 # Document-scope quizzes use a fixed, backend-authoritative blueprint: the model never chooses
 # the type mix. Unlike a pre-assignment scheme, no slot is stamped with a question_type before
 # generation -- _run_document_v2_batch decides each slot's final type special-first: it locks
@@ -1497,6 +1505,59 @@ def _validate_v2_question(
     return normalized, sorted(set(warnings))
 
 
+def _v2_candidate_pool_target(question_count: int) -> int:
+    """Desired candidate-pool size for the initial generation call: requested_count plus a
+    bounded buffer, so validation and duplicate rejection still leave enough good candidates to
+    select the best `question_count` from. Bounded repair/fill rounds never chase this buffered
+    target -- only the caller's initial batch does; repair/fill only chase the base requested
+    count (see _generate_topic_quiz_v2)."""
+    buffer = min(
+        QUIZ_V2_CANDIDATE_BUFFER_MAX,
+        max(QUIZ_V2_CANDIDATE_BUFFER_MIN, math.ceil(question_count * QUIZ_V2_CANDIDATE_BUFFER_RATIO)),
+    )
+    return question_count + buffer
+
+
+def _select_best_v2_candidates(pool: list[dict], target_count: int) -> list[dict]:
+    """Select the best `target_count` candidates from an over-generated candidate pool.
+
+    Quality first: within each concept, a candidate with no quality warnings
+    ("validation_outcome" == "accepted") is preferred over one with warnings. Concept coverage
+    second: candidates are drawn round-robin across distinct concept_ids so one concept cannot
+    crowd out the others just because the model happened to return more of it. Each concept's
+    own candidates keep their original generation order as the final tiebreaker. True/near
+    duplicates never reach the pool -- _validate_v2_question already rejects them -- so this
+    function only has to pick among genuinely distinct, valid candidates.
+    """
+    if len(pool) <= target_count:
+        return list(pool)
+
+    by_concept: dict[str, list[dict]] = {}
+    for index, question in enumerate(pool):
+        by_concept.setdefault(question["concept_id"], []).append({"index": index, "question": question})
+    for candidates in by_concept.values():
+        candidates.sort(key=lambda item: (item["question"]["validation_outcome"] != "accepted", item["index"]))
+
+    concept_order = list(by_concept.keys())
+    selected_indices: set[int] = set()
+    round_index = 0
+    while len(selected_indices) < target_count:
+        made_progress = False
+        for concept_id in concept_order:
+            if len(selected_indices) >= target_count:
+                break
+            bucket = by_concept[concept_id]
+            if round_index >= len(bucket):
+                continue
+            selected_indices.add(bucket[round_index]["index"])
+            made_progress = True
+        if not made_progress:
+            break
+        round_index += 1
+
+    return [pool[index] for index in sorted(selected_indices)]
+
+
 def _generate_topic_quiz_v2(
     document: dict,
     topic: dict,
@@ -1529,9 +1590,10 @@ def _generate_topic_quiz_v2(
             target_questions=question_count,
         )
 
+    candidate_pool_target = _v2_candidate_pool_target(question_count)
     planned_slots = [
         {**groups[index % len(groups)], "slot_id": f"S{index + 1}"}
-        for index in range(question_count)
+        for index in range(candidate_pool_target)
     ]
     groups_by_id = {slot["slot_id"]: slot for slot in planned_slots}
     remaining_slot_ids = set(groups_by_id)
@@ -1561,10 +1623,15 @@ def _generate_topic_quiz_v2(
     rejection_reasons_by_slot = {slot_id: [] for slot_id in groups_by_id}
     for attempt_index, phase in enumerate(generation_phases):
         call_started = time.perf_counter()
-        missing = question_count - len(accepted)
+        # The initial call chases the buffered pool target (over-generate for selection).
+        # Repair/fill only chase the base requested count -- once the pool already has enough
+        # to select from, or once it has been topped back up to the requested count, bounded
+        # retries stop; they never chase the buffer.
+        phase_target = candidate_pool_target if phase == "initial" else question_count
+        missing = phase_target - len(accepted)
         if missing <= 0:
             break
-        available_groups = [slot for slot in planned_slots if slot["slot_id"] in remaining_slot_ids]
+        available_groups = [slot for slot in planned_slots if slot["slot_id"] in remaining_slot_ids][:missing]
         if phase != "initial":
             retry_attempt = repair_attempt_count + 1 if phase == "repair" else fill_attempt_count + 1
             retry_state = {
@@ -1698,7 +1765,7 @@ def _generate_topic_quiz_v2(
 
         validation_started = time.perf_counter()
         for candidate_index, raw in enumerate(candidates):
-            if len(accepted) >= question_count:
+            if len(accepted) >= phase_target:
                 break
             try:
                 normalized, warnings = _validate_v2_question(
@@ -1763,51 +1830,6 @@ def _generate_topic_quiz_v2(
         if phase != "initial":
             repair_ms += round((time.perf_counter() - call_started) * 1000)
 
-    deterministic_fallback_count = 0
-    for fallback_index, slot in enumerate(planned_slots):
-        slot_id = str(slot["slot_id"])
-        if slot_id not in remaining_slot_ids:
-            continue
-        try:
-            scope_evidence = [
-                str(other.get("evidence_excerpt") or "")
-                for other in planned_slots if str(other.get("topic_id") or topic["topic_id"]) == str(topic["topic_id"])
-            ]
-            raw = _deterministic_grounded_candidate(slot, fallback_index, scope_evidence)
-            normalized, warnings = _validate_v2_question(
-                raw, groups_by_id, remaining_slot_ids, accepted_stems, difficulty,
-                len(accepted) + 1, topic, int(topic_plan["assessment_capacity"]),
-            )
-            accepted.append(normalized)
-            accepted_stems.append(normalized["question"])
-            remaining_slot_ids.remove(slot_id)
-            deterministic_fallback_count += 1
-            validation_results["accepted_with_warnings" if warnings else "accepted"] += 1
-            validation_results["quality_warnings"] += len(warnings)
-            save_quiz_validation_event({
-                "generation_run_id": generation_run_id, "owner_id": owner_id,
-                "document_id": document["id"], "document_hash": document.get("hash", ""),
-                "topic_id": topic["topic_id"],
-                "topic_schema_version": int(document.get("topic_schema_version", 0)),
-                "difficulty": difficulty, "batch_index": 1,
-                "generation_attempt": llm_calls + 1, "candidate_index": fallback_index,
-                "generator_model": "deterministic-grounded-fallback",
-                "generation_prompt_version": QUIZ_V2_PROMPT_VERSION,
-                "validator_model": "deterministic-v2", "validator_prompt_version": "no-semantic-llm-v2",
-                "candidate_question": normalized, "cited_chunk_ids": normalized["source_chunk_ids"],
-                "evidence_chunk_ids": normalized["source_chunk_ids"], "hard_passed": True,
-                "quality_passed": not warnings, "accepted": True,
-                "outcome": normalized["validation_outcome"],
-                "verdict": {"mode": "deterministic-grounded-fallback", "warnings": warnings},
-                "rejection_reasons": warnings, "latency_ms": 0,
-            })
-        except Exception as error:
-            reason = f"deterministic fallback: {error}"
-            rejection_reasons_by_slot[slot_id].append(reason)
-            validation_results["rejected"] += 1
-            validation_results["hard_rejections"] += 1
-            validation_results["reasons"].append(reason)
-
     timings["generation_ms"] = generation_ms
     timings["model_load_ms"] = model_load_ms
     timings["prompt_eval_ms"] = prompt_eval_ms
@@ -1824,32 +1846,45 @@ def _generate_topic_quiz_v2(
     timings["missing_slots_before_each_retry"] = missing_slots_before_each_retry
     timings["rejection_reasons_by_slot"] = rejection_reasons_by_slot
     timings["final_fill_llm_calls"] = final_fill_llm_calls
-    timings["deterministic_fallback_count"] = deterministic_fallback_count
+    # Quiz Generation V2 no longer forces a fabricated deterministic fallback to hit an exact
+    # count -- question quality, grounding, and coverage outrank raw question count. A candidate
+    # pool below the requested count is persisted as a partial quiz instead (see below).
+    timings["deterministic_fallback_count"] = 0
+    timings["candidate_pool_size"] = len(accepted)
+    timings["desired_candidate_count"] = candidate_pool_target
     timings["total_quiz_generation_ms"] = round((time.perf_counter() - total_started) * 1000)
-    if len(accepted) != question_count:
+
+    candidate_pool = accepted
+    if not candidate_pool:
         timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
         timings["total_request_ms"] = timings["total_ms"]
         print(f"[quiz-v2-timing] {json.dumps({**timings, 'llm_calls': llm_calls})}")
         diag.absorb_pipeline_timings({**timings, "llm_calls": llm_calls})
-        missing = question_count - len(accepted)
         summary = list(dict.fromkeys(validation_results["reasons"]))[-10:]
         if not summary:
-            summary = [f"No valid candidate was returned for {missing} remaining question slots."]
+            summary = [f"No valid candidate was returned for any of the {question_count} requested questions."]
         raise QuizGenerationError(
-            f"Quiz generation requested {question_count} questions but produced {len(accepted)} valid questions; "
-            f"{missing} questions are still missing after bounded targeted repair.",
+            f"Quiz generation requested {question_count} questions but produced 0 valid questions.",
             stage="validation",
-            valid_questions=len(accepted),
+            valid_questions=0,
             target_questions=question_count,
             failure_summary=summary,
             missing_slots=[slot["slot_id"] for slot in planned_slots if slot["slot_id"] in remaining_slot_ids],
-            rejection_reasons_by_slot={
-                slot_id: reasons for slot_id, reasons in rejection_reasons_by_slot.items()
-                if slot_id in remaining_slot_ids
-            },
+            rejection_reasons_by_slot=dict(rejection_reasons_by_slot),
         )
 
-    partial = False
+    # Selection: pick the best `question_count` from the (possibly over-generated) pool rather
+    # than simply taking the first N. If the pool did not reach the requested count even after
+    # bounded repair/fill, every valid candidate is kept and the quiz is persisted as partial --
+    # a smaller, high-quality quiz beats failing the whole request closed.
+    selected = _select_best_v2_candidates(candidate_pool, question_count)
+    for renumbered_id, question in enumerate(selected, start=1):
+        question["id"] = renumbered_id
+    actual_count = len(selected)
+    missing_count = max(0, question_count - actual_count)
+    status = "complete" if actual_count >= question_count else "partial"
+    partial = status == "partial"
+    timings["selected_count"] = actual_count
     quiz = {
         "quiz_id": str(uuid4()),
         "document_id": document["id"],
@@ -1878,16 +1913,21 @@ def _generate_topic_quiz_v2(
             }],
             "excluded_topic_ids": [],
             "target_questions": question_count,
-            "total_questions": len(accepted),
+            "total_questions": actual_count,
+            "status": status,
+            "requested_count": question_count,
+            "actual_count": actual_count,
+            "missing_count": missing_count,
+            "candidate_pool_size": len(candidate_pool),
             "partial": partial,
             "generation_warnings": validation_results["reasons"],
             "validation_results": validation_results,
             "llm_calls": llm_calls,
         },
         "topic_schema_version": int(document.get("topic_schema_version", 0)),
-        "question_count": len(accepted),
+        "question_count": actual_count,
         "created_at": utc_now_iso(),
-        "questions": accepted,
+        "questions": selected,
     }
     if regenerate:
         delete_document_attempts(document["id"], difficulty, str(topic["topic_id"]), owner_id)
@@ -1897,7 +1937,7 @@ def _generate_topic_quiz_v2(
     timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
     timings["total_request_ms"] = timings["total_ms"]
     saved["assessment_plan"]["timings_ms"] = timings
-    print(f"[quiz-v2-timing] {json.dumps({**timings, 'llm_calls': llm_calls, 'questions': len(accepted)})}")
+    print(f"[quiz-v2-timing] {json.dumps({**timings, 'llm_calls': llm_calls, 'questions': actual_count})}")
     # Diagnostics-only view: llm_calls lives in a separate local variable here (not in the
     # persisted timings dict), so pass a throwaway merged copy rather than mutating `timings`
     # itself -- the object actually saved into assessment_plan.timings_ms stays unchanged.
@@ -4213,32 +4253,31 @@ def _generate_quiz(
     )
     timings.update(batch_timings)
 
-    if len(questions) != question_count:
-        missing = question_count - len(questions)
+    if not questions:
         summary = list(dict.fromkeys(validation_results["reasons"]))[-10:]
         if not summary:
-            summary = [f"No grounded evidence or valid question was available for {missing} remaining slots."]
+            summary = [f"No grounded evidence or valid question was available for any of the {question_count} requested slots."]
         timings["total_request_ms"] = round((time.perf_counter() - request_started) * 1000)
         print(f"[quiz-document-timing] {json.dumps({**timings, 'valid_questions': len(questions)})}")
         diag.absorb_pipeline_timings(timings)
         raise QuizGenerationError(
-            f"Quiz generation requested {question_count} questions but produced {len(questions)} valid questions; "
-            f"{missing} questions are still missing after bounded targeted repair.",
+            f"Quiz generation requested {question_count} questions but produced 0 valid questions.",
             stage="generation",
-            valid_questions=len(questions),
+            valid_questions=0,
             target_questions=question_count,
             failure_summary=summary,
-            missing_slots=[
-                retry_slot for retry_slot, reasons in timings.get("rejection_reasons_by_slot", {}).items()
-                if retry_slot not in {question.get("slot_id") for question in questions}
-            ],
-            rejection_reasons_by_slot={
-                retry_slot: reasons
-                for retry_slot, reasons in timings.get("rejection_reasons_by_slot", {}).items()
-                if retry_slot not in {question.get("slot_id") for question in questions}
-            },
+            missing_slots=list(timings.get("rejection_reasons_by_slot", {}).keys()),
+            rejection_reasons_by_slot=dict(timings.get("rejection_reasons_by_slot", {})),
         )
-    _verify_final_single_choice_document_quiz(questions, question_count)
+    # A candidate pool below the requested count is persisted as a partial quiz instead of
+    # failing the whole request closed -- question quality, grounding, and coverage outrank raw
+    # question count. _verify_final_single_choice_document_quiz still checks the persisted
+    # questions are structurally sound (unique slot_ids, all single_choice); it just no longer
+    # requires them to number exactly `question_count`.
+    _verify_final_single_choice_document_quiz(questions, len(questions))
+    actual_count = len(questions)
+    missing_count = max(0, question_count - actual_count)
+    status = "complete" if actual_count >= question_count else "partial"
 
     quiz = {
         "quiz_id": str(uuid4()),
@@ -4255,14 +4294,19 @@ def _generate_quiz(
             "topics": planned_topics,
             "excluded_topic_ids": excluded_topic_ids,
             "target_questions": question_count,
-            "total_questions": len(questions),
-            "type_distribution": {"single_choice": len(questions)},
+            "total_questions": actual_count,
+            "status": status,
+            "requested_count": question_count,
+            "actual_count": actual_count,
+            "missing_count": missing_count,
+            "partial": status == "partial",
+            "type_distribution": {"single_choice": actual_count},
             "generation_warnings": validation_results["reasons"],
             "validation_results": validation_results,
             "llm_calls": timings["llm_calls"],
         },
         "topic_schema_version": topic_schema_version,
-        "question_count": len(questions),
+        "question_count": actual_count,
         "created_at": utc_now_iso(),
         "questions": questions,
     }

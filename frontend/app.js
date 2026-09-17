@@ -2461,7 +2461,7 @@ async function generateAssessmentQuiz() {
     closeQuizCreateDialog();
     renderAssessmentQuiz();
     showToast(currentQuiz.assessment_plan?.partial
-      ? `Quiz ready with ${currentQuiz.questions.length}/${currentQuiz.assessment_plan?.target_questions || selectedQuestionCount()} grounded questions`
+      ? `Quiz ready with ${currentQuiz.assessment_plan?.actual_count ?? currentQuiz.questions.length}/${currentQuiz.assessment_plan?.requested_count ?? currentQuiz.assessment_plan?.target_questions ?? selectedQuestionCount()} grounded questions`
       : "Quiz ready");
   } catch (error) {
     if (requestedQuizKey !== currentQuizKey()) return;
@@ -3011,17 +3011,26 @@ function documentQuizTypeBreakdown(quiz) {
   return counts;
 }
 
+function quizPartialSuffix(quiz) {
+  const plan = quiz?.assessment_plan;
+  if (!plan?.partial) return "";
+  const requested = plan.requested_count ?? plan.target_questions ?? quiz.questions.length;
+  const actual = plan.actual_count ?? quiz.questions.length;
+  return ` · ${actual}/${requested} questions generated`;
+}
+
 function assessmentTitleText(quiz) {
   if (!quiz?.questions?.length) return "Assessment Agent";
   const quizName = (quiz.title || "").trim() || "Untitled Quiz";
+  const partialSuffix = quizPartialSuffix(quiz);
   if (quiz.assessment_scope === "document") {
     const distribution = documentQuizTypeBreakdown(quiz);
     const parts = ["single_choice", "true_false", "multi_select"]
       .filter((questionType) => distribution[questionType])
       .map((questionType) => `${distribution[questionType]} ${quizTypeLabel(questionType)}`);
-    return `${quizName} · ${quiz.questions.length} questions · ${parts.join(" · ")}`;
+    return `${quizName} · ${quiz.questions.length} questions · ${parts.join(" · ")}` + partialSuffix;
   }
-  return `${quizName} · ${quiz.questions.length} ${quiz.difficulty} questions from ${quiz.document_id}`;
+  return `${quizName} · ${quiz.questions.length} ${quiz.difficulty} questions from ${quiz.document_id}` + partialSuffix;
 }
 
 function renderAssessmentQuiz() {

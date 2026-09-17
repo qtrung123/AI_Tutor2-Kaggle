@@ -262,19 +262,26 @@ class QuizV2Tests(unittest.TestCase):
                 self.assertEqual(len(saved), 1)
 
     def test_ten_questions_use_one_selected_model_call_and_no_semantic_llm(self):
+        # The initial call asks for a buffered candidate pool (10 requested + 3 buffer = 13 --
+        # see _v2_candidate_pool_target), but the model only returns 10 candidates and all 10
+        # validate, which already meets the requested count, so no repair/fill call follows.
         result, saved = self.run_v2([{"questions": [raw_question(index) for index in range(10)]}])
         self.assertEqual(len(result["questions"]), 10)
         self.assertEqual(result["assessment_plan"]["llm_calls"], 1)
         self.assertFalse(result["assessment_plan"]["partial"])
+        self.assertEqual(result["assessment_plan"]["status"], "complete")
+        self.assertEqual(result["assessment_plan"]["requested_count"], 10)
+        self.assertEqual(result["assessment_plan"]["actual_count"], 10)
+        self.assertEqual(result["assessment_plan"]["missing_count"], 0)
         self.assertEqual(FakeBatchModel.models, ["qwen-2.5-3b-runtime"])
         self.assertEqual(len(saved), 1)
         self.assertEqual({question["source_chunk_ids"][0] for question in result["questions"]}, {"canonical_chunk_1"})
         self.assertEqual(FakeBatchModel.configurations[0]["keep_alive"], "5m")
         self.assertEqual(FakeBatchModel.configurations[0]["num_ctx"], 8192)
-        self.assertEqual(FakeBatchModel.configurations[0]["num_predict"], 1500)
+        self.assertEqual(FakeBatchModel.configurations[0]["num_predict"], 1950)
         self.assertNotIn("source_chunk_ids", FakeBatchModel.prompts[0])
         self.assertIn('"slot_id":"S1"', FakeBatchModel.prompts[0])
-        self.assertLess(len(FakeBatchModel.prompts[0]), 3400)
+        self.assertLess(len(FakeBatchModel.prompts[0]), 4200)
         timings = result["assessment_plan"]["timings_ms"]
         self.assertEqual(timings["model_load_ms"], 2)
         self.assertEqual(timings["prompt_eval_ms"], 3)
@@ -283,6 +290,8 @@ class QuizV2Tests(unittest.TestCase):
         self.assertGreaterEqual(timings["initial_generation_ms"], 0)
         self.assertEqual(timings["repair_generation_ms"], 0)
         self.assertEqual(timings["fill_generation_ms"], 0)
+        self.assertEqual(timings["deterministic_fallback_count"], 0)
+        self.assertEqual(timings["desired_candidate_count"], 13)
         self.assertGreaterEqual(timings["total_quiz_generation_ms"], 0)
 
     def test_shared_v2_prompt_has_distinct_prompt_only_cognitive_contracts(self):
@@ -551,7 +560,12 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(timings["final_fill_llm_calls"], 1)
         self.assertEqual(len(saved), 1)
 
-    def test_topic_repair_exhaustion_uses_fallback_and_persists_exact_count(self):
+    def test_topic_repair_exhaustion_persists_partial_quiz_instead_of_fallback(self):
+        """Quiz Generation V2 no longer fabricates deterministic filler questions to force an
+        exact count: once bounded repair/fill are exhausted, whatever valid pool remains is
+        persisted as a partial quiz (status="partial") with accurate requested/actual/missing
+        counts -- this is spec case C (valid=10 of 12 in the design doc, generalized to 8 of 10
+        here since this fixture's payload shape predates the 12/15-question API default)."""
         FakeBatchModel.payloads = [
             {"questions": [raw_question(index) for index in range(8)]},
             {"questions": []}, {"questions": []},
@@ -564,19 +578,23 @@ class QuizV2Tests(unittest.TestCase):
             patch("backend.quiz_service.save_quiz", side_effect=lambda _d, _v, quiz, _o: quiz) as save,
         ):
             result = _generate_topic_quiz_v2(DOCUMENT, TOPIC, "easy", "owner", "qwen-3b", False)
-        self.assertEqual(len(result["questions"]), 10)
-        self.assertEqual(result["assessment_plan"]["timings_ms"]["deterministic_fallback_count"], 2)
-        self.assertEqual(
-            [question["source_chunk_ids"] for question in result["questions"][-2:]],
-            [["canonical_chunk_1"], ["canonical_chunk_1"]],
-        )
+        self.assertEqual(len(result["questions"]), 8)
+        self.assertTrue(result["assessment_plan"]["partial"])
+        self.assertEqual(result["assessment_plan"]["status"], "partial")
+        self.assertEqual(result["assessment_plan"]["requested_count"], 10)
+        self.assertEqual(result["assessment_plan"]["actual_count"], 8)
+        self.assertEqual(result["assessment_plan"]["missing_count"], 2)
+        self.assertEqual(result["assessment_plan"]["timings_ms"]["deterministic_fallback_count"], 0)
         self.assertEqual(len(FakeBatchModel.configurations), 5)
         save.assert_called_once()
 
-    def test_wrong_model_slot_is_rejected_not_corrected_by_backend_order(self):
+    def test_wrong_model_slot_batch_yields_zero_valid_and_fails_closed(self):
         """A whole batch sharing one invalid slot_id must never be salvaged by array position
-        (that was the source of real cross-topic/cross-concept mis-binding); bounded repair and
-        deterministic fallback must still reach the exact count instead."""
+        (that was the source of real cross-topic/cross-concept mis-binding). Quiz Generation V2
+        has no deterministic fallback to paper over a fully mis-bound batch, so when bounded
+        repair/fill also produce nothing usable, the candidate pool is empty and generation fails
+        closed (spec case E: valid=0 -> failure) instead of persisting a quiz built from
+        fabricated filler questions."""
         questions = [raw_question(index) for index in range(10)]
         for question in questions:
             question["slot_id"] = "invented_slot"
@@ -585,13 +603,14 @@ class QuizV2Tests(unittest.TestCase):
             patch("backend.quiz_service.get_topic_chunks", return_value=[CHUNK]),
             patch("backend.quiz_service.ChatOllama", FakeBatchModel),
             patch("backend.quiz_service.save_quiz_validation_event"),
-            patch("backend.quiz_service.save_quiz", side_effect=lambda _d, _x, quiz, _o: quiz),
+            patch("backend.quiz_service.save_quiz", side_effect=lambda _d, _x, quiz, _o: quiz) as save,
         ):
-            result = _generate_topic_quiz_v2(DOCUMENT, TOPIC, "easy", "owner", "qwen-3b", False)
-        self.assertEqual(len(result["questions"]), 10)
-        self.assertFalse(result["assessment_plan"]["partial"])
-        self.assertEqual(result["assessment_plan"]["timings_ms"]["deterministic_fallback_count"], 10)
-        self.assertEqual([question["slot_id"] for question in result["questions"]], [f"S{index}" for index in range(1, 11)])
+            with self.assertRaises(QuizGenerationError) as failure:
+                _generate_topic_quiz_v2(DOCUMENT, TOPIC, "easy", "owner", "qwen-3b", False)
+        self.assertEqual(failure.exception.detail["valid_questions"], 0)
+        self.assertEqual(failure.exception.detail["target_questions"], 10)
+        self.assertEqual(failure.exception.detail["missing_count"], 10)
+        save.assert_not_called()
 
     def test_partial_repeated_slot_mapping_is_rejected_then_repaired(self):
         partial = [raw_question(index) for index in range(9)]

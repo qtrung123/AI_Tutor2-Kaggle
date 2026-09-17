@@ -482,11 +482,12 @@ class GenerateQuizWrapperBehaviorTests(unittest.TestCase):
         document = self._document("doc-e.pdf")
 
         def fake_quiz_short(_document, _difficulty, planned_slots, _owner, _model, question_count, _run_id):
-            # Deliberately short by one question -- matches the existing "insufficient count"
-            # failure mode (see the Quiz diagnostic report), unchanged behavior.
-            questions = self._fake_quiz(planned_slots)[:-1]
-            return questions, {"accepted": question_count - 1, "accepted_with_warnings": 0, "rejected": 1, "reasons": ["short"]}, {
-                "llm_calls": 3, "rejection_reasons_by_slot": {"S12": ["short"]},
+            # Quiz Generation V2 only fails the whole request closed when the candidate pool is
+            # completely empty (spec case E) -- a non-empty pool below question_count is now
+            # persisted as a partial quiz instead of raising. Return zero questions here to still
+            # exercise the real failure/diagnostics path.
+            return [], {"accepted": 0, "accepted_with_warnings": 0, "rejected": question_count, "reasons": ["short"]}, {
+                "llm_calls": 3, "rejection_reasons_by_slot": {f"S{index}": ["short"] for index in range(1, question_count + 1)},
             }
 
         with capture_diagnostics() as captured, \
