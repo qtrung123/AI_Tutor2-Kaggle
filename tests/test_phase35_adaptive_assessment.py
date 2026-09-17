@@ -1,6 +1,8 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend import quiz_store
@@ -9,6 +11,33 @@ from backend.main import QuizGenerateRequest, QuizRegenerateRequest
 from backend.mastery_service import calculate_mastery, recompute_topic_mastery
 from backend.quiz_service import update_quiz_progress
 from backend import quiz_service
+
+
+class _FakeV3BatchModel:
+    """Minimal ChatOllama stand-in for Quiz Generation V3 (no Planner) tests -- mirrors the
+    FakeBatchModel recipe already proven in tests/test_quiz_v2.py."""
+    payloads = []
+
+    def __init__(self, **_kwargs):
+        pass
+
+    def invoke(self, _prompt):
+        return SimpleNamespace(content=json.dumps(self.__class__.payloads.pop(0)), response_metadata={})
+
+
+def _v3_document_chunk(chunk_id: str, sentence: str) -> dict:
+    return {
+        "content": sentence,
+        "metadata": {"chunk_id": chunk_id, "chunk": int(chunk_id.split("_")[-1]), "document_id": "doc.pdf"},
+    }
+
+
+def _v3_raw_question(slot_id: str, stem: str) -> dict:
+    return {
+        "slot_id": slot_id, "question_type": "single_choice", "question": stem,
+        "options": ["A supported answer", "An unrelated distractor", "Another distractor", "A third distractor"],
+        "correct_answers": [0], "explanation": "The evidence directly supports the first option.",
+    }
 
 
 def concept_plan(topic_id: str, capacity: int) -> dict:
@@ -147,58 +176,41 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         self.assertTrue(completed["mastery_by_topic"]["topic_a"]["has_sufficient_evidence"])
         self.assertTrue(completed["mastery_by_topic"]["topic_b"]["has_sufficient_evidence"])
 
-    def test_document_generation_plans_and_generates_topic_by_topic(self):
+    def test_document_generation_covers_multiple_regions_without_planner(self):
+        """Quiz Generation V3 (live path): document-scope generation no longer plans per topic
+        via the Planner -- coverage instead comes from deterministic context grouping over
+        ordered document chunks (see _select_v3_context_groups)."""
         document = {
             "id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 2,
-            "topics": [{"topic_id": "topic_a", "name": "A"}, {"topic_id": "topic_b", "name": "B"}],
+            "topics": [{"topic_id": "topic_a", "name": "A"}],
         }
-
-        def planned(topic, chunks):
-            capacity = 1 if topic["topic_id"] == "topic_a" else 2
-            plan = concept_plan(topic["topic_id"], capacity) | {"topic_name": topic["name"]}
-            plan["concept_plan_id"] = f"plan-{topic['topic_id']}"
-            for concept in plan["concepts"]:
-                concept["source_chunk_ids"] = [f"{topic['topic_id']}_1"]
-            return plan
-
-        def generated(_document, difficulty, slots, _owner, _model, requested, _run_id):
-            # Every slot is single_choice -- the sole production path for document quizzes.
-            questions = [{
-                "id": index + 1, "slot_id": slot["slot_id"],
-                "question_type": "single_choice",
-                "question": f"Question for {slot['name']} case {index + 1}?",
-                "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
-                "topic_id": slot["topic_id"], "topic_name": slot["topic_name"],
-                "concept_id": slot["concept_id"], "concept_name": slot["name"],
-                "concept_plan_id": slot["concept_plan_id"],
-                "assessment_capacity": slot["assessment_capacity"], "difficulty": difficulty,
-                "explanation": "Supported.", "source_chunk_ids": slot["source_chunk_ids"],
-                "validation_outcome": "accepted",
-            } for index, slot in enumerate(slots)]
-            return questions, {"accepted": requested, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}, {
-                "llm_calls": 1, "rejection_reasons_by_slot": {},
-            }
-
-        def chunks(document_id, topic_id, owner_id):
-            return [{
-                "content": (
-                    f"{topic_id} directly governs this documented mechanism. "
-                    f"{topic_id} also affects the resulting system behavior."
-                ),
-                "metadata": {"chunk_id": f"{topic_id}_1", "topic_id": topic_id},
-            }]
+        base_sentence = (
+            "TCP acknowledgements support reliable delivery. Flow control protects receivers. "
+            "Sequence numbers preserve ordering."
+        )
+        document_chunks = [_v3_document_chunk(f"chunk_{index}", base_sentence) for index in range(1, 7)]
+        candidates = [
+            _v3_raw_question(f"S{index + 1}", f"Why does mechanism {index + 1} support reliable delivery of a message?")
+            for index in range(12)
+        ]
+        _FakeV3BatchModel.payloads = [{"questions": candidates}]
 
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
-             patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
-             patch.object(quiz_service, "build_topic_plan", side_effect=planned), \
-             patch.object(quiz_service, "_run_document_single_choice_quiz", side_effect=generated) as generator, \
+             patch.object(quiz_service, "get_document_chunks", return_value=document_chunks), \
+             patch.object(quiz_service, "ChatOllama", _FakeV3BatchModel), \
+             patch.object(quiz_service, "save_quiz_validation_event"), \
              patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _owner: quiz):
             result = quiz_service.generate_quiz("doc.pdf", "easy", "document")
 
         self.assertEqual(result["question_count"], 12)
-        self.assertEqual(generator.call_count, 1)
-        self.assertEqual({question["topic_id"] for question in result["questions"]}, {"topic_a", "topic_b"})
+        self.assertEqual(result["assessment_plan"]["status"], "complete")
+        self.assertEqual(result["assessment_plan"]["planner_version"], quiz_service.QUIZ_V3_ENGINE_VERSION)
+        self.assertGreater(result["assessment_plan"]["context_group_count"], 1)
+        represented_chunks = {
+            chunk_id for question in result["questions"] for chunk_id in question["source_chunk_ids"]
+        }
+        self.assertGreaterEqual(len(represented_chunks), 4)
         self.assertTrue(all(question["concept_id"] for question in result["questions"]))
 
     def test_request_models_and_frontend_support_allowed_question_counts(self):
@@ -215,14 +227,17 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         self.assertIn('quizCreateDialog?.classList.contains("open")', frontend)
         self.assertIn("!currentQuiz?.questions?.length && !createDialogOpen", frontend)
 
-    def test_topic_generation_uses_v2_batch_pipeline(self):
+    def test_topic_generation_uses_v3_context_group_pipeline(self):
+        """Quiz Generation V3 (live path): topic-scope generation dispatches to the Planner-free
+        _generate_quiz_v3 engine, not the Planner-based _generate_topic_quiz_v2."""
         document = {
             "id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 2,
             "topics": [{"topic_id": "topic_a", "name": "A"}],
         }
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
-             patch.object(quiz_service, "_generate_topic_quiz_v2", return_value={
+             patch.object(quiz_service, "get_schema_topic_evidence", return_value=[]), \
+             patch.object(quiz_service, "_generate_quiz_v3", return_value={
                  "question_count": 10, "questions": [{"concept_id": f"concept_{index:03d}"} for index in range(1, 11)]
              }) as generator:
             result = quiz_service.generate_quiz("doc.pdf", "easy", "topic", "topic_a")
@@ -230,6 +245,7 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         self.assertEqual(result["question_count"], 10)
         generator.assert_called_once()
         self.assertEqual(generator.call_args.kwargs["model_id"], quiz_service.CHAT_MODEL)
+        self.assertEqual(generator.call_args.kwargs["scope"], "topic")
 
     def test_dashboard_empty_state_contains_no_invented_metrics(self):
         with patch.object(quiz_service, "list_indexed_documents", return_value=[]):

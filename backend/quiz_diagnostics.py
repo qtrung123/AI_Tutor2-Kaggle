@@ -134,7 +134,11 @@ class QuizRunDiagnostics:
             return default
 
         self.add_stage_ms("retrieval_ms", get("topic_chunk_retrieval_ms"))
-        self.add_stage_ms("context_ms", get("slot_build_ms") + get("evidence_selection_ms") + get("prompt_construction_ms"))
+        self.add_stage_ms(
+            "context_ms",
+            get("slot_build_ms") + get("evidence_selection_ms") + get("prompt_construction_ms")
+            + get("context_grouping_ms"),
+        )
         self.add_stage_ms("planner_ms", get("concept_planning_ms"))
         self.add_stage_ms("allocation_ms", get("allocation_ms"))
         self.add_stage_ms(
@@ -149,7 +153,12 @@ class QuizRunDiagnostics:
             0 if "repair_ms" in timings else get("repair_generation_ms") + get("fill_generation_ms")
         ))
         self.add_stage_ms("persistence_ms", get("persistence_ms"))
-        self.counts["llm_calls"] = self.counts.get("llm_calls", 0) + int(get("llm_calls"))
+        # Take the max, not a sum: when the real generation pipeline ran, record_llm_call already
+        # counted every call as it happened, and the timings dict's own "llm_calls" reports the
+        # same total -- adding them would double-count. When a test replaces the whole inner
+        # generation function with a mock (so record_llm_call is never invoked), counts["llm_calls"]
+        # stays 0 and this timings-reported total is the only source of truth.
+        self.counts["llm_calls"] = max(self.counts.get("llm_calls", 0), int(get("llm_calls")))
 
     # -- context / retrieval -------------------------------------------------
 

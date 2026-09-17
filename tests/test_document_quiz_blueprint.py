@@ -491,63 +491,43 @@ class GenerateQuizDocumentContractTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_document_scope_respects_requested_count_and_is_all_single_choice(self):
+        """Quiz Generation V3 (live path): document scope respects the requested question_count
+        and produces an all-single_choice quiz -- no Planner, no per-topic quota (see
+        _generate_quiz_v3)."""
         document = {
             "id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 2,
             "topics": [{"topic_id": "topic_a", "name": "A"}],
         }
+        document_chunks = [{
+            "content": f"Item{i} fact one is documented. Item{i} fact two is documented.",
+            "metadata": {"chunk_id": f"chunk_{i}", "document_id": "doc.pdf"},
+        } for i in range(1, 16)]
 
-        def planned(topic, _chunks):
-            concepts = [{
-                "concept_id": f"concept_{i}", "name": f"Concept {i}",
-                "source_subtopic_ids": [], "source_chunk_ids": [f"chunk_{i}"],
-                "concept_origin": "derived",
-            } for i in range(15)]
-            return {
-                "topic_id": topic["topic_id"], "topic_name": topic["name"],
-                "planner_version": quiz_service.PLANNER_VERSION,
-                "concept_plan_id": "plan-a", "assessment_capacity": 15,
-                "allocated_questions": 0, "concepts": concepts,
-            }
-
-        def chunks(_document_id, topic_id, _owner_id):
+        def respond(_prompt):
             return [{
-                "content": (
-                    f"Concept {i} directly governs this documented mechanism. "
-                    f"Concept {i} also affects the resulting system behavior."
-                ),
-                "metadata": {"chunk_id": f"chunk_{i}", "topic_id": topic_id},
-            } for i in range(15)]
+                "slot_id": f"S{index + 1}", "question_type": "single_choice",
+                "question": f"Which fact does the evidence document in case {index + 1}?",
+                "options": [
+                    "Item fact one is documented", "Unrelated claim A",
+                    "Unrelated claim B", "Unrelated claim C",
+                ],
+                "correct_answers": [0],
+                "explanation": "Item fact one is documented, as the evidence states.",
+            } for index in range(12)]
 
-        captured = {}
-
-        def fake_quiz(_document, _difficulty, planned_slots, _owner, _model, question_count, _run_id):
-            captured["question_count"] = question_count
-            captured["planned_slots"] = planned_slots
-            questions = [{
-                "id": index + 1, "slot_id": s["slot_id"], "question": f"Question {index + 1}?",
-                "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
-                "correct_answers": ["A"], "question_type": "single_choice",
-                "topic_id": s["topic_id"], "topic_name": s["topic_name"],
-                "concept_id": s["concept_id"], "concept_name": s["name"],
-                "assessment_capacity": s["assessment_capacity"], "difficulty": "easy",
-                "explanation": "Explained.", "source_chunk_ids": s["source_chunk_ids"],
-                "validation_outcome": "accepted",
-            } for index, s in enumerate(planned_slots)]
-            return questions, {"accepted": 12, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}, {
-                "llm_calls": 2, "rejection_reasons_by_slot": {},
-            }
-
+        SequencedOllama.respond = respond
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
-             patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
-             patch.object(quiz_service, "build_topic_plan", side_effect=planned), \
-             patch.object(quiz_service, "_run_document_single_choice_quiz", side_effect=fake_quiz):
+             patch.object(quiz_service, "get_document_chunks", return_value=document_chunks), \
+             patch.object(quiz_service, "ChatOllama", SequencedOllama), \
+             patch.object(quiz_service, "save_quiz_validation_event"):
             result = quiz_service.generate_quiz("doc.pdf", "easy", "document", question_count=12)
 
-        self.assertEqual(captured["question_count"], 12)
-        self.assertEqual(len(captured["planned_slots"]), 12)
         self.assertEqual(result["question_count"], 12)
         self.assertEqual(result["assessment_plan"]["target_questions"], 12)
+        self.assertEqual(result["assessment_plan"]["status"], "complete")
+        self.assertEqual(result["assessment_plan"]["llm_calls"], 1)
+        self.assertGreater(result["assessment_plan"]["context_group_count"], 1)
         self.assertEqual(result["assessment_plan"]["type_distribution"], {"single_choice": 12})
         self.assertTrue(all(q["question_type"] == "single_choice" for q in result["questions"]))
 

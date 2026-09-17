@@ -206,45 +206,17 @@ class QuizRetakeFlowTests(unittest.TestCase):
             "topic_schema_version": 2,
             "topics": [{"topic_id": "topic_1", "name": "Topic 1"}, {"topic_id": "topic_2", "name": "Topic 2"}],
         }
-        topic_plans = {
-            topic_id: {
-                "topic_id": topic_id, "topic_name": f"Topic {topic_id[-1]}",
-                "planner_version": "assessment_capacity_v1", "concept_plan_id": f"plan_{topic_id[-1]}",
-                "assessment_capacity": 6,
-                "concepts": [{
-                    "concept_id": f"concept_{offset + index}", "name": f"Concept {offset + index}",
-                    "source_chunk_ids": [f"chunk_{offset + index}"], "source_subtopic_ids": [f"subtopic_{offset + index}"],
-                    "concept_origin": "structural",
-                } for index in range(1, 7)],
-            }
-            for topic_id, offset in (("topic_1", 0), ("topic_2", 6))
-        }
 
-        def generated_batch(_document, _difficulty, _slots, _owner, _model, _count, _run_id):
-            return quiz["questions"], {
-                "accepted": 15, "accepted_with_warnings": 0, "rejected": 0, "reasons": [],
-            }, {"llm_calls": 1, "rejection_reasons_by_slot": {}}
+        # Quiz Generation V3 (live path) has no Planner and no per-slot batch function to mock at
+        # that level -- this test is about the persistence/retrieval lifecycle, not generation,
+        # so it mocks the whole _generate_quiz_v3 engine to persist this fixed fixture quiz via
+        # the real save_quiz, exactly as the real engine would.
+        def fake_generate_v3(*, document, difficulty, owner_id, **_kwargs):
+            return quiz_service.save_quiz(document["id"], difficulty, quiz, owner_id)
 
         with patch.object(quiz_service, "_document_lookup", return_value={document["id"]: document}), \
-             patch.object(quiz_service, "get_topic_chunks", return_value=[{
-                 "content": (
-                     "Embedded systems evidence confirms reliable behavior. "
-                     "This evidence directly supports the documented mechanism. "
-                     "The system behavior remains consistent under load."
-                 ),
-                 "metadata": {"chunk_id": "chunk_1"},
-             }]), \
-             patch.object(quiz_service, "build_topic_plan", side_effect=lambda topic, _chunks: topic_plans[topic["topic_id"]]), \
-             patch.object(quiz_service, "resolve_concept_evidence", return_value=[{
-                 "content": (
-                     "Embedded systems evidence confirms reliable behavior. "
-                     "This evidence directly supports the documented mechanism. "
-                     "The system behavior remains consistent under load."
-                 ),
-                 "metadata": {"chunk_id": "chunk_1"},
-             }]), \
-             patch.object(quiz_service, "_run_document_single_choice_quiz", side_effect=generated_batch), \
-             patch.object(quiz_service, "uuid4", return_value="document-batch-15"):
+             patch.object(quiz_service, "get_document_chunks", return_value=[]), \
+             patch.object(quiz_service, "_generate_quiz_v3", side_effect=fake_generate_v3):
             generated = quiz_service.generate_quiz(
                 "Embedded Systems.pdf", "easy", "document", owner_id=LEGACY_USER_ID, question_count=15,
             )

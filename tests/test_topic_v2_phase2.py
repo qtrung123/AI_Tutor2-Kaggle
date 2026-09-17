@@ -1,6 +1,8 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend import assessment_planner, quiz_service, quiz_store
@@ -38,6 +40,39 @@ CHUNKS = [
     chunk("c3", "sub_b", "Small details support configuration."),
     chunk("c4", "", "Topic introduction provides context."),
 ]
+
+
+class _FakeV3Model:
+    """Minimal ChatOllama stand-in for Quiz Generation V3 (no Planner) document-scope tests."""
+    payloads = []
+
+    def __init__(self, **_kwargs):
+        pass
+
+    def invoke(self, _prompt):
+        return SimpleNamespace(content=json.dumps(self.__class__.payloads.pop(0)), response_metadata={})
+
+
+def _v3_chunks(count: int) -> list[dict]:
+    return [
+        chunk(f"chunk_{index}", "", "Scheduling selects work. Priorities affect selection.", "document")
+        for index in range(1, count + 1)
+    ]
+
+
+def _v3_candidates(count: int) -> list[dict]:
+    return [{
+        "slot_id": f"S{index + 1}", "question_type": "single_choice",
+        "question": f"How does scheduling select work in case {index + 1}?",
+        "options": [
+            "Scheduling selects work based on priorities",
+            "An unrelated distractor about something else",
+            "Another distractor about something else",
+            "A third distractor about something else",
+        ],
+        "correct_answers": [0],
+        "explanation": "Scheduling selects work based on priorities, as the evidence states.",
+    } for index in range(count)]
 
 
 def question(quiz_id, plan_id, concept_id="aconcept_one"):
@@ -120,119 +155,57 @@ class TopicV2Phase2Tests(unittest.TestCase):
         self.assertTrue(all(count >= 1 for count in counts.values()))
 
     def test_document_generation_uses_requested_question_count_all_single_choice(self):
-        """Document scope respects the requested 12/15 question_count (default 12) and produces
-        an all-single_choice quiz -- no type planner, no special-type quota (see
-        _run_document_single_choice_quiz)."""
-        topics = [{"topic_id": name, "name": name, "subtopics": []} for name in ("a", "b", "c", "d")]
-        document = {"id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 3, "topics": topics}
-        def chunks(_document_id, topic_id, _owner):
-            return [chunk(
-                f"{topic_id}-chunk", "",
-                f"{topic_id} directly governs this documented mechanism. "
-                f"{topic_id} also affects the resulting system behavior.",
-                topic_id,
-            )]
-        def plan(topic, _chunks):
-            concepts = [{
-                "concept_id": f"aconcept_{topic['topic_id']}_{index}", "name": f"Concept {index}",
-                "source_subtopic_ids": [], "source_chunk_ids": [f"{topic['topic_id']}-chunk"],
-                "concept_origin": "derived",
-            } for index in range(4)]
-            return {"topic_id": topic["topic_id"], "topic_name": topic["name"], "planner_version": PLANNER_VERSION,
-                    "concept_plan_id": f"plan-{topic['topic_id']}", "assessment_capacity": 4,
-                    "allocated_questions": 0, "concepts": concepts}
-        def generated(_document, _difficulty, slots, _owner, _model, requested, _run_id, **_kwargs):
-            # Every slot is single_choice -- the sole production path for document quizzes.
-            questions = [{
-                "id": index + 1, "slot_id": slot["slot_id"],
-                "question": f"Which supported concept applies in case {index + 1}?",
-                "question_type": "single_choice",
-                "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
-                "topic_id": slot["topic_id"], "topic_name": slot["topic_name"],
-                "concept_id": slot["concept_id"], "concept_name": slot["name"],
-                "concept_plan_id": slot["concept_plan_id"], "source_subtopic_ids": [],
-                "concept_origin": slot["concept_origin"], "assessment_capacity": slot["assessment_capacity"],
-                "difficulty": "easy", "explanation": "The evidence supports this.",
-                "source_chunk_ids": slot["source_chunk_ids"],
-            } for index, slot in enumerate(slots)]
-            return questions, {"accepted": requested, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}, {
-                "llm_calls": 1, "prompt_construction_ms": 1, "initial_batch_generation_ms": 2,
-                "validation_ms": 1, "repair_ms": 0, "prompt_tokens": 100, "output_tokens": 200,
-                "rejection_reasons_by_slot": {},
-            }
+        """Quiz Generation V3 (live path): document scope respects the requested 12/15
+        question_count (default 12) and produces an all-single_choice quiz -- no Planner, no
+        per-topic quota (see _generate_quiz_v3)."""
+        document = {"id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 3, "topics": []}
+        document_chunks = _v3_chunks(15)
         for requested in (None, 12, 15):
             expected_count = requested or 12
+            _FakeV3Model.payloads = [{"questions": _v3_candidates(expected_count)}]
             with self.subTest(question_count=requested), \
                  patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
                  patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
                  patch.object(quiz_service, "get_quiz", return_value=None), \
-                 patch.object(quiz_service, "get_topic_chunks", side_effect=chunks), \
-                 patch.object(quiz_service, "build_topic_plan", side_effect=plan), \
-                 patch.object(quiz_service, "_run_document_single_choice_quiz", side_effect=generated) as batch, \
+                 patch.object(quiz_service, "get_document_chunks", return_value=document_chunks), \
+                 patch.object(quiz_service, "ChatOllama", _FakeV3Model), \
+                 patch.object(quiz_service, "save_quiz_validation_event"), \
                  patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, value, _o: value):
                 kwargs = {"question_count": requested} if requested is not None else {}
                 result = quiz_service.generate_quiz("doc.pdf", "easy", "document", **kwargs)
             self.assertEqual(result["question_count"], expected_count)
             self.assertEqual(result["assessment_plan"]["target_questions"], expected_count)
-            represented = {question["topic_id"] for question in result["questions"]}
-            self.assertEqual(represented, {"a", "b", "c", "d"})
+            self.assertEqual(result["assessment_plan"]["status"], "complete")
+            self.assertEqual(result["assessment_plan"]["llm_calls"], 1)
             self.assertTrue(all(question["question_type"] == "single_choice" for question in result["questions"]))
-            self.assertEqual(batch.call_count, 1)
+            self.assertGreater(result["assessment_plan"]["context_group_count"], 1)
             timings = result["assessment_plan"]["timings_ms"]
             for key in (
-                "concept_planning_ms", "allocation_ms", "prompt_construction_ms",
-                "initial_batch_generation_ms", "validation_ms", "repair_ms",
-                "persistence_ms", "total_request_ms", "prompt_tokens", "output_tokens",
+                "context_grouping_ms", "topic_chunk_retrieval_ms", "generation_ms", "validation_ms",
+                "persistence_ms", "total_request_ms",
             ):
                 self.assertIn(key, timings)
 
     def test_document_partial_generation_persists_partial_quiz(self):
-        """Quiz Generation V2: a document-scope candidate pool that falls short of
+        """Quiz Generation V3 (live path): a document-scope candidate pool that falls short of
         question_count after bounded repair/fill is persisted as a partial quiz
         (status="partial") instead of failing the whole request closed, as long as at least
-        one valid, structurally sound question was produced (spec case C/D)."""
-        topic = {"topic_id": "a", "name": "A", "subtopics": []}
-        document = {"id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 3, "topics": [topic]}
-        evidence = chunk(
-            "a-chunk", "",
-            "Concept A directly governs this documented mechanism. "
-            "Concept A also affects the resulting system behavior.",
-            "a",
-        )
-        concept = {
-            "concept_id": "aconcept_a", "name": "Concept A", "source_subtopic_ids": [],
-            "source_chunk_ids": ["a-chunk"], "concept_origin": "derived",
-        }
-        plan = {
-            "topic_id": "a", "topic_name": "A", "planner_version": PLANNER_VERSION,
-            "concept_plan_id": "plan-a", "assessment_capacity": 1,
-            "allocated_questions": 0, "concepts": [concept],
-        }
-        def generated(_document, _difficulty, slots, _owner, _model, _requested, _run_id, **_kwargs):
-            # Bounded repair/fill only reached 9 of the 12 requested slots -- the remaining 3
-            # stay missing rather than being papered over by a fabricated fallback.
-            questions = [{
-                "id": index + 1, "slot_id": slot["slot_id"],
-                "question": f"Which supported concept applies in case {index + 1}?",
-                "question_type": "single_choice",
-                "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
-                "topic_id": slot["topic_id"], "topic_name": slot["topic_name"],
-                "concept_id": slot["concept_id"], "concept_name": slot["name"],
-                "concept_plan_id": slot["concept_plan_id"], "source_subtopic_ids": [],
-                "concept_origin": slot["concept_origin"], "assessment_capacity": slot["assessment_capacity"],
-                "difficulty": "easy", "explanation": "The evidence supports this.",
-                "source_chunk_ids": slot["source_chunk_ids"],
-            } for index, slot in enumerate(slots[:9])]
-            return questions, {"accepted": 9, "accepted_with_warnings": 0, "rejected": 1,
-                                "reasons": ["bounded repair exhausted"]}, {"llm_calls": 3, "rejection_reasons_by_slot": {}}
-
+        one valid, structurally sound question was produced (spec case C/D). No Planner and no
+        fabricated deterministic fallback are involved (see _generate_quiz_v3)."""
+        document = {"id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 3, "topics": []}
+        document_chunks = _v3_chunks(15)
+        # Bounded repair/fill only reach 9 of the 12 requested slots -- the remaining 3 stay
+        # missing rather than being papered over by a fabricated fallback.
+        _FakeV3Model.payloads = [
+            {"questions": _v3_candidates(9)},
+            {"questions": []}, {"questions": []}, {"questions": []}, {"questions": []},
+        ]
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
              patch.object(quiz_service, "get_quiz", return_value=None), \
-             patch.object(quiz_service, "get_topic_chunks", return_value=[evidence]), \
-             patch.object(quiz_service, "build_topic_plan", return_value=plan), \
-             patch.object(quiz_service, "resolve_concept_evidence", return_value=[evidence]), \
-             patch.object(quiz_service, "_run_document_single_choice_quiz", side_effect=generated), \
+             patch.object(quiz_service, "get_document_chunks", return_value=document_chunks), \
+             patch.object(quiz_service, "ChatOllama", _FakeV3Model), \
+             patch.object(quiz_service, "save_quiz_validation_event"), \
              patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, value, _o: value) as save:
             result = quiz_service.generate_quiz("doc.pdf", "easy", "document", question_count=12)
         self.assertEqual(result["question_count"], 9)

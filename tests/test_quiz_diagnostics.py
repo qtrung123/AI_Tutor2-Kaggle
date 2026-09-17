@@ -10,6 +10,7 @@ No new tokenizer, no new database table, no change to prompts/models/retry
 limits/validation rules is exercised or asserted here.
 """
 
+import json
 import tempfile
 import time
 import unittest
@@ -358,10 +359,43 @@ class PlannerDiagnosticsTests(unittest.TestCase):
         self.assertTrue(plan["concepts"])  # deterministic fallback still produced usable concepts
 
 
+class _FakeV3DiagModel:
+    """Minimal ChatOllama stand-in for Quiz Generation V3 (no Planner) diagnostics tests."""
+    payloads = []
+
+    def __init__(self, **_kwargs):
+        pass
+
+    def invoke(self, _prompt):
+        return SimpleNamespace(content=json.dumps(self.__class__.payloads.pop(0)), response_metadata={})
+
+
+def _v3_diag_chunks(count: int) -> list[dict]:
+    return [{
+        "content": "Concept coverage fact one is documented. Concept coverage fact two is documented.",
+        "metadata": {"chunk_id": f"chunk_{index}", "document_id": "doc.pdf"},
+    } for index in range(1, count + 1)]
+
+
+def _v3_diag_candidates(count: int) -> list[dict]:
+    return [{
+        "slot_id": f"S{index + 1}", "question_type": "single_choice",
+        "question": f"Which fact does the evidence support in case {index + 1}?",
+        "options": [
+            "Concept coverage fact one is documented",
+            "An unrelated distractor about something else",
+            "Another distractor about something else",
+            "A third distractor about something else",
+        ],
+        "correct_answers": [0],
+        "explanation": "Concept coverage fact one is documented, as the evidence states.",
+    } for index in range(count)]
+
+
 class GenerateQuizWrapperBehaviorTests(unittest.TestCase):
-    """The public generate_quiz() entry point, through the full mocked document-scope
-    pipeline (mirrors tests/test_phase35_adaptive_assessment.py's mocking approach), proving
-    the instrumentation wrapper changes nothing about the returned quiz."""
+    """The public generate_quiz() entry point, through the real Quiz Generation V3 (no
+    Planner) document-scope pipeline with only chunk retrieval and the LLM mocked out,
+    proving the instrumentation wrapper changes nothing about the returned quiz."""
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -379,51 +413,15 @@ class GenerateQuizWrapperBehaviorTests(unittest.TestCase):
             "topics": [{"topic_id": "topic_a", "name": "A"}],
         }
 
-    def _planned(self, topic, _chunks):
-        concepts = [{
-            "concept_id": f"concept_{i}", "name": f"Concept {i}",
-            "source_subtopic_ids": [], "source_chunk_ids": [f"chunk_{i}"],
-            "concept_origin": "derived",
-        } for i in range(12)]
-        return {
-            "topic_id": topic["topic_id"], "topic_name": topic["name"],
-            "planner_version": quiz_service.PLANNER_VERSION,
-            "concept_plan_id": "plan-a", "assessment_capacity": 12,
-            "allocated_questions": 0, "concepts": concepts,
-        }
-
-    def _chunks(self, _document_id, topic_id, _owner_id):
-        return [{
-            "content": f"Concept {i} directly governs this documented mechanism.",
-            "metadata": {"chunk_id": f"chunk_{i}", "topic_id": topic_id},
-        } for i in range(12)]
-
-    def _fake_quiz(self, planned_slots):
-        return [{
-            "id": index + 1, "slot_id": s["slot_id"], "question": f"Question {index + 1}?",
-            "options": ["A. One", "B. Two", "C. Three", "D. Four"], "correct_answer": "A",
-            "correct_answers": ["A"], "question_type": "single_choice",
-            "topic_id": s["topic_id"], "topic_name": s["topic_name"],
-            "concept_id": s["concept_id"], "concept_name": s["name"],
-            "assessment_capacity": s["assessment_capacity"], "difficulty": "easy",
-            "explanation": "Explained.", "source_chunk_ids": s["source_chunk_ids"],
-            "validation_outcome": "accepted",
-        } for index, s in enumerate(planned_slots)]
-
     @contextmanager
-    def _mocked_pipeline(self, document):
-        def fake_quiz(_document, _difficulty, planned_slots, _owner, _model, question_count, _run_id):
-            questions = self._fake_quiz(planned_slots)
-            return questions, {"accepted": question_count, "accepted_with_warnings": 0, "rejected": 0, "reasons": []}, {
-                "llm_calls": 2, "rejection_reasons_by_slot": {},
-            }
-
+    def _mocked_pipeline(self, document, candidate_count: int = 12):
+        _FakeV3DiagModel.payloads = [{"questions": _v3_diag_candidates(candidate_count)}]
         with ExitStack() as stack:
             stack.enter_context(patch.object(quiz_service, "_document_lookup", return_value={document["id"]: document}))
             stack.enter_context(patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"))
-            stack.enter_context(patch.object(quiz_service, "get_topic_chunks", side_effect=self._chunks))
-            stack.enter_context(patch.object(quiz_service, "build_topic_plan", side_effect=self._planned))
-            stack.enter_context(patch.object(quiz_service, "_run_document_single_choice_quiz", side_effect=fake_quiz))
+            stack.enter_context(patch.object(quiz_service, "get_document_chunks", return_value=_v3_diag_chunks(12)))
+            stack.enter_context(patch.object(quiz_service, "ChatOllama", _FakeV3DiagModel))
+            stack.enter_context(patch.object(quiz_service, "save_quiz_validation_event"))
             yield
 
     def test_wrapper_output_matches_calling_the_internal_function_directly(self):
@@ -463,7 +461,8 @@ class GenerateQuizWrapperBehaviorTests(unittest.TestCase):
         self.assertEqual(summary["requested_questions"], 12)
         self.assertEqual(summary["generated_questions"], 12)
         self.assertEqual(summary["validated_questions"], 12)
-        self.assertEqual(summary["llm_calls"], 2)  # from the mocked batch_timings above
+        # One initial call already supplies all 12 valid candidates -- no repair/fill needed.
+        self.assertEqual(summary["llm_calls"], 1)
         self.assertEqual(summary["cache_hit"], False)
 
     def test_cache_hit_path_still_logs_a_summary(self):
@@ -480,22 +479,19 @@ class GenerateQuizWrapperBehaviorTests(unittest.TestCase):
 
     def test_failure_path_is_recorded_and_the_original_error_still_propagates(self):
         document = self._document("doc-e.pdf")
-
-        def fake_quiz_short(_document, _difficulty, planned_slots, _owner, _model, question_count, _run_id):
-            # Quiz Generation V2 only fails the whole request closed when the candidate pool is
-            # completely empty (spec case E) -- a non-empty pool below question_count is now
-            # persisted as a partial quiz instead of raising. Return zero questions here to still
-            # exercise the real failure/diagnostics path.
-            return [], {"accepted": 0, "accepted_with_warnings": 0, "rejected": question_count, "reasons": ["short"]}, {
-                "llm_calls": 3, "rejection_reasons_by_slot": {f"S{index}": ["short"] for index in range(1, question_count + 1)},
-            }
+        # Quiz Generation V3 only fails the whole request closed when the candidate pool is
+        # completely empty (spec case E) -- a non-empty pool below question_count is persisted
+        # as a partial quiz instead of raising. An empty initial response (and every bounded
+        # repair/fill retry after it) keeps the pool empty, so this still exercises the real
+        # failure/diagnostics path.
+        _FakeV3DiagModel.payloads = [{"questions": []}]
 
         with capture_diagnostics() as captured, \
              patch.object(quiz_service, "_document_lookup", return_value={document["id"]: document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
-             patch.object(quiz_service, "get_topic_chunks", side_effect=self._chunks), \
-             patch.object(quiz_service, "build_topic_plan", side_effect=self._planned), \
-             patch.object(quiz_service, "_run_document_single_choice_quiz", side_effect=fake_quiz_short):
+             patch.object(quiz_service, "get_document_chunks", return_value=_v3_diag_chunks(12)), \
+             patch.object(quiz_service, "ChatOllama", _FakeV3DiagModel), \
+             patch.object(quiz_service, "save_quiz_validation_event"):
             with self.assertRaises(quiz_service.QuizGenerationError):
                 quiz_service.generate_quiz(document["id"], "easy", "document", question_count=12)
 
@@ -503,7 +499,8 @@ class GenerateQuizWrapperBehaviorTests(unittest.TestCase):
         summary = captured[0].summary()
         self.assertIn("failure", summary)
         self.assertEqual(summary["failure"]["exception_type"], "QuizGenerationError")
-        self.assertEqual(summary["llm_calls"], 3)
+        # One initial call plus the full bounded repair(2) + fill(2) budget.
+        self.assertEqual(summary["llm_calls"], 5)
 
 
 if __name__ == "__main__":
