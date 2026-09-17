@@ -370,26 +370,52 @@ class _FakeV3DiagModel:
         return SimpleNamespace(content=json.dumps(self.__class__.payloads.pop(0)), response_metadata={})
 
 
+# Every chunk carries the full fact vocabulary so a candidate grounds against any of the 4
+# context groups _v3_diag_chunks(12) produces (QUIZ_V3_MAX_CHUNKS_PER_GROUP=3). Sixteen
+# genuinely distinct facts, each with its own stem AND answer wording (verified low mutual
+# content overlap) so a pool of up to 12 candidates can be built without tripping the
+# content-duplicate check on candidates that only differ by a case number.
+_V3_DIAG_FACT_VARIANTS = [
+    ("Why does the mechanism support reliable delivery?", "It supports reliable delivery"),
+    ("How does the mechanism protect against packet loss?", "It protects against packet loss"),
+    ("What prevents duplicate delivery in this mechanism?", "It prevents duplicate delivery"),
+    ("Why does the mechanism preserve delivery order?", "It preserves delivery order"),
+    ("How does the mechanism detect corrupted data?", "It detects corrupted data"),
+    ("What confirms successful delivery in this mechanism?", "It confirms successful delivery"),
+    ("Why does the mechanism retransmit lost data?", "It retransmits lost data automatically"),
+    ("How does the mechanism avoid overwhelming the receiver?", "It avoids overwhelming the receiver"),
+    ("What limits the transmission rate in this mechanism?", "It limits the transmission rate"),
+    ("Why does the mechanism track acknowledgements?", "It tracks acknowledgements from the receiver"),
+    ("How does the mechanism recover from timeouts?", "It recovers from timeouts by retrying"),
+    ("What ensures data integrity in this mechanism?", "It ensures data integrity"),
+]
+_V3_DIAG_SHARED_FACTS = ". ".join(answer for _stem, answer in _V3_DIAG_FACT_VARIANTS) + "."
+
+
 def _v3_diag_chunks(count: int) -> list[dict]:
     return [{
-        "content": "Concept coverage fact one is documented. Concept coverage fact two is documented.",
+        "content": f"Chunk{index}: {_V3_DIAG_SHARED_FACTS}",
         "metadata": {"chunk_id": f"chunk_{index}", "document_id": "doc.pdf"},
     } for index in range(1, count + 1)]
 
 
 def _v3_diag_candidates(count: int) -> list[dict]:
-    return [{
-        "slot_id": f"S{index + 1}", "question_type": "single_choice",
-        "question": f"Which fact does the evidence support in case {index + 1}?",
-        "options": [
-            "Concept coverage fact one is documented",
-            "An unrelated distractor about something else",
-            "Another distractor about something else",
-            "A third distractor about something else",
-        ],
-        "correct_answers": [0],
-        "explanation": "Concept coverage fact one is documented, as the evidence states.",
-    } for index in range(count)]
+    questions = []
+    for index in range(count):
+        stem, answer = _V3_DIAG_FACT_VARIANTS[index % len(_V3_DIAG_FACT_VARIANTS)]
+        questions.append({
+            "group_id": f"G{(index % 4) + 1}", "question_type": "single_choice",
+            "question": stem,
+            "options": [
+                answer,
+                "An unrelated distractor about something else",
+                "Another distractor about something else",
+                "A third distractor about something else",
+            ],
+            "correct_answers": [0],
+            "explanation": f"The evidence directly states that {answer[0].lower()}{answer[1:]}.",
+        })
+    return questions
 
 
 class GenerateQuizWrapperBehaviorTests(unittest.TestCase):

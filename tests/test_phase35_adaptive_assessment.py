@@ -32,11 +32,11 @@ def _v3_document_chunk(chunk_id: str, sentence: str) -> dict:
     }
 
 
-def _v3_raw_question(slot_id: str, stem: str) -> dict:
+def _v3_raw_question(group_id: str, stem: str, answer_text: str = "A supported answer") -> dict:
     return {
-        "slot_id": slot_id, "question_type": "single_choice", "question": stem,
-        "options": ["A supported answer", "An unrelated distractor", "Another distractor", "A third distractor"],
-        "correct_answers": [0], "explanation": "The evidence directly supports the first option.",
+        "group_id": group_id, "question_type": "single_choice", "question": stem,
+        "options": [answer_text, "An unrelated distractor", "Another distractor", "A third distractor"],
+        "correct_answers": [0], "explanation": f"The evidence directly states that {answer_text.lower()}.",
     }
 
 
@@ -184,14 +184,29 @@ class AdaptiveAssessmentTests(unittest.TestCase):
             "id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 2,
             "topics": [{"topic_id": "topic_a", "name": "A"}],
         }
-        base_sentence = (
-            "TCP acknowledgements support reliable delivery. Flow control protects receivers. "
-            "Sequence numbers preserve ordering."
-        )
-        document_chunks = [_v3_document_chunk(f"chunk_{index}", base_sentence) for index in range(1, 7)]
+        # Twelve genuinely distinct facts (low mutual content overlap) so the pool doesn't trip
+        # the content-duplicate check on candidates that would otherwise only differ by number.
+        facts = [
+            ("Why does TCP use acknowledgements for reliable delivery?", "TCP acknowledgements support reliable delivery"),
+            ("How does flow control protect a receiver?", "Flow control protects receivers"),
+            ("How do sequence numbers preserve ordering?", "Sequence numbers preserve ordering"),
+            ("What detects corrupted segments in TCP?", "Checksums detect corrupted segments"),
+            ("How does TCP recover from packet loss?", "TCP retransmits lost packets automatically"),
+            ("What prevents overwhelming a slow receiver?", "Flow control prevents overwhelming a slow receiver"),
+            ("How does TCP avoid network congestion?", "Congestion control avoids network congestion"),
+            ("What confirms successful segment delivery?", "Acknowledgements confirm successful segment delivery"),
+            ("How does TCP reorder out-of-order segments?", "Sequence numbers let TCP reorder out-of-order segments"),
+            ("What triggers a retransmission timeout?", "An unacknowledged segment triggers a retransmission timeout"),
+            ("How does TCP establish a connection?", "TCP establishes a connection with a three-way handshake"),
+            ("What ensures reliable byte-stream delivery?", "TCP sequencing ensures reliable byte-stream delivery"),
+        ]
+        document_chunks = [
+            _v3_document_chunk(f"chunk_{index}", answer_text)
+            for index, (_stem, answer_text) in enumerate(facts, start=1)
+        ]
         candidates = [
-            _v3_raw_question(f"S{index + 1}", f"Why does mechanism {index + 1} support reliable delivery of a message?")
-            for index in range(12)
+            _v3_raw_question(f"G{(index % 2) + 1}", stem, answer_text)
+            for index, (stem, answer_text) in enumerate(facts)
         ]
         _FakeV3BatchModel.payloads = [{"questions": candidates}]
 

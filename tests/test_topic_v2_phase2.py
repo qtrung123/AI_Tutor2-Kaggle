@@ -53,26 +53,67 @@ class _FakeV3Model:
         return SimpleNamespace(content=json.dumps(self.__class__.payloads.pop(0)), response_metadata={})
 
 
+# Every chunk carries the full fact vocabulary so a candidate grounds against any of the 5
+# context groups _v3_chunks(15) produces (QUIZ_V3_MAX_CHUNKS_PER_GROUP=3), regardless of which
+# distinct fact (see _V3_FACT_VARIANTS) it happens to test.
+_V3_SHARED_FACTS = (
+    "Scheduling selects work based on priorities. It balances CPU load across processes. "
+    "It reduces waiting time for short jobs. It considers process priority levels. "
+    "It supports preemption of running tasks. It maintains a ready queue of processes. "
+    "It reorders tasks based on urgency. It accounts for I/O bound and CPU bound jobs. "
+    "It adapts to changing system load. It aims to maximize throughput. "
+    "It aims to minimize response time. It prevents starvation of low priority tasks. "
+    "It supports multiple scheduling classes. It tracks process burst time. "
+    "It can use round robin time slices. It logs scheduling decisions for analysis."
+)
+
+# Sixteen genuinely distinct facts (low mutual content overlap) so a pool of up to 15/16
+# candidates can be built without tripping the content-duplicate check on candidates that are
+# only "different" by an incrementing case number.
+_V3_FACT_VARIANTS = [
+    ("How does scheduling select work based on priorities?", "Scheduling selects work based on priorities"),
+    ("How does scheduling balance CPU load across processes?", "It balances CPU load across processes"),
+    ("How does scheduling reduce waiting time for short jobs?", "It reduces waiting time for short jobs"),
+    ("How does scheduling consider process priority levels?", "It considers process priority levels"),
+    ("How does scheduling support preemption of running tasks?", "It supports preemption of running tasks"),
+    ("How does scheduling maintain a ready queue of processes?", "It maintains a ready queue of processes"),
+    ("How does scheduling reorder tasks based on urgency?", "It reorders tasks based on urgency"),
+    ("How does scheduling account for I/O and CPU bound jobs?", "It accounts for I/O bound and CPU bound jobs"),
+    ("How does scheduling adapt to changing system load?", "It adapts to changing system load"),
+    ("How does scheduling aim to maximize throughput?", "It aims to maximize throughput"),
+    ("How does scheduling aim to minimize response time?", "It aims to minimize response time"),
+    ("How does scheduling prevent starvation of low priority tasks?", "It prevents starvation of low priority tasks"),
+    ("How does scheduling support multiple scheduling classes?", "It supports multiple scheduling classes"),
+    ("How does scheduling track process burst time?", "It tracks process burst time"),
+    ("How does scheduling use round robin time slices?", "It can use round robin time slices"),
+    ("How does scheduling log decisions for analysis?", "It logs scheduling decisions for analysis"),
+]
+
+
 def _v3_chunks(count: int) -> list[dict]:
     return [
-        chunk(f"chunk_{index}", "", "Scheduling selects work. Priorities affect selection.", "document")
+        chunk(f"chunk_{index}", "", f"Chunk{index}: {_V3_SHARED_FACTS}", "document")
         for index in range(1, count + 1)
     ]
 
 
 def _v3_candidates(count: int) -> list[dict]:
-    return [{
-        "slot_id": f"S{index + 1}", "question_type": "single_choice",
-        "question": f"How does scheduling select work in case {index + 1}?",
-        "options": [
-            "Scheduling selects work based on priorities",
-            "An unrelated distractor about something else",
-            "Another distractor about something else",
-            "A third distractor about something else",
-        ],
-        "correct_answers": [0],
-        "explanation": "Scheduling selects work based on priorities, as the evidence states.",
-    } for index in range(count)]
+    questions = []
+    for index in range(count):
+        stem, correct_answer = _V3_FACT_VARIANTS[index % len(_V3_FACT_VARIANTS)]
+        questions.append({
+            "group_id": f"G{(index % 5) + 1}", "question_type": "single_choice",
+            "question": stem,
+            "options": [
+                correct_answer,
+                "An unrelated distractor about something else",
+                "Another distractor about something else",
+                "A third distractor about something else",
+            ],
+            "correct_answers": [0],
+            "explanation": f"{correct_answer}, as the evidence states.",
+        })
+    return questions
 
 
 def question(quiz_id, plan_id, concept_id="aconcept_one"):

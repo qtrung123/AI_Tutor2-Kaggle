@@ -498,21 +498,30 @@ class GenerateQuizDocumentContractTests(unittest.TestCase):
             "id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 2,
             "topics": [{"topic_id": "topic_a", "name": "A"}],
         }
+        # Twelve genuinely distinct facts (low mutual content overlap) so the pool doesn't trip
+        # the content-duplicate check on candidates that would otherwise only differ by number.
+        facts = [
+            "supports reliable delivery", "protects against packet loss", "prevents duplicate delivery",
+            "preserves delivery order", "detects corrupted data", "confirms successful delivery",
+            "retransmits lost data automatically", "avoids overwhelming the receiver",
+            "limits the transmission rate", "tracks acknowledgements from the receiver",
+            "recovers from timeouts by retrying", "ensures data integrity",
+        ]
         document_chunks = [{
-            "content": f"Item{i} fact one is documented. Item{i} fact two is documented.",
+            "content": f"Item{i}: " + ". ".join(f"It {fact}" for fact in facts) + ".",
             "metadata": {"chunk_id": f"chunk_{i}", "document_id": "doc.pdf"},
         } for i in range(1, 16)]
 
         def respond(_prompt):
             return [{
-                "slot_id": f"S{index + 1}", "question_type": "single_choice",
-                "question": f"Which fact does the evidence document in case {index + 1}?",
+                "group_id": f"G{(index % 5) + 1}", "question_type": "single_choice",
+                "question": f"Which fact does the evidence document: {facts[index % len(facts)]}?",
                 "options": [
-                    "Item fact one is documented", "Unrelated claim A",
+                    f"It {facts[index % len(facts)]}", "Unrelated claim A",
                     "Unrelated claim B", "Unrelated claim C",
                 ],
                 "correct_answers": [0],
-                "explanation": "Item fact one is documented, as the evidence states.",
+                "explanation": f"It {facts[index % len(facts)]}, as the evidence states.",
             } for index in range(12)]
 
         SequencedOllama.respond = respond

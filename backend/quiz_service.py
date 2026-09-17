@@ -1619,59 +1619,334 @@ def _select_v3_context_groups(chunks: list[dict]) -> list[dict]:
 def _classify_v3_rejection(reason: str) -> str:
     """Categorize a candidate rejection reason for Quiz Generation V3 benchmark logging.
 
-    This only inspects the existing _validate_v2_question error message text -- validation
-    itself is unchanged, so this classification is diagnostic-only and never affects which
-    candidates are accepted or rejected.
+    This only inspects the validator's error message text -- validation itself decides
+    acceptance independently; this classification is diagnostic-only.
     """
     lowered = str(reason).lower()
-    if "duplicate" in lowered:
+    if "duplicate" in lowered or "same fact or concept" in lowered:
         return "duplicate"
-    if "does not appear to test the assigned slot" in lowered:
+    if "does not appear to test the assigned group" in lowered:
         return "grounding"
     return "structural"
 
 
-def _v3_slot_from_group(
-    group: dict, slot_id: str, scope_topic_id: str, scope_topic_name: str, assessment_capacity: int,
-) -> dict:
-    """Stamp one backend-owned V3 slot from a context group.
+QUIZ_V3_CONTENT_DUPLICATE_JACCARD = 0.5
 
-    The model is never trusted with provenance: source_chunk_ids, document identity, and context
-    group identity all come from the group the backend already built, never from model output.
+
+def _v3_content_signature(stem: str, correct_answer_text: str) -> frozenset[str]:
+    """Lightweight, deterministic content signature for one candidate (no LLM call).
+
+    Reuses the same stopword-filtered, suffix-normalized content tokenizer already used for
+    grounding checks (_grounding_tokens) -- not a new NLP mechanism, just applied to a
+    stem+correct-answer pair so near-identical topical content can be compared across
+    candidates that are phrased differently (see _is_v3_content_duplicate).
     """
-    return {
-        **group,
-        "slot_id": slot_id,
-        "concept_id": group["group_id"],
-        "name": group["name"],
+    return frozenset(_grounding_tokens(f"{stem} {correct_answer_text}"))
+
+
+def _is_v3_content_duplicate(
+    signature: frozenset[str], accepted_signatures: list[frozenset[str]],
+    threshold: float = QUIZ_V3_CONTENT_DUPLICATE_JACCARD,
+) -> bool:
+    """True when a candidate's content overlaps an already-accepted candidate too heavily to be
+    a genuinely distinct fact -- e.g. two questions that both test "long-term scheduling" or the
+    same priority/behavior concept, even when their exact wording differs enough to pass the
+    stem-similarity check. Deterministic token-set Jaccard overlap; no LLM call.
+    """
+    if not signature:
+        return False
+    for other in accepted_signatures:
+        if not other:
+            continue
+        union = signature | other
+        if union and len(signature & other) / len(union) >= threshold:
+            return True
+    return False
+
+
+def _has_ambiguous_option_containment(option_bodies: list[str]) -> bool:
+    """Reject options where one option's meaningful wording is entirely contained in another's
+    (e.g. "clock" vs "clock interrupt") -- the two are too close to be a fair, unambiguous
+    choice, even though they are not near-duplicate strings. Deterministic token-set comparison
+    reusing _grounding_tokens; no LLM call.
+    """
+    token_sets = [_grounding_tokens(option) for option in option_bodies]
+    for left, left_tokens in enumerate(token_sets):
+        if not left_tokens:
+            continue
+        for right, right_tokens in enumerate(token_sets):
+            if left == right or not right_tokens:
+                continue
+            if left_tokens < right_tokens:  # strict subset
+                return True
+    return False
+
+
+def _build_v3_prompt(
+    document_id: str,
+    topic: dict,
+    difficulty: str,
+    groups: list[dict],
+    count: int,
+    accepted_stems: list[str],
+    repair: bool,
+    required_question_type: str | None = None,
+) -> str:
+    """Quiz Generation V3 prompt: no Question Blueprint, no per-slot allocation.
+
+    The model is asked to write `count` questions total from the supplied context-group
+    evidence and choose freely which group(s) to draw from -- it may write more than one
+    question from the same group, and is never told to map one question to one evidence line
+    (V2's "use each evidence slot exactly once" instruction, and the matching hard rejection for
+    reusing a slot, are both gone). Every question must still cite the group_id its evidence
+    came from so the backend can attach its own authoritative source_chunk_ids/concept identity;
+    the model is never trusted with source_chunk_ids or concept identity itself.
+    """
+    cognitive_intent = {
+        "easy": "recall",
+        "medium": "relationship_application",
+        "difficult": "multi_fact_reasoning",
+    }[difficulty]
+    evidence = "\n".join(
+        f"{group['group_id']}|{group['evidence_excerpt']}|cognitive_intent={cognitive_intent}"
+        for group in groups
+    )
+    avoid = "\n".join(f"- {stem}" for stem in accepted_stems) if repair else ""
+    repair_lines = []
+    if repair:
+        stem_shape = (
+            "a complete declarative statement (never a question, never ending in '?')"
+            if required_question_type == "true_false"
+            else "a complete standalone question stem ending in a question mark"
+        )
+        repair_lines.append(
+            f"Write {count} MORE distinct questions from the evidence below; for every question "
+            f"write {stem_shape}; never return a fragment, placeholder, or an already-used question."
+        )
+    if avoid:
+        repair_lines.append(
+            "ACCEPTED STEMS / FORBIDDEN QUESTIONS -- do not repeat, closely paraphrase, or test the "
+            f"same fact or concept as any of these:\n{avoid}"
+        )
+    repair_line = "\n".join(repair_lines) + ("\n" if repair_lines else "")
+    difficulty_contracts = {
+        "easy": (
+            "EASY QUALITY: Ask direct recall/basic comprehension about one explicit evidence fact. "
+            "Exactly one option must fully answer the stem; every distractor must conflict with or be unsupported by the cited evidence. "
+            "Do not rely on outside-world plausibility. Do not use NOT, EXCEPT, false, incorrect, least, or double negatives. "
+            "If several evidence facts are true, do not make them competing options; the correct option must contain the complete requested set. "
+            "The correct option must match the stem in scope and grammar.\n"
+        ),
+        "medium": (
+            "MEDIUM QUALITY: Require one reasoning step using comparison, cause/effect, interpretation, or application "
+            "within the cited evidence; do not ask direct recall alone.\n"
+        ),
+        "difficult": (
+            "DIFFICULT QUALITY: Require multi-fact reasoning that combines at least two supported facts already inside "
+            "the SAME evidence group to diagnose, predict, justify, or select a consequence. "
+            "Do not combine facts from separate evidence groups and do not ask direct recall alone.\n"
+        ),
+    }
+    type_instruction = (
+        f'Every question must use "question_type":"{required_question_type}" only; do not use any other type. '
+        if required_question_type else
+        "Choose each question_type from what its evidence can assess naturally; include single_choice, true_false, "
+        "and multi_select at least once each across the whole set, with no fixed ratio. "
+    )
+    return (
+        f"Write exactly {count} {difficulty} quiz questions for {topic.get('name') or topic.get('topic_id')}, "
+        "drawn from the evidence groups below.\n"
+        'JSON only: {"questions":[{"group_id":"G1","question_type":"single_choice|true_false|multi_select","question":"...","options":["..."],"correct_answers":[0],"explanation":"..."}]}\n'
+        "Base every question only on the evidence of the group_id you cite. You may write more than one "
+        "question from the same group if it tests a different fact; never write two questions that test "
+        "the same fact or concept, even if reworded. single_choice uses four options and one answer; "
+        "true_false uses exactly True/False and one answer; multi_select uses four options, two or more answers, and at least one incorrect option. "
+        f"{type_instruction}"
+        "Question <=18 words, each option <=10 words, explanation <=16 words. No markdown or extra fields.\n"
+        f"{difficulty_contracts[difficulty]}{repair_line}EVIDENCE:\n{evidence}"
+    )
+
+
+def _validate_v3_candidate(
+    raw: dict,
+    groups_by_id: dict[str, dict],
+    accepted_stems: list[str],
+    accepted_signatures: list[frozenset[str]],
+    difficulty: str,
+    question_id: int,
+    topic: dict,
+    assessment_capacity: int,
+    required_question_type: str | None = None,
+) -> tuple[dict, list[str], frozenset[str]]:
+    """Quiz Generation V3 candidate validation: no Question Blueprint, no slot allocation, and no
+    "already used this slot" rejection -- a context group may contribute any number of accepted
+    candidates. Provenance (source_chunk_ids, concept identity) is still assigned entirely from
+    the backend's own group record, never from the model's raw JSON; only the group_id itself
+    (which evidence the question is based on) comes from the model.
+
+    Structural/grounding/near-duplicate checks mirror _validate_v2_question. This adds:
+    required_question_type enforcement (the system's configured question-type contract -- e.g.
+    single_choice-only for a document-scope quiz -- is never silently overridden by the model),
+    a content/topic-overlap duplicate check beyond exact-stem matching
+    (_is_v3_content_duplicate), and an ambiguous-option containment check
+    (_has_ambiguous_option_containment, e.g. "clock" vs "clock interrupt").
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("Question must be a JSON object.")
+    stem = _clean_inline_text(raw.get("question", ""))
+    _reject_unsafe_final_text(stem, field="Question")
+    if len(stem.split()) < 4 or any(re.search(pattern, stem.lower()) for pattern in GENERIC_QUESTION_PATTERNS):
+        raise ValueError("Question stem is empty, generic, or unusable.")
+    candidate_key = _normalize_question_key(stem)
+    if any(candidate_key == _normalize_question_key(existing) for existing in accepted_stems):
+        raise ValueError("Question duplicates an accepted question.")
+    near_duplicate_stem = any(
+        difflib.SequenceMatcher(None, candidate_key, _normalize_question_key(existing)).ratio() >= 0.94
+        for existing in accepted_stems
+    )
+
+    question_type = str(raw.get("question_type") or "single_choice").strip().lower()
+    if question_type not in {"single_choice", "true_false", "multi_select"}:
+        raise ValueError("Question has an unsupported question_type.")
+    if required_question_type and question_type != required_question_type:
+        raise ValueError(
+            f"Question uses question_type={question_type!r} but this Quiz is configured for "
+            f"{required_question_type!r} only."
+        )
+    if question_type == "true_false":
+        stripped_stem = stem.strip()
+        if stripped_stem.endswith("?") or _TRUE_FALSE_INTERROGATIVE_START.match(stripped_stem):
+            raise ValueError(
+                "true_false question must be a declarative statement, not an interrogative one."
+            )
+    raw_options = raw.get("options")
+    required_option_count = 2 if question_type == "true_false" else 4
+    if not isinstance(raw_options, list) or len(raw_options) != required_option_count:
+        raise ValueError(f"{question_type} question must contain exactly {required_option_count} options.")
+    option_bodies = [strip_leading_option_label(_clean_inline_text(option)) for option in raw_options]
+    true_false_label_normalized = False
+    if question_type == "true_false":
+        normalized_labels = [_normalize_true_false_label(option) for option in option_bodies]
+        true_false_label_normalized = normalized_labels != option_bodies
+        option_bodies = normalized_labels
+    for option in option_bodies:
+        _reject_unsafe_final_text(option, field="Option")
+    if len({option.lower() for option in option_bodies}) != len(option_bodies):
+        raise ValueError("Question options must be distinct.")
+    normalized_options = [_normalize_question_key(option) for option in option_bodies]
+    near_duplicate_options = any(
+        difflib.SequenceMatcher(None, normalized_options[left], normalized_options[right]).ratio() >= 0.94
+        for left in range(len(option_bodies)) for right in range(left + 1, len(option_bodies))
+    )
+    if question_type != "true_false" and _has_ambiguous_option_containment(option_bodies):
+        raise ValueError("Options are ambiguous: one option's wording is entirely contained within another's.")
+
+    raw_answers = raw.get("correct_answers")
+    if raw_answers is None:
+        raw_answers = [raw.get("correct_answer")]
+    if not isinstance(raw_answers, list):
+        raise ValueError("correct_answers must be a list.")
+    answer_indices = []
+    for answer in raw_answers:
+        if isinstance(answer, bool) or not isinstance(answer, int) or answer not in range(len(option_bodies)):
+            raise ValueError("correct_answers contains an invalid option index.")
+        if answer not in answer_indices:
+            answer_indices.append(answer)
+    # Sorted so correct_answers is always in ascending option order and correct_answer (the
+    # single-value compatibility field) is always exactly correct_answers[0] -- never a stray
+    # value out of sync with the authoritative list (see the multi_select consistency fix).
+    answer_indices.sort()
+    if question_type in {"single_choice", "true_false"} and len(answer_indices) != 1:
+        raise ValueError(f"{question_type} requires exactly one correct answer.")
+    if question_type == "multi_select" and (len(answer_indices) < 2 or len(answer_indices) >= len(option_bodies)):
+        raise ValueError("multi_select requires at least two correct and one incorrect option.")
+    if question_type == "true_false" and {option.lower() for option in option_bodies} != {"true", "false"}:
+        raise ValueError("true_false options must be True and False.")
+    answer_index = answer_indices[0]
+    group_id = str(raw.get("group_id") or raw.get("slot_id") or "").strip()
+    if group_id not in groups_by_id:
+        raise ValueError("Question has an unknown group_id.")
+    group = groups_by_id[group_id]
+    concept_id = group["group_id"]
+    source_ids = list(group["source_chunk_ids"])
+    explanation = _clean_inline_text(raw.get("explanation", ""))
+    _reject_unsafe_final_text(explanation, field="Explanation")
+
+    _semantic_check_started = time.perf_counter()
+    concept_overlap, evidence_overlap = _concept_grounding_overlap(
+        stem, option_bodies, answer_index, explanation, group,
+    )
+    quiz_diagnostics.get_current().add_stage_ms(
+        "semantic_validation_ms", (time.perf_counter() - _semantic_check_started) * 1000
+    )
+    if concept_overlap == 0.0 and evidence_overlap == 0.0:
+        raise ValueError("Question does not appear to test the assigned group's evidence.")
+
+    content_signature = _v3_content_signature(stem, option_bodies[answer_index])
+    if _is_v3_content_duplicate(content_signature, accepted_signatures):
+        raise ValueError("Question tests essentially the same fact or concept as an accepted question.")
+
+    warnings = []
+    best_grounding_overlap = max(
+        (value for value in (concept_overlap, evidence_overlap) if value is not None),
+        default=None,
+    )
+    if best_grounding_overlap is not None and best_grounding_overlap < 0.12:
+        warnings.append("uncertain_concept_grounding")
+    if near_duplicate_stem:
+        warnings.append("near_duplicate_question")
+    if near_duplicate_options:
+        warnings.append("near_duplicate_options")
+    if any(not option for option in option_bodies):
+        warnings.append("empty_option")
+    if true_false_label_normalized:
+        warnings.append("true_false_label_normalized")
+    if difficulty == "easy":
+        warnings.extend(_validate_easy_v2_quality(
+            stem, option_bodies, answer_index, explanation, str(group.get("evidence_excerpt") or ""),
+            question_type,
+        ))
+    if len(explanation.split()) < 4:
+        warnings.append("explanation_quality")
+    if len(stem.split()) < 6:
+        warnings.append("meaningful_concept_quality")
+    try:
+        _validate_difficulty_quality(stem, difficulty)
+    except ValueError:
+        warnings.append("difficulty_mismatch")
+    for option in option_bodies:
+        lowered = option.lower()
+        if (
+            any(re.search(pattern, lowered) for pattern in GENERIC_OPTION_PATTERNS)
+            or lowered in {"all of the above", "none of the above", "cannot be determined"}
+            or _looks_like_raw_chunk(option)
+        ):
+            warnings.append("mediocre_distractors")
+            break
+
+    authoritative_topic_id = str(topic["topic_id"])
+    authoritative_topic_name = str(topic.get("name") or authoritative_topic_id)
+    normalized = {
+        "id": question_id,
+        "question": stem,
+        "options": [canonicalize_option(option, "ABCD"[index]) for index, option in enumerate(option_bodies)],
+        "correct_answer": "ABCD"[answer_index],
+        "question_type": question_type,
+        "correct_answers": ["ABCD"[index] for index in answer_indices],
+        "topic_id": authoritative_topic_id,
+        "topic_name": authoritative_topic_name,
+        "concept_id": concept_id,
+        "concept_name": group["name"],
         "source_subtopic_ids": [],
         "concept_origin": "context_group",
         "concept_plan_id": QUIZ_V3_ENGINE_VERSION,
-        "topic_id": scope_topic_id,
-        "topic_name": scope_topic_name,
         "assessment_capacity": assessment_capacity,
+        "difficulty": difficulty,
+        "explanation": explanation,
+        "source_chunk_ids": source_ids,
+        "validation_outcome": "accepted_quality_warning" if warnings else "accepted",
     }
-
-
-def _prioritize_v3_fill_slots(remaining_slots: list[dict], accepted: list[dict], limit: int) -> list[dict]:
-    """Choose which missing slots a bounded repair/fill round should target.
-
-    Prefers slots whose context group currently has the fewest accepted candidates, so a
-    limited fill budget goes toward restoring document coverage instead of over-asking a
-    group that is already well represented in the pool. Ties keep the slots' original
-    (document) order. This only changes which of the already-missing slots get exposed this
-    round -- it never asks a group for more than the round's own budget, and never changes
-    how many candidates are requested overall.
-    """
-    accepted_counts_by_group: dict[str, int] = {}
-    for question in accepted:
-        group_id = question["concept_id"]
-        accepted_counts_by_group[group_id] = accepted_counts_by_group.get(group_id, 0) + 1
-    ordered = sorted(
-        remaining_slots,
-        key=lambda slot: accepted_counts_by_group.get(slot["concept_id"], 0),
-    )
-    return ordered[:limit]
+    return normalized, sorted(set(warnings)), content_signature
 
 
 def _generate_topic_quiz_v2(
@@ -2075,19 +2350,32 @@ def _generate_quiz_v3(
     quiz_title: str | None = None,
     retrieval_ms: int = 0,
 ) -> dict:
-    """Quiz Generation V3: the live generation path with the Planner bypassed entirely.
+    """Quiz Generation V3: the live generation path with the Planner AND the Question Blueprint
+    / slot allocation both bypassed entirely.
 
     Document/topic coverage comes from deterministic context grouping
     (_select_v3_context_groups) over the same chunk retrieval V2 already used
     (get_schema_topic_evidence / get_document_chunks, both unchanged) -- no concept extraction,
-    no Question Blueprint, and no extra LLM call for planning. One shared engine serves both
-    "topic" and "document" assessment_scope: the only difference is which chunks are passed in.
+    no extra LLM call for planning. One shared engine serves both "topic" and "document"
+    assessment_scope: the only difference is which chunks are passed in.
 
-    Everything downstream of coverage keeps the V2 candidate-pool architecture unchanged: an
-    initial call over-generates a buffered pool (_v2_candidate_pool_target), every candidate is
-    validated with the same deterministic structural/grounding/duplicate checks
-    (_validate_v2_question), bounded targeted repair/fill only chase the gap to question_count
-    (never the buffer), and the best N are selected by quality + coverage
+    Unlike V2 (and V3's own first iteration), the model is never told to map exactly one
+    question to one pre-allocated slot: it is simply asked for `count` questions drawn from
+    whichever context group(s) it chooses, tagging each with the group_id its evidence came
+    from (_build_v3_prompt/_validate_v3_candidate). A context group may contribute any number of
+    accepted candidates -- there is no "this slot was already used" rejection. Provenance
+    (source_chunk_ids, concept identity) is still assigned entirely by the backend from its own
+    group record, never trusted from the model's JSON.
+
+    question_type is controlled by the system, not left to the model: a document-scope quiz is
+    pinned to single_choice only (the same contract _run_document_single_choice_quiz enforced
+    before Planner removal); a topic-scope quiz keeps the existing mixed-type design.
+
+    Everything else keeps the V2 candidate-pool architecture: an initial call over-generates a
+    buffered pool (_v2_candidate_pool_target), every candidate is validated (structural,
+    grounding, exact/near-duplicate, and a lightweight content/topic-overlap duplicate check),
+    bounded targeted repair/fill only chase the gap to question_count (never the buffer, plus a
+    small configurable buffer of its own), and the best N are selected by quality + coverage
     (_select_best_v2_candidates) rather than the first N. A pool below question_count is
     persisted as a partial quiz; only an empty pool fails the request closed.
 
@@ -2101,6 +2389,10 @@ def _generate_quiz_v3(
     llm_calls = 0
     generation_run_id = str(uuid4())
     scope_topic = {"topic_id": scope_topic_id, "name": scope_topic_name}
+    # The system, not the model, controls question type: document-scope quizzes are single_choice
+    # only (the pre-Planner-removal contract _run_document_single_choice_quiz enforced); topic
+    # scope keeps its existing mixed-type design. This is never silently overridden by the model.
+    required_question_type = "single_choice" if scope == "document" else None
 
     stage_started = time.perf_counter()
     diag.record_retrieved_chunks(chunks)
@@ -2114,19 +2406,11 @@ def _generate_quiz_v3(
             target_questions=question_count,
         )
 
-    assessment_capacity = len(context_groups)
+    groups_by_id = {group["group_id"]: group for group in context_groups}
     candidate_pool_target = _v2_candidate_pool_target(question_count)
-    planned_slots = [
-        _v3_slot_from_group(
-            context_groups[index % len(context_groups)], f"S{index + 1}",
-            scope_topic_id, scope_topic_name, assessment_capacity,
-        )
-        for index in range(candidate_pool_target)
-    ]
-    groups_by_id = {slot["slot_id"]: slot for slot in planned_slots}
-    remaining_slot_ids = set(groups_by_id)
-    accepted = []
-    accepted_stems = []
+    accepted: list[dict] = []
+    accepted_stems: list[str] = []
+    accepted_signatures: list[frozenset[str]] = []
     validation_results = {
         "accepted": 0, "accepted_with_warnings": 0, "rejected": 0,
         "hard_rejections": 0, "quality_warnings": 0, "reasons": [],
@@ -2152,13 +2436,16 @@ def _generate_quiz_v3(
     candidates_returned_total = 0
 
     # One initial batch, up to two targeted repairs, then up to two bounded fills -- identical
-    # bounds to V2 (see _generate_topic_quiz_v2).
+    # bounds to V2 (see _generate_topic_quiz_v2). Every round offers the model the SAME full set
+    # of context groups -- there is no per-group slot to expose or exhaust; only the requested
+    # count and the "avoid these" list change between rounds. Diversity/coverage across groups is
+    # enforced by validation (content-overlap duplicate rejection) and by selection
+    # (_select_best_v2_candidates), not by restricting which evidence a round may see.
     generation_phases = ["initial", "repair", "repair", "fill", "fill"]
     repair_attempt_count = 0
     fill_attempt_count = 0
     final_fill_llm_calls = 0
-    missing_slots_before_each_retry = []
-    rejection_reasons_by_slot = {slot_id: [] for slot_id in groups_by_id}
+    retry_log = []
     for attempt_index, phase in enumerate(generation_phases):
         call_started = time.perf_counter()
         # The initial call chases the buffered pool target (over-generate for selection).
@@ -2167,56 +2454,34 @@ def _generate_quiz_v3(
         missing = phase_target - len(accepted)
         if missing <= 0:
             break
-        remaining_slots_in_order = [slot for slot in planned_slots if slot["slot_id"] in remaining_slot_ids]
-        if phase == "initial":
-            # The initial call already over-generates the buffered pool in one combined prompt
-            # (every context group's evidence together) -- there is no per-group call to skip.
-            available_groups = remaining_slots_in_order[:missing]
-        else:
-            # Bounded repair/fill: ask for the actual gap plus a small buffer (not the original
-            # requested_count) so one round is more likely to close the gap outright, and bias
-            # which specific missing slots get exposed toward under-represented context groups
-            # instead of a fixed per-group quota.
-            expose_count = min(missing + QUIZ_V3_FILL_BUFFER, len(remaining_slots_in_order))
-            available_groups = _prioritize_v3_fill_slots(remaining_slots_in_order, accepted, expose_count)
-        requested_count_for_call = len(available_groups)
+        # Bounded repair/fill ask for the actual gap plus a small buffer (not the original
+        # requested_count, and not the pool buffer) so one round is more likely to close the gap
+        # outright.
+        requested_count_for_call = missing if phase == "initial" else missing + QUIZ_V3_FILL_BUFFER
         if phase != "initial":
             retry_attempt = repair_attempt_count + 1 if phase == "repair" else fill_attempt_count + 1
-            retry_state = {
-                "phase": phase, "attempt": retry_attempt,
-                "missing_slots": [slot["slot_id"] for slot in available_groups],
-                "rejection_reasons_by_slot": {
-                    slot["slot_id"]: list(rejection_reasons_by_slot[slot["slot_id"]])
-                    for slot in available_groups
-                },
-            }
-            missing_slots_before_each_retry.append(retry_state)
+            retry_state = {"phase": phase, "attempt": retry_attempt, "missing": missing}
+            retry_log.append(retry_state)
             print(f"[quiz-v3-retry] {json.dumps(retry_state)}")
-            for slot in available_groups:
-                slot_reasons = rejection_reasons_by_slot[slot["slot_id"]]
-                diag.record_retry(
-                    concept_id=slot["slot_id"], original_attempt=1, retry_attempt=retry_attempt,
-                    reason=slot_reasons[-1] if slot_reasons else f"missing after {phase} window",
-                    stage="generation_call" if slot_reasons and slot_reasons[-1].startswith("response:") else "validation",
-                )
+            diag.record_retry(
+                concept_id="pool", original_attempt=1, retry_attempt=retry_attempt,
+                reason=f"pool has {len(accepted)}/{question_count} valid candidates after {phase} window",
+                stage="validation",
+            )
         if phase == "repair":
             repair_attempt_count += 1
         elif phase == "fill":
             fill_attempt_count += 1
-        prompt = _build_v2_prompt(
-            document["id"], scope_topic, difficulty, available_groups, requested_count_for_call, accepted_stems,
-            phase != "initial", rejection_reasons_by_slot,
+        prompt = _build_v3_prompt(
+            document["id"], scope_topic, difficulty, context_groups, requested_count_for_call,
+            accepted_stems, phase != "initial", required_question_type,
         )
-        rejection_counts_before_call = {
-            slot["slot_id"]: len(rejection_reasons_by_slot[slot["slot_id"]])
-            for slot in available_groups
-        }
         diag.record_context(
             stage="repair" if phase != "initial" else "generator",
-            num_chunks=len(available_groups),
-            total_chars=sum(len(str(group.get("evidence_excerpt") or "")) for group in available_groups),
+            num_chunks=len(context_groups),
+            total_chars=sum(len(str(group.get("evidence_excerpt") or "")) for group in context_groups),
             prompt=prompt,
-            concept_id=",".join(sorted(group["slot_id"] for group in available_groups))[:120],
+            concept_id=",".join(sorted(groups_by_id))[:120],
         )
         stage_started = time.perf_counter()
         llm_calls += 1
@@ -2234,12 +2499,12 @@ def _generate_quiz_v3(
                             "question": {"type": "string"},
                             "question_type": {"type": "string", "enum": ["single_choice", "true_false", "multi_select"]},
                             "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 4},
-                            "slot_id": {"type": "string"},
+                            "group_id": {"type": "string"},
                             "correct_answer": {"type": "integer", "minimum": 0, "maximum": 3},
                             "correct_answers": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 3}},
                             "explanation": {"type": "string"},
                         },
-                        "required": ["slot_id", "question_type", "question", "options", "correct_answers", "explanation"],
+                        "required": ["group_id", "question_type", "question", "options", "correct_answers", "explanation"],
                     },
                 }
             },
@@ -2257,7 +2522,7 @@ def _generate_quiz_v3(
         )
         print(
             f"[quiz-v3-llm] attempt={attempt_index + 1}, phase={phase}, model={model_id}, "
-            f"requested={requested_count_for_call}, context_groups_used={len({group['concept_id'] for group in available_groups})}"
+            f"requested={requested_count_for_call}, context_group_count={len(context_groups)}"
         )
         invocation_started = time.perf_counter()
         call_invocation_ms = 0
@@ -2285,7 +2550,7 @@ def _generate_quiz_v3(
             diag.record_llm_call(
                 stage="generator" if phase == "initial" else "repair", model=model_id,
                 elapsed_ms=call_invocation_ms, success=True,
-                concept_id=",".join(sorted(group["slot_id"] for group in available_groups))[:120],
+                concept_id=",".join(sorted(groups_by_id))[:120],
                 attempt=attempt_index + 1,
                 input_tokens=int(metadata["prompt_eval_count"]) if "prompt_eval_count" in metadata else None,
                 output_tokens=int(metadata["eval_count"]) if "eval_count" in metadata else None,
@@ -2301,12 +2566,10 @@ def _generate_quiz_v3(
             validation_results["response_failures"] += requested_count_for_call
             reason = f"response: {error}"
             validation_results["reasons"].append(reason)
-            for slot in available_groups:
-                rejection_reasons_by_slot[slot["slot_id"]].append(reason)
             diag.record_llm_call(
                 stage="generator" if phase == "initial" else "repair", model=model_id,
                 elapsed_ms=call_invocation_ms, success=False,
-                concept_id=",".join(sorted(group["slot_id"] for group in available_groups))[:120],
+                concept_id=",".join(sorted(groups_by_id))[:120],
                 attempt=attempt_index + 1, exception_type=type(error).__name__, reason=str(error)[:200],
             )
         elapsed = round((time.perf_counter() - stage_started) * 1000)
@@ -2320,17 +2583,17 @@ def _generate_quiz_v3(
             fill_generation_ms += elapsed
 
         validation_started = time.perf_counter()
-        for candidate_index, raw in enumerate(candidates):
+        for raw in candidates:
             if len(accepted) >= phase_target:
                 break
             try:
-                normalized, warnings = _validate_v2_question(
-                    raw, groups_by_id, remaining_slot_ids, accepted_stems, difficulty,
-                    len(accepted) + 1, scope_topic, assessment_capacity,
+                normalized, warnings, signature = _validate_v3_candidate(
+                    raw, groups_by_id, accepted_stems, accepted_signatures, difficulty,
+                    len(accepted) + 1, scope_topic, len(context_groups), required_question_type,
                 )
                 accepted.append(normalized)
                 accepted_stems.append(normalized["question"])
-                remaining_slot_ids.remove(normalized["slot_id"])
+                accepted_signatures.append(signature)
                 key = "accepted_with_warnings" if warnings else "accepted"
                 validation_results[key] += 1
                 validation_results["quality_warnings"] += len(warnings)
@@ -2344,7 +2607,7 @@ def _generate_quiz_v3(
                     "difficulty": difficulty,
                     "batch_index": 1,
                     "generation_attempt": attempt_index + 1,
-                    "candidate_index": candidate_index,
+                    "candidate_index": len(accepted),
                     "generator_model": model_id,
                     "generation_prompt_version": QUIZ_V2_PROMPT_VERSION,
                     "validator_model": "deterministic-v3",
@@ -2362,11 +2625,6 @@ def _generate_quiz_v3(
                 })
             except Exception as error:
                 reason = str(error)
-                candidate_slot_id = str(raw.get("slot_id") or raw.get("concept_id") or "").strip() if isinstance(raw, dict) else ""
-                if candidate_slot_id not in remaining_slot_ids and candidate_index < len(available_groups):
-                    candidate_slot_id = str(available_groups[candidate_index]["slot_id"])
-                if candidate_slot_id in rejection_reasons_by_slot:
-                    rejection_reasons_by_slot[candidate_slot_id].append(reason)
                 validation_results["rejected"] += 1
                 validation_results["hard_rejections"] += 1
                 validation_results["reasons"].append(reason)
@@ -2374,11 +2632,6 @@ def _generate_quiz_v3(
                 validation_results[f"{category}_rejections"] += 1
                 print(f"[quiz-v3-validation] discarded candidate ({category}): {error}")
         validation_ms += round((time.perf_counter() - validation_started) * 1000)
-        for slot in available_groups:
-            slot_id = slot["slot_id"]
-            if (slot_id in remaining_slot_ids
-                    and len(rejection_reasons_by_slot[slot_id]) == rejection_counts_before_call[slot_id]):
-                rejection_reasons_by_slot[slot_id].append("Model returned no valid candidate for the requested slot.")
         if phase != "initial":
             repair_ms += round((time.perf_counter() - call_started) * 1000)
 
@@ -2395,8 +2648,7 @@ def _generate_quiz_v3(
     timings["repair_llm_calls"] = repair_attempt_count + fill_attempt_count
     timings["repair_attempt_count"] = repair_attempt_count
     timings["fill_attempt_count"] = fill_attempt_count
-    timings["missing_slots_before_each_retry"] = missing_slots_before_each_retry
-    timings["rejection_reasons_by_slot"] = rejection_reasons_by_slot
+    timings["missing_slots_before_each_retry"] = retry_log
     timings["final_fill_llm_calls"] = final_fill_llm_calls
     # Quiz Generation V3 has no deterministic/fabricated fallback either -- kept only so any
     # shared consumer of this timings shape (e.g. quiz_diagnostics) never has to special-case V2
@@ -2430,8 +2682,6 @@ def _generate_quiz_v3(
             valid_questions=0,
             target_questions=question_count,
             failure_summary=summary,
-            missing_slots=[slot["slot_id"] for slot in planned_slots if slot["slot_id"] in remaining_slot_ids],
-            rejection_reasons_by_slot=dict(rejection_reasons_by_slot),
         )
 
     # Selection: pick the best `question_count` from the (possibly over-generated) pool rather
