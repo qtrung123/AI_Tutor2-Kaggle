@@ -18,6 +18,9 @@ language, subject or layout of a document:
 * build_generation_prompt / QUIZ_OUTPUT_SCHEMA -- one prompt and one schema that agree with the validator
 * parse_candidates      -- tolerant JSON parsing (salvages complete questions from truncated output)
 * validate_candidate    -- 4 options / 1 answer + grounding in the provided context + duplicates
+                          (PDF-artifact tolerant; refuses negative "NOT/EXCEPT" questions; a question is a
+                          duplicate when it tests the same FACT, not merely the same sentence)
+* followup_units        -- what a follow-up call is shown: unused text preferred, used text only if needed
 * select_questions      -- best-ranked candidates, returned in document order
 
 The model never owns provenance: the excerpt (and so source_chunk_ids) of a question is derived by
@@ -35,7 +38,7 @@ import unicodedata
 from collections import Counter
 
 QUIZ_ENGINE_VERSION = "simple_context_v7"
-QUIZ_PROMPT_VERSION = "simple_context_v7_single_choice"
+QUIZ_PROMPT_VERSION = "simple_context_v8_single_choice"
 
 # --- how many questions / candidates ------------------------------------------------------------
 QUIZ_ALLOWED_QUESTION_COUNTS = (12, 15, 18, 20)
@@ -53,6 +56,7 @@ QUIZ_MIN_ITEMS_RATIO = 0.7            # the schema makes the model write at leas
 QUIZ_MAX_ITEMS_EXTRA = 3              # ... and at most `ask` + this many
 QUIZ_CHARS_PER_MIN_ITEM = 500         # ... but never more than the shown text can carry: 1 question per 500 chars
 QUIZ_AVOID_QUOTE_CHARS = 110          # evidence shown to a follow-up call for every existing question
+QUIZ_UNUSED_CHARS_PER_QUESTION = 150  # unused text (about one short bullet) a follow-up needs per missing question
 
 # --- excerpts and context -----------------------------------------------------------------------
 QUIZ_UNIT_MAX_CHARS = 1000            # an excerpt is never truncated; larger chunks are split instead
@@ -88,7 +92,7 @@ QUIZ_MIN_CALL_S = 45
 QUIZ_MIN_QUOTE_CHARS = 20             # letters/digits only; shorter quotes prove nothing
 QUIZ_QUOTE_MIN_ALIGNMENT = 0.85       # share of the quote that must align, in order, with one excerpt
 QUIZ_ALIGN_BLOCK_MIN = 5              # matching runs shorter than this are noise
-QUIZ_ALIGN_BLOCKS_MAX = 5             # at most this many separate matching runs (a few small edits)
+QUIZ_ALIGN_BLOCKS_MAX = 8             # at most this many separate matching runs (PDF glyph drops split a quote into runs)
 QUIZ_ALIGN_SPAN_SLACK = 20            # aligned region may exceed the quote length by this much (+30%)
 QUIZ_ALIGN_PREFILTER = 0.25
 QUIZ_ALIGN_CANDIDATE_UNITS = 3
@@ -97,7 +101,9 @@ QUIZ_LINK_TOKEN_MIN_CHARS = 5         # words shorter than this match glued text
 QUIZ_MIN_LINK_SUPPORT = 0.25          # question + answer vs the excerpt the quote sits in
 QUIZ_WEAK_LINK_SUPPORT = 0.5
 QUIZ_MIN_ANSWER_ANCHOR = 0.5          # share of the answer's distinctive words found in the context
-QUIZ_STRONG_ANCHOR_CHARS = 8          # ... or one word this long inside the quoted excerpt
+QUIZ_STEM_MIN_PREFIX = 6              # inflected words ("scheduling"/"schedule") match on this many leading letters ...
+QUIZ_STEM_MAX_DROP = 3                # ... after dropping at most this many trailing letters (words of 7+ letters only)
+QUIZ_MIN_ANSWER_MATCHES = 2           # ... and never fewer than this many (one shared word is not support)
 QUIZ_COMMON_TOKEN_SHARE = 0.4         # a word present in more than this share of excerpts says nothing
 QUIZ_COMMON_MIN_UNITS = 5             # ... but only judged when the context has at least this many
 
@@ -107,6 +113,10 @@ QUIZ_QUOTE_DUPLICATE_JACCARD = 0.6
 QUIZ_STEM_DUPLICATE_RATIO = 0.9
 QUIZ_OPTION_DUPLICATE_RATIO = 0.94
 QUIZ_OPTION_BAG_JACCARD = 0.8
+QUIZ_EVIDENCE_OVERLAP_MAX = 0.5       # two questions on (mostly) the same evidence ...
+QUIZ_SAME_TARGET_JACCARD = 0.5        # ... whose correct answers overlap this much test the same fact
+QUIZ_SEGMENT_MAX_CHARS = 450          # a used bullet/sentence is hidden from later calls as a whole up to this size
+QUIZ_MIN_REMAINING_CHARS = 100        # an excerpt with less unused text than this is not shown again
 QUIZ_MIN_STEM_CHARS = 12
 QUIZ_MAX_STEM_CHARS = 320
 QUIZ_MAX_OPTION_CHARS = 200
@@ -141,11 +151,14 @@ QUIZ_OUTPUT_SCHEMA = {
 
 
 class CandidateRejected(ValueError):
-    """A candidate failed a hard validation rule. `category` feeds the diagnostics counters."""
+    """A candidate failed a hard validation rule. `category` feeds the diagnostics counters and
+    `code` says which rule (quote_not_found, answer_not_in_context, duplicate_evidence, ...), so a
+    real run shows WHY candidates were rejected, not only how many."""
 
-    def __init__(self, category: str, message: str):
+    def __init__(self, category: str, message: str, code: str | None = None):
         super().__init__(message)
         self.category = category  # "structure" | "grounding" | "duplicate"
+        self.code = code or category
 
 
 def candidate_target(question_count: int) -> int:
@@ -199,7 +212,8 @@ _STOPWORDS = frozenset(
     "the and for with from that this which what when where does are is was were into than then its "
     "their one option answer following about between during using used use can will not has have had "
     "how why who whom whose each any all also only most more some such according document statement "
-    "describes described primary main purpose best correct true false identify select choose".split()
+    "describes described primary main purpose best correct true false identify select choose "
+    "because therefore however instead whereas rather their there these those every other another should would could".split()
 )
 _LABEL = re.compile(r"^\s*\(?[A-Da-d][\.\):]\s+")
 _SCAFFOLDING = re.compile(r"\[U\d+\]|\bunit_id\b|\bevidence_quote\b", flags=re.IGNORECASE)
@@ -207,6 +221,16 @@ _GENERIC_STEM = (
     re.compile(r"\bwhich statement is supported\b", re.IGNORECASE),
     re.compile(r"\bwhat does this (chunk|segment|context|excerpt) say\b", re.IGNORECASE),
     re.compile(r"\b(provided|given) (context|evidence|excerpt)s?\b", re.IGNORECASE),
+)
+# "Which is NOT ...", "all EXCEPT ...", "which statement is incorrect/false": the right answer is the
+# one option that is NOT supported, which no deterministic check can verify (and models often mark a
+# supported option as the answer). Such questions are refused instead of guessed at.
+_NEGATIVE_EMPHASIS = re.compile(r"\b(?:NOT|EXCEPT|INCORRECT|FALSE)\b|\bKHÔNG\b")
+_NEGATIVE_PHRASES = re.compile(
+    r"\b(?:except|incorrect(?:ly)?|false|not true|not correct|least likely|least true)\b"
+    r"|\bwhich\b[^?.]{0,60}\b(?:is|are|was|were|does|do|did|can|would|will)\s+not\b"
+    r"|ngoại trừ|không đúng|không chính xác|\b(?:phát biểu|câu|mệnh đề|nhận định|khẳng định|nào)\s+sai\b",
+    flags=re.IGNORECASE,
 )
 _GENERIC_OPTIONS = frozenset({
     "all of the above", "none of the above", "both a and b", "both b and c", "cannot be determined",
@@ -417,8 +441,9 @@ def build_generation_prompt(
             + "\n".join(lines) + "\n"
         )
     spread_rule = (
-        "- The questions already written are listed below the rules; use sentences and parts of the "
-        "excerpts that they did not use.\n"
+        "- The questions already written are listed below the rules; prefer sentences and parts of the "
+        "excerpts that they did not use. A sentence they used may still hold a different fact: ask about "
+        "it only if none of the listed questions tests that fact.\n"
         if avoid_stems else
         "- Each question tests a different fact; never ask the same fact twice, even reworded. Draw the "
         "questions from different excerpts (at most 2 per excerpt) whenever the material allows.\n"
@@ -440,7 +465,9 @@ def build_generation_prompt(
         "- The 4 options must have clearly different meanings: never write two options that say the same "
         "thing in different words, and no option may be a shorter or longer version of another.\n"
         f"{spread_rule}"
-        "- No 'all/none of the above' options.\n"
+        "- No 'all/none of the above' options. No negative questions: the question must not contain NOT, EXCEPT, "
+        "incorrect or false (or their equivalent in the excerpts' language) -- never ask which option is NOT true; "
+        "ask what the excerpts positively state.\n"
         f"- Write ALL {count} questions: do not stop early.\n"
         "- Write in the main language of the excerpts. Question <=25 words, each option <=15 words, "
         "explanation <=25 words. No markdown, no extra fields.\n"
@@ -528,22 +555,33 @@ def _alignment(quote_squashed: str, unit_squashed: str) -> float:
     return sum(block.size for block in blocks) / len(quote_squashed)
 
 
-def locate_evidence(quote: str, units: list[dict]) -> tuple[dict, float] | None:
-    """Find the excerpt that really contains `quote` and how well (1.0 = verbatim).
+def _join_units(first: dict, second: dict) -> dict:
+    """Two neighbouring excerpts read as one text (a sentence can run across the boundary between
+    two chunks, and so across two excerpts). `_parts` remembers where the boundary is."""
+    return {
+        **first,
+        "_squashed": first["_squashed"] + second["_squashed"],
+        "_shingles": first["_shingles"] | second["_shingles"],
+        "source_chunk_ids": list(dict.fromkeys([*first["source_chunk_ids"], *second["source_chunk_ids"]])),
+        "evidence_excerpt": f"{first['evidence_excerpt']} {second['evidence_excerpt']}",
+        "char_count": first["char_count"] + second["char_count"],
+        "_parts": ((first["unit_id"], len(first["_squashed"])), (second["unit_id"], len(second["_squashed"]))),
+    }
 
-    Returns None when the quote is too short to prove anything or no excerpt contains it well
-    enough. Comparison is on squashed text, so PDF spacing defects, accents, punctuation and case
-    never matter; small in-order edits are tolerated (see _alignment) whatever the quote's length.
-    """
-    quote_squashed = squash(quote)
-    if len(quote_squashed) < QUIZ_MIN_QUOTE_CHARS:
-        return None
+
+def _adjacent_pairs(units: list[dict]) -> list[dict]:
+    ordered = sorted(units, key=lambda unit: unit["index"])
+    return [_join_units(first, second) for first, second in zip(ordered, ordered[1:])
+            if second["index"] == first["index"] + 1]
+
+
+def _best_match(quote_squashed: str, candidates: list[dict]) -> tuple[dict, float] | None:
     scored: list[tuple[float, dict]] = [
-        (1.0, unit) for unit in units if quote_squashed in unit["_squashed"]
+        (1.0, unit) for unit in candidates if quote_squashed in unit["_squashed"]
     ]
     if not scored:
         shortlist = sorted(
-            ((_shingle_containment(quote_squashed, unit), unit) for unit in units),
+            ((_shingle_containment(quote_squashed, unit), unit) for unit in candidates),
             key=lambda item: -item[0],
         )[:QUIZ_ALIGN_CANDIDATE_UNITS]
         scored = [
@@ -556,6 +594,51 @@ def locate_evidence(quote: str, units: list[dict]) -> tuple[dict, float] | None:
     return (unit, score) if score >= QUIZ_QUOTE_MIN_ALIGNMENT else None
 
 
+def locate_evidence(quote: str, units: list[dict]) -> tuple[dict, float] | None:
+    """Find the excerpt that really contains `quote` and how well (1.0 = verbatim).
+
+    Returns None when the quote is too short to prove anything or no excerpt contains it well
+    enough. Comparison is on squashed text, so PDF spacing defects, accents, punctuation and case
+    never matter; small in-order edits are tolerated (see _alignment) whatever the quote's length.
+    A quote that runs across the boundary of two NEIGHBOURING excerpts (a sentence split by the
+    chunker) is found in the two read as one; the result is then a joined excerpt (`_parts`)
+    whose source_chunk_ids cover both. Excerpts that are not neighbours are never joined.
+    """
+    quote_squashed = squash(quote)
+    if len(quote_squashed) < QUIZ_MIN_QUOTE_CHARS:
+        return None
+    return _best_match(quote_squashed, units) or _best_match(quote_squashed, _adjacent_pairs(units))
+
+
+def evidence_spans(quote: str, unit: dict) -> list[tuple[str, int, int]]:
+    """Where in the (squashed) excerpt(s) the quote sits: [(unit_id, start, end), ...].
+
+    This is the fact the question was built on; the backend uses it to notice a second question
+    about the same passage and to hide used passages from later calls.
+    """
+    quote_squashed = squash(quote)
+    text = unit["_squashed"]
+    start = text.find(quote_squashed)
+    if start >= 0:
+        end = start + len(quote_squashed)
+    else:
+        blocks = [block for block in difflib.SequenceMatcher(None, text, quote_squashed, autojunk=False).get_matching_blocks()
+                  if block.size >= QUIZ_ALIGN_BLOCK_MIN]
+        if not blocks:
+            return []
+        start, end = blocks[0].a, blocks[-1].a + blocks[-1].size
+    parts = unit.get("_parts")
+    if not parts:
+        return [(unit["unit_id"], start, end)]
+    spans, offset = [], 0
+    for unit_id, length in parts:
+        low, high = max(start, offset), min(end, offset + length)
+        if high > low:
+            spans.append((unit_id, low - offset, high - offset))
+        offset += length
+    return spans
+
+
 def _token_supported(token: str, haystack_squashed: str) -> bool:
     squashed = squash(token)
     if not squashed:
@@ -565,6 +648,12 @@ def _token_supported(token: str, haystack_squashed: str) -> bool:
     if len(squashed) > 10:  # long word or unsegmented (CJK) run: allow inflection / partial restatement
         pieces = _shingles(squashed, 5)
         return bool(pieces) and sum(piece in haystack_squashed for piece in pieces) / len(pieces) >= 0.7
+    if len(squashed) > QUIZ_STEM_MIN_PREFIX:
+        # an inflected form of a word the material uses (scheduling/schedule, preemption/preemptive):
+        # its leading letters, dropping at most a few endings, are found. Words of 6 letters or
+        # fewer must match whole, so short words cannot match glued text by accident.
+        prefix = squashed[:max(QUIZ_STEM_MIN_PREFIX, len(squashed) - QUIZ_STEM_MAX_DROP)]
+        return prefix in haystack_squashed
     return False
 
 
@@ -592,10 +681,11 @@ def context_support(stem: str, correct_option: str, unit: dict, units: list[dict
     * joint  -- share of the distinctive words of stem + answer found in THE EXCERPT the quote sits
                 in (is the question about that passage?);
     * answer -- share of the answer's distinctive words found ANYWHERE in the context (is the
-                answer stated in the material at all?; 1.0 when a word of 8+ letters is found in that excerpt). An
-                answer may legitimately name a section
-                heading that lives in a neighbouring excerpt; one built from outside knowledge is
-                found nowhere.
+                answer stated in the material at all?). At least half of them AND at least
+                QUIZ_MIN_ANSWER_MATCHES of them (all of them for a one-word answer): a single shared
+                word -- "algorithm" in an answer about the banker's algorithm -- never grounds an
+                answer. An answer may legitimately name a section heading that lives in a
+                neighbouring excerpt; one built from outside knowledge is found nowhere.
     Both compare against the document's own text -- for a bilingual document that is both
     languages -- and never against the language of the quote, so a Vietnamese question about an
     English bullet is judged by the Vietnamese translation printed next to it. Matching is on
@@ -610,12 +700,8 @@ def context_support(stem: str, correct_option: str, unit: dict, units: list[dict
     if answer_tokens:
         found = [token for token in answer_tokens if any(_token_supported(token, other["_squashed"]) for other in units)]
         answer = len(found) / len(answer_tokens)
-        # Natural answers carry filler words the material never uses ("because", "operations"), so
-        # one long word found in the very excerpt the question quotes is enough of an anchor (a long
-        # word cannot match glued text by accident). A long word that only occurs somewhere else in
-        # the document does not rescue an otherwise unsupported answer.
-        if any(len(squash(token)) >= QUIZ_STRONG_ANCHOR_CHARS and _token_supported(token, haystack) for token in found):
-            answer = 1.0
+        if len(found) < min(len(answer_tokens), QUIZ_MIN_ANSWER_MATCHES):
+            answer = 0.0
     return joint, answer
 
 
@@ -647,6 +733,31 @@ def _options_too_similar(options: list[str]) -> bool:
     return False
 
 
+def _same_target(new_tokens, new_key: str, old_tokens, old_key: str) -> bool:
+    """Do two correct answers state the same fact? (identical, largely the same words, or one
+    contained in the other)"""
+    if new_key and new_key == old_key:
+        return True
+    if new_tokens and old_tokens and _jaccard(new_tokens, old_tokens) >= QUIZ_SAME_TARGET_JACCARD:
+        return True
+    shorter, longer = sorted((new_key, old_key), key=len)
+    return len(shorter) >= 8 and shorter in longer
+
+
+def _evidence_overlap(new_spans, old_spans) -> float:
+    """Largest share of the smaller of two evidence spans (same excerpt) that they have in common."""
+    best = 0.0
+    for new_unit, new_start, new_end in new_spans:
+        for old_unit, old_start, old_end in old_spans:
+            if new_unit != old_unit:
+                continue
+            common = min(new_end, old_end) - max(new_start, old_start)
+            smaller = min(new_end - new_start, old_end - old_start)
+            if common > 0 and smaller > 0:
+                best = max(best, common / smaller)
+    return best
+
+
 def validate_candidate(
     raw,
     units: list[dict],
@@ -668,13 +779,18 @@ def validate_candidate(
 
     stem = _clean_inline(raw.get("question"))
     if len(stem) < QUIZ_MIN_STEM_CHARS or len(stem) > QUIZ_MAX_STEM_CHARS or any(p.search(stem) for p in _GENERIC_STEM):
-        raise CandidateRejected("structure", "Question stem is empty, too short/long, or generic.")
+        raise CandidateRejected("structure", "Question stem is empty, too short/long, or generic.", "stem")
     if _SCAFFOLDING.search(stem):
-        raise CandidateRejected("structure", "Question contains generation scaffolding.")
+        raise CandidateRejected("structure", "Question contains generation scaffolding.", "scaffolding")
+    if _NEGATIVE_EMPHASIS.search(stem) or _NEGATIVE_PHRASES.search(stem):
+        raise CandidateRejected(
+            "structure", "Negative questions (NOT / EXCEPT / incorrect / false) cannot be verified against the material.",
+            "negative_polarity",
+        )
 
     raw_options = raw.get("options")
     if not isinstance(raw_options, list) or len(raw_options) != 4 or not all(isinstance(o, str) for o in raw_options):
-        raise CandidateRejected("structure", "Question must contain exactly 4 options.")
+        raise CandidateRejected("structure", "Question must contain exactly 4 options.", "options")
     # Only an explicit "A." / "A)" / "(A)" label is stripped: the generic label stripper in
     # backend.quiz_options would also eat the article of an option such as "A process ...".
     options = [_clean_inline(_LABEL.sub("", option)) for option in raw_options]
@@ -691,9 +807,9 @@ def validate_candidate(
         difflib.SequenceMatcher(None, normalized_options[a], normalized_options[b]).ratio() >= QUIZ_OPTION_DUPLICATE_RATIO
         for a in range(4) for b in range(a + 1, 4)
     ):
-        raise CandidateRejected("structure", "Options are not distinct.")
+        raise CandidateRejected("structure", "Options are not distinct.", "options")
     if _options_too_similar(options):
-        raise CandidateRejected("structure", "Two options say the same thing in different words.")
+        raise CandidateRejected("structure", "Two options say the same thing in different words.", "options")
 
     answer_index = raw.get("answer_index")
     if isinstance(answer_index, bool) or not isinstance(answer_index, int) or answer_index not in range(4):
@@ -704,38 +820,57 @@ def validate_candidate(
     quote = _clean_inline(raw.get("evidence_quote"))
     located = locate_evidence(quote, units)
     if located is None:
-        raise CandidateRejected("grounding", "evidence_quote was not found in the provided context.")
+        code = "quote_too_short" if len(squash(quote)) < QUIZ_MIN_QUOTE_CHARS else "quote_not_found"
+        raise CandidateRejected("grounding", "evidence_quote was not found in the provided context.", code)
     unit, alignment = located
     quote_squashed = squash(quote)
     link, answer_link = context_support(stem, options[answer_index], unit, units)
     if link is not None and link < QUIZ_MIN_LINK_SUPPORT:
-        raise CandidateRejected("grounding", "The question and its answer are not supported by the context.")
+        raise CandidateRejected("grounding", "The question and its answer are not supported by the context.", "question_not_supported")
     # One matching word is not an anchor: in glued PDF text a 5-letter word occurs inside other
     # words by chance, so at least half of the answer's distinctive words must be found.
     if answer_link is not None and answer_link < QUIZ_MIN_ANSWER_ANCHOR:
-        raise CandidateRejected("grounding", "The correct answer is not stated in the provided context.")
+        raise CandidateRejected("grounding", "The correct answer is not stated in the provided context.", "answer_not_in_context")
 
     stem_key = squash(stem)
     for existing in accepted:
         existing_key = squash(existing["question"])
         if stem_key == existing_key or difflib.SequenceMatcher(None, stem_key, existing_key).ratio() >= QUIZ_STEM_DUPLICATE_RATIO:
-            raise CandidateRejected("duplicate", "Question duplicates an accepted question.")
+            raise CandidateRejected("duplicate", "Question duplicates an accepted question.", "duplicate_stem")
+    # Two questions may be built on the same sentence when they test different facts of it. They
+    # are the same question when they rest on (mostly) the same evidence AND their correct answers
+    # are the same fact.
+    spans = evidence_spans(quote, unit)
+    answer_tokens, answer_key = content_tokens(options[answer_index]), squash(options[answer_index])
+    for existing in accepted:
+        meta = existing["_meta"]
+        if (_evidence_overlap(spans, meta.get("spans", ())) >= QUIZ_EVIDENCE_OVERLAP_MAX
+                and _same_target(answer_tokens, answer_key, meta["answer_tokens"], meta["answer_key"])):
+            raise CandidateRejected("duplicate", "Question tests the same fact as an accepted question on the same evidence.", "duplicate_evidence")
     signature = content_tokens(f"{stem} {options[answer_index]}")
     quote_shingles = _shingles(quote_squashed)
     for existing in accepted:
         meta = existing["_meta"]
-        if (
-            (signature and _jaccard(signature, meta["signature"]) >= QUIZ_CONTENT_DUPLICATE_JACCARD)
-            or _jaccard(quote_shingles, meta["quote_shingles"]) >= QUIZ_QUOTE_DUPLICATE_JACCARD
-        ):
-            raise CandidateRejected("duplicate", "Question tests the same fact or concept as an accepted question.")
+        if signature and _jaccard(signature, meta["signature"]) >= QUIZ_CONTENT_DUPLICATE_JACCARD:
+            raise CandidateRejected("duplicate", "Question tests the same fact or concept as an accepted question.", "duplicate_content")
+        # the same sentence quoted again is a duplicate only when the same fact is asked (a sentence can hold several)
+        if (_jaccard(quote_shingles, meta["quote_shingles"]) >= QUIZ_QUOTE_DUPLICATE_JACCARD
+                and _same_target(answer_tokens, answer_key, meta["answer_tokens"], meta["answer_key"])):
+            raise CandidateRejected("duplicate", "Question asks the same fact as an accepted question on the same sentence.", "duplicate_quote")
 
     warnings: list[str] = []
     answer_squashed = squash(options[answer_index])
-    answer_in_evidence = len(answer_squashed) >= 4 and answer_squashed in unit["_squashed"]
+    # ONE definition, the one acceptance used: the answer's distinctive words were found in the
+    # material (answer_link is not None means they passed QUIZ_MIN_ANSWER_ANCHOR above), or -- for an
+    # answer with no distinctive word (an acronym, a number) -- the whole answer text occurs in it.
+    # (It used to be "the whole answer is a substring of the quote's excerpt", which is False for a
+    # supported answer that is reordered, inflected or found in a neighbouring excerpt.)
+    answer_in_evidence = answer_link is not None or (
+        len(answer_squashed) >= 4 and any(answer_squashed in context["_squashed"] for context in units)
+    )
     if alignment < 1.0:
         warnings.append("quote_not_verbatim")
-    if answer_link is None:
+    if not answer_in_evidence:
         warnings.append("unverified_answer")  # numbers / very short answers: nothing to anchor, so rank lower
     if link is None:
         warnings.append("unverifiable_relevance")
@@ -771,10 +906,117 @@ def validate_candidate(
         "_meta": {
             "index": generation_index, "unit_index": unit["index"], "signature": signature,
             "quote_shingles": quote_shingles, "quote": quote, "alignment": alignment, "link": link,
-            "answer_in_evidence": answer_in_evidence,
+            "answer_in_evidence": answer_in_evidence, "spans": spans,
+            "answer_tokens": answer_tokens, "answer_key": answer_key,
         },
     }
     return normalized, sorted(set(warnings))
+
+
+# ---------------------------------------------------------------------------------------------
+# Evidence already used (what a follow-up call must not be shown again)
+# ---------------------------------------------------------------------------------------------
+
+# Generic boundaries of a bullet / sentence / numbered item in extracted text (no language or
+# document format is assumed; text without any of them is simply cut at the quote itself).
+_SEGMENT_BREAK = re.compile(r"[○●•▪◦■□◆◇▶►➢✓✔]|(?<=[.!?])\s+|\s(?=\d{1,2}\.\s)")
+
+
+def _raw_positions(text: str) -> list[int]:
+    """For every character of squash(text): the index of the character of `text` it came from."""
+    positions: list[int] = []
+    for index, char in enumerate(text):
+        positions.extend([index] * len(squash(char)))
+    return positions
+
+
+def segment_bounds(unit: dict, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The passages of the excerpt (raw character ranges) that the given squashed spans belong to.
+
+    A span is widened to its whole bullet / sentence / numbered item when that is short, so the
+    translation or restatement printed next to a sentence counts as the same passage. Text with
+    none of those boundaries is cut at the quote itself. Overlapping passages are merged.
+    Returns [] when the excerpt cannot be mapped back reliably.
+    """
+    text = unit["evidence_excerpt"]
+    raw_of = _raw_positions(text)
+    if len(raw_of) != len(unit["_squashed"]):
+        return []
+    breaks = sorted({
+        match.start() if len(match.group()) == 1 and not match.group().isspace() else match.end()
+        for match in _SEGMENT_BREAK.finditer(text)
+    })
+    cuts: list[list[int]] = []
+    for start, end in spans:
+        if not 0 <= start < end <= len(raw_of):
+            continue
+        low, high = raw_of[start], raw_of[end - 1] + 1
+        before = max([0] + [position for position in breaks if position <= low])
+        after = min([len(text)] + [position for position in breaks if position >= high])
+        cuts.append([before, after] if after - before <= QUIZ_SEGMENT_MAX_CHARS else [low, high])
+    cuts.sort()
+    merged: list[list[int]] = []
+    for cut in cuts:
+        if merged and cut[0] <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], cut[1])
+        else:
+            merged.append(cut)
+    return [(low, high) for low, high in merged]
+
+
+def unused_excerpt(unit: dict, spans: list[tuple[int, int]]) -> str:
+    """The excerpt without the passages accepted questions were built on."""
+    text = unit["evidence_excerpt"]
+    kept, cursor = [], 0
+    for low, high in segment_bounds(unit, spans):
+        kept.append(text[cursor:low])
+        cursor = high
+    kept.append(text[cursor:])
+    return _clean_inline(" ".join(kept))
+
+
+def mask_used_evidence(units: list[dict], accepted: list[dict]) -> list[dict]:
+    """Excerpts with the passages of the accepted questions removed; excerpts with nothing left
+    worth showing are dropped. Used only to build a follow-up prompt: validation still checks
+    quotes against the original excerpts."""
+    spans_by_unit: dict[str, list[tuple[int, int]]] = {}
+    for question in accepted:
+        for unit_id, start, end in question["_meta"].get("spans", ()):
+            spans_by_unit.setdefault(unit_id, []).append((start, end))
+    masked = []
+    for unit in units:
+        spans = spans_by_unit.get(unit["unit_id"])
+        text = unused_excerpt(unit, spans) if spans else unit["evidence_excerpt"]
+        if len(text) >= QUIZ_MIN_REMAINING_CHARS:
+            masked.append({**unit, "evidence_excerpt": text, "char_count": len(text)})
+    return masked
+
+
+def _least_used_first(units: list[dict], usage: Counter, budget_chars: int) -> list[dict]:
+    """As many excerpts as fit the budget, the ones fewest accepted questions came from first."""
+    chosen, total = [], 0
+    for unit in sorted(units, key=lambda item: (usage.get(item["unit_id"], 0), item["index"])):
+        if chosen and total + unit["char_count"] > budget_chars:
+            continue
+        chosen.append(unit)
+        total += unit["char_count"]
+    return sorted(chosen, key=lambda item: item["index"])
+
+
+def followup_units(units: list[dict], accepted: list[dict], budget_chars: int, wanted_chars: int) -> list[dict]:
+    """The evidence of a follow-up call once every excerpt has been shown: a PREFERENCE for new
+    material, not a ban on used material.
+
+    * enough unused text (`wanted_chars`) -> only that, least-used excerpts first;
+    * too little left -> the whole excerpts again, least-used first. A passage that already became
+      a question can still hold a different fact; the list of existing questions in the prompt and
+      the duplicate checks keep the new questions different.
+    """
+    usage = Counter(question["concept_id"] for question in accepted)
+    unused = _least_used_first(mask_used_evidence(units, accepted), usage, budget_chars)
+    if sum(unit["char_count"] for unit in unused) >= wanted_chars:
+        return unused
+    return _least_used_first(units, usage, budget_chars)
 
 
 # ---------------------------------------------------------------------------------------------

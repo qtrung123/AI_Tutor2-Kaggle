@@ -48,6 +48,7 @@ from backend.quiz_units import (
     QUIZ_PROMPT_VERSION,
     QUIZ_STALL_LIMIT,
     QUIZ_TOKENS_PER_QUESTION,
+    QUIZ_UNUSED_CHARS_PER_QUESTION,
     QUIZ_TOTAL_DEADLINE_S,
     build_generation_prompt,
     build_study_units,
@@ -55,6 +56,7 @@ from backend.quiz_units import (
     context_budget,
     finalize_questions,
     followup_request,
+    followup_units,
     max_llm_calls,
     output_schema_for,
     parse_candidates,
@@ -2073,6 +2075,8 @@ def _generate_quiz_from_units(
         #           + response_failures (a whole-call failure is not a per-candidate outcome).
         "duplicate_rejections": 0, "grounding_rejections": 0, "structural_rejections": 0,
         "response_failures": 0,
+        # which rule rejected the candidates (quote_not_found, answer_not_in_context, duplicate_evidence, ...)
+        "rejection_codes": {},
     }
     generation_ms = validation_ms = model_load_ms = prompt_eval_ms = 0
     token_generation_ms = model_invocation_ms = initial_generation_ms = followup_generation_ms = 0
@@ -2103,14 +2107,13 @@ def _generate_quiz_from_units(
                 break
             requested = followup_request(missing)
             budget = context_budget(requested)
-            # Prefer excerpts no call has shown; once every excerpt was shown, prefer the ones no
-            # accepted question came from; only then look at everything again (the list of existing
-            # questions and their sentences keeps the new ones different).
+            # Prefer excerpts no call has shown. Once every excerpt was shown, prefer the text no
+            # accepted question was built on (least-used excerpts first) and only fall back to the
+            # used passages when too little is left for what is missing: a passage can hold a further,
+            # different fact. Repeats are stopped by the duplicate checks and the stall guard.
             shown_units = select_context_units(units, budget, exclude_ids=shown_ids)
             if not shown_units:
-                used_ids = {question["concept_id"] for question in accepted}
-                shown_units = (select_context_units(units, budget, exclude_ids=used_ids)
-                               or select_context_units(units, budget))
+                shown_units = followup_units(units, accepted, budget, QUIZ_UNUSED_CHARS_PER_QUESTION * missing)
             avoid_stems = [question["question"] for question in accepted]
             avoid_quotes = [question["_meta"]["quote"] for question in accepted]
             deadline_s = min(QUIZ_FOLLOWUP_DEADLINE_S, remaining_s)
@@ -2195,7 +2198,7 @@ def _generate_quiz_from_units(
             followup_generation_ms += elapsed
 
         validation_started = time.perf_counter()
-        accepted_before, rejected_here = len(accepted), 0
+        accepted_before, rejected_here, codes_here = len(accepted), 0, {}
         for raw in candidates:
             candidate_counter += 1
             try:
@@ -2210,6 +2213,9 @@ def _generate_quiz_from_units(
                 validation_results["reasons"].append(str(error))
                 bucket = category if category in {"duplicate", "grounding"} else "structural"
                 validation_results[f"{bucket}_rejections"] += 1
+                code = getattr(error, "code", None) or bucket
+                codes_here[code] = codes_here.get(code, 0) + 1
+                validation_results["rejection_codes"][code] = validation_results["rejection_codes"].get(code, 0) + 1
                 print(f"[quiz-units-validation] call={call_number} discarded candidate ({bucket}): {error}")
                 continue
             accepted.append(normalized)
@@ -2251,7 +2257,7 @@ def _generate_quiz_from_units(
         call_record = {
             "call": call_number, "asked": requested, "min_items": output_schema["properties"]["questions"]["minItems"],
             "returned": len(candidates), "valid_added": added,
-            "rejected": rejected_here,
+            "rejected": rejected_here, "rejected_by": codes_here,
             "excerpts": len(shown_units), "material_chars": material_chars, "prompt_chars": len(prompt),
             "num_predict": num_predict,
             "prompt_tokens": metadata.get("prompt_eval_count"), "generated_tokens": eval_count,

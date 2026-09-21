@@ -555,8 +555,12 @@ class ValidationTests(unittest.TestCase):
         raw = raw_candidate(0, question="What does the mutex reserve?",
                             options=["The wireless antenna stack", "orders tasks", "maps names", "connects ports"])
         self.rejected(raw, "grounding", units=units)  # "stack" sits inside "backstackframes"; the rest occurs nowhere
+        # one shared word of two is not support either (the other word, "antenna", occurs nowhere) ...
         half = raw_candidate(0, question="What does the mutex reserve?", options=["It reserves antenna", "orders tasks", "maps names", "connects ports"])
-        self.assertEqual(validate(half, units)[0]["correct_answer"], "A")
+        self.rejected(half, "grounding", units=units)
+        # ... while a paraphrase that keeps two words of the material and adds one of its own is fine
+        paraphrase = raw_candidate(0, question="What does the mutex reserve?", options=["It reserves resources for one thread", "orders tasks", "maps names", "connects ports"])
+        self.assertEqual(validate(paraphrase, units)[0]["correct_answer"], "A")
 
 
 def bilingual_units():
@@ -640,18 +644,21 @@ class RelaxedValidationTests(unittest.TestCase):
             with self.assertRaises(CandidateRejected):
                 validate(self.cand("The page table maps virtual addresses to physical frames.", question, options), self.units)
 
-    def test_one_long_word_of_the_material_anchors_an_answer_padded_with_filler_words(self):
+    def test_one_shared_long_word_never_grounds_an_answer_but_a_reasonable_paraphrase_does(self):
         units = build_study_units([{"content": "Nonblocking, so there are few explicit synchronization primitives. " + "context words " * 40,
                                     "metadata": {"chunk_id": "n1"}}])
-        raw = self.cand("Nonblocking, so there are few explicit synchronization primitives.",
-                        "Why does this kernel need so few synchronisation primitives?",
-                        ["Because its operations are nonblocking", "Because it has no scheduler", "Because tasks never start", "Because memory is unlimited"])
-        self.assertEqual(validate(raw, units)[0]["correct_answer"], "A")  # "because"/"operations" are not in the text, "nonblocking" is
-        made_up = self.cand("Nonblocking, so there are few explicit synchronization primitives.",
-                            "Why does this kernel need so few synchronisation primitives?",
-                            ["Because its stack overflows", "Because it has no scheduler", "Because tasks never start", "Because memory is unlimited"])
+        quote = "Nonblocking, so there are few explicit synchronization primitives."
+        question = "Why does this kernel need so few synchronisation primitives?"
+        wrong = ["Because it has no scheduler", "Because tasks never start", "Because memory is unlimited"]
+        # only "nonblocking" is the material's: the rest of the answer is the model's own
         with self.assertRaises(CandidateRejected):
-            validate(made_up, units)
+            validate(self.cand(quote, question, ["Because its operations are nonblocking", *wrong]), units)
+        # two words of the material (nonblocking, explicit) in a differently worded answer: a paraphrase
+        self.assertEqual(validate(self.cand(quote, question, ["Because its calls are nonblocking and explicit", *wrong]), units)[0]["correct_answer"], "A")
+        # an answer that repeats the material's own words is grounded
+        self.assertEqual(validate(self.cand(quote, question, ["Its synchronization primitives are explicit and nonblocking", *wrong]), units)[0]["correct_answer"], "A")
+        with self.assertRaises(CandidateRejected):
+            validate(self.cand(quote, question, ["Because its stack overflows", *wrong]), units)
 
     def test_a_long_word_from_another_excerpt_does_not_rescue_an_invented_answer(self):
         units = build_study_units([
@@ -865,14 +872,16 @@ class EngineTests(unittest.TestCase):
         self.run_engine([{"questions": candidates(range(12))}, {"questions": candidates([12])}])
         self.assertEqual(len(FakeModel.prompts), 1)
 
-    def test_follow_ups_avoid_excerpts_the_accepted_questions_already_came_from(self):
+    def test_follow_ups_are_not_shown_the_passages_accepted_questions_were_built_on(self):
         result, _ = self.run_engine([{"questions": candidates(range(6))}, {"questions": candidates(range(6, 12))}])
         self.assert_valid_quiz(result, 12)
-        first = {int(m) for m in re.findall(r"\[U(\d+)\]", FakeModel.prompts[0])}
-        second = {int(m) for m in re.findall(r"\[U(\d+)\]", FakeModel.prompts[1])}
-        self.assertEqual(first, set(range(1, 13)))          # a small document is shown whole in call 1 ...
-        self.assertFalse(second & {1, 2, 3})                # ... facts 0-5 live in U1-U3, which a follow-up skips
-        self.assertTrue(second)
+        first, second = (prompt[prompt.index("EXCERPTS:"):] for prompt in FakeModel.prompts[:2])
+        for fact in range(12):
+            self.assertIn(fact_sentence(fact), first)                     # call 1 shows the whole small document
+        for used in range(6):
+            self.assertNotIn(fact_sentence(used), second)                 # facts 0-5 became questions: cut out
+        for unused in range(6, 12):
+            self.assertIn(fact_sentence(unused), second)                  # the rest is still offered
 
     def test_every_call_is_logged_with_the_evidence_needed_to_diagnose_a_short_answer(self):
         result, _ = self.run_engine([{"questions": candidates(range(4))}, {"questions": candidates(range(4, 7))}, {"questions": []}],
