@@ -5,7 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from backend import quiz_store
+from quiz_fixtures import candidates, make_chunks, spread_facts
+
+from backend import quiz_store, quiz_units
 from backend.assessment_planner import allocate_document_topics, validate_and_deduplicate_concepts
 from backend.main import QuizGenerateRequest, QuizRegenerateRequest
 from backend.mastery_service import calculate_mastery, recompute_topic_mastery
@@ -21,23 +23,12 @@ class _FakeV3BatchModel:
     def __init__(self, **_kwargs):
         pass
 
+    def stream(self, prompt):
+        response = self.invoke(prompt)
+        yield SimpleNamespace(content=response.content, response_metadata=getattr(response, "response_metadata", {}))
+
     def invoke(self, _prompt):
         return SimpleNamespace(content=json.dumps(self.__class__.payloads.pop(0)), response_metadata={})
-
-
-def _v3_document_chunk(chunk_id: str, sentence: str) -> dict:
-    return {
-        "content": sentence,
-        "metadata": {"chunk_id": chunk_id, "chunk": int(chunk_id.split("_")[-1]), "document_id": "doc.pdf"},
-    }
-
-
-def _v3_raw_question(group_id: str, stem: str, answer_text: str = "A supported answer") -> dict:
-    return {
-        "group_id": group_id, "question_type": "single_choice", "question": stem,
-        "options": [answer_text, "An unrelated distractor", "Another distractor", "A third distractor"],
-        "correct_answers": [0], "explanation": f"The evidence directly states that {answer_text.lower()}.",
-    }
 
 
 def concept_plan(topic_id: str, capacity: int) -> dict:
@@ -177,38 +168,16 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         self.assertTrue(completed["mastery_by_topic"]["topic_b"]["has_sufficient_evidence"])
 
     def test_document_generation_covers_multiple_regions_without_planner(self):
-        """Quiz Generation V3 (live path): document-scope generation no longer plans per topic
-        via the Planner -- coverage instead comes from deterministic context grouping over
-        ordered document chunks (see _select_v3_context_groups)."""
+        """Live Study Units path: document-scope generation no longer plans per topic via the
+        Planner -- coverage comes from deterministic study units over ordered document chunks
+        (see build_study_units)."""
         document = {
             "id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 2,
             "topics": [{"topic_id": "topic_a", "name": "A"}],
         }
-        # Twelve genuinely distinct facts (low mutual content overlap) so the pool doesn't trip
-        # the content-duplicate check on candidates that would otherwise only differ by number.
-        facts = [
-            ("Why does TCP use acknowledgements for reliable delivery?", "TCP acknowledgements support reliable delivery"),
-            ("How does flow control protect a receiver?", "Flow control protects receivers"),
-            ("How do sequence numbers preserve ordering?", "Sequence numbers preserve ordering"),
-            ("What detects corrupted segments in TCP?", "Checksums detect corrupted segments"),
-            ("How does TCP recover from packet loss?", "TCP retransmits lost packets automatically"),
-            ("What prevents overwhelming a slow receiver?", "Flow control prevents overwhelming a slow receiver"),
-            ("How does TCP avoid network congestion?", "Congestion control avoids network congestion"),
-            ("What confirms successful segment delivery?", "Acknowledgements confirm successful segment delivery"),
-            ("How does TCP reorder out-of-order segments?", "Sequence numbers let TCP reorder out-of-order segments"),
-            ("What triggers a retransmission timeout?", "An unacknowledged segment triggers a retransmission timeout"),
-            ("How does TCP establish a connection?", "TCP establishes a connection with a three-way handshake"),
-            ("What ensures reliable byte-stream delivery?", "TCP sequencing ensures reliable byte-stream delivery"),
-        ]
-        document_chunks = [
-            _v3_document_chunk(f"chunk_{index}", answer_text)
-            for index, (_stem, answer_text) in enumerate(facts, start=1)
-        ]
-        candidates = [
-            _v3_raw_question(f"G{(index % 2) + 1}", stem, answer_text)
-            for index, (stem, answer_text) in enumerate(facts)
-        ]
-        _FakeV3BatchModel.payloads = [{"questions": candidates}]
+        document_chunks = make_chunks(12, facts_per_chunk=2)
+        generated = candidates(spread_facts(15))
+        _FakeV3BatchModel.payloads = [{"questions": generated}]
 
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
@@ -220,7 +189,7 @@ class AdaptiveAssessmentTests(unittest.TestCase):
 
         self.assertEqual(result["question_count"], 12)
         self.assertEqual(result["assessment_plan"]["status"], "complete")
-        self.assertEqual(result["assessment_plan"]["planner_version"], quiz_service.QUIZ_V3_ENGINE_VERSION)
+        self.assertEqual(result["assessment_plan"]["planner_version"], quiz_units.QUIZ_ENGINE_VERSION)
         self.assertGreater(result["assessment_plan"]["context_group_count"], 1)
         represented_chunks = {
             chunk_id for question in result["questions"] for chunk_id in question["source_chunk_ids"]
@@ -242,9 +211,9 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         self.assertIn('quizCreateDialog?.classList.contains("open")', frontend)
         self.assertIn("!currentQuiz?.questions?.length && !createDialogOpen", frontend)
 
-    def test_topic_generation_uses_v3_context_group_pipeline(self):
-        """Quiz Generation V3 (live path): topic-scope generation dispatches to the Planner-free
-        _generate_quiz_v3 engine, not the Planner-based _generate_topic_quiz_v2."""
+    def test_topic_generation_uses_study_units_pipeline(self):
+        """Live Study Units path: topic-scope generation dispatches to the Planner-free
+        _generate_quiz_from_units engine, not the Planner-based _generate_topic_quiz_v2."""
         document = {
             "id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 2,
             "topics": [{"topic_id": "topic_a", "name": "A"}],
@@ -252,7 +221,7 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
              patch.object(quiz_service, "get_schema_topic_evidence", return_value=[]), \
-             patch.object(quiz_service, "_generate_quiz_v3", return_value={
+             patch.object(quiz_service, "_generate_quiz_from_units", return_value={
                  "question_count": 10, "questions": [{"concept_id": f"concept_{index:03d}"} for index in range(1, 11)]
              }) as generator:
             result = quiz_service.generate_quiz("doc.pdf", "easy", "topic", "topic_a")

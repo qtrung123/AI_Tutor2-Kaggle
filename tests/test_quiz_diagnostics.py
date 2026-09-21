@@ -19,6 +19,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from quiz_fixtures import candidates, make_chunks, spread_facts
+
 from backend import assessment_planner, quiz_diagnostics, quiz_service, quiz_store
 from backend.quiz_service import _run_document_single_choice_batch
 
@@ -360,66 +362,30 @@ class PlannerDiagnosticsTests(unittest.TestCase):
 
 
 class _FakeV3DiagModel:
-    """Minimal ChatOllama stand-in for Quiz Generation V3 (no Planner) diagnostics tests."""
+    """Minimal ChatOllama stand-in for the live Study Units pipeline diagnostics tests."""
     payloads = []
 
     def __init__(self, **_kwargs):
         pass
 
+    def stream(self, prompt):
+        response = self.invoke(prompt)
+        yield SimpleNamespace(content=response.content, response_metadata=getattr(response, "response_metadata", {}))
+
     def invoke(self, _prompt):
         return SimpleNamespace(content=json.dumps(self.__class__.payloads.pop(0)), response_metadata={})
 
 
-# Every chunk carries the full fact vocabulary so a candidate grounds against any of the 4
-# context groups _v3_diag_chunks(12) produces (QUIZ_V3_MAX_CHUNKS_PER_GROUP=3). Sixteen
-# genuinely distinct facts, each with its own stem AND answer wording (verified low mutual
-# content overlap) so a pool of up to 12 candidates can be built without tripping the
-# content-duplicate check on candidates that only differ by a case number.
-_V3_DIAG_FACT_VARIANTS = [
-    ("Why does the mechanism support reliable delivery?", "It supports reliable delivery"),
-    ("How does the mechanism protect against packet loss?", "It protects against packet loss"),
-    ("What prevents duplicate delivery in this mechanism?", "It prevents duplicate delivery"),
-    ("Why does the mechanism preserve delivery order?", "It preserves delivery order"),
-    ("How does the mechanism detect corrupted data?", "It detects corrupted data"),
-    ("What confirms successful delivery in this mechanism?", "It confirms successful delivery"),
-    ("Why does the mechanism retransmit lost data?", "It retransmits lost data automatically"),
-    ("How does the mechanism avoid overwhelming the receiver?", "It avoids overwhelming the receiver"),
-    ("What limits the transmission rate in this mechanism?", "It limits the transmission rate"),
-    ("Why does the mechanism track acknowledgements?", "It tracks acknowledgements from the receiver"),
-    ("How does the mechanism recover from timeouts?", "It recovers from timeouts by retrying"),
-    ("What ensures data integrity in this mechanism?", "It ensures data integrity"),
-]
-_V3_DIAG_SHARED_FACTS = ". ".join(answer for _stem, answer in _V3_DIAG_FACT_VARIANTS) + "."
-
-
 def _v3_diag_chunks(count: int) -> list[dict]:
-    return [{
-        "content": f"Chunk{index}: {_V3_DIAG_SHARED_FACTS}",
-        "metadata": {"chunk_id": f"chunk_{index}", "document_id": "doc.pdf"},
-    } for index in range(1, count + 1)]
+    return make_chunks(count, facts_per_chunk=2, prefix="chunk")
 
 
 def _v3_diag_candidates(count: int) -> list[dict]:
-    questions = []
-    for index in range(count):
-        stem, answer = _V3_DIAG_FACT_VARIANTS[index % len(_V3_DIAG_FACT_VARIANTS)]
-        questions.append({
-            "group_id": f"G{(index % 4) + 1}", "question_type": "single_choice",
-            "question": stem,
-            "options": [
-                answer,
-                "An unrelated distractor about something else",
-                "Another distractor about something else",
-                "A third distractor about something else",
-            ],
-            "correct_answers": [0],
-            "explanation": f"The evidence directly states that {answer[0].lower()}{answer[1:]}.",
-        })
-    return questions
+    return candidates(spread_facts(count))
 
 
 class GenerateQuizWrapperBehaviorTests(unittest.TestCase):
-    """The public generate_quiz() entry point, through the real Quiz Generation V3 (no
+    """The public generate_quiz() entry point, through the real Study Units (no
     Planner) document-scope pipeline with only chunk retrieval and the LLM mocked out,
     proving the instrumentation wrapper changes nothing about the returned quiz."""
 
@@ -505,10 +471,10 @@ class GenerateQuizWrapperBehaviorTests(unittest.TestCase):
 
     def test_failure_path_is_recorded_and_the_original_error_still_propagates(self):
         document = self._document("doc-e.pdf")
-        # Quiz Generation V3 only fails the whole request closed when the candidate pool is
+        # The Study Units pipeline only fails the whole request closed when the candidate pool is
         # completely empty (spec case E) -- a non-empty pool below question_count is persisted
-        # as a partial quiz instead of raising. An empty initial response (and every bounded
-        # repair/fill retry after it) keeps the pool empty, so this still exercises the real
+        # as a partial quiz instead of raising. An empty initial response (and the single
+        # bounded top-up after it) keeps the pool empty, so this still exercises the real
         # failure/diagnostics path.
         _FakeV3DiagModel.payloads = [{"questions": []}]
 
@@ -525,8 +491,8 @@ class GenerateQuizWrapperBehaviorTests(unittest.TestCase):
         summary = captured[0].summary()
         self.assertIn("failure", summary)
         self.assertEqual(summary["failure"]["exception_type"], "QuizGenerationError")
-        # One initial call plus the full bounded repair(2) + fill(2) budget.
-        self.assertEqual(summary["llm_calls"], 5)
+        # One initial call plus the single bounded top-up: the hard ceiling of the live pipeline.
+        self.assertEqual(summary["llm_calls"], 2)
 
 
 if __name__ == "__main__":

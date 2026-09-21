@@ -6,6 +6,8 @@ from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
+from quiz_fixtures import candidates, make_chunks
+
 from backend import quiz_service, quiz_store
 from backend.quiz_service import (
     DOCUMENT_QUIZ_QUESTION_COUNT,
@@ -120,6 +122,11 @@ class SequencedOllama:
 
     def __init__(self, **_kwargs):
         pass
+
+    def stream(self, prompt):
+        from types import SimpleNamespace
+        response = self.invoke(prompt)
+        yield SimpleNamespace(content=response.content, response_metadata=getattr(response, "response_metadata", {}))
 
     def invoke(self, prompt):
         from types import SimpleNamespace
@@ -491,38 +498,17 @@ class GenerateQuizDocumentContractTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_document_scope_respects_requested_count_and_is_all_single_choice(self):
-        """Quiz Generation V3 (live path): document scope respects the requested question_count
-        and produces an all-single_choice quiz -- no Planner, no per-topic quota (see
-        _generate_quiz_v3)."""
+        """Live Study Units path: document scope respects the requested question_count and
+        produces an all-single_choice quiz in ONE LLM call -- no Planner, no per-topic quota
+        (see _generate_quiz_from_units)."""
         document = {
             "id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 2,
             "topics": [{"topic_id": "topic_a", "name": "A"}],
         }
-        # Twelve genuinely distinct facts (low mutual content overlap) so the pool doesn't trip
-        # the content-duplicate check on candidates that would otherwise only differ by number.
-        facts = [
-            "supports reliable delivery", "protects against packet loss", "prevents duplicate delivery",
-            "preserves delivery order", "detects corrupted data", "confirms successful delivery",
-            "retransmits lost data automatically", "avoids overwhelming the receiver",
-            "limits the transmission rate", "tracks acknowledgements from the receiver",
-            "recovers from timeouts by retrying", "ensures data integrity",
-        ]
-        document_chunks = [{
-            "content": f"Item{i}: " + ". ".join(f"It {fact}" for fact in facts) + ".",
-            "metadata": {"chunk_id": f"chunk_{i}", "document_id": "doc.pdf"},
-        } for i in range(1, 16)]
+        document_chunks = make_chunks(15, facts_per_chunk=1)
 
         def respond(_prompt):
-            return [{
-                "group_id": f"G{(index % 5) + 1}", "question_type": "single_choice",
-                "question": f"Which fact does the evidence document: {facts[index % len(facts)]}?",
-                "options": [
-                    f"It {facts[index % len(facts)]}", "Unrelated claim A",
-                    "Unrelated claim B", "Unrelated claim C",
-                ],
-                "correct_answers": [0],
-                "explanation": f"It {facts[index % len(facts)]}, as the evidence states.",
-            } for index in range(12)]
+            return candidates(range(15))
 
         SequencedOllama.respond = respond
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
@@ -828,13 +814,13 @@ class NoRawMultiSelectFallbackJunkTests(unittest.TestCase):
 
 
 class FrontendDocumentBlueprintTests(unittest.TestCase):
-    def test_frontend_lets_document_scope_choose_twelve_or_fifteen(self):
+    def test_frontend_lets_document_scope_choose_twelve_to_twenty(self):
         script = Path("frontend/app.js").read_text(encoding="utf-8")
         self.assertNotIn("DOCUMENT_QUIZ_QUESTION_COUNT", script)
         self.assertIn(
             "function selectedQuestionCount() {\n"
             "  const value = Number(quizQuestionCountSelect?.value || 12);\n"
-            "  return [12, 15].includes(value) ? value : 12;\n"
+            "  return [12, 15, 18, 20].includes(value) ? value : 12;\n"
             "}",
             script,
         )

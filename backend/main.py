@@ -213,7 +213,7 @@ class QuizGenerateRequest(BaseModel):
     assessment_scope: str = Field(pattern="^(topic|document)$")
     topic_id: Optional[str] = None
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
-    question_count: Literal[12, 15] = 12
+    question_count: Literal[12, 15, 18, 20] = 12
     model_id: Optional[str] = None
     quiz_name: str = Field(min_length=1, max_length=200)
 
@@ -224,7 +224,7 @@ class QuizRegenerateRequest(BaseModel):
     model_id: Optional[str] = None
     assessment_scope: str = Field(pattern="^(topic|document)$")
     topic_id: Optional[str] = None
-    question_count: Literal[12, 15] = 12
+    question_count: Literal[12, 15, 18, 20] = 12
     # Omitted or blank keeps the quiz's existing name; regeneration must never
     # silently rename a quiz the user already gave a custom name.
     quiz_name: Optional[str] = Field(default=None, max_length=200)
@@ -282,6 +282,11 @@ class QuizGenerateResponse(BaseModel):
     document_hash: Optional[str] = None
     title: Optional[str] = None
     question_count: int
+    # requested_count is the user's TARGET; actual_count is what was really returned. status is
+    # "complete" when they match and "partial" when fewer valid questions than requested exist.
+    requested_count: Optional[int] = None
+    actual_count: Optional[int] = None
+    status: Optional[str] = None
     difficulty: str
     topic_id: str
     topic_name: Optional[str] = None

@@ -158,7 +158,7 @@ class QuizV2Tests(unittest.TestCase):
         )
         self.assertEqual(request.model_id, "qwen-2.5-3b")
         self.assertEqual(request.question_count, 12)
-        for count in (12, 15):
+        for count in (12, 15, 18, 20):
             self.assertEqual(QuizGenerateRequest(
                 document_id="lecture.pdf", assessment_scope="topic", topic_id="topic_001",
                 difficulty="easy", question_count=count, quiz_name="Sample Quiz",
@@ -169,8 +169,8 @@ class QuizV2Tests(unittest.TestCase):
                 difficulty="easy", question_count=5, quiz_name="Sample Quiz",
             )
         frontend = Path("frontend/app.js").read_text(encoding="utf-8")
-        self.assertIn("[12, 15].includes(value)", frontend)
-        self.assertIn("[12, 15].forEach((count)", frontend)
+        self.assertIn("[12, 15, 18, 20].includes(value)", frontend)
+        self.assertIn("[12, 15, 18, 20].forEach((count)", frontend)
         self.assertNotIn("[10, 15, 20, 25]", frontend)
 
     def test_all_supported_question_types_validate_with_normalized_answers(self):

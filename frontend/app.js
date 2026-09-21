@@ -1386,7 +1386,7 @@ function selectedDifficulty() {
 
 function selectedQuestionCount() {
   const value = Number(quizQuestionCountSelect?.value || 12);
-  return [12, 15].includes(value) ? value : 12;
+  return [12, 15, 18, 20].includes(value) ? value : 12;
 }
 
 function selectedTopicId() {
@@ -3393,7 +3393,7 @@ function openQuizCreateDialog() {
     caption.textContent = "Number of questions";
     quizQuestionCountSelect = document.createElement("select");
     quizQuestionCountSelect.id = "quiz-question-count-select";
-    [12, 15].forEach((count) => {
+    [12, 15, 18, 20].forEach((count) => {
       const option = document.createElement("option");
       option.value = String(count);
       option.textContent = String(count);

@@ -35,6 +35,30 @@ from backend.quiz_store import (
     utc_now_iso,
 )
 from backend.quiz_validation import validate_question_semantics
+from backend.quiz_units import (
+    QUIZ_ALLOWED_QUESTION_COUNTS,
+    QUIZ_ENGINE_VERSION,
+    QUIZ_FIRST_CALL_DEADLINE_S,
+    QUIZ_LLM_TIMEOUT_S,
+    QUIZ_MAX_NEW_TOKENS,
+    QUIZ_MIN_TOPUP_S,
+    QUIZ_NUM_CTX,
+    QUIZ_OUTPUT_SCHEMA,
+    QUIZ_PROMPT_VERSION,
+    QUIZ_TOKENS_PER_QUESTION,
+    QUIZ_TOTAL_DEADLINE_S,
+    build_generation_prompt,
+    build_study_units,
+    candidate_target,
+    context_budget,
+    finalize_questions,
+    parse_candidates,
+    public_unit,
+    select_context_units,
+    select_questions,
+    topup_request,
+    validate_candidate,
+)
 from backend.assessment_planner import (
     CONCEPT_PLANNER_PROMPT_VERSION,
     PLANNER_VERSION,
@@ -64,7 +88,7 @@ from config import (
 
 GENERATION_PROMPT_VERSION = "topic_mcq_v2_backend_evidence"
 QUIZ_V2_PROMPT_VERSION = "topic_mcq_v2_slot_batch_fast"
-QUIZ_V2_ALLOWED_QUESTION_COUNTS = {12, 15}
+QUIZ_V2_ALLOWED_QUESTION_COUNTS = set(QUIZ_ALLOWED_QUESTION_COUNTS)
 QUIZ_V2_DISTINCT_CONCEPT_LIMIT = 5
 QUIZ_GENERATION_KEEP_ALIVE = "5m"
 
@@ -76,23 +100,12 @@ QUIZ_V2_CANDIDATE_BUFFER_MIN = 3
 QUIZ_V2_CANDIDATE_BUFFER_MAX = 6
 QUIZ_V2_CANDIDATE_BUFFER_RATIO = 0.3
 
-# Quiz Generation V3 (live path): the Planner/concept-extraction/Question-Blueprint step is
-# bypassed entirely. Document/topic coverage instead comes from deterministic, Planner-free
-# context grouping over the SAME chunk retrieval V2 already used (get_schema_topic_evidence /
-# get_document_chunks) -- no LLM call, no chunking/embedding/retrieval change. A group is simply
-# a contiguous window of adjacent chunks in document order (see _select_v3_context_groups). The
-# V2 Planner-based engine (_generate_topic_quiz_v2, _run_document_single_choice_quiz, and
-# backend/assessment_planner.py) is left fully intact and directly callable so V2 and V3 can be
-# compared; only _generate_quiz's live dispatch was changed to call the V3 engine.
-QUIZ_V3_ENGINE_VERSION = "context_group_v3_no_planner"
-QUIZ_V3_MAX_CHUNKS_PER_GROUP = 3
-QUIZ_V3_MAX_CHARS_PER_GROUP = 700
-
-# Quiz Generation V3 targeted-fill sizing: a bounded repair/fill round asks for the actual
-# missing count plus a small buffer (not the original requested_count) so one round is more
-# likely to close the gap outright -- see _generate_quiz_v3. This is separate from, and much
-# smaller than, the initial call's candidate-pool buffer (QUIZ_V2_CANDIDATE_BUFFER_*).
-QUIZ_V3_FILL_BUFFER = 1
+# Live Quiz path ("Study Units", see backend/quiz_units.py and _generate_quiz_from_units): no
+# Planner, concept extraction, Question Blueprint, slots, or repair/fill loops. At most TWO LLM
+# calls per request: one candidate-generation call and, only if the validated pool is short of
+# question_count, one bounded top-up. The V2 Planner-based engines (_generate_topic_quiz_v2,
+# _run_document_single_choice_quiz, backend/assessment_planner.py) are left intact and directly
+# callable for comparison, but are not on the live path.
 
 # Document-scope quizzes use a fixed, backend-authoritative blueprint: the model never chooses
 # the type mix. Unlike a pre-assignment scheme, no slot is stamped with a question_type before
@@ -1576,379 +1589,6 @@ def _select_best_v2_candidates(pool: list[dict], target_count: int) -> list[dict
     return [pool[index] for index in sorted(selected_indices)]
 
 
-def _select_v3_context_groups(chunks: list[dict]) -> list[dict]:
-    """Deterministic, Planner-free document/topic coverage grouping for Quiz Generation V3.
-
-    Chunks arrive already ordered by document position (see get_topic_chunks/get_document_chunks
-    -- unchanged). A group is simply a contiguous window of up to QUIZ_V3_MAX_CHUNKS_PER_GROUP
-    adjacent chunks, so different portions of the document/topic each become their own group with
-    their own backend-owned provenance. No LLM call, no concept extraction, no Question
-    Blueprint, and no change to chunking/embeddings/retrieval -- this only groups chunks that
-    already came out of the existing retrieval path.
-    """
-    usable = []
-    seen_ids = set()
-    for chunk in chunks:
-        chunk_id = str((chunk.get("metadata") or {}).get("chunk_id") or "").strip()
-        content = str(chunk.get("content") or "").strip()
-        if not chunk_id or chunk_id in seen_ids or not content:
-            continue
-        seen_ids.add(chunk_id)
-        usable.append((chunk_id, content))
-    if not usable:
-        return []
-
-    groups = []
-    for start in range(0, len(usable), QUIZ_V3_MAX_CHUNKS_PER_GROUP):
-        window = usable[start:start + QUIZ_V3_MAX_CHUNKS_PER_GROUP]
-        chunk_ids = [chunk_id for chunk_id, _content in window]
-        excerpt = " ".join(re.sub(r"\s+", " ", content).strip() for _chunk_id, content in window)
-        if len(excerpt) > QUIZ_V3_MAX_CHARS_PER_GROUP:
-            excerpt = excerpt[:QUIZ_V3_MAX_CHARS_PER_GROUP].rstrip()
-        group_index = len(groups) + 1
-        label = chunk_ids[0] if len(chunk_ids) == 1 else f"{chunk_ids[0]}..{chunk_ids[-1]}"
-        groups.append({
-            "group_id": f"G{group_index}",
-            "name": f"Document section {group_index} (chunks {label})",
-            "source_chunk_ids": chunk_ids,
-            "evidence_excerpt": excerpt,
-        })
-    return groups
-
-
-def _classify_v3_rejection(reason: str) -> str:
-    """Categorize a candidate rejection reason for Quiz Generation V3 benchmark logging.
-
-    This only inspects the validator's error message text -- validation itself decides
-    acceptance independently; this classification is diagnostic-only.
-    """
-    lowered = str(reason).lower()
-    if "duplicate" in lowered or "same fact or concept" in lowered:
-        return "duplicate"
-    if "does not appear to test the assigned group" in lowered:
-        return "grounding"
-    return "structural"
-
-
-QUIZ_V3_CONTENT_DUPLICATE_JACCARD = 0.5
-
-
-def _v3_content_signature(stem: str, correct_answer_text: str) -> frozenset[str]:
-    """Lightweight, deterministic content signature for one candidate (no LLM call).
-
-    Reuses the same stopword-filtered, suffix-normalized content tokenizer already used for
-    grounding checks (_grounding_tokens) -- not a new NLP mechanism, just applied to a
-    stem+correct-answer pair so near-identical topical content can be compared across
-    candidates that are phrased differently (see _is_v3_content_duplicate).
-    """
-    return frozenset(_grounding_tokens(f"{stem} {correct_answer_text}"))
-
-
-def _is_v3_content_duplicate(
-    signature: frozenset[str], accepted_signatures: list[frozenset[str]],
-    threshold: float = QUIZ_V3_CONTENT_DUPLICATE_JACCARD,
-) -> bool:
-    """True when a candidate's content overlaps an already-accepted candidate too heavily to be
-    a genuinely distinct fact -- e.g. two questions that both test "long-term scheduling" or the
-    same priority/behavior concept, even when their exact wording differs enough to pass the
-    stem-similarity check. Deterministic token-set Jaccard overlap; no LLM call.
-    """
-    if not signature:
-        return False
-    for other in accepted_signatures:
-        if not other:
-            continue
-        union = signature | other
-        if union and len(signature & other) / len(union) >= threshold:
-            return True
-    return False
-
-
-def _has_ambiguous_option_containment(option_bodies: list[str]) -> bool:
-    """Reject options where one option's meaningful wording is entirely contained in another's
-    (e.g. "clock" vs "clock interrupt") -- the two are too close to be a fair, unambiguous
-    choice, even though they are not near-duplicate strings. Deterministic token-set comparison
-    reusing _grounding_tokens; no LLM call.
-    """
-    token_sets = [_grounding_tokens(option) for option in option_bodies]
-    for left, left_tokens in enumerate(token_sets):
-        if not left_tokens:
-            continue
-        for right, right_tokens in enumerate(token_sets):
-            if left == right or not right_tokens:
-                continue
-            if left_tokens < right_tokens:  # strict subset
-                return True
-    return False
-
-
-def _build_v3_prompt(
-    document_id: str,
-    topic: dict,
-    difficulty: str,
-    groups: list[dict],
-    count: int,
-    accepted_stems: list[str],
-    repair: bool,
-    required_question_type: str | None = None,
-) -> str:
-    """Quiz Generation V3 prompt: no Question Blueprint, no per-slot allocation.
-
-    The model is asked to write `count` questions total from the supplied context-group
-    evidence and choose freely which group(s) to draw from -- it may write more than one
-    question from the same group, and is never told to map one question to one evidence line
-    (V2's "use each evidence slot exactly once" instruction, and the matching hard rejection for
-    reusing a slot, are both gone). Every question must still cite the group_id its evidence
-    came from so the backend can attach its own authoritative source_chunk_ids/concept identity;
-    the model is never trusted with source_chunk_ids or concept identity itself.
-    """
-    cognitive_intent = {
-        "easy": "recall",
-        "medium": "relationship_application",
-        "difficult": "multi_fact_reasoning",
-    }[difficulty]
-    evidence = "\n".join(
-        f"{group['group_id']}|{group['evidence_excerpt']}|cognitive_intent={cognitive_intent}"
-        for group in groups
-    )
-    avoid = "\n".join(f"- {stem}" for stem in accepted_stems) if repair else ""
-    repair_lines = []
-    if repair:
-        stem_shape = (
-            "a complete declarative statement (never a question, never ending in '?')"
-            if required_question_type == "true_false"
-            else "a complete standalone question stem ending in a question mark"
-        )
-        repair_lines.append(
-            f"Write {count} MORE distinct questions from the evidence below; for every question "
-            f"write {stem_shape}; never return a fragment, placeholder, or an already-used question."
-        )
-    if avoid:
-        repair_lines.append(
-            "ACCEPTED STEMS / FORBIDDEN QUESTIONS -- do not repeat, closely paraphrase, or test the "
-            f"same fact or concept as any of these:\n{avoid}"
-        )
-    repair_line = "\n".join(repair_lines) + ("\n" if repair_lines else "")
-    difficulty_contracts = {
-        "easy": (
-            "EASY QUALITY: Ask direct recall/basic comprehension about one explicit evidence fact. "
-            "Exactly one option must fully answer the stem; every distractor must conflict with or be unsupported by the cited evidence. "
-            "Do not rely on outside-world plausibility. Do not use NOT, EXCEPT, false, incorrect, least, or double negatives. "
-            "If several evidence facts are true, do not make them competing options; the correct option must contain the complete requested set. "
-            "The correct option must match the stem in scope and grammar.\n"
-        ),
-        "medium": (
-            "MEDIUM QUALITY: Require one reasoning step using comparison, cause/effect, interpretation, or application "
-            "within the cited evidence; do not ask direct recall alone.\n"
-        ),
-        "difficult": (
-            "DIFFICULT QUALITY: Require multi-fact reasoning that combines at least two supported facts already inside "
-            "the SAME evidence group to diagnose, predict, justify, or select a consequence. "
-            "Do not combine facts from separate evidence groups and do not ask direct recall alone.\n"
-        ),
-    }
-    type_instruction = (
-        f'Every question must use "question_type":"{required_question_type}" only; do not use any other type. '
-        if required_question_type else
-        "Choose each question_type from what its evidence can assess naturally; include single_choice, true_false, "
-        "and multi_select at least once each across the whole set, with no fixed ratio. "
-    )
-    return (
-        f"Write exactly {count} {difficulty} quiz questions for {topic.get('name') or topic.get('topic_id')}, "
-        "drawn from the evidence groups below.\n"
-        'JSON only: {"questions":[{"group_id":"G1","question_type":"single_choice|true_false|multi_select","question":"...","options":["..."],"correct_answers":[0],"explanation":"..."}]}\n'
-        "Base every question only on the evidence of the group_id you cite. You may write more than one "
-        "question from the same group if it tests a different fact; never write two questions that test "
-        "the same fact or concept, even if reworded. single_choice uses four options and one answer; "
-        "true_false uses exactly True/False and one answer; multi_select uses four options, two or more answers, and at least one incorrect option. "
-        f"{type_instruction}"
-        "Question <=18 words, each option <=10 words, explanation <=16 words. No markdown or extra fields.\n"
-        f"{difficulty_contracts[difficulty]}{repair_line}EVIDENCE:\n{evidence}"
-    )
-
-
-def _validate_v3_candidate(
-    raw: dict,
-    groups_by_id: dict[str, dict],
-    accepted_stems: list[str],
-    accepted_signatures: list[frozenset[str]],
-    difficulty: str,
-    question_id: int,
-    topic: dict,
-    assessment_capacity: int,
-    required_question_type: str | None = None,
-) -> tuple[dict, list[str], frozenset[str]]:
-    """Quiz Generation V3 candidate validation: no Question Blueprint, no slot allocation, and no
-    "already used this slot" rejection -- a context group may contribute any number of accepted
-    candidates. Provenance (source_chunk_ids, concept identity) is still assigned entirely from
-    the backend's own group record, never from the model's raw JSON; only the group_id itself
-    (which evidence the question is based on) comes from the model.
-
-    Structural/grounding/near-duplicate checks mirror _validate_v2_question. This adds:
-    required_question_type enforcement (the system's configured question-type contract -- e.g.
-    single_choice-only for a document-scope quiz -- is never silently overridden by the model),
-    a content/topic-overlap duplicate check beyond exact-stem matching
-    (_is_v3_content_duplicate), and an ambiguous-option containment check
-    (_has_ambiguous_option_containment, e.g. "clock" vs "clock interrupt").
-    """
-    if not isinstance(raw, dict):
-        raise ValueError("Question must be a JSON object.")
-    stem = _clean_inline_text(raw.get("question", ""))
-    _reject_unsafe_final_text(stem, field="Question")
-    if len(stem.split()) < 4 or any(re.search(pattern, stem.lower()) for pattern in GENERIC_QUESTION_PATTERNS):
-        raise ValueError("Question stem is empty, generic, or unusable.")
-    candidate_key = _normalize_question_key(stem)
-    if any(candidate_key == _normalize_question_key(existing) for existing in accepted_stems):
-        raise ValueError("Question duplicates an accepted question.")
-    near_duplicate_stem = any(
-        difflib.SequenceMatcher(None, candidate_key, _normalize_question_key(existing)).ratio() >= 0.94
-        for existing in accepted_stems
-    )
-
-    question_type = str(raw.get("question_type") or "single_choice").strip().lower()
-    if question_type not in {"single_choice", "true_false", "multi_select"}:
-        raise ValueError("Question has an unsupported question_type.")
-    if required_question_type and question_type != required_question_type:
-        raise ValueError(
-            f"Question uses question_type={question_type!r} but this Quiz is configured for "
-            f"{required_question_type!r} only."
-        )
-    if question_type == "true_false":
-        stripped_stem = stem.strip()
-        if stripped_stem.endswith("?") or _TRUE_FALSE_INTERROGATIVE_START.match(stripped_stem):
-            raise ValueError(
-                "true_false question must be a declarative statement, not an interrogative one."
-            )
-    raw_options = raw.get("options")
-    required_option_count = 2 if question_type == "true_false" else 4
-    if not isinstance(raw_options, list) or len(raw_options) != required_option_count:
-        raise ValueError(f"{question_type} question must contain exactly {required_option_count} options.")
-    option_bodies = [strip_leading_option_label(_clean_inline_text(option)) for option in raw_options]
-    true_false_label_normalized = False
-    if question_type == "true_false":
-        normalized_labels = [_normalize_true_false_label(option) for option in option_bodies]
-        true_false_label_normalized = normalized_labels != option_bodies
-        option_bodies = normalized_labels
-    for option in option_bodies:
-        _reject_unsafe_final_text(option, field="Option")
-    if len({option.lower() for option in option_bodies}) != len(option_bodies):
-        raise ValueError("Question options must be distinct.")
-    normalized_options = [_normalize_question_key(option) for option in option_bodies]
-    near_duplicate_options = any(
-        difflib.SequenceMatcher(None, normalized_options[left], normalized_options[right]).ratio() >= 0.94
-        for left in range(len(option_bodies)) for right in range(left + 1, len(option_bodies))
-    )
-    if question_type != "true_false" and _has_ambiguous_option_containment(option_bodies):
-        raise ValueError("Options are ambiguous: one option's wording is entirely contained within another's.")
-
-    raw_answers = raw.get("correct_answers")
-    if raw_answers is None:
-        raw_answers = [raw.get("correct_answer")]
-    if not isinstance(raw_answers, list):
-        raise ValueError("correct_answers must be a list.")
-    answer_indices = []
-    for answer in raw_answers:
-        if isinstance(answer, bool) or not isinstance(answer, int) or answer not in range(len(option_bodies)):
-            raise ValueError("correct_answers contains an invalid option index.")
-        if answer not in answer_indices:
-            answer_indices.append(answer)
-    # Sorted so correct_answers is always in ascending option order and correct_answer (the
-    # single-value compatibility field) is always exactly correct_answers[0] -- never a stray
-    # value out of sync with the authoritative list (see the multi_select consistency fix).
-    answer_indices.sort()
-    if question_type in {"single_choice", "true_false"} and len(answer_indices) != 1:
-        raise ValueError(f"{question_type} requires exactly one correct answer.")
-    if question_type == "multi_select" and (len(answer_indices) < 2 or len(answer_indices) >= len(option_bodies)):
-        raise ValueError("multi_select requires at least two correct and one incorrect option.")
-    if question_type == "true_false" and {option.lower() for option in option_bodies} != {"true", "false"}:
-        raise ValueError("true_false options must be True and False.")
-    answer_index = answer_indices[0]
-    group_id = str(raw.get("group_id") or raw.get("slot_id") or "").strip()
-    if group_id not in groups_by_id:
-        raise ValueError("Question has an unknown group_id.")
-    group = groups_by_id[group_id]
-    concept_id = group["group_id"]
-    source_ids = list(group["source_chunk_ids"])
-    explanation = _clean_inline_text(raw.get("explanation", ""))
-    _reject_unsafe_final_text(explanation, field="Explanation")
-
-    _semantic_check_started = time.perf_counter()
-    concept_overlap, evidence_overlap = _concept_grounding_overlap(
-        stem, option_bodies, answer_index, explanation, group,
-    )
-    quiz_diagnostics.get_current().add_stage_ms(
-        "semantic_validation_ms", (time.perf_counter() - _semantic_check_started) * 1000
-    )
-    if concept_overlap == 0.0 and evidence_overlap == 0.0:
-        raise ValueError("Question does not appear to test the assigned group's evidence.")
-
-    content_signature = _v3_content_signature(stem, option_bodies[answer_index])
-    if _is_v3_content_duplicate(content_signature, accepted_signatures):
-        raise ValueError("Question tests essentially the same fact or concept as an accepted question.")
-
-    warnings = []
-    best_grounding_overlap = max(
-        (value for value in (concept_overlap, evidence_overlap) if value is not None),
-        default=None,
-    )
-    if best_grounding_overlap is not None and best_grounding_overlap < 0.12:
-        warnings.append("uncertain_concept_grounding")
-    if near_duplicate_stem:
-        warnings.append("near_duplicate_question")
-    if near_duplicate_options:
-        warnings.append("near_duplicate_options")
-    if any(not option for option in option_bodies):
-        warnings.append("empty_option")
-    if true_false_label_normalized:
-        warnings.append("true_false_label_normalized")
-    if difficulty == "easy":
-        warnings.extend(_validate_easy_v2_quality(
-            stem, option_bodies, answer_index, explanation, str(group.get("evidence_excerpt") or ""),
-            question_type,
-        ))
-    if len(explanation.split()) < 4:
-        warnings.append("explanation_quality")
-    if len(stem.split()) < 6:
-        warnings.append("meaningful_concept_quality")
-    try:
-        _validate_difficulty_quality(stem, difficulty)
-    except ValueError:
-        warnings.append("difficulty_mismatch")
-    for option in option_bodies:
-        lowered = option.lower()
-        if (
-            any(re.search(pattern, lowered) for pattern in GENERIC_OPTION_PATTERNS)
-            or lowered in {"all of the above", "none of the above", "cannot be determined"}
-            or _looks_like_raw_chunk(option)
-        ):
-            warnings.append("mediocre_distractors")
-            break
-
-    authoritative_topic_id = str(topic["topic_id"])
-    authoritative_topic_name = str(topic.get("name") or authoritative_topic_id)
-    normalized = {
-        "id": question_id,
-        "question": stem,
-        "options": [canonicalize_option(option, "ABCD"[index]) for index, option in enumerate(option_bodies)],
-        "correct_answer": "ABCD"[answer_index],
-        "question_type": question_type,
-        "correct_answers": ["ABCD"[index] for index in answer_indices],
-        "topic_id": authoritative_topic_id,
-        "topic_name": authoritative_topic_name,
-        "concept_id": concept_id,
-        "concept_name": group["name"],
-        "source_subtopic_ids": [],
-        "concept_origin": "context_group",
-        "concept_plan_id": QUIZ_V3_ENGINE_VERSION,
-        "assessment_capacity": assessment_capacity,
-        "difficulty": difficulty,
-        "explanation": explanation,
-        "source_chunk_ids": source_ids,
-        "validation_outcome": "accepted_quality_warning" if warnings else "accepted",
-    }
-    return normalized, sorted(set(warnings)), content_signature
-
-
 def _generate_topic_quiz_v2(
     document: dict,
     topic: dict,
@@ -2336,7 +1976,33 @@ def _generate_topic_quiz_v2(
     return saved
 
 
-def _generate_quiz_v3(
+def _generate_with_deadline(llm, prompt: str, deadline_s: float) -> tuple[str, dict, bool]:
+    """Stream the model's answer, stopping at a wall-clock deadline.
+
+    Returns (text, response_metadata, cut). When the deadline is reached the text written so far
+    is kept -- parse_candidates salvages every complete question in it -- so a slow GPU costs some
+    candidates instead of the whole request (and never outlives the reverse proxy's time limit).
+    """
+    started = time.perf_counter()
+    parts: list[str] = []
+    metadata: dict = {}
+    cut = False
+    stream = llm.stream(prompt)
+    try:
+        for chunk in stream:
+            parts.append(str(getattr(chunk, "content", "") or ""))
+            metadata.update(getattr(chunk, "response_metadata", None) or {})
+            if time.perf_counter() - started > deadline_s:
+                cut = True
+                break
+    finally:
+        close = getattr(stream, "close", None)
+        if close:
+            close()
+    return "".join(parts), metadata, cut
+
+
+def _generate_quiz_from_units(
     document: dict,
     scope: str,
     scope_topic_id: str,
@@ -2346,42 +2012,25 @@ def _generate_quiz_v3(
     owner_id: str,
     model_id: str,
     regenerate: bool,
-    question_count: int = 10,
+    question_count: int = 12,
     quiz_title: str | None = None,
     retrieval_ms: int = 0,
 ) -> dict:
-    """Quiz Generation V3: the live generation path with the Planner AND the Question Blueprint
-    / slot allocation both bypassed entirely.
+    """Live Quiz generation: one simple pipeline for ANY document.
 
-    Document/topic coverage comes from deterministic context grouping
-    (_select_v3_context_groups) over the same chunk retrieval V2 already used
-    (get_schema_topic_evidence / get_document_chunks, both unchanged) -- no concept extraction,
-    no extra LLM call for planning. One shared engine serves both "topic" and "document"
-    assessment_scope: the only difference is which chunks are passed in.
+        chunks -> excerpts -> context that fits a fixed budget
+        -> ONE call writing a surplus of candidates (12 -> 15, 15 -> 18, 18 -> 22, 20 -> 24)
+        -> validation (4 options / 1 answer, grounding in the context, no duplicates)
+        -> best `question_count` candidates -> quiz
 
-    Unlike V2 (and V3's own first iteration), the model is never told to map exactly one
-    question to one pre-allocated slot: it is simply asked for `count` questions drawn from
-    whichever context group(s) it chooses, tagging each with the group_id its evidence came
-    from (_build_v3_prompt/_validate_v3_candidate). A context group may contribute any number of
-    accepted candidates -- there is no "this slot was already used" rejection. Provenance
-    (source_chunk_ids, concept identity) is still assigned entirely by the backend from its own
-    group record, never trusted from the model's JSON.
-
-    question_type is controlled by the system, not left to the model: a document-scope quiz is
-    pinned to single_choice only (the same contract _run_document_single_choice_quiz enforced
-    before Planner removal); a topic-scope quiz keeps the existing mixed-type design.
-
-    Everything else keeps the V2 candidate-pool architecture: an initial call over-generates a
-    buffered pool (_v2_candidate_pool_target), every candidate is validated (structural,
-    grounding, exact/near-duplicate, and a lightweight content/topic-overlap duplicate check),
-    bounded targeted repair/fill only chase the gap to question_count (never the buffer, plus a
-    small configurable buffer of its own), and the best N are selected by quality + coverage
-    (_select_best_v2_candidates) rather than the first N. A pool below question_count is
-    persisted as a partial quiz; only an empty pool fails the request closed.
-
-    See _generate_topic_quiz_v2 for the Planner-based V2 engine this replaces on the live path.
-    V2 (and backend/assessment_planner.py) is left fully intact and directly callable so V2 and
-    V3 can be compared side by side.
+    `question_count` is a target, not a condition of success: the quiz holds
+    min(valid candidates, question_count) questions and is "partial" when it is short. Only when
+    there is not a single valid candidate does generation fail. If the first call is short,
+    exactly ONE top-up call writes just the missing questions (on excerpts the first call did not
+    see when there are any). There is never a third call: no Planner, topics, slots, coverage
+    requirement or repair/fill loops, and no rule is relaxed and nothing invented to reach the
+    target. Provenance (excerpt and source_chunk_ids) is derived by the backend from where the
+    model's evidence_quote is really found in the context it was given.
     """
     diag = quiz_diagnostics.get_current()
     total_started = time.perf_counter()
@@ -2389,168 +2038,128 @@ def _generate_quiz_v3(
     llm_calls = 0
     generation_run_id = str(uuid4())
     scope_topic = {"topic_id": scope_topic_id, "name": scope_topic_name}
-    # The system, not the model, controls question type: document-scope quizzes are single_choice
-    # only (the pre-Planner-removal contract _run_document_single_choice_quiz enforced); topic
-    # scope keeps its existing mixed-type design. This is never silently overridden by the model.
-    required_question_type = "single_choice" if scope == "document" else None
+    scope_label = scope_topic_name if scope == "topic" else str(document.get("title") or document["id"])
 
     stage_started = time.perf_counter()
     diag.record_retrieved_chunks(chunks)
-    context_groups = _select_v3_context_groups(chunks)
+    units = build_study_units(chunks)
     timings["context_grouping_ms"] = round((time.perf_counter() - stage_started) * 1000)
-    timings["context_group_count"] = len(context_groups)
-    if not context_groups:
+    timings["context_group_count"] = len(units)
+    if not units:
         raise QuizGenerationError(
             "No usable document context was found for a grounded quiz.",
             stage="context_grouping",
             target_questions=question_count,
         )
+    units_by_id = {unit["unit_id"]: unit for unit in units}
+    pool_target = candidate_target(question_count)
 
-    groups_by_id = {group["group_id"]: group for group in context_groups}
-    candidate_pool_target = _v2_candidate_pool_target(question_count)
     accepted: list[dict] = []
-    accepted_stems: list[str] = []
-    accepted_signatures: list[frozenset[str]] = []
+    shown_ids: set[str] = set()
     validation_results = {
         "accepted": 0, "accepted_with_warnings": 0, "rejected": 0,
         "hard_rejections": 0, "quality_warnings": 0, "reasons": [],
-        # duplicate/grounding/structural classify per-candidate validation rejections;
-        # response_failures counts candidate requests lost to a whole-call failure (exception,
-        # timeout, malformed response) -- those were never individual candidates to classify.
         # rejected == duplicate_rejections + grounding_rejections + structural_rejections
-        #           + response_failures (see the two increment sites below).
+        #           + response_failures (a whole-call failure is not a per-candidate outcome).
         "duplicate_rejections": 0, "grounding_rejections": 0, "structural_rejections": 0,
         "response_failures": 0,
     }
-    generation_ms = 0
-    validation_ms = 0
-    repair_ms = 0
-    model_load_ms = 0
-    prompt_eval_ms = 0
-    token_generation_ms = 0
-    model_invocation_ms = 0
-    initial_generation_ms = 0
-    repair_generation_ms = 0
-    fill_generation_ms = 0
-    candidates_requested_total = 0
-    candidates_returned_total = 0
+    generation_ms = validation_ms = model_load_ms = prompt_eval_ms = 0
+    token_generation_ms = model_invocation_ms = initial_generation_ms = topup_generation_ms = 0
+    candidates_requested_total = candidates_returned_total = 0
+    candidate_counter = 0
+    retry_log: list[dict] = []
+    topup_calls = 0
 
-    # One initial batch, up to two targeted repairs, then up to two bounded fills -- identical
-    # bounds to V2 (see _generate_topic_quiz_v2). Every round offers the model the SAME full set
-    # of context groups -- there is no per-group slot to expose or exhaust; only the requested
-    # count and the "avoid these" list change between rounds. Diversity/coverage across groups is
-    # enforced by validation (content-overlap duplicate rejection) and by selection
-    # (_select_best_v2_candidates), not by restricting which evidence a round may see.
-    generation_phases = ["initial", "repair", "repair", "fill", "fill"]
-    repair_attempt_count = 0
-    fill_attempt_count = 0
-    final_fill_llm_calls = 0
-    retry_log = []
-    for attempt_index, phase in enumerate(generation_phases):
-        call_started = time.perf_counter()
-        # The initial call chases the buffered pool target (over-generate for selection).
-        # Repair/fill only chase the base requested count -- they never chase the buffer.
-        phase_target = candidate_pool_target if phase == "initial" else question_count
-        missing = phase_target - len(accepted)
-        if missing <= 0:
-            break
-        # Bounded repair/fill ask for the actual gap plus a small buffer (not the original
-        # requested_count, and not the pool buffer) so one round is more likely to close the gap
-        # outright.
-        requested_count_for_call = missing if phase == "initial" else missing + QUIZ_V3_FILL_BUFFER
-        if phase != "initial":
-            retry_attempt = repair_attempt_count + 1 if phase == "repair" else fill_attempt_count + 1
-            retry_state = {"phase": phase, "attempt": retry_attempt, "missing": missing}
+    for attempt_index, phase in enumerate(("initial", "topup")):
+        if phase == "initial":
+            requested = pool_target
+            shown_units = select_context_units(units, context_budget(requested))
+            avoid_stems = None
+        else:
+            missing = question_count - len(accepted)
+            if missing <= 0:
+                break
+            remaining_s = QUIZ_TOTAL_DEADLINE_S - (time.perf_counter() - total_started)
+            if remaining_s < QUIZ_MIN_TOPUP_S:
+                print(f"[quiz-units-topup] skipped: only {remaining_s:.0f}s of the time budget left")
+                validation_results["reasons"].append("top-up skipped: time budget used up")
+                break
+            requested = topup_request(missing)
+            budget = context_budget(requested)
+            # Prefer excerpts the first call never saw; if there are none, look at the same
+            # material again (the avoid-list keeps the new questions different).
+            shown_units = select_context_units(units, budget, exclude_ids=shown_ids) or select_context_units(units, budget)
+            avoid_stems = [question["question"] for question in accepted]
+            topup_calls += 1
+            retry_state = {
+                "phase": phase, "missing": missing, "requested": requested,
+                "units": [unit["unit_id"] for unit in shown_units],
+            }
             retry_log.append(retry_state)
-            print(f"[quiz-v3-retry] {json.dumps(retry_state)}")
+            print(f"[quiz-units-topup] {json.dumps(retry_state)}")
             diag.record_retry(
-                concept_id="pool", original_attempt=1, retry_attempt=retry_attempt,
-                reason=f"pool has {len(accepted)}/{question_count} valid candidates after {phase} window",
+                concept_id="pool", original_attempt=1, retry_attempt=1,
+                reason=f"{len(accepted)}/{question_count} valid questions after the first call",
                 stage="validation",
             )
-        if phase == "repair":
-            repair_attempt_count += 1
-        elif phase == "fill":
-            fill_attempt_count += 1
-        prompt = _build_v3_prompt(
-            document["id"], scope_topic, difficulty, context_groups, requested_count_for_call,
-            accepted_stems, phase != "initial", required_question_type,
-        )
+        shown_ids.update(unit["unit_id"] for unit in shown_units)
+        deadline_s = QUIZ_FIRST_CALL_DEADLINE_S if phase == "initial" else remaining_s
+        # Grounding is judged against everything the model has been shown so far.
+        context_units = [unit for unit in units if unit["unit_id"] in shown_ids]
+        prompt = build_generation_prompt(scope_label, difficulty, shown_units, requested, avoid_stems)
+        unit_ids = ",".join(unit["unit_id"] for unit in shown_units)[:120]
         diag.record_context(
-            stage="repair" if phase != "initial" else "generator",
-            num_chunks=len(context_groups),
-            total_chars=sum(len(str(group.get("evidence_excerpt") or "")) for group in context_groups),
+            stage="generator" if phase == "initial" else "repair",
+            num_chunks=len(shown_units),
+            total_chars=sum(unit["char_count"] for unit in shown_units),
             prompt=prompt,
-            concept_id=",".join(sorted(groups_by_id))[:120],
+            concept_id=unit_ids,
         )
         stage_started = time.perf_counter()
         llm_calls += 1
-        candidates_requested_total += requested_count_for_call
-        if phase == "fill":
-            final_fill_llm_calls += 1
-        output_schema = {
-            "type": "object",
-            "properties": {
-                "questions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "question": {"type": "string"},
-                            "question_type": {"type": "string", "enum": ["single_choice", "true_false", "multi_select"]},
-                            "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 4},
-                            "group_id": {"type": "string"},
-                            "correct_answer": {"type": "integer", "minimum": 0, "maximum": 3},
-                            "correct_answers": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 3}},
-                            "explanation": {"type": "string"},
-                        },
-                        "required": ["group_id", "question_type", "question", "options", "correct_answers", "explanation"],
-                    },
-                }
-            },
-            "required": ["questions"],
-        }
+        candidates_requested_total += requested
+        # One fixed context window for both calls so Ollama never reloads the model between them;
+        # the evidence per call is bounded by context_budget whatever the document size.
         llm = ChatOllama(
             model=model_id,
             reasoning=False,
             temperature=0.1 if phase == "initial" else 0.25,
-            format=output_schema,
-            num_ctx=16384 if requested_count_for_call > 15 else 8192,
-            num_predict=min(4800, max(520, requested_count_for_call * 150)),
+            format=QUIZ_OUTPUT_SCHEMA,
+            num_ctx=QUIZ_NUM_CTX,
+            num_predict=min(QUIZ_MAX_NEW_TOKENS, max(600, requested * QUIZ_TOKENS_PER_QUESTION)),
             keep_alive=QUIZ_GENERATION_KEEP_ALIVE,
-            client_kwargs={"timeout": 270},
+            client_kwargs={"timeout": min(QUIZ_LLM_TIMEOUT_S, max(30, deadline_s))},
         )
         print(
-            f"[quiz-v3-llm] attempt={attempt_index + 1}, phase={phase}, model={model_id}, "
-            f"requested={requested_count_for_call}, context_group_count={len(context_groups)}"
+            f"[quiz-units-llm] attempt={attempt_index + 1}, phase={phase}, model={model_id}, "
+            f"requested={requested}, excerpts={len(shown_units)}, prompt_chars={len(prompt)}"
         )
         invocation_started = time.perf_counter()
         call_invocation_ms = 0
         try:
-            response = llm.invoke(prompt)
+            response_text, metadata, cut = _generate_with_deadline(llm, prompt, deadline_s)
             call_invocation_ms = round((time.perf_counter() - invocation_started) * 1000)
-            metadata = getattr(response, "response_metadata", {}) or {}
+            if cut:
+                validation_results["reasons"].append("response: time limit reached; kept the complete questions written so far")
+                timings["deadline_hit"] = True
             call_model_load_ms = round(float(metadata.get("load_duration") or 0) / 1_000_000)
             call_prompt_eval_ms = round(float(metadata.get("prompt_eval_duration") or 0) / 1_000_000)
             call_token_generation_ms = round(float(metadata.get("eval_duration") or 0) / 1_000_000)
             model_load_ms += call_model_load_ms
             prompt_eval_ms += call_prompt_eval_ms
             token_generation_ms += call_token_generation_ms
-            data = _extract_json(str(response.content))
-            candidates = data.get("questions") if isinstance(data, dict) else None
-            if not isinstance(candidates, list):
-                raise ValueError("Quiz JSON does not contain a questions list.")
+            candidates = parse_candidates(response_text)
             candidates_returned_total += len(candidates)
             print(
-                f"[quiz-v3-ollama] attempt={attempt_index + 1}, returned={len(candidates)}, "
+                f"[quiz-units-ollama] attempt={attempt_index + 1}, returned={len(candidates)}, "
                 f"model_load_ms={call_model_load_ms}, prompt_eval_ms={call_prompt_eval_ms}, "
                 f"token_generation_ms={call_token_generation_ms}, "
                 f"prompt_tokens={metadata.get('prompt_eval_count', 0)}, generated_tokens={metadata.get('eval_count', 0)}"
             )
             diag.record_llm_call(
                 stage="generator" if phase == "initial" else "repair", model=model_id,
-                elapsed_ms=call_invocation_ms, success=True,
-                concept_id=",".join(sorted(groups_by_id))[:120],
+                elapsed_ms=call_invocation_ms, success=True, concept_id=unit_ids,
                 attempt=attempt_index + 1,
                 input_tokens=int(metadata["prompt_eval_count"]) if "prompt_eval_count" in metadata else None,
                 output_tokens=int(metadata["eval_count"]) if "eval_count" in metadata else None,
@@ -2558,18 +2167,12 @@ def _generate_quiz_v3(
         except Exception as error:
             call_invocation_ms = call_invocation_ms or round((time.perf_counter() - invocation_started) * 1000)
             candidates = []
-            # A whole-response failure (exception, timeout, malformed JSON) never produced
-            # individual candidates to classify -- count it separately from
-            # duplicate/grounding/structural so those three still describe only genuine
-            # per-candidate validation outcomes.
-            validation_results["rejected"] += requested_count_for_call
-            validation_results["response_failures"] += requested_count_for_call
-            reason = f"response: {error}"
-            validation_results["reasons"].append(reason)
+            validation_results["rejected"] += requested
+            validation_results["response_failures"] += requested
+            validation_results["reasons"].append(f"response: {error}")
             diag.record_llm_call(
                 stage="generator" if phase == "initial" else "repair", model=model_id,
-                elapsed_ms=call_invocation_ms, success=False,
-                concept_id=",".join(sorted(groups_by_id))[:120],
+                elapsed_ms=call_invocation_ms, success=False, concept_id=unit_ids,
                 attempt=attempt_index + 1, exception_type=type(error).__name__, reason=str(error)[:200],
             )
         elapsed = round((time.perf_counter() - stage_started) * 1000)
@@ -2577,63 +2180,55 @@ def _generate_quiz_v3(
         model_invocation_ms += call_invocation_ms
         if phase == "initial":
             initial_generation_ms += elapsed
-        elif phase == "repair":
-            repair_generation_ms += elapsed
         else:
-            fill_generation_ms += elapsed
+            topup_generation_ms += elapsed
 
         validation_started = time.perf_counter()
         for raw in candidates:
-            if len(accepted) >= phase_target:
-                break
+            candidate_counter += 1
             try:
-                normalized, warnings, signature = _validate_v3_candidate(
-                    raw, groups_by_id, accepted_stems, accepted_signatures, difficulty,
-                    len(accepted) + 1, scope_topic, len(context_groups), required_question_type,
+                normalized, warnings = validate_candidate(
+                    raw, context_units, accepted, difficulty, len(accepted) + 1, scope_topic, candidate_counter,
                 )
-                accepted.append(normalized)
-                accepted_stems.append(normalized["question"])
-                accepted_signatures.append(signature)
-                key = "accepted_with_warnings" if warnings else "accepted"
-                validation_results[key] += 1
-                validation_results["quality_warnings"] += len(warnings)
-                save_quiz_validation_event({
-                    "generation_run_id": generation_run_id,
-                    "owner_id": owner_id,
-                    "document_id": document["id"],
-                    "document_hash": document.get("hash", ""),
-                    "topic_id": scope_topic_id,
-                    "topic_schema_version": int(document.get("topic_schema_version", 0)),
-                    "difficulty": difficulty,
-                    "batch_index": 1,
-                    "generation_attempt": attempt_index + 1,
-                    "candidate_index": len(accepted),
-                    "generator_model": model_id,
-                    "generation_prompt_version": QUIZ_V2_PROMPT_VERSION,
-                    "validator_model": "deterministic-v3",
-                    "validator_prompt_version": "no-planner-v3",
-                    "candidate_question": normalized,
-                    "cited_chunk_ids": normalized["source_chunk_ids"],
-                    "evidence_chunk_ids": normalized["source_chunk_ids"],
-                    "hard_passed": True,
-                    "quality_passed": not warnings,
-                    "accepted": True,
-                    "outcome": normalized["validation_outcome"],
-                    "verdict": {"mode": "deterministic", "warnings": warnings},
-                    "rejection_reasons": warnings,
-                    "latency_ms": 0,
-                })
-            except Exception as error:
-                reason = str(error)
+            except (ValueError, TypeError, KeyError, AttributeError) as error:
+                category = getattr(error, "category", "structure")
                 validation_results["rejected"] += 1
                 validation_results["hard_rejections"] += 1
-                validation_results["reasons"].append(reason)
-                category = _classify_v3_rejection(reason)
-                validation_results[f"{category}_rejections"] += 1
-                print(f"[quiz-v3-validation] discarded candidate ({category}): {error}")
+                validation_results["reasons"].append(str(error))
+                bucket = category if category in {"duplicate", "grounding"} else "structural"
+                validation_results[f"{bucket}_rejections"] += 1
+                print(f"[quiz-units-validation] discarded candidate ({bucket}): {error}")
+                continue
+            accepted.append(normalized)
+            validation_results["accepted_with_warnings" if warnings else "accepted"] += 1
+            validation_results["quality_warnings"] += len(warnings)
+            save_quiz_validation_event({
+                "generation_run_id": generation_run_id,
+                "owner_id": owner_id,
+                "document_id": document["id"],
+                "document_hash": document.get("hash", ""),
+                "topic_id": scope_topic_id,
+                "topic_schema_version": int(document.get("topic_schema_version", 0)),
+                "difficulty": difficulty,
+                "batch_index": 1,
+                "generation_attempt": attempt_index + 1,
+                "candidate_index": len(accepted),
+                "generator_model": model_id,
+                "generation_prompt_version": QUIZ_PROMPT_VERSION,
+                "validator_model": "deterministic-context-grounding",
+                "validator_prompt_version": QUIZ_ENGINE_VERSION,
+                "candidate_question": {key: value for key, value in normalized.items() if key != "_meta"},
+                "cited_chunk_ids": normalized["source_chunk_ids"],
+                "evidence_chunk_ids": normalized["source_chunk_ids"],
+                "hard_passed": True,
+                "quality_passed": not warnings,
+                "accepted": True,
+                "outcome": normalized["validation_outcome"],
+                "verdict": {"mode": "deterministic", "warnings": warnings},
+                "rejection_reasons": warnings,
+                "latency_ms": 0,
+            })
         validation_ms += round((time.perf_counter() - validation_started) * 1000)
-        if phase != "initial":
-            repair_ms += round((time.perf_counter() - call_started) * 1000)
 
     timings["generation_ms"] = generation_ms
     timings["model_load_ms"] = model_load_ms
@@ -2641,25 +2236,20 @@ def _generate_quiz_v3(
     timings["token_generation_ms"] = token_generation_ms
     timings["model_invocation_ms"] = model_invocation_ms
     timings["initial_generation_ms"] = initial_generation_ms
-    timings["repair_generation_ms"] = repair_generation_ms
-    timings["fill_generation_ms"] = fill_generation_ms
+    timings["repair_generation_ms"] = topup_generation_ms
+    timings["fill_generation_ms"] = 0
     timings["validation_ms"] = validation_ms
-    timings["repair_ms"] = repair_ms
-    timings["repair_llm_calls"] = repair_attempt_count + fill_attempt_count
-    timings["repair_attempt_count"] = repair_attempt_count
-    timings["fill_attempt_count"] = fill_attempt_count
+    timings["repair_ms"] = topup_generation_ms
+    timings["repair_llm_calls"] = topup_calls
+    timings["repair_attempt_count"] = 0
+    timings["fill_attempt_count"] = topup_calls
     timings["missing_slots_before_each_retry"] = retry_log
-    timings["final_fill_llm_calls"] = final_fill_llm_calls
-    # Quiz Generation V3 has no deterministic/fabricated fallback either -- kept only so any
-    # shared consumer of this timings shape (e.g. quiz_diagnostics) never has to special-case V2
-    # vs V3.
+    timings["final_fill_llm_calls"] = topup_calls
     timings["deterministic_fallback_count"] = 0
     timings["candidate_pool_size"] = len(accepted)  # valid candidates, pre-selection
-    timings["desired_candidate_count"] = candidate_pool_target
+    timings["desired_candidate_count"] = pool_target
     timings["candidates_requested_total"] = candidates_requested_total
     timings["candidates_returned_total"] = candidates_returned_total
-    # rejected_candidates == duplicate_candidates + grounding_rejected_candidates
-    #                       + structural_rejected_candidates + response_failures
     timings["rejected_candidates"] = validation_results["rejected"]
     timings["duplicate_candidates"] = validation_results["duplicate_rejections"]
     timings["grounding_rejected_candidates"] = validation_results["grounding_rejections"]
@@ -2667,11 +2257,11 @@ def _generate_quiz_v3(
     timings["response_failures"] = validation_results["response_failures"]
     timings["total_quiz_generation_ms"] = round((time.perf_counter() - total_started) * 1000)
 
-    candidate_pool = accepted
-    if not candidate_pool:
+    # The ONLY failure: not a single valid question.
+    if not accepted:
         timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
         timings["total_request_ms"] = timings["total_ms"]
-        print(f"[quiz-v3-timing] {json.dumps({**timings, 'llm_calls': llm_calls})}")
+        print(f"[quiz-units-timing] {json.dumps({**timings, 'llm_calls': llm_calls})}")
         diag.absorb_pipeline_timings({**timings, "llm_calls": llm_calls})
         summary = list(dict.fromkeys(validation_results["reasons"]))[-10:]
         if not summary:
@@ -2684,21 +2274,14 @@ def _generate_quiz_v3(
             failure_summary=summary,
         )
 
-    # Selection: pick the best `question_count` from the (possibly over-generated) pool rather
-    # than simply taking the first N. If the pool did not reach the requested count even after
-    # bounded repair/fill, every valid candidate is kept and the quiz is persisted as partial.
-    selected = _select_best_v2_candidates(candidate_pool, question_count)
-    for renumbered_id, question in enumerate(selected, start=1):
-        question["id"] = renumbered_id
+    # final_count = min(valid candidates, requested_count). Short is "partial", never a failure.
+    selected, question_evidence = finalize_questions(select_questions(accepted, question_count))
     actual_count = len(selected)
     missing_count = max(0, question_count - actual_count)
     status = "complete" if actual_count >= question_count else "partial"
-    partial = status == "partial"
+    shown_chars = sum(units_by_id[uid]["char_count"] for uid in shown_ids)
+    document_chars = sum(unit["char_count"] for unit in units)
     timings["selected_count"] = actual_count
-    type_distribution: dict[str, int] = {}
-    for question in selected:
-        question_type = str(question.get("question_type") or "single_choice")
-        type_distribution[question_type] = type_distribution.get(question_type, 0) + 1
 
     quiz = {
         "quiz_id": str(uuid4()),
@@ -2710,14 +2293,16 @@ def _generate_quiz_v3(
         "topic_name": scope_topic_name,
         "assessment_scope": scope,
         "assessment_plan": {
-            "planner_version": QUIZ_V3_ENGINE_VERSION,
-            "generation_engine": "v3_context_groups",
+            "planner_version": QUIZ_ENGINE_VERSION,
+            "generation_engine": "context_candidates",
             "scope": scope,
-            "context_group_count": len(context_groups),
-            "context_groups": [
-                {key: group[key] for key in ("group_id", "name", "source_chunk_ids")}
-                for group in context_groups
-            ],
+            "context_group_count": len(shown_ids),
+            "study_units": [public_unit(units_by_id[uid]) for uid in sorted(shown_ids, key=lambda uid: units_by_id[uid]["index"])],
+            "context": {
+                "excerpts_total": len(units), "excerpts_shown": len(shown_ids),
+                "chars_total": document_chars, "chars_shown": shown_chars,
+                "share_of_document_shown": round(shown_chars / document_chars, 3) if document_chars else 0.0,
+            },
             "excluded_topic_ids": [],
             "target_questions": question_count,
             "total_questions": actual_count,
@@ -2725,11 +2310,12 @@ def _generate_quiz_v3(
             "requested_count": question_count,
             "actual_count": actual_count,
             "missing_count": missing_count,
-            "candidate_pool_size": len(candidate_pool),
-            "partial": partial,
-            "type_distribution": type_distribution,
+            "candidate_pool_size": len(accepted),
+            "partial": status == "partial",
+            "type_distribution": {"single_choice": actual_count},
             "generation_warnings": validation_results["reasons"],
             "validation_results": validation_results,
+            "question_evidence": question_evidence,
             "llm_calls": llm_calls,
         },
         "topic_schema_version": int(document.get("topic_schema_version", 0)),
@@ -2745,7 +2331,7 @@ def _generate_quiz_v3(
     timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
     timings["total_request_ms"] = timings["total_ms"]
     saved["assessment_plan"]["timings_ms"] = timings
-    print(f"[quiz-v3-timing] {json.dumps({**timings, 'llm_calls': llm_calls, 'questions': actual_count})}")
+    print(f"[quiz-units-timing] {json.dumps({**timings, 'llm_calls': llm_calls, 'questions': actual_count})}")
     diag.absorb_pipeline_timings({**timings, "llm_calls": llm_calls})
     return saved
 
@@ -4868,6 +4454,17 @@ def _resolve_quiz_title(quiz_name: str | None, previous_title: str | None, fallb
     return trimmed_previous or fallback
 
 
+def _with_count_fields(quiz: dict, requested: int) -> dict:
+    """Expose requested_count / actual_count / status at the top level of the quiz."""
+    plan = quiz.get("assessment_plan") or {}
+    requested_count = int(plan.get("requested_count") or plan.get("target_questions") or requested)
+    actual_count = len(quiz.get("questions") or [])
+    quiz["requested_count"] = requested_count
+    quiz["actual_count"] = actual_count
+    quiz["status"] = "complete" if actual_count >= requested_count else "partial"
+    return quiz
+
+
 def generate_quiz(
     document_id: str,
     difficulty: str,
@@ -4899,6 +4496,7 @@ def generate_quiz(
                 document_id, difficulty, assessment_scope, topic_id, regenerate,
                 owner_id, model_id, question_count, quiz_name,
             )
+            _with_count_fields(result, question_count)
             questions = result.get("questions") or []
             diag.set_counts(
                 requested_questions=question_count,
@@ -4944,7 +4542,7 @@ def _generate_quiz(
     if assessment_scope not in {"topic", "document"}:
         raise ValueError("assessment_scope must be topic or document.")
     if question_count not in QUIZ_V2_ALLOWED_QUESTION_COUNTS:
-        raise ValueError("question_count must be one of 12 or 15.")
+        raise ValueError("question_count must be one of 12, 15, 18 or 20.")
     topic_lookup = {topic.get("topic_id"): topic for topic in document.get("topics", [])}
     if assessment_scope == "topic" and topic_id not in topic_lookup:
         raise ValueError("topic_id was not found in the selected document.")
@@ -4957,13 +4555,11 @@ def _generate_quiz(
     diag.set_stage_ms("cache_lookup_ms", (time.perf_counter() - cache_lookup_started) * 1000)
 
     if not regenerate:
-        saved_target = int((saved_quiz or {}).get("assessment_plan", {}).get(
-            "target_questions", (saved_quiz or {}).get("question_count", 10)
-        ))
-        saved_planner = str((saved_quiz or {}).get("assessment_plan", {}).get("planner_version") or "legacy")
+        saved_plan = (saved_quiz or {}).get("assessment_plan") or {}
+        saved_planner = str(saved_plan.get("planner_version") or "legacy")
+        saved_requested = int(saved_plan.get("requested_count") or saved_plan.get("target_questions") or 0)
         saved_questions = list((saved_quiz or {}).get("questions") or [])
-        saved_exact = int((saved_quiz or {}).get("question_count", 0)) == question_count == len(saved_questions)
-        if saved_quiz and saved_exact and saved_target == question_count and saved_planner == QUIZ_V3_ENGINE_VERSION:
+        if saved_quiz and saved_questions and saved_requested == question_count and saved_planner == QUIZ_ENGINE_VERSION:
             print(f"[quiz-cache] key={cache_key} HIT")
             diag.set_counts(cache_hit=True, requested_questions=question_count,
                              generated_questions=len(saved_questions), validated_questions=len(saved_questions))
@@ -4981,15 +4577,14 @@ def _generate_quiz(
         quiz_name, (saved_quiz or {}).get("title"), document.get("title", document_id)
     )
 
-    # Quiz Generation V3 (live path): the Planner/concept-extraction/Question-Blueprint step is
-    # bypassed entirely for both scopes. Coverage comes from deterministic context grouping over
-    # the same chunk retrieval V2 already used -- get_schema_topic_evidence for a topic quiz,
-    # get_document_chunks for a whole-document quiz (both unchanged). See _generate_quiz_v3.
+    # Live path ("Study Units", see backend/quiz_units.py): no Planner, concept extraction,
+    # Question Blueprint, slots or repair/fill loops, for both scopes. Retrieval is unchanged --
+    # get_schema_topic_evidence for a topic quiz, get_document_chunks for a whole-document quiz --
+    # and the chunks become excerpts in _generate_quiz_from_units (one call, at most one top-up).
     #
     # The V2 Planner-based engines (_generate_topic_quiz_v2 for topic scope,
     # _run_document_single_choice_quiz + backend/assessment_planner.py for document scope) are
-    # left fully intact and directly callable/testable for comparison; they are simply no longer
-    # invoked from this live dispatch.
+    # left intact and directly callable/testable for comparison; they are not invoked from here.
     retrieval_started = time.perf_counter()
     if assessment_scope == "topic":
         topic = topic_lookup[topic_id]
@@ -5000,7 +4595,7 @@ def _generate_quiz(
         scope_topic_name = "Entire document"
     retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000)
 
-    return _generate_quiz_v3(
+    return _generate_quiz_from_units(
         document=document,
         scope=assessment_scope,
         scope_topic_id=scope_topic_id,

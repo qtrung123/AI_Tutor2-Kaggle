@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from quiz_fixtures import candidates, make_chunks, spread_facts
+
 from backend import assessment_planner, quiz_service, quiz_store
 from backend.assessment_planner import (
     PLANNER_VERSION,
@@ -49,71 +51,24 @@ class _FakeV3Model:
     def __init__(self, **_kwargs):
         pass
 
+    def stream(self, prompt):
+        response = self.invoke(prompt)
+        yield SimpleNamespace(content=response.content, response_metadata=getattr(response, "response_metadata", {}))
+
     def invoke(self, _prompt):
         return SimpleNamespace(content=json.dumps(self.__class__.payloads.pop(0)), response_metadata={})
 
 
-# Every chunk carries the full fact vocabulary so a candidate grounds against any of the 5
-# context groups _v3_chunks(15) produces (QUIZ_V3_MAX_CHUNKS_PER_GROUP=3), regardless of which
-# distinct fact (see _V3_FACT_VARIANTS) it happens to test.
-_V3_SHARED_FACTS = (
-    "Scheduling selects work based on priorities. It balances CPU load across processes. "
-    "It reduces waiting time for short jobs. It considers process priority levels. "
-    "It supports preemption of running tasks. It maintains a ready queue of processes. "
-    "It reorders tasks based on urgency. It accounts for I/O bound and CPU bound jobs. "
-    "It adapts to changing system load. It aims to maximize throughput. "
-    "It aims to minimize response time. It prevents starvation of low priority tasks. "
-    "It supports multiple scheduling classes. It tracks process burst time. "
-    "It can use round robin time slices. It logs scheduling decisions for analysis."
-)
-
-# Sixteen genuinely distinct facts (low mutual content overlap) so a pool of up to 15/16
-# candidates can be built without tripping the content-duplicate check on candidates that are
-# only "different" by an incrementing case number.
-_V3_FACT_VARIANTS = [
-    ("How does scheduling select work based on priorities?", "Scheduling selects work based on priorities"),
-    ("How does scheduling balance CPU load across processes?", "It balances CPU load across processes"),
-    ("How does scheduling reduce waiting time for short jobs?", "It reduces waiting time for short jobs"),
-    ("How does scheduling consider process priority levels?", "It considers process priority levels"),
-    ("How does scheduling support preemption of running tasks?", "It supports preemption of running tasks"),
-    ("How does scheduling maintain a ready queue of processes?", "It maintains a ready queue of processes"),
-    ("How does scheduling reorder tasks based on urgency?", "It reorders tasks based on urgency"),
-    ("How does scheduling account for I/O and CPU bound jobs?", "It accounts for I/O bound and CPU bound jobs"),
-    ("How does scheduling adapt to changing system load?", "It adapts to changing system load"),
-    ("How does scheduling aim to maximize throughput?", "It aims to maximize throughput"),
-    ("How does scheduling aim to minimize response time?", "It aims to minimize response time"),
-    ("How does scheduling prevent starvation of low priority tasks?", "It prevents starvation of low priority tasks"),
-    ("How does scheduling support multiple scheduling classes?", "It supports multiple scheduling classes"),
-    ("How does scheduling track process burst time?", "It tracks process burst time"),
-    ("How does scheduling use round robin time slices?", "It can use round robin time slices"),
-    ("How does scheduling log decisions for analysis?", "It logs scheduling decisions for analysis"),
-]
-
-
 def _v3_chunks(count: int) -> list[dict]:
+    """Ordered document chunks for the live Study Units pipeline (24 distinct facts)."""
     return [
-        chunk(f"chunk_{index}", "", f"Chunk{index}: {_V3_SHARED_FACTS}", "document")
-        for index in range(1, count + 1)
+        chunk(fixture["metadata"]["chunk_id"], "", fixture["content"], "document")
+        for fixture in make_chunks(min(count, 12), facts_per_chunk=2)
     ]
 
 
 def _v3_candidates(count: int) -> list[dict]:
-    questions = []
-    for index in range(count):
-        stem, correct_answer = _V3_FACT_VARIANTS[index % len(_V3_FACT_VARIANTS)]
-        questions.append({
-            "group_id": f"G{(index % 5) + 1}", "question_type": "single_choice",
-            "question": stem,
-            "options": [
-                correct_answer,
-                "An unrelated distractor about something else",
-                "Another distractor about something else",
-                "A third distractor about something else",
-            ],
-            "correct_answers": [0],
-            "explanation": f"{correct_answer}, as the evidence states.",
-        })
-    return questions
+    return candidates(spread_facts(count))
 
 
 def question(quiz_id, plan_id, concept_id="aconcept_one"):
@@ -196,9 +151,9 @@ class TopicV2Phase2Tests(unittest.TestCase):
         self.assertTrue(all(count >= 1 for count in counts.values()))
 
     def test_document_generation_uses_requested_question_count_all_single_choice(self):
-        """Quiz Generation V3 (live path): document scope respects the requested 12/15
-        question_count (default 12) and produces an all-single_choice quiz -- no Planner, no
-        per-topic quota (see _generate_quiz_v3)."""
+        """Live Study Units path: document scope respects the requested 12/15 question_count
+        (default 12) and produces an all-single_choice quiz in one LLM call -- no Planner, no
+        per-topic quota (see _generate_quiz_from_units)."""
         document = {"id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 3, "topics": []}
         document_chunks = _v3_chunks(15)
         for requested in (None, 12, 15):
@@ -228,19 +183,16 @@ class TopicV2Phase2Tests(unittest.TestCase):
                 self.assertIn(key, timings)
 
     def test_document_partial_generation_persists_partial_quiz(self):
-        """Quiz Generation V3 (live path): a document-scope candidate pool that falls short of
-        question_count after bounded repair/fill is persisted as a partial quiz
+        """Live Study Units path: a document-scope candidate pool that falls short of
+        question_count after the single top-up call is persisted as a partial quiz
         (status="partial") instead of failing the whole request closed, as long as at least
-        one valid, structurally sound question was produced (spec case C/D). No Planner and no
-        fabricated deterministic fallback are involved (see _generate_quiz_v3)."""
+        one valid, structurally sound question was produced. No Planner and no fabricated
+        deterministic fallback are involved (see _generate_quiz_from_units)."""
         document = {"id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 3, "topics": []}
         document_chunks = _v3_chunks(15)
-        # Bounded repair/fill only reach 9 of the 12 requested slots -- the remaining 3 stay
-        # missing rather than being papered over by a fabricated fallback.
-        _FakeV3Model.payloads = [
-            {"questions": _v3_candidates(9)},
-            {"questions": []}, {"questions": []}, {"questions": []}, {"questions": []},
-        ]
+        # The single top-up returns nothing, so only 9 of the 12 requested questions exist -- the
+        # remaining 3 stay missing rather than being papered over by a fabricated fallback.
+        _FakeV3Model.payloads = [{"questions": _v3_candidates(9)}, {"questions": []}]
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
              patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
              patch.object(quiz_service, "get_quiz", return_value=None), \

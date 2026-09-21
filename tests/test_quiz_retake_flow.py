@@ -207,16 +207,16 @@ class QuizRetakeFlowTests(unittest.TestCase):
             "topics": [{"topic_id": "topic_1", "name": "Topic 1"}, {"topic_id": "topic_2", "name": "Topic 2"}],
         }
 
-        # Quiz Generation V3 (live path) has no Planner and no per-slot batch function to mock at
+        # The live Study Units path has no Planner and no per-slot batch function to mock at
         # that level -- this test is about the persistence/retrieval lifecycle, not generation,
-        # so it mocks the whole _generate_quiz_v3 engine to persist this fixed fixture quiz via
+        # so it mocks the whole _generate_quiz_from_units engine to persist this fixed fixture quiz via
         # the real save_quiz, exactly as the real engine would.
-        def fake_generate_v3(*, document, difficulty, owner_id, **_kwargs):
+        def fake_generate_units(*, document, difficulty, owner_id, **_kwargs):
             return quiz_service.save_quiz(document["id"], difficulty, quiz, owner_id)
 
         with patch.object(quiz_service, "_document_lookup", return_value={document["id"]: document}), \
              patch.object(quiz_service, "get_document_chunks", return_value=[]), \
-             patch.object(quiz_service, "_generate_quiz_v3", side_effect=fake_generate_v3):
+             patch.object(quiz_service, "_generate_quiz_from_units", side_effect=fake_generate_units):
             generated = quiz_service.generate_quiz(
                 "Embedded Systems.pdf", "easy", "document", owner_id=LEGACY_USER_ID, question_count=15,
             )
