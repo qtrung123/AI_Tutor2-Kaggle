@@ -96,22 +96,14 @@ class QuizStudySessionScopingTests(unittest.TestCase):
         self.assertIn("!== requestDocumentId) return", history_body)
         self.assertLess(detail_body.index("currentQuiz = null"), detail_body.index("requestQuizDetail(documentId)"))
 
-    def test_two_new_documents_without_attempts_render_as_unassessed(self):
-        """A and B both use the generic null-attempt path; no document special case is allowed."""
-        mastery_body = function_body("renderPracticeMastery")
-
-        self.assertIn("currentAttempt?.mastery_by_topic || {}", mastery_body)
-        self.assertIn("currentAttempt?.mastery", mastery_body)
-        self.assertNotRegex(mastery_body, r"[AaBb]\.pdf|document_[ab]")
-
-    def test_assessed_document_keeps_attempt_mastery_precedence(self):
-        mastery_body = function_body("renderPracticeMastery")
-
-        attempt_rows = mastery_body.index("currentAttempt?.mastery_by_topic")
-        legacy_attempt_row = mastery_body.index("currentAttempt?.mastery)")
-        dashboard_fallback = mastery_body.index("dashboardData.mastery || []")
-        self.assertLess(attempt_rows, legacy_attempt_row)
-        self.assertLess(legacy_attempt_row, dashboard_fallback)
+    def test_the_old_quiz_progress_and_mastery_drawer_is_gone(self):
+        """The old per-quiz "View Progress" drawer (Progress & Mastery) was removed; mastery lives in the
+        Study Session's Progress tab and the dashboard, which do not depend on the open quiz."""
+        script = (Path(__file__).parents[1] / "frontend" / "app.js").read_text(encoding="utf-8")
+        for removed in ("renderPracticeMastery", "practice-mastery", "quizProgressTrigger", "setQuizProgressDrawerOpen",
+                        "Mastery evidence is not available for this quiz.", "View Progress", "Progress &amp; Mastery"):
+            self.assertNotIn(removed, script)
+        self.assertIn("renderSessionProgress(documentId)", script)
 
     def test_switching_c_to_a_to_b_rejects_stale_quiz_and_session_responses(self):
         generation_body = function_body("generateAssessmentQuiz")
@@ -125,7 +117,6 @@ class QuizStudySessionScopingTests(unittest.TestCase):
 
     def test_first_generated_quiz_renders_immediately_with_null_attempt(self):
         generation_body = function_body("generateAssessmentQuiz")
-        mastery_body = function_body("renderPracticeMastery")
 
         self.assertEqual(generation_body.count("await requestGeneratedQuiz(generationRequest)"), 1)
         quiz_assignment = generation_body.index("currentQuiz = generatedQuiz")
@@ -133,8 +124,6 @@ class QuizStudySessionScopingTests(unittest.TestCase):
         immediate_render = generation_body.index("renderAssessmentQuiz()", null_attempt)
         self.assertLess(quiz_assignment, null_attempt)
         self.assertLess(null_attempt, immediate_render)
-        self.assertIn("currentAttempt?.mastery_by_topic || {}", mastery_body)
-        self.assertIn("Mastery evidence is not available for this quiz.", mastery_body)
 
     def test_post_persistence_render_failure_is_not_reported_as_generation_failure(self):
         generation_body = function_body("generateAssessmentQuiz")

@@ -73,6 +73,22 @@ class SummaryFeatureTests(unittest.TestCase):
             )
         return result, retrieval.call_args_list, list(FakeLlm.prompts)
 
+    def test_cache_only_lookup_reports_a_missing_summary_without_generating_anything(self):
+        """The screen asks "does it exist?" before offering Generate: no model call, no retrieval."""
+        with patch.object(summary_service, "ChatOllama") as llm,              patch.object(summary_service, "get_topic_chunks") as retrieval,              patch.object(summary_service, "resolve_generation_model", return_value="runtime-model-a"):
+            missing = summary_service.generate_document_summary(self.alice, "lecture.pdf", model_id="model-a", cache_only=True)
+        self.assertEqual((missing["status"], missing["cache_hit"], missing["model_id"]), ("not_generated", False, "model-a"))
+        llm.assert_not_called(); retrieval.assert_not_called()
+
+    def test_cache_only_lookup_returns_a_saved_summary_of_the_same_model_only(self):
+        self.generate(model="model-a")
+        with patch.object(summary_service, "ChatOllama") as llm,              patch.object(summary_service, "resolve_generation_model", side_effect=lambda model: f"runtime-{model}"):
+            same = summary_service.generate_document_summary(self.alice, "lecture.pdf", model_id="model-a", cache_only=True)
+            other = summary_service.generate_document_summary(self.alice, "lecture.pdf", model_id="model-b", cache_only=True)
+        self.assertTrue(same["cache_hit"]); self.assertEqual(same["final_summary"]["overview"], "Whole document overview.")
+        self.assertEqual(other["status"], "not_generated")
+        llm.assert_not_called()
+
     def test_normal_path_uses_two_calls_and_preserves_topic_order_and_scope(self):
         result, retrievals, prompts = self.generate()
         self.assertEqual(len(prompts), 2)

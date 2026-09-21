@@ -131,14 +131,51 @@ class ModelSurvivesRegenerationTests(unittest.TestCase):
         # (the store also imports legacy quizzes of the real data folder, so look at ours only)
         self.assertEqual((rows[qwen_quiz["quiz_id"]], rows[deepseek_quiz["quiz_id"]]), (0, 1))
 
-    def test_generating_with_deepseek_over_a_saved_qwen_quiz_returns_the_qwen_quiz_labelled_qwen(self):
+    def test_generating_with_deepseek_over_a_saved_qwen_quiz_makes_a_new_deepseek_quiz(self):
+        """A saved quiz only answers a request for the model that made it: asking for DeepSeek does not
+        hand back the Qwen quiz, it generates a new one (the Qwen quiz is superseded but kept)."""
         qwen_quiz = self.generate(QWEN)
-        again = self.generate(DEEPSEEK)                                   # no regenerate: served from the cache
-        self.assertEqual(again["quiz_id"], qwen_quiz["quiz_id"])
-        self.assertEqual(len(FakeModel.prompts), 0)                       # no model ran at all
-        self.assertEqual(again["generation_model"], QWEN_INFO)            # never DeepSeek's name
-        self.assertEqual(QuizGenerateResponse(**again).generation_model, QWEN_INFO)   # what the API returns
-        self.assertEqual(self.store.get_quiz(DOCUMENT["id"], "easy", "document")["generation_model"], QWEN_INFO)
+        deepseek_quiz = self.generate(DEEPSEEK)                           # no regenerate flag
+        self.assertNotEqual(deepseek_quiz["quiz_id"], qwen_quiz["quiz_id"])
+        self.assertEqual(deepseek_quiz["generation_model"], DEEPSEEK_INFO)
+        self.assertEqual({call["model"] for call in FakeModel.kwargs}, {DEEPSEEK})
+        self.assertEqual(self.store.get_quiz_by_id(qwen_quiz["quiz_id"])["generation_model"], QWEN_INFO)
+        self.assertEqual(self.generate(DEEPSEEK)["quiz_id"], deepseek_quiz["quiz_id"])   # same model again: cache hit
+        self.assertEqual(len(FakeModel.prompts), 0)
+
+    def test_a_quiz_saved_before_models_were_recorded_stays_reusable_for_any_model(self):
+        quiz = self.generate(QWEN)
+        with self.store._connect() as connection:
+            import json
+            plan = json.loads(connection.execute(
+                "SELECT assessment_plan_json FROM quizzes WHERE quiz_id = ?", (quiz["quiz_id"],)).fetchone()[0])
+            plan.pop("generation_model")
+            connection.execute("UPDATE quizzes SET assessment_plan_json = ? WHERE quiz_id = ?", (json.dumps(plan), quiz["quiz_id"]))
+        self.assertEqual(self.generate(DEEPSEEK)["quiz_id"], quiz["quiz_id"])
+        self.assertEqual(len(FakeModel.prompts), 0)
+
+    def test_quiz_statuses_describe_each_saved_quiz_with_its_own_model_and_counts(self):
+        quiz = self.generate(QWEN)
+        with patch.object(quiz_service, "list_indexed_documents", return_value=[{"id": DOCUMENT["id"], "title": "Lecture", "chunks": 12}]):
+            (status,) = [item for item in quiz_service.list_quiz_statuses() if item["document_id"] == DOCUMENT["id"]]
+        (variant,) = [item for item in status["variants"] if item["quiz_id"] == quiz["quiz_id"]]
+        self.assertEqual((variant["difficulty"], variant["topic_id"], variant["question_count"], variant["requested_count"], variant["status"]),
+                         ("easy", "document", 12, 12, "complete"))
+        self.assertEqual((variant["model_id"], variant["model_name"], variant["title"]), ("qwen-2.5-7b", "Qwen2.5-7B-Instruct", "Benchmark"))
+
+    def test_a_partial_quiz_is_reported_as_partial_with_both_counts(self):
+        FakeModel.reset([{"questions": candidates(range(8))}, {"questions": []}, {"questions": []}])
+        with (
+            patch.object(quiz_service, "_document_lookup", return_value={DOCUMENT["id"]: DOCUMENT}),
+            patch.object(quiz_service, "get_document_chunks", return_value=make_chunks(12, 2)),
+            patch.object(quiz_service, "ChatOllama", FakeModel),
+            patch.object(quiz_service, "list_indexed_documents", return_value=[{"id": DOCUMENT["id"], "title": "Lecture", "chunks": 12}]),
+        ):
+            quiz = quiz_service.generate_quiz(DOCUMENT["id"], "medium", "document", question_count=12, quiz_name="Short", model_id=QWEN)
+            (status,) = [item for item in quiz_service.list_quiz_statuses() if item["document_id"] == DOCUMENT["id"]]
+        (variant,) = [item for item in status["variants"] if item["quiz_id"] == quiz["quiz_id"]]
+        self.assertEqual((variant["question_count"], variant["requested_count"], variant["status"]), (8, 12, "partial"))
+        self.assertEqual(self.store.get_quiz(DOCUMENT["id"], "medium", "document")["question_count"], 8)     # saved and loadable
 
     def test_switching_back_and_forth_keeps_each_quizs_own_model(self):
         ids = []
@@ -162,7 +199,7 @@ class FrontendShowsTheModelTests(unittest.TestCase):
     def test_the_quiz_title_shows_the_backend_supplied_model_name(self):
         frontend = (Path(__file__).parents[1] / "frontend" / "app.js").read_text(encoding="utf-8")
         self.assertIn("quiz?.generation_model || quiz?.assessment_plan?.generation_model", frontend)
-        self.assertIn("` · Generated by: ${model.name}`", frontend)
+        self.assertIn("` · Generated by ${name}`", frontend)
         self.assertIn("quizPartialSuffix(quiz) + quizModelSuffix(quiz)", frontend)
         self.assertIn("assessmentTitle.textContent = assessmentTitleText(currentQuiz)", frontend)
 

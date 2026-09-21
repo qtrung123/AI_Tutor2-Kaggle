@@ -298,7 +298,8 @@ ORDERED TOPIC SUMMARIES:
 {json.dumps(synthesis_evidence, ensure_ascii=False)}"""
 
 
-def generate_document_summary(owner_id: str, document_id: str, model_id: str | None = None, regenerate: bool = False) -> dict:
+def generate_document_summary(owner_id: str, document_id: str, model_id: str | None = None, regenerate: bool = False,
+                              cache_only: bool = False) -> dict:
     total_started = time.perf_counter()
     document = get_indexed_document(owner_id, document_id)
     if not document:
@@ -319,6 +320,9 @@ def generate_document_summary(owner_id: str, document_id: str, model_id: str | N
         if cached:
             cached["cache_hit"] = True
             return cached
+        if cache_only:
+            # The screen only asks "does this summary exist?": answer without generating anything.
+            return {"status": "not_generated", "document_id": document_id, "model_id": selected_model, "cache_hit": False}
 
     retrieval_started = time.perf_counter()
     evidence = [(

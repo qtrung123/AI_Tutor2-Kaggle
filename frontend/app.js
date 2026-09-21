@@ -57,8 +57,10 @@ let currentAttempt = null;
 let quizAttemptSummary = null;
 let quizExplanations = {};
 let quizHistory = [];
+// Quizzes whose generation request is still running (the request outlives the screen it was started on).
+const pendingQuizGenerations = new Map();
+let pendingQuizSequence = 0;
 let quizHistoryDifficultyFilter = "all";
-let quizHistoryScopeFilter = "all";
 let quizQuestionIndex = 0;
 let quizExplanationPending = false;
 let conversations = [];
@@ -72,6 +74,8 @@ let generationModels = [];
 let selectedModelId = localStorage.getItem("aiTutorModelId") || "";
 let activeDocumentId = "";
 let loadedSummaryKey = "";
+let summaryInFlightKey = "";
+let flashcardsInFlightKey = "";
 let flashcardSet = null;
 let flashcards = [];
 let flashcardIndex = 0;
@@ -109,13 +113,10 @@ const uploadSourceButton = document.getElementById("upload-source-button");
 const uploadStatus = document.getElementById("upload-status");
 const quizNameInput = document.getElementById("quiz-name-input");
 const quizDocumentSelect = document.getElementById("quiz-document-select");
-const quizTopicSelect = document.getElementById("quiz-topic-select");
 const quizScopeSelect = document.getElementById("quiz-scope-select");
-const quizTopicField = document.getElementById("quiz-topic-field");
 const quizDifficultySelect = document.getElementById("quiz-difficulty-select");
 let quizQuestionCountSelect = document.getElementById("quiz-question-count-select");
 let quizQuestionCountField = document.getElementById("quiz-question-count-field");
-let quizModelSelect = document.getElementById("quiz-model-select");
 const generateQuizButton = document.getElementById("generate-quiz-button");
 const resetQuizButton = document.getElementById("reset-quiz-button");
 resetQuizButton.textContent = "Retake Quiz";
@@ -168,32 +169,6 @@ const learningStatusAction = document.getElementById("learning-status-action");
 const sidebarDocumentCount = document.getElementById("sidebar-document-count");
 const sidebarTopicProgress = document.getElementById("sidebar-topic-progress");
 const sidebarTopicStatus = document.getElementById("sidebar-topic-status");
-const practiceMasteryPanel = document.getElementById("practice-mastery-panel");
-const practiceMasteryList = document.getElementById("practice-mastery-list");
-const quizProgressTrigger = document.createElement("button");
-quizProgressTrigger.className = "quiz-progress-trigger";
-quizProgressTrigger.type = "button";
-quizProgressTrigger.textContent = "View Progress";
-quizProgressTrigger.setAttribute("aria-expanded", "false");
-quizProgressTrigger.hidden = true;
-const quizProgressBackdrop = document.createElement("button");
-quizProgressBackdrop.className = "quiz-progress-drawer-backdrop";
-quizProgressBackdrop.type = "button";
-quizProgressBackdrop.setAttribute("aria-label", "Close progress");
-const quizProgressDrawer = document.createElement("aside");
-quizProgressDrawer.className = "quiz-progress-drawer";
-quizProgressDrawer.setAttribute("aria-label", "Quiz progress and mastery");
-const quizProgressDrawerHeader = document.createElement("div");
-quizProgressDrawerHeader.className = "quiz-progress-drawer-header";
-quizProgressDrawerHeader.innerHTML = "<div><span>Learning progress</span><h2>Progress &amp; Mastery</h2></div>";
-const quizProgressClose = document.createElement("button");
-quizProgressClose.className = "quiz-progress-drawer-close";
-quizProgressClose.type = "button";
-quizProgressClose.textContent = "×";
-quizProgressClose.setAttribute("aria-label", "Close progress");
-quizProgressDrawerHeader.appendChild(quizProgressClose);
-quizProgressDrawer.append(quizProgressDrawerHeader, practiceMasteryPanel);
-document.body.append(quizProgressTrigger, quizProgressBackdrop, quizProgressDrawer);
 const sessionDocumentName = document.getElementById("session-document-name");
 const sessionDocumentStatus = document.getElementById("session-document-status");
 const sessionMaterialDetails = document.getElementById("session-material-details");
@@ -210,15 +185,19 @@ const originalContentOpen = document.getElementById("original-content-open");
 const originalContentEmpty = document.getElementById("original-content-empty");
 const summaryPane = document.querySelector('[data-session-pane="summary"]');
 summaryPane?.classList.remove("placeholder-pane");
-if (summaryPane) summaryPane.innerHTML = `<article class="panel summary-panel"><div class="summary-heading"><div><p class="eyebrow">Summary</p><h2>Document Overview</h2></div><button class="secondary-button" id="regenerate-summary-button" type="button">Regenerate Summary</button></div><div id="summary-loading" class="empty-state" hidden>Generating a grounded summary…</div><div id="summary-error" class="empty-state" hidden></div><div id="summary-content"></div></article>`;
+if (summaryPane) summaryPane.innerHTML = `<article class="panel summary-panel"><div class="summary-heading"><div><p class="eyebrow">Summary</p><h2>Document Overview</h2></div><button class="secondary-button" id="regenerate-summary-button" type="button">Regenerate Summary</button></div><div id="summary-generate" class="generate-prompt" hidden><h3>Generate a summary</h3><p>No summary has been generated for this document with the selected model yet.</p><p class="generate-model-note">Model: <span class="generate-model-name"></span> (change it in the Model selector above)</p><button class="primary-button" id="generate-summary-button" type="button">Generate Summary</button></div><div id="summary-loading" class="empty-state" hidden>Generating a grounded summary…</div><div id="summary-error" class="empty-state" hidden></div><div id="summary-content"></div></article>`;
 const summaryLoading = document.getElementById("summary-loading");
+const summaryGenerate = document.getElementById("summary-generate");
+const generateSummaryButton = document.getElementById("generate-summary-button");
 const summaryError = document.getElementById("summary-error");
 const summaryContent = document.getElementById("summary-content");
 const regenerateSummaryButton = document.getElementById("regenerate-summary-button");
 const flashcardsPane = document.querySelector('[data-session-pane="flashcards"]');
 flashcardsPane?.classList.remove("placeholder-pane");
-if (flashcardsPane) flashcardsPane.innerHTML = `<article class="panel flashcards-panel"><div class="flashcards-toolbar"><div><p class="eyebrow">Flashcards</p><h2>Study Cards</h2></div><div class="flashcards-actions"><label>Filter Topics<select id="flashcard-topic-filter"><option value="all">All topics</option></select></label><label>Flashcard language<select id="flashcard-language-select"><option value="auto">Auto</option><option value="english">English</option><option value="vietnamese">Vietnamese</option></select></label><button class="secondary-button" id="shuffle-flashcards" type="button">Shuffle</button><button class="secondary-button" id="manage-flashcards" type="button">Manage Cards</button></div></div><div id="flashcards-loading" class="empty-state" hidden>Generating grounded flashcards…</div><div id="flashcards-error" class="empty-state" hidden></div><div id="flashcards-stage" hidden><div class="flashcard-topic-title" id="flashcard-topic-title"></div><button class="flashcard" id="flashcard" type="button" aria-label="Flip flashcard"><span class="flashcard-side-label" id="flashcard-side-label">Front</span><span class="flashcard-copy" id="flashcard-copy"></span><span class="flashcard-flip-hint">Click to flip</span></button><div class="flashcard-navigation"><button class="secondary-button" id="previous-flashcard" type="button">Previous</button><span id="flashcard-position">0 of 0</span><button class="secondary-button" id="next-flashcard" type="button">Next</button><button class="favorite-button" id="favorite-flashcard" type="button" aria-label="Favorite card">☆</button></div></div></article>`;
+if (flashcardsPane) flashcardsPane.innerHTML = `<article class="panel flashcards-panel"><div class="flashcards-toolbar"><div><p class="eyebrow">Flashcards</p><h2>Study Cards</h2></div><div class="flashcards-actions"><label>Filter Topics<select id="flashcard-topic-filter"><option value="all">All topics</option></select></label><label>Flashcard language<select id="flashcard-language-select"><option value="auto">Auto</option><option value="english">English</option><option value="vietnamese">Vietnamese</option></select></label><button class="secondary-button" id="shuffle-flashcards" type="button">Shuffle</button><button class="secondary-button" id="manage-flashcards" type="button">Manage Cards</button></div></div><div id="flashcards-generate" class="generate-prompt" hidden><h3>Generate flashcards</h3><p>No flashcards have been generated for this document with the selected model and language yet.</p><p class="generate-model-note">Model: <span class="generate-model-name"></span> (change it in the Model selector above)</p><button class="primary-button" id="generate-flashcards-button" type="button">Generate Flashcards</button></div><div id="flashcards-loading" class="empty-state" hidden>Generating grounded flashcards…</div><div id="flashcards-error" class="empty-state" hidden></div><div id="flashcards-stage" hidden><div class="flashcard-topic-title" id="flashcard-topic-title"></div><button class="flashcard" id="flashcard" type="button" aria-label="Flip flashcard"><span class="flashcard-side-label" id="flashcard-side-label">Front</span><span class="flashcard-copy" id="flashcard-copy"></span><span class="flashcard-flip-hint">Click to flip</span></button><div class="flashcard-navigation"><button class="secondary-button" id="previous-flashcard" type="button">Previous</button><span id="flashcard-position">0 of 0</span><button class="secondary-button" id="next-flashcard" type="button">Next</button><button class="favorite-button" id="favorite-flashcard" type="button" aria-label="Favorite card">☆</button></div></div></article>`;
 const flashcardsLoading = document.getElementById("flashcards-loading");
+const flashcardsGenerate = document.getElementById("flashcards-generate");
+const generateFlashcardsButton = document.getElementById("generate-flashcards-button");
 const flashcardsError = document.getElementById("flashcards-error");
 const flashcardsStage = document.getElementById("flashcards-stage");
 const flashcardTopicSelect = document.getElementById("flashcard-topic-filter");
@@ -368,7 +347,6 @@ function showToast(message) {
 
 function setPage(page) {
   if (page !== "session") closeSourcesDrawer();
-  if (page !== "session") setQuizProgressDrawerOpen(false);
   state.page = page;
   document.body.dataset.page = page;
   navItems.forEach((item, index) => item.classList.toggle("active", item.dataset.page === page && (page !== "overview" || index === 0)));
@@ -385,7 +363,19 @@ async function loadGenerationModels() {
     generationModels = data.models || [];
     if (!generationModels.some((model) => model.id === selectedModelId)) selectedModelId = generationModels.find((model) => model.default)?.id || generationModels[0]?.id || "";
     renderModelSelector();
+    if (currentQuiz?.questions?.length) assessmentTitle.textContent = assessmentTitleText(currentQuiz);   // labels of the models are known now
   } catch (error) { generationModels = []; }
+}
+
+// The Study Session's "Model:" selector is the ONLY place the model is chosen. Quiz, Summary,
+// Flashcards and later AI features all use the selected model; none has a selector of its own.
+function modelLabel(modelId, fallbackName) {
+  return generationModels.find((model) => model.id === modelId)?.label || fallbackName || modelId || "";
+}
+
+// Says which model a Generate button will use (the Generate screens have no selector of their own).
+function updateGenerateModelNotes() {
+  document.querySelectorAll(".generate-model-name").forEach((element) => { element.textContent = modelLabel(selectedModelId); });
 }
 
 function renderModelSelector() {
@@ -394,17 +384,30 @@ function renderModelSelector() {
   let select = document.getElementById("generation-model-select");
   if (!select) {
     const label = document.createElement("label"); label.className = "generation-model-control"; label.textContent = "Model:";
-    select = document.createElement("select"); select.id = "generation-model-select"; label.appendChild(select); header.appendChild(label);
-    select.addEventListener("change", async () => {
-      selectedModelId = select.value; localStorage.setItem("aiTutorModelId", selectedModelId);
-      select.disabled = true;
-      try { await fetchJson(`${MODELS_API_URL}/${encodeURIComponent(selectedModelId)}/prepare`, { method: "POST" }); showToast("Model ready"); if (document.body.dataset.sessionTab === "summary") await loadDocumentSummary(); if (document.body.dataset.sessionTab === "flashcards") { loadedFlashcardKey = ""; await loadDocumentFlashcards(); } }
-      catch (error) { showToast(error.message || "Model is still preparing"); }
-      finally { select.disabled = false; }
-    });
+    select = document.createElement("select"); select.id = "generation-model-select";
+    label.appendChild(select); header.appendChild(label);
+    select.addEventListener("change", () => setSelectedModel(select.value));
   }
   select.innerHTML = "";
   generationModels.forEach((model) => select.add(new Option(model.label, model.id, false, model.id === selectedModelId)));
+  updateGenerateModelNotes();
+}
+
+async function setSelectedModel(modelId) {
+  selectedModelId = modelId; localStorage.setItem("aiTutorModelId", selectedModelId);
+  const select = document.getElementById("generation-model-select");
+  if (select) { select.value = selectedModelId; select.disabled = true; }
+  updateGenerateModelNotes();
+  // Changing the model never generates anything: saved states are re-read and the screens
+  // re-evaluated for the new model; a saved quiz keeps the model that made it.
+  updateDifficultyOptions();
+  if (currentQuiz?.questions?.length) assessmentTitle.textContent = assessmentTitleText(currentQuiz);
+  const tab = document.body.dataset.sessionTab;
+  if (tab === "summary") showSummaryState();
+  if (tab === "flashcards") showFlashcardsState();
+  try { await fetchJson(`${MODELS_API_URL}/${encodeURIComponent(selectedModelId)}/prepare`, { method: "POST" }); showToast("Model ready"); }
+  catch (error) { showToast(error.message || "Model is still preparing"); }
+  finally { if (select) select.disabled = false; }
 }
 
 function formatBenchmarkPercent(value) {
@@ -513,13 +516,12 @@ function renderQuizModelComparison(view, data) {
 
 function setSessionTab(tab) {
   document.body.dataset.sessionTab = tab;
-  quizProgressTrigger.hidden = tab !== "quiz" || !currentQuiz?.questions?.length;
-  if (tab !== "quiz") setQuizProgressDrawerOpen(false);
   document.querySelectorAll(".session-tab").forEach((button) => button.classList.toggle("active", button.dataset.sessionTab === tab));
   document.querySelectorAll(".session-pane").forEach((pane) => pane.classList.toggle("active", pane.dataset.sessionPane === tab));
   document.getElementById("persistent-tutor").hidden = false;
-  if (tab === "summary") loadDocumentSummary();
-  if (tab === "flashcards") loadDocumentFlashcards();
+  if (tab === "summary") showSummaryState();
+  if (tab === "flashcards") showFlashcardsState();
+  if (tab === "quiz") renderQuizHistory();
 }
 
 function visibleFlashcards() {
@@ -549,19 +551,54 @@ function renderFlashcardTopicFilter() {
   flashcardTopicFilter = seen.has(selected) ? selected : "all"; flashcardTopicSelect.value = flashcardTopicFilter;
 }
 
+function flashcardsKey() {
+  return `${activeDocumentId}:${selectedModelId}:${flashcardLanguage}`;
+}
+
+function flashcardsUrl(extra = "") {
+  return `${FLASHCARDS_API_BASE_URL}/${encodeURIComponent(activeDocumentId)}?model_id=${encodeURIComponent(selectedModelId)}&language=${encodeURIComponent(flashcardLanguage)}${extra}`;
+}
+
+function applyFlashcardSet(set, key) {
+  flashcardSet = set; flashcards = set.cards || []; flashcardIndex = 0; flashcardFlipped = false; loadedFlashcardKey = key;
+  flashcardsGenerate.hidden = true;
+  renderFlashcardTopicFilter(); renderCurrentFlashcard();
+}
+
+// Opening the tab (or changing model/language) only LOOKS for saved cards; nothing is generated.
+async function showFlashcardsState() {
+  if (!activeDocumentId || !flashcardsPane) return;
+  const requestDocumentId = activeDocumentId, key = flashcardsKey();
+  flashcardsLoading.hidden = flashcardsInFlightKey !== key;   // a generation of these very cards may still be running
+  if (loadedFlashcardKey === key && flashcards.length) { flashcardsGenerate.hidden = true; renderCurrentFlashcard(); return; }
+  flashcards = []; flashcardSet = null; loadedFlashcardKey = "";
+  if (flashcardsInFlightKey === key) { flashcardsError.hidden = true; flashcardsStage.hidden = true; flashcardsGenerate.hidden = true; return; }
+  flashcardsError.hidden = true; flashcardsStage.hidden = true; flashcardsGenerate.hidden = true;
+  let saved = null;
+  try { saved = await fetchJson(flashcardsUrl("&cache_only=true")); } catch (error) { saved = null; }
+  if (activeDocumentId !== requestDocumentId || key !== flashcardsKey()) return;
+  if (saved && saved.status !== "not_generated" && (saved.cards || []).length) applyFlashcardSet(saved, key);
+  else flashcardsGenerate.hidden = false;
+}
+
+// Only the Generate button (or a saved-set reload) reaches this: it is the one place that generates.
 async function loadDocumentFlashcards() {
   if (!activeDocumentId || !flashcardsPane) return;
-  const requestDocumentId = activeDocumentId, key = `${requestDocumentId}:${selectedModelId}:${flashcardLanguage}`;
+  const requestDocumentId = activeDocumentId, key = flashcardsKey();
   if (loadedFlashcardKey === key && flashcards.length) { renderCurrentFlashcard(); return; }
-  flashcardsLoading.hidden = false; flashcardsError.hidden = true; flashcardsStage.hidden = true;
+  flashcardsLoading.hidden = false; flashcardsError.hidden = true; flashcardsStage.hidden = true; flashcardsGenerate.hidden = true;
+  flashcardsInFlightKey = key;
+  let generated = false;
   try {
-    flashcardSet = await fetchJson(`${FLASHCARDS_API_BASE_URL}/${encodeURIComponent(requestDocumentId)}?model_id=${encodeURIComponent(selectedModelId)}&language=${encodeURIComponent(flashcardLanguage)}`);
-    if (activeDocumentId !== requestDocumentId) return;
-    flashcards = flashcardSet.cards || []; flashcardIndex = 0; flashcardFlipped = false; loadedFlashcardKey = key;
-    renderFlashcardTopicFilter(); renderCurrentFlashcard();
+    const set = await fetchJson(flashcardsUrl());
+    if (activeDocumentId !== requestDocumentId || key !== flashcardsKey()) return;   // another document/model/language is on screen now
+    applyFlashcardSet(set, key); generated = true;
   } catch (error) {
     if (activeDocumentId === requestDocumentId) { flashcardsError.textContent = error.message || "Could not load flashcards."; flashcardsError.hidden = false; }
-  } finally { if (activeDocumentId === requestDocumentId) flashcardsLoading.hidden = true; }
+  } finally {
+    if (flashcardsInFlightKey === key) flashcardsInFlightKey = "";
+    if (activeDocumentId === requestDocumentId) { flashcardsLoading.hidden = true; if (!generated && !flashcards.length) flashcardsGenerate.hidden = false; }
+  }
 }
 
 async function patchFlashcard(card, changes) {
@@ -645,6 +682,8 @@ function renderSummaryContent(content) {
 
 function renderDocumentSummary(summary) {
   summaryContent.innerHTML = "";
+  const generatedBy = modelLabel(summary.model_id || selectedModelId);
+  if (generatedBy) { const badge = document.createElement("p"); badge.className = "artifact-model"; badge.textContent = `Generated by ${generatedBy}`; summaryContent.appendChild(badge); }
   const overview = document.createElement("p"); overview.className = "summary-overview";
   overview.textContent = summary.final_summary?.overview || "No overview was returned."; summaryContent.appendChild(overview);
   (summary.topic_summaries || []).forEach((topic) => {
@@ -662,24 +701,48 @@ function renderDocumentSummary(summary) {
   appendTakeaways(takeaways, summary.final_summary?.key_takeaways); if (takeaways.children.length) summaryContent.appendChild(takeaways);
 }
 
+function updateSummaryChrome(key) {
+  const has = loadedSummaryKey === key && summaryContent.children.length > 0;
+  summaryGenerate.hidden = has || !summaryLoading.hidden;
+  regenerateSummaryButton.hidden = !has;
+}
+
+// Opening the tab (or changing model) only LOOKS for a saved summary; nothing is generated.
+async function showSummaryState() {
+  if (!activeDocumentId || !summaryContent) return;
+  const requestDocumentId = activeDocumentId, key = `${requestDocumentId}:${selectedModelId}`;
+  summaryError.hidden = true;
+  summaryLoading.hidden = summaryInFlightKey !== key;   // a generation of this very summary may still be running
+  if (loadedSummaryKey === key && summaryContent.children.length) { summaryContent.hidden = false; updateSummaryChrome(key); return; }
+  if (summaryInFlightKey === key) { summaryContent.innerHTML = ""; summaryGenerate.hidden = true; regenerateSummaryButton.hidden = true; return; }
+  summaryContent.innerHTML = ""; loadedSummaryKey = ""; summaryGenerate.hidden = true; regenerateSummaryButton.hidden = true;
+  let saved = null;
+  try { saved = await fetchJson(`${SUMMARY_API_BASE_URL}/${encodeURIComponent(requestDocumentId)}?model_id=${encodeURIComponent(selectedModelId)}&cache_only=true`); } catch (error) { saved = null; }
+  if (activeDocumentId !== requestDocumentId || key !== `${activeDocumentId}:${selectedModelId}`) return;
+  if (saved && saved.status !== "not_generated" && saved.final_summary) { renderDocumentSummary(saved); loadedSummaryKey = key; summaryContent.hidden = false; }
+  updateSummaryChrome(key);
+}
+
+// Only the Generate / Regenerate buttons reach this: it is the one place that generates.
 async function loadDocumentSummary(regenerate = false) {
   if (!activeDocumentId || !summaryContent) return;
   const requestDocumentId = activeDocumentId;
   const key = `${requestDocumentId}:${selectedModelId}`;
   if (!regenerate && loadedSummaryKey === key && summaryContent.children.length) return;
-  summaryLoading.hidden = false; summaryError.hidden = true; summaryContent.hidden = true;
-  regenerateSummaryButton.disabled = true;
+  summaryLoading.hidden = false; summaryError.hidden = true; summaryContent.hidden = true; summaryGenerate.hidden = true;
+  regenerateSummaryButton.disabled = true; summaryInFlightKey = key;
   try {
     const url = `${SUMMARY_API_BASE_URL}/${encodeURIComponent(requestDocumentId)}`;
     const summary = await fetchJson(regenerate ? `${url}/regenerate` : `${url}?model_id=${encodeURIComponent(selectedModelId)}`, regenerate ? {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model_id: selectedModelId || null })
     } : {});
-    if (activeDocumentId !== requestDocumentId) return;
+    if (activeDocumentId !== requestDocumentId || key !== `${activeDocumentId}:${selectedModelId}`) return;   // another document/model is on screen now
     renderDocumentSummary(summary); loadedSummaryKey = key;
   } catch (error) {
     if (activeDocumentId === requestDocumentId) { summaryError.textContent = error.message || "Could not load summary."; summaryError.hidden = false; }
   } finally {
-    if (activeDocumentId === requestDocumentId) { summaryLoading.hidden = true; summaryContent.hidden = false; regenerateSummaryButton.disabled = false; }
+    if (summaryInFlightKey === key) summaryInFlightKey = "";
+    if (activeDocumentId === requestDocumentId) { summaryLoading.hidden = true; summaryContent.hidden = false; regenerateSummaryButton.disabled = false; updateSummaryChrome(`${activeDocumentId}:${selectedModelId}`); }
   }
 }
 
@@ -724,10 +787,7 @@ async function openStudySession(documentId, tab = "material", topicId = "") {
   (documentItem.topics || []).forEach((topic) => { const item = document.createElement("div"); item.className = "mastery-card"; item.innerHTML = `<strong>${topic.name}</strong><span>Ready for assessment</span>`; sessionTopicList.appendChild(item); });
   if (!documentItem.topics?.length) sessionTopicList.innerHTML = '<div class="empty-state">No extracted topics are available yet.</div>';
   if (quizDocumentSelect) quizDocumentSelect.value = documentId;
-  updateTopicOptions();
-  if (topicId && topicId !== "document") { quizScopeSelect.value = "topic"; quizTopicSelect.value = topicId; }
-  else quizScopeSelect.value = "document";
-  updateAssessmentScope();
+  quizScopeSelect.value = "document";   // a quiz always covers the whole document
   flashcardTopicFilter = topicId && topicId !== "document" ? topicId : "all";
   await Promise.all([loadSelectedQuiz(), loadQuizHistory(documentId)]);
   renderSessionProgress(documentId);
@@ -1389,8 +1449,9 @@ function selectedQuestionCount() {
   return [12, 15, 18, 20].includes(value) ? value : 12;
 }
 
+// A quiz always covers the whole document (there is no topic to choose); "document" is the id of that slot.
 function selectedTopicId() {
-  return selectedAssessmentScope() === "document" ? "document" : (quizTopicSelect?.value || "");
+  return "document";
 }
 
 function selectedQuizName() {
@@ -1402,11 +1463,11 @@ function selectedQuizGenerationRequest() {
   return {
     document_id: quizDocumentSelect?.value || "",
     assessment_scope: assessmentScope,
-    topic_id: assessmentScope === "topic" ? selectedTopicId() : null,
+    topic_id: null,
     difficulty: selectedDifficulty(),
     question_count: selectedQuestionCount(),
     quiz_name: selectedQuizName(),
-    model_id: quizModelSelect?.value || "qwen-2.5-7b"
+    model_id: selectedModelId || "qwen-2.5-7b"
   };
 }
 
@@ -1519,17 +1580,10 @@ function renderMasteryList(container, masteries, options = {}) {
   masteries.forEach((mastery) => container.appendChild(createMasteryCard(mastery, options)));
 }
 
-async function openPracticeContext(documentId, topicId = "") {
+async function openPracticeContext(documentId) {
   setPage("practice");
   if (documentId && quizDocumentSelect) quizDocumentSelect.value = documentId;
-  updateTopicOptions();
-  if (topicId && topicId !== "document") {
-    quizScopeSelect.value = "topic";
-    quizTopicSelect.value = topicId;
-  } else {
-    quizScopeSelect.value = "document";
-  }
-  updateAssessmentScope();
+  quizScopeSelect.value = "document";
   await loadSelectedQuiz();
 }
 
@@ -1748,7 +1802,6 @@ async function loadDashboard() {
   try {
     dashboardData = await fetchJson(DASHBOARD_API_URL);
     renderDashboard();
-    renderPracticeMastery();
   } catch (error) {
     dashboardData = null;
     learningStatusTitle.textContent = "Dashboard unavailable";
@@ -1833,11 +1886,19 @@ async function loadRecommendations() {
 }
 
 function selectedAssessmentScope() {
-  return quizScopeSelect?.value || "topic";
+  return "document";
 }
 
 function currentQuizKey() {
   return quizGenerationRequestKey(selectedQuizGenerationRequest());
+}
+
+// A saved quiz counts as "saved" for the current form only if it was made with the same model and
+// number of questions. (A quiz saved before models were recorded has neither: it stays "saved".)
+function variantMatchesSettings(variant) {
+  const modelMatches = !variant.model_id && !variant.model_name || !selectedModelId || variant.model_id === selectedModelId;
+  const countMatches = !variant.requested_count || variant.requested_count === selectedQuestionCount();
+  return modelMatches && countMatches;
 }
 
 function updateDifficultyOptions() {
@@ -1845,7 +1906,7 @@ function updateDifficultyOptions() {
     return;
   }
   const savedLevels = (getSelectedQuizStatus()?.variants || [])
-    .filter((variant) => variant.topic_id === selectedTopicId())
+    .filter((variant) => variant.topic_id === selectedTopicId() && variantMatchesSettings(variant))
     .map((variant) => variant.difficulty);
   Array.from(quizDifficultySelect.options).forEach((option) => {
     const label = option.value.charAt(0).toUpperCase() + option.value.slice(1);
@@ -1855,7 +1916,7 @@ function updateDifficultyOptions() {
 
 function formatQuizStatus(status) {
   const levelIsSaved = (status?.variants || []).some(
-    (variant) => variant.topic_id === selectedTopicId() && variant.difficulty === selectedDifficulty()
+    (variant) => variant.topic_id === selectedTopicId() && variant.difficulty === selectedDifficulty() && variantMatchesSettings(variant)
   );
   if (!levelIsSaved && !currentQuiz) {
     return "Not generated";
@@ -1915,7 +1976,6 @@ async function loadIndexedDocuments() {
       quizDocumentSelect.appendChild(option);
     });
 
-    updateTopicOptions();
     await loadSelectedQuiz();
   } catch (error) {
     quizDocumentSelect.innerHTML = "";
@@ -1926,31 +1986,6 @@ async function loadIndexedDocuments() {
     showToast("Could not load indexed documents");
     updateAssessmentSummary();
   }
-}
-
-function updateTopicOptions() {
-  if (!quizTopicSelect) return;
-  const selectedDocument = indexedDocuments.find((item) => item.id === quizDocumentSelect?.value);
-  const topics = selectedDocument?.topics || [];
-  quizTopicSelect.innerHTML = "";
-  if (!topics.length) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = "No extracted topics available";
-    quizTopicSelect.appendChild(option);
-    return;
-  }
-  topics.forEach((topic) => {
-    const option = document.createElement("option");
-    option.value = topic.topic_id;
-    option.textContent = topic.name;
-    quizTopicSelect.appendChild(option);
-  });
-}
-
-function updateAssessmentScope() {
-  const topicMode = selectedAssessmentScope() === "topic";
-  if (quizTopicField) quizTopicField.hidden = !topicMode;
 }
 
 async function handleQuizDocumentChange() {
@@ -1964,8 +1999,6 @@ async function handleQuizDocumentChange() {
   quizHistory = [];
   renderAssessmentQuiz();
   renderQuizHistory();
-  updateTopicOptions();
-  updateAssessmentScope();
   await Promise.all([loadSelectedQuiz(), loadQuizHistory(documentId)]);
 }
 
@@ -1975,8 +2008,8 @@ function setAssessmentLoading(isLoading) {
   newQuizButton.disabled = isLoading;
   resetQuizButton.disabled = isLoading;
   if (deleteQuizButton) deleteQuizButton.disabled = isLoading;
-  [quizNameInput, quizDocumentSelect, quizScopeSelect, quizTopicSelect, quizDifficultySelect,
-    quizQuestionCountSelect, quizModelSelect].forEach((control) => {
+  [quizNameInput, quizDocumentSelect, quizScopeSelect, quizDifficultySelect,
+    quizQuestionCountSelect].forEach((control) => {
     if (control) control.disabled = isLoading;
   });
 }
@@ -2173,6 +2206,25 @@ async function requestQuizForRetake(attemptId) {
   return response.json();
 }
 
+// What the Quizzes screen lists for the open document: completed quizzes (attempts), plus quizzes that
+// are still being generated and saved quizzes (also partial ones) not attempted yet -- a quiz must not
+// look "missing" only because nobody has completed it.
+function quizListState(groups) {
+  const passesFilters = (difficulty) => quizHistoryDifficultyFilter === "all" || difficulty === quizHistoryDifficultyFilter;
+  const activeDocument = quizDocumentSelect?.value || activeDocumentId;
+  const attemptedQuizIds = new Set(groups.map((group) => group.quizId));
+  const savedVariants = (quizStatuses.find((item) => item.document_id === activeDocument)?.variants || [])
+    .filter((variant) => variant.quiz_id && variant.topic_id === "document" && !attemptedQuizIds.has(variant.quiz_id));
+  const pending = [...pendingQuizGenerations.values()].filter((item) => item.documentId === activeDocument);
+  const visibleGroups = groups.filter(({ latest }) => passesFilters(latest.difficulty));
+  const visibleSaved = savedVariants.filter((variant) => passesFilters(variant.difficulty));
+  const visiblePending = pending.filter((item) => passesFilters(item.difficulty));
+  let emptyMessage = "";
+  if (!groups.length && !savedVariants.length && !pending.length) emptyMessage = "No quizzes yet. Create one to get started.";
+  else if (!visibleGroups.length && !visibleSaved.length && !visiblePending.length) emptyMessage = "No quizzes match these filters.";
+  return { visibleGroups, visibleSaved, visiblePending, emptyMessage };
+}
+
 function renderQuizHistory() {
   if (!quizHistoryList) {
     return;
@@ -2208,36 +2260,22 @@ function renderQuizHistory() {
       quizHistoryDifficultyFilter = value;
       renderQuizHistory();
     });
-    const scope = makeFilter("Scope", [["all", "All"], ["topic", "Topic"], ["document", "Entire Document"]], (value) => {
-      quizHistoryScopeFilter = value;
-      renderQuizHistory();
-    });
-    filters.append(difficulty.label, scope.label);
+    filters.append(difficulty.label);
     quizHistoryList.before(filters);
   }
   const filterSelects = filters.querySelectorAll("select");
   filterSelects[0].value = quizHistoryDifficultyFilter;
-  filterSelects[1].value = quizHistoryScopeFilter;
 
-  const visibleGroups = groups.filter(({ latest }) => {
-    const scope = latest.topic_id === "document" ? "document" : "topic";
-    return (quizHistoryDifficultyFilter === "all" || latest.difficulty === quizHistoryDifficultyFilter)
-      && (quizHistoryScopeFilter === "all" || scope === quizHistoryScopeFilter);
-  });
-  if (!groups.length) {
+  const { visibleGroups, visibleSaved, visiblePending, emptyMessage } = quizListState(groups);
+  if (emptyMessage) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "No completed quizzes yet.";
+    empty.textContent = emptyMessage;
     quizHistoryList.appendChild(empty);
     return;
   }
-  if (!visibleGroups.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.textContent = "No quizzes match these filters.";
-    quizHistoryList.appendChild(empty);
-    return;
-  }
+  visiblePending.forEach((pending) => quizHistoryList.appendChild(createPendingQuizCard(pending)));
+  visibleSaved.forEach((variant) => quizHistoryList.appendChild(createSavedQuizCard(variant)));
 
   visibleGroups.forEach((group) => {
     const attempt = group.latest;
@@ -2277,7 +2315,9 @@ function renderQuizHistory() {
     regenerate.type = "button";
     regenerate.textContent = "Regenerate Quiz";
     regenerate.addEventListener("click", () => regenerateHistoryQuiz(attempt));
-    actions.append(retake, review, regenerate);
+    // Older quizzes made per topic can still be retaken/reviewed, but new quizzes are whole-document only.
+    if ((attempt.topic_id || "document") === "document") actions.append(retake, review, regenerate);
+    else actions.append(retake, review);
     const history = document.createElement("details");
     history.className = "quiz-attempt-history";
     const historySummary = document.createElement("summary");
@@ -2295,6 +2335,75 @@ function renderQuizHistory() {
     card.append(info, score, actions, history);
     quizHistoryList.appendChild(card);
   });
+}
+
+function createQuizStatusCard(className, titleText, metaText, statusText, detailText) {
+  const card = document.createElement("article");
+  card.className = `quiz-history-card ${className}`;
+  const info = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = titleText;
+  const meta = document.createElement("small");
+  meta.className = "quiz-history-meta";
+  meta.textContent = metaText;
+  const status = document.createElement("span");
+  status.className = "quiz-history-scope";
+  status.textContent = statusText;
+  const detail = document.createElement("small");
+  detail.textContent = detailText;
+  info.append(title, meta, status, detail);
+  card.appendChild(info);
+  return { card, info };
+}
+
+function createPendingQuizCard(pending) {
+  return createQuizStatusCard(
+    "quiz-pending-card", pending.name || "Untitled Quiz", `Entire Document · ${pending.difficulty}`,
+    `Generating ${pending.count} questions…`, `Using ${modelLabel(pending.modelId)} · this quiz appears here as soon as it is ready`,
+  ).card;
+}
+
+function createSavedQuizCard(variant) {
+  const partial = variant.status === "partial";
+  const counts = partial ? `${variant.question_count}/${variant.requested_count} questions (partial)` : `${variant.question_count} questions`;
+  const model = variant.model_name ? modelLabel(variant.model_id, variant.model_name) : "";
+  const { card } = createQuizStatusCard(
+    "quiz-saved-card", (variant.title || "").trim() || "Untitled Quiz", `Entire Document · ${variant.difficulty}`,
+    `${counts} · not attempted yet`, model ? `Generated by ${model}` : "Saved quiz",
+  );
+  const actions = document.createElement("div");
+  actions.className = "quiz-history-actions";
+  const start = document.createElement("button");
+  start.className = "text-button";
+  start.type = "button";
+  start.textContent = "Start Quiz";
+  start.addEventListener("click", async () => {
+    try { await selectHistoryQuizVariant({ document_id: activeDocumentId, topic_id: variant.topic_id, difficulty: variant.difficulty }); }
+    catch (error) { showToast(error.message || "Could not open this quiz"); }
+  });
+  actions.appendChild(start);
+  card.appendChild(actions);
+  return card;
+}
+
+function registerPendingQuiz(request, fallbackName = "") {
+  const id = ++pendingQuizSequence;
+  pendingQuizGenerations.set(id, {
+    documentId: request.document_id, name: request.quiz_name || fallbackName, difficulty: request.difficulty,
+    count: request.question_count, modelId: request.model_id,
+  });
+  renderQuizHistory();
+  return id;
+}
+
+// The request is over (saved, failed or superseded): drop the "generating" card and re-read what
+// the backend has saved, whether or not the user is still looking at that quiz.
+async function finishPendingQuiz(id) {
+  pendingQuizGenerations.delete(id);
+  renderQuizHistory();
+  await loadQuizStatuses();
+  updateDifficultyOptions();
+  renderQuizHistory();
 }
 
 async function showQuizHistoryDetail(attemptId) {
@@ -2377,7 +2486,7 @@ async function loadSelectedQuiz() {
   quizExplanations = {};
   quizQuestionIndex = 0;
   renderAssessmentQuiz();
-  if (!documentId || !selectedTopicId()) {
+  if (!documentId) {
     return;
   }
 
@@ -2423,14 +2532,9 @@ async function generateAssessmentQuiz() {
     showToast("Choose an indexed document first");
     return;
   }
-  if (selectedAssessmentScope() === "topic" && !selectedTopicId()) {
-    showToast("Choose an extracted topic first");
-    return;
-  }
-
   if (currentQuiz?.questions?.length) {
     renderAssessmentQuiz();
-    showToast(quizModelMismatch(currentQuiz) || (currentAttempt?.completed ? "Reviewing saved quiz" : "Quiz ready"));
+    showToast(quizSettingsMismatch(currentQuiz) || (currentAttempt?.completed ? "Reviewing saved quiz" : "Quiz ready"));
     return;
   }
 
@@ -2441,6 +2545,7 @@ async function generateAssessmentQuiz() {
     return;
   }
   const requestedQuizKey = quizGenerationRequestKey(generationRequest);
+  const pendingId = registerPendingQuiz(generationRequest);
   setAssessmentLoading(true);
   quizList.innerHTML = "";
   assessmentTitle.textContent = "Generating assessment";
@@ -2460,7 +2565,7 @@ async function generateAssessmentQuiz() {
     updateDifficultyOptions();
     closeQuizCreateDialog();
     renderAssessmentQuiz();
-    const reusedOtherModel = quizModelMismatch(currentQuiz, generationRequest.model_id);
+    const reusedOtherModel = quizSettingsMismatch(currentQuiz, generationRequest);
     showToast(reusedOtherModel ? reusedOtherModel : currentQuiz.assessment_plan?.partial
       ? `Quiz ready with ${currentQuiz.assessment_plan?.actual_count ?? currentQuiz.questions.length}/${currentQuiz.assessment_plan?.requested_count ?? currentQuiz.assessment_plan?.target_questions ?? selectedQuestionCount()} grounded questions`
       : "Quiz ready");
@@ -2483,6 +2588,7 @@ async function generateAssessmentQuiz() {
   } finally {
     setAssessmentLoading(false);
     updateAssessmentSummary();
+    finishPendingQuiz(pendingId);
   }
 }
 
@@ -2491,13 +2597,9 @@ async function regenerateAssessmentQuiz() {
     showToast("Choose an indexed document first");
     return;
   }
-  if (!selectedTopicId()) {
-    showToast("Choose an extracted topic first");
-    return;
-  }
-
   const generationRequest = selectedQuizGenerationRequest();
   const requestedQuizKey = quizGenerationRequestKey(generationRequest);
+  const pendingId = registerPendingQuiz(generationRequest, currentQuiz?.title || "");
   setAssessmentLoading(true);
   quizList.innerHTML = "";
   assessmentTitle.textContent = "Regenerating assessment";
@@ -2525,6 +2627,7 @@ async function regenerateAssessmentQuiz() {
   } finally {
     setAssessmentLoading(false);
     updateAssessmentSummary();
+    finishPendingQuiz(pendingId);
   }
 }
 
@@ -2543,44 +2646,13 @@ async function deleteAssessmentQuiz() {
   }
 }
 
-function setQuizProgressDrawerOpen(open) {
-  const shouldOpen = Boolean(open && currentQuiz?.questions?.length);
-  document.body.classList.toggle("quiz-progress-open", shouldOpen);
-  quizProgressTrigger.setAttribute("aria-expanded", String(shouldOpen));
-  if (shouldOpen) quizProgressClose.focus();
-}
-
-function renderPracticeMastery() {
-  if (!practiceMasteryPanel || !practiceMasteryList) return;
-  if (!currentQuiz?.questions?.length) {
-    practiceMasteryPanel.hidden = true;
-    practiceMasteryList.innerHTML = "";
-    return;
-  }
-  const topicNames = Object.fromEntries((currentQuiz?.questions || []).map((question) => [question.topic_id, question.topic_name || question.topic_id]));
-  let masteries = Object.values(currentAttempt?.mastery_by_topic || {});
-  if (!masteries.length && currentAttempt?.mastery) masteries = [currentAttempt.mastery];
-  if (!masteries.length && dashboardData) {
-    const represented = new Set((currentQuiz?.questions || []).map((question) => question.topic_id));
-    masteries = (dashboardData.mastery || []).filter((mastery) => mastery.document_id === currentQuiz.document_id && represented.has(mastery.topic_id));
-  }
-  masteries = masteries.map((mastery) => ({ ...mastery, topic_name: mastery.topic_name || topicNames[mastery.topic_id] || mastery.topic_id }));
-  practiceMasteryPanel.hidden = false;
-  renderMasteryList(practiceMasteryList, masteries, { emptyText: "Mastery evidence is not available for this quiz." });
-}
-
 async function selectHistoryQuizVariant(attempt) {
-  const topicId = attempt.topic_id || "document";
-  quizDocumentSelect.value = attempt.document_id;
-  updateTopicOptions();
-  quizDifficultySelect.value = attempt.difficulty || "easy";
-  if (topicId === "document") {
-    quizScopeSelect.value = "document";
-  } else {
-    quizScopeSelect.value = "topic";
-    if ([...quizTopicSelect.options].some((option) => option.value === topicId)) quizTopicSelect.value = topicId;
+  if ((attempt.topic_id || "document") !== "document") {
+    throw new Error("Quizzes are no longer created per topic. Create a quiz for the whole document instead.");
   }
-  updateAssessmentScope();
+  quizDocumentSelect.value = attempt.document_id;
+  quizDifficultySelect.value = attempt.difficulty || "easy";
+  quizScopeSelect.value = "document";
   await loadSelectedQuiz();
   if (!currentQuiz?.questions?.length) throw new Error("The saved quiz is no longer available. Regenerate it to create new questions.");
 }
@@ -2627,7 +2699,6 @@ function renderAssessmentQuizLegacy() {
     empty.className = "empty-state";
     empty.textContent = "Choose a document, then generate or start its saved quiz.";
     quizList.appendChild(empty);
-    renderPracticeMastery();
     updateAssessmentSummary();
     return;
   }
@@ -2720,7 +2791,6 @@ function renderAssessmentQuizLegacy() {
   }
 
   updateAssessmentSummary();
-  renderPracticeMastery();
 }
 
 function moveQuizQuestion(direction) {
@@ -2769,7 +2839,6 @@ async function selectAssessmentAnswer(question, option, card) {
     if (currentAttempt.completed) {
       await loadQuizHistory();
       await loadDashboard();
-      renderPracticeMastery();
       showToast(`Quiz completed: ${currentAttempt.score}/${currentAttempt.total}`);
     }
   } catch (error) {
@@ -2977,7 +3046,6 @@ function renderCompletedQuizReview(container, attempt, questions, callbacks) {
 }
 
 function backToQuizzes() {
-  setQuizProgressDrawerOpen(false);
   currentQuiz = null;
   currentAttempt = null;
   quizAttemptSummary = null;
@@ -3020,28 +3088,37 @@ function quizPartialSuffix(quiz) {
   return ` · ${actual}/${requested} questions generated`;
 }
 
-// "Generated by: <model>" -- the name comes from the backend (the model that really ran the quiz),
-// never from the selector. Quizzes saved before this field existed have none and show nothing.
-function quizModelSuffix(quiz) {
-  const model = quiz?.generation_model || quiz?.assessment_plan?.generation_model;
-  return model?.name ? ` · Generated by: ${model.name}` : "";
+// "Generated by <model>": the name comes from the backend (the model that really ran the quiz) and is
+// shown with the Study Session's label for it; it never follows the current selector. Quizzes saved
+// before this field existed have none and show nothing.
+function quizModelInfo(quiz) {
+  return quiz?.generation_model || quiz?.assessment_plan?.generation_model || null;
 }
 
-// The selector may say another model than the one that made the saved quiz on screen (generating
-// reuses a saved quiz; only "Regenerate Quiz" makes a new one). Say so instead of leaving it implicit.
-function quizModelMismatch(quiz, requestedModelId = quizModelSelect?.value) {
-  const actual = quiz?.generation_model || quiz?.assessment_plan?.generation_model;
-  if (!actual?.model_id || !requestedModelId || actual.model_id === requestedModelId) return "";
-  const selected = [...(quizModelSelect?.options || [])].find((option) => option.value === requestedModelId)?.text || requestedModelId;
-  return `This saved quiz was generated by ${actual.name}, not ${selected}. Use Regenerate Quiz to create a new one with ${selected}.`;
+function quizModelSuffix(quiz) {
+  const info = quizModelInfo(quiz);
+  const name = info ? modelLabel(info.model_id, info.name) : "";
+  return name ? ` · Generated by ${name}` : "";
+}
+
+// A saved quiz belongs to the settings it was made with (model, number of questions). If the
+// screen's current settings differ, say so: generating over it never silently relabels or replaces it.
+function quizSettingsMismatch(quiz, request = selectedQuizGenerationRequest()) {
+  const info = quizModelInfo(quiz);
+  const requested = Number(quiz?.requested_count ?? quiz?.assessment_plan?.requested_count ?? 0);
+  const modelDiffers = Boolean(info?.model_id && request.model_id && info.model_id !== request.model_id);
+  const countDiffers = Boolean(requested && request.question_count && requested !== Number(request.question_count));
+  if (!modelDiffers && !countDiffers) return "";
+  const made = [info ? `generated by ${modelLabel(info.model_id, info.name)}` : "", requested ? `${requested} questions` : ""].filter(Boolean).join(", ");
+  return `This saved quiz was ${made}. Your current settings are ${modelLabel(request.model_id)}, ${request.question_count} questions. Use Regenerate Quiz to create a new one with them.`;
 }
 
 function assessmentTitleText(quiz) {
   if (!quiz?.questions?.length) return "Assessment Agent";
   const quizName = (quiz.title || "").trim() || "Untitled Quiz";
-  const mismatch = quizModelMismatch(quiz);
+  const mismatch = quizSettingsMismatch(quiz);
   const partialSuffix = quizPartialSuffix(quiz) + quizModelSuffix(quiz)
-    + (mismatch ? ` · Selected model differs: press Regenerate Quiz to use it` : "");
+    + (mismatch ? " · Current settings differ: press Regenerate Quiz to use them" : "");
   if (quiz.assessment_scope === "document") {
     const distribution = documentQuizTypeBreakdown(quiz);
     const parts = ["single_choice", "true_false", "multi_select"]
@@ -3055,8 +3132,6 @@ function assessmentTitleText(quiz) {
 function renderAssessmentQuiz() {
   const quizPane = document.querySelector('[data-session-pane="quiz"]');
   const hasQuiz = Boolean(currentQuiz?.questions?.length);
-  quizProgressTrigger.hidden = !hasQuiz;
-  if (!hasQuiz) setQuizProgressDrawerOpen(false);
   quizPane?.classList.toggle("quiz-active", hasQuiz);
   quizPane?.classList.toggle("quiz-landing", !hasQuiz);
   updateQuizLandingLayout();
@@ -3067,7 +3142,6 @@ function renderAssessmentQuiz() {
     empty.className = "empty-state";
     empty.textContent = "Choose a document, then generate or start its saved quiz.";
     quizList.appendChild(empty);
-    renderPracticeMastery();
     updateAssessmentSummary();
     return;
   }
@@ -3080,7 +3154,6 @@ function renderAssessmentQuiz() {
       remove: deleteAssessmentQuiz,
     });
     updateAssessmentSummary();
-    renderPracticeMastery();
     return;
   }
 
@@ -3102,7 +3175,6 @@ function renderAssessmentQuiz() {
       if (result) quizList.appendChild(createAssessmentReviewCard(question, result, index));
     });
     updateAssessmentSummary();
-    renderPracticeMastery();
     return;
   }
 
@@ -3184,7 +3256,6 @@ function renderAssessmentQuiz() {
   card.append(heading, questionText, ...(multiSelectHelper ? [multiSelectHelper] : []), options, navigator, navigation);
   quizList.appendChild(card);
   updateAssessmentSummary();
-  renderPracticeMastery();
 }
 
 function moveQuizQuestionLegacy(direction) {
@@ -3231,7 +3302,6 @@ function resetAssessmentQuiz() {
   quizAnswers = {};
   quizExplanations = {};
   quizQuestionIndex = 0;
-  setQuizProgressDrawerOpen(false);
   renderAssessmentQuiz();
   showToast("Retake started with the same questions");
 }
@@ -3263,6 +3333,7 @@ navItems.forEach((item) => {
 
 document.getElementById("session-home-button")?.addEventListener("click", () => setPage("overview"));
 regenerateSummaryButton?.addEventListener("click", () => loadDocumentSummary(true));
+generateSummaryButton?.addEventListener("click", () => loadDocumentSummary());
 flashcardElement?.addEventListener("click", () => { flashcardFlipped = !flashcardFlipped; renderCurrentFlashcard(); });
 document.getElementById("previous-flashcard")?.addEventListener("click", () => { const cards = visibleFlashcards(); if (cards.length) { flashcardIndex = (flashcardIndex - 1 + cards.length) % cards.length; flashcardFlipped = false; renderCurrentFlashcard(); } });
 document.getElementById("next-flashcard")?.addEventListener("click", () => { const cards = visibleFlashcards(); if (cards.length) { flashcardIndex = (flashcardIndex + 1) % cards.length; flashcardFlipped = false; renderCurrentFlashcard(); } });
@@ -3271,8 +3342,9 @@ flashcardLanguageSelect?.addEventListener("change", () => {
   flashcardLanguage = flashcardLanguageSelect.value;
   localStorage.setItem("aiTutorFlashcardLanguage", flashcardLanguage);
   loadedFlashcardKey = "";
-  loadDocumentFlashcards();
+  showFlashcardsState();
 });
+generateFlashcardsButton?.addEventListener("click", () => loadDocumentFlashcards());
 document.getElementById("shuffle-flashcards")?.addEventListener("click", () => { for (let index = flashcards.length - 1; index > 0; index -= 1) { const swap = Math.floor(Math.random() * (index + 1)); [flashcards[index], flashcards[swap]] = [flashcards[swap], flashcards[index]]; } flashcardIndex = 0; flashcardFlipped = false; renderCurrentFlashcard(); });
 document.getElementById("manage-flashcards")?.addEventListener("click", openFlashcardManager);
 favoriteFlashcardButton?.addEventListener("click", async () => { const card = visibleFlashcards()[flashcardIndex]; if (!card) return; try { await patchFlashcard(card, { is_favorite: !card.is_favorite }); renderCurrentFlashcard(); } catch (error) { showToast(error.message); } });
@@ -3317,11 +3389,7 @@ reviewQuizButton.addEventListener("click", () => {
 });
 backToQuizzesButton.addEventListener("click", backToQuizzes);
 quizDocumentSelect.addEventListener("change", handleQuizDocumentChange);
-quizTopicSelect.addEventListener("change", loadSelectedQuiz);
-quizScopeSelect.addEventListener("change", async () => {
-  updateAssessmentScope();
-  await loadSelectedQuiz();
-});
+quizScopeSelect.addEventListener("change", loadSelectedQuiz);
 
 authForm.addEventListener("submit", handleAuthentication);
 authSwitch.addEventListener("click", () => setAuthMode(authMode === "login" ? "signup" : "login"));
@@ -3369,7 +3437,7 @@ async function initializeChatWorkspace() {
 function updateQuizLandingLayout() {
   const pane = document.querySelector('[data-session-pane="quiz"]');
   if (!pane) return;
-  ensureQuizModelSelect();
+  ensureQuizQuestionCountSelect();
   let header = pane.querySelector(".quiz-landing-header");
   if (!header) {
     header = document.createElement("div");
@@ -3392,47 +3460,37 @@ function updateQuizLandingLayout() {
   }
 }
 
-// The model selector must exist whenever a saved quiz is shown too, not only after "+ Create Quiz":
-// "Regenerate Quiz" reads it, and without it a regeneration would silently use the default model.
-function ensureQuizModelSelect() {
-  if (quizModelSelect || !generateQuizButton) return;
+// The question-count select is part of the quiz form whenever it is shown (also next to a saved
+// quiz, where "Regenerate Quiz" reads it), so it is built once with the screen, not with the dialog.
+function ensureQuizQuestionCountSelect() {
+  if (quizQuestionCountSelect || !generateQuizButton) return;
   const label = document.createElement("label");
+  label.id = "quiz-question-count-field";
   const caption = document.createElement("span");
-  caption.textContent = "Quiz model";
-  quizModelSelect = document.createElement("select");
-  quizModelSelect.id = "quiz-model-select";
-  quizModelSelect.add(new Option("Qwen2.5-7B-Instruct", "qwen-2.5-7b", true, true));
-  quizModelSelect.add(new Option("DeepSeek-R1-Distill-Qwen-14B", "deepseek-r1-14b"));
-  // Choosing another model never changes a saved quiz: only the hint next to its title updates.
-  quizModelSelect.addEventListener("change", () => {
+  caption.textContent = "Number of questions";
+  quizQuestionCountSelect = document.createElement("select");
+  quizQuestionCountSelect.id = "quiz-question-count-select";
+  [12, 15, 18, 20].forEach((count) => {
+    const option = document.createElement("option");
+    option.value = String(count);
+    option.textContent = String(count);
+    option.selected = count === 12;
+    quizQuestionCountSelect.appendChild(option);
+  });
+  // Changing the settings never changes a saved quiz: only the "saved" marks and the hint update.
+  quizQuestionCountSelect.addEventListener("change", () => {
+    updateDifficultyOptions();
     if (currentQuiz?.questions?.length) assessmentTitle.textContent = assessmentTitleText(currentQuiz);
   });
-  label.append(caption, quizModelSelect);
+  label.append(caption, quizQuestionCountSelect);
   generateQuizButton.before(label);
+  quizQuestionCountField = label;
 }
 
 function openQuizCreateDialog() {
   if (!assessmentControl) return;
   if (quizNameInput) quizNameInput.value = "";
-  ensureQuizModelSelect();
-  if (!quizQuestionCountSelect) {
-    const label = document.createElement("label");
-    label.id = "quiz-question-count-field";
-    const caption = document.createElement("span");
-    caption.textContent = "Number of questions";
-    quizQuestionCountSelect = document.createElement("select");
-    quizQuestionCountSelect.id = "quiz-question-count-select";
-    [12, 15, 18, 20].forEach((count) => {
-      const option = document.createElement("option");
-      option.value = String(count);
-      option.textContent = String(count);
-      option.selected = count === 12;
-      quizQuestionCountSelect.appendChild(option);
-    });
-    label.append(caption, quizQuestionCountSelect);
-    generateQuizButton.before(label);
-    quizQuestionCountField = label;
-  }
+  ensureQuizQuestionCountSelect();
   if (!quizCreateDialog) {
     quizCreateDialog = document.createElement("div");
     quizCreateDialog.className = "quiz-create-dialog";
@@ -3453,15 +3511,6 @@ function closeQuizCreateDialog() {
   assessmentControl.hidden = true;
   quizCreateDialog.classList.remove("open");
 }
-
-quizProgressTrigger.addEventListener("click", () => {
-  setQuizProgressDrawerOpen(!document.body.classList.contains("quiz-progress-open"));
-});
-quizProgressClose.addEventListener("click", () => setQuizProgressDrawerOpen(false));
-quizProgressBackdrop.addEventListener("click", () => setQuizProgressDrawerOpen(false));
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") setQuizProgressDrawerOpen(false);
-});
 
 // ---------------------------------------------------------------------------
 // Study Planner (Phase 1 / MVP)

@@ -304,17 +304,17 @@ class QuizRetakeFlowTests(unittest.TestCase):
         self.assertIn("const groups = Object.values(quizHistory.reduce", script)
         self.assertIn('historySummary.textContent = `Attempt history (${group.attempts.length})`', script)
         self.assertIn('makeFilter("Difficulty"', script)
-        self.assertIn('makeFilter("Scope"', script)
+        self.assertNotIn('makeFilter("Scope"', script)      # quizzes are whole-document only: no Topic/Scope filter
         self.assertIn("group.average", script)
         self.assertNotIn("— Your answer", script)
         self.assertNotIn("— Correct answer", script)
         self.assertNotIn("Source citation unavailable.", script)
         self.assertNotIn("source_chunk_ids.join", script)
-        self.assertIn('quizProgressTrigger.textContent = "View Progress"', script)
-        self.assertIn("setQuizProgressDrawerOpen", script)
+        self.assertNotIn("View Progress", script)            # the old per-quiz progress drawer was removed
+        self.assertNotIn("setQuizProgressDrawerOpen", script)
         styles = Path("frontend/styles.css").read_text(encoding="utf-8")
-        self.assertIn(".quiz-progress-drawer", styles)
-        self.assertIn(".quiz-progress-open .quiz-progress-drawer", styles)
+        self.assertNotIn(".quiz-progress-drawer", styles)
+        self.assertNotIn(".quiz-progress-trigger", styles)
         self.assertIn("flex-wrap: wrap", styles)
         self.assertIn("@media (max-width: 720px)", styles)
         deferred_selector = script[script.rfind("function selectAssessmentAnswer") :]

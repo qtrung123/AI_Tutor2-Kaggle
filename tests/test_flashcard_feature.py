@@ -79,6 +79,21 @@ class FlashcardFeatureTests(unittest.TestCase):
         self.assertLess(prompt.index("TOPIC_ID: beta"), prompt.index("TOPIC_ID: alpha"))
         self.assertIn("Use ONLY evidence from the card's own TOPIC block", prompt)
 
+    def test_cache_only_lookup_reports_missing_cards_without_generating_and_finds_saved_ones(self):
+        with patch.object(flashcard_service, "ChatOllama") as llm,              patch.object(flashcard_service, "get_topic_chunks") as retrieval,              patch.object(flashcard_service, "resolve_generation_model", return_value="runtime-model"):
+            missing = flashcard_service.generate_flashcards(self.alice, "notes.pdf", model_id="model-a", cache_only=True)
+        self.assertEqual((missing["status"], missing["cards"], missing["llm_calls"]), ("not_generated", [], 0))
+        llm.assert_not_called(); retrieval.assert_not_called()
+
+        self.generate()
+        with patch.object(flashcard_service, "ChatOllama") as llm,              patch.object(flashcard_service, "resolve_generation_model", return_value="runtime-model"):
+            found = flashcard_service.generate_flashcards(self.alice, "notes.pdf", ["alpha", "beta"], "model-a", cache_only=True)
+            other_language = flashcard_service.generate_flashcards(self.alice, "notes.pdf", ["alpha", "beta"], "model-a",
+                                                                   language="vietnamese", cache_only=True)
+        self.assertTrue(found["cache_hit"]); self.assertEqual(len(found["cards"]), 2)
+        self.assertEqual(other_language["status"], "not_generated")
+        llm.assert_not_called()
+
     def test_compatible_cache_hit_uses_zero_calls_and_is_owner_scoped(self):
         first, _ = self.generate()
         with patch.object(flashcard_service, "ChatOllama") as llm, \

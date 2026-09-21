@@ -278,11 +278,10 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         ):
             self.assertNotIn(demo_text, markup)
         self.assertIn('id="overview-mastery-list"', markup)
-        self.assertIn('id="practice-mastery-list"', markup)
+        self.assertNotIn('id="practice-mastery-list"', markup)   # the old Progress & Mastery panel was removed
         self.assertIn('id="continue-learning-list"', markup)
         self.assertIn('id="overview-materials-list"', markup)
         self.assertIn('/api/dashboard', script)
-        self.assertIn("mastery_by_topic", script)
         self.assertIn('"Learning materials"', script)
         self.assertIn('"Overall accuracy"', script)
         self.assertIn("Across all learning materials", script)

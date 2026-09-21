@@ -82,23 +82,20 @@ class ModelRegistryTests(unittest.TestCase):
         summary = (ROOT / "backend" / "summary_service.py").read_text(encoding="utf-8")
         rag = (ROOT / "backend" / "rag_service.py").read_text(encoding="utf-8")
 
-        self.assertIn('model_id: quizModelSelect?.value || "qwen-2.5-7b"', frontend)
+        self.assertIn('model_id: selectedModelId || "qwen-2.5-7b"', frontend)
         self.assertIn("model_id: request.model_id", frontend)
         self.assertIn("body: JSON.stringify(request)", frontend)
         self.assertGreaterEqual(main.count("or QUIZ_DEFAULT_GENERATION_MODEL"), 2)
         self.assertIn("model_id or DEFAULT_GENERATION_MODEL", summary)
         self.assertIn("resolve_generation_model(model_id)", rag)
 
-    def test_create_quiz_model_selector_offers_exactly_qwen_and_deepseek_by_public_id(self):
+    def test_the_only_model_selector_is_the_study_session_one_and_it_lists_the_registry_models(self):
         frontend = (ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
 
-        qwen = 'new Option("Qwen2.5-7B-Instruct", "qwen-2.5-7b", true, true)'
-        deepseek = 'new Option("DeepSeek-R1-Distill-Qwen-14B", "deepseek-r1-14b")'
-        self.assertIn(qwen, frontend)
-        self.assertIn(deepseek, frontend)
-        self.assertLess(frontend.index(qwen), frontend.index(deepseek))
-        self.assertEqual(frontend.count("quizModelSelect.add(new Option("), 2)
-        self.assertNotIn("hf.co/", frontend)
+        self.assertEqual(frontend.count('select.id = "generation-model-select"'), 1)
+        self.assertNotIn("quizModelSelect", frontend)              # the Create Quiz form has no model field of its own
+        self.assertIn("generationModels.forEach((model) => select.add(new Option(model.label, model.id", frontend)
+        self.assertNotIn("hf.co/", frontend)                       # public ids only, never runtime references
         self.assertNotIn("qwen3", frontend.lower())
 
     def test_quiz_calls_disable_reasoning_and_kaggle_prepares_without_residency(self):

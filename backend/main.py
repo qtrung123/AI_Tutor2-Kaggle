@@ -667,9 +667,15 @@ def quiz_delete(quiz_id: str, current_user: dict = Depends(require_current_user)
 
 
 @app.get("/api/summary/{document_id}")
-def summary_detail(document_id: str, model_id: Optional[str] = None, current_user: dict = Depends(require_current_user)) -> dict:
-    """Return a compatible persisted summary or generate it from existing indexed chunks."""
+def summary_detail(document_id: str, model_id: Optional[str] = None, cache_only: bool = False,
+                   current_user: dict = Depends(require_current_user)) -> dict:
+    """Return a compatible persisted summary or generate it from existing indexed chunks.
+
+    With cache_only=true nothing is generated: a missing summary is reported as status "not_generated".
+    """
     try:
+        if cache_only:
+            return generate_document_summary(current_user["id"], document_id, model_id=model_id, cache_only=True)
         return generate_document_summary(current_user["id"], document_id, model_id=model_id)
     except ValueError as error:
         message = str(error)
@@ -692,10 +698,16 @@ def summary_regenerate(document_id: str, request: SummaryGenerateRequest, curren
 
 @app.get("/api/flashcards/{document_id}")
 def flashcards_detail(document_id: str, topic_ids: list[str] | None = Query(default=None),
-                      model_id: Optional[str] = None, language: Optional[str] = None,
+                      model_id: Optional[str] = None, language: Optional[str] = None, cache_only: bool = False,
                       current_user: dict = Depends(require_current_user)) -> dict:
-    """Reuse or generate grounded cards from existing owner-scoped indexed chunks."""
+    """Reuse or generate grounded cards from existing owner-scoped indexed chunks.
+
+    With cache_only=true nothing is generated: missing cards are reported as status "not_generated".
+    """
     try:
+        if cache_only:
+            return generate_flashcards(current_user["id"], document_id, topic_ids=topic_ids, model_id=model_id,
+                                       language=language, cache_only=True)
         return generate_flashcards(current_user["id"], document_id, topic_ids=topic_ids, model_id=model_id, language=language)
     except ValueError as error:
         raise HTTPException(status_code=404 if str(error) == "Document not found." else 400, detail=str(error)) from error

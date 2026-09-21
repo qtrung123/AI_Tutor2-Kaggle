@@ -4497,6 +4497,40 @@ def _resolve_quiz_title(quiz_name: str | None, previous_title: str | None, fallb
     return trimmed_previous or fallback
 
 
+def _saved_quiz_uses_model(quiz: dict, model_id: str) -> bool:
+    """A saved quiz answers a request only if the same model generated it.
+
+    A quiz saved before models were recorded has no `generation_model`; it stays reusable rather
+    than being replaced only because its model is unknown.
+    """
+    saved = quiz.get("generation_model") or (quiz.get("assessment_plan") or {}).get("generation_model")
+    if not saved:
+        return True
+    requested = describe_generation_model(model_id)
+    return (saved.get("name"), saved.get("quantization")) == (requested["name"], requested["quantization"])
+
+
+def _quiz_variant_status(quiz: dict) -> dict:
+    """What the Quiz screen needs to know about one saved quiz (no questions)."""
+    plan = quiz.get("assessment_plan") or {}
+    model = quiz.get("generation_model") or plan.get("generation_model") or {}
+    requested = int(plan.get("requested_count") or plan.get("target_questions") or quiz.get("question_count") or 0)
+    actual = int(quiz.get("question_count") or 0)
+    return {
+        "quiz_id": quiz.get("quiz_id"),
+        "title": quiz.get("title") or "",
+        "topic_id": quiz["topic_id"],
+        "topic_name": quiz.get("topic_name") or "",
+        "difficulty": quiz["difficulty"],
+        "question_count": actual,
+        "requested_count": requested,
+        "status": "complete" if actual >= requested else "partial",
+        "model_id": model.get("model_id"),
+        "model_name": model.get("name"),
+        "created_at": quiz.get("created_at"),
+    }
+
+
 def _with_count_fields(quiz: dict, requested: int) -> dict:
     """Expose requested_count / actual_count / status at the top level of the quiz."""
     plan = quiz.get("assessment_plan") or {}
@@ -4602,13 +4636,16 @@ def _generate_quiz(
         saved_planner = str(saved_plan.get("planner_version") or "legacy")
         saved_requested = int(saved_plan.get("requested_count") or saved_plan.get("target_questions") or 0)
         saved_questions = list((saved_quiz or {}).get("questions") or [])
-        if saved_quiz and saved_questions and saved_requested == question_count and saved_planner == QUIZ_ENGINE_VERSION:
+        if (
+            saved_quiz and saved_questions and saved_requested == question_count and saved_planner == QUIZ_ENGINE_VERSION
+            and _saved_quiz_uses_model(saved_quiz, model_id)
+        ):
             print(f"[quiz-cache] key={cache_key} HIT")
             diag.set_counts(cache_hit=True, requested_questions=question_count,
                              generated_questions=len(saved_questions), validated_questions=len(saved_questions))
             return saved_quiz
         if saved_quiz:
-            print(f"[quiz-cache] key={cache_key} MISS (planner/count compatibility)")
+            print(f"[quiz-cache] key={cache_key} MISS (planner/count/model compatibility)")
         else:
             print(f"[quiz-cache] key={cache_key} MISS")
         diag.set_counts(cache_hit=False)
@@ -4730,14 +4767,7 @@ def list_quiz_statuses(owner_id: str = LEGACY_USER_ID) -> list[dict]:
     for document in list_indexed_documents(owner_id):
         document_id = document["id"]
         document_quizzes = list_document_quizzes(document_id, owner_id)
-        variants = [
-            {
-                "topic_id": quiz["topic_id"],
-                "difficulty": quiz["difficulty"],
-                "question_count": int(quiz.get("question_count", 0)),
-            }
-            for quiz in document_quizzes.values()
-        ]
+        variants = [_quiz_variant_status(quiz) for quiz in document_quizzes.values()]
 
         statuses.append(
             {
