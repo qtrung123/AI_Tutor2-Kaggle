@@ -81,8 +81,30 @@ wait_http() {
 }
 
 ollama_has_model() {
-  ollama list 2>/dev/null | awk 'NR > 1 {print $1}' | grep -Fxq "$1" ||
-    ollama list 2>/dev/null | awk 'NR > 1 {print $1}' | grep -Fxq "$1:latest"
+  # Read the list once into a variable: `awk | grep -q` under `set -o pipefail` can report failure
+  # (SIGPIPE) when grep exits at the first match, which would wrongly trigger a second pull.
+  local names
+  names="$(ollama list 2>/dev/null | awk 'NR > 1 {print $1}')" || return 1
+  grep -Fxq "$1" <<<"$names" || grep -Fxq "$1:latest" <<<"$names"
+}
+
+# Pull one model into Ollama (callers only pull when ollama_has_model is false).
+# Ollama 0.34.x refuses the redirect from the Hugging Face registry to its CDN
+# ("blocked redirect to a different host", e.g. us.aws.cdn.hf.co), so hf.co/* models are pulled
+# with --insecure first and, if that also fails, with a plain pull. --insecure is used only for
+# hf.co/* models, never for the registry.ollama.ai models (e.g. the embedding model).
+pull_model() {
+  local model="$1"
+  if [[ "$model" == hf.co/* ]]; then
+    if ! ollama pull --insecure "$model" >>"$LOG_DIR/ollama.log" 2>&1; then
+      log "ollama pull --insecure failed for $model; retrying without --insecure"
+      ollama pull "$model" >>"$LOG_DIR/ollama.log" 2>&1 ||
+        fail "Could not pull Hugging Face model '$model' (tried --insecure and a plain pull)." "$LOG_DIR/ollama.log"
+    fi
+  else
+    ollama pull "$model" >>"$LOG_DIR/ollama.log" 2>&1 || fail "Could not pull model '$model'." "$LOG_DIR/ollama.log"
+  fi
+  ollama_has_model "$model" || fail "Model '$model' is still absent after pulling it." "$LOG_DIR/ollama.log"
 }
 
 prepare_kaggle_chroma() {
@@ -178,7 +200,7 @@ wait_http "Ollama" "$OLLAMA_HOST/api/tags" 120 "$LOG_DIR/ollama.log"
 
 if [[ "$OLLAMA_CHAT_MODEL" == hf.co/* ]] && ! ollama_has_model "$OLLAMA_CHAT_MODEL"; then
   log "Pulling Hugging Face chat model $OLLAMA_CHAT_MODEL"
-  ollama pull "$OLLAMA_CHAT_MODEL" >>"$LOG_DIR/ollama.log" 2>&1
+  pull_model "$OLLAMA_CHAT_MODEL"
 elif [[ "$RECREATE_OLLAMA_MODEL" == "1" ]] || ! ollama_has_model "$OLLAMA_CHAT_MODEL"; then
   [[ -n "$GGUF_MODEL_PATH" ]] || fail "GGUF_MODEL_PATH must be set because chat model '$OLLAMA_CHAT_MODEL' is absent."
   [[ -f "$GGUF_MODEL_PATH" ]] || fail "GGUF file does not exist: $GGUF_MODEL_PATH"
@@ -190,7 +212,7 @@ fi
 
 if ! ollama_has_model "$OLLAMA_QWEN3_8B_MODEL"; then
   log "Pulling quiz model $OLLAMA_QWEN3_8B_MODEL"
-  ollama pull "$OLLAMA_QWEN3_8B_MODEL" >>"$LOG_DIR/ollama.log" 2>&1
+  pull_model "$OLLAMA_QWEN3_8B_MODEL"
 else
   log "Quiz model already exists: $OLLAMA_QWEN3_8B_MODEL"
 fi
@@ -201,7 +223,7 @@ if [[ "$PRELOAD_ALL_MODELS" == "true" || "$PRELOAD_ALL_MODELS" == "1" ]]; then
     generation_model="${generation_model//[[:space:]]/}"
     [[ -z "$generation_model" || "$generation_model" == "$OLLAMA_CHAT_MODEL" ]] && continue
     if ollama_has_model "$generation_model"; then log "Generation model already exists: $generation_model"
-    elif [[ "$generation_model" == hf.co/* ]]; then log "Preloading optional generation model $generation_model"; ollama pull "$generation_model" >>"$LOG_DIR/ollama.log" 2>&1
+    elif [[ "$generation_model" == hf.co/* ]]; then log "Preloading optional generation model $generation_model"; pull_model "$generation_model"
     else fail "Optional model '$generation_model' is absent and cannot be pulled automatically."
     fi
   done
@@ -211,7 +233,7 @@ fi
 
 if ! ollama_has_model "$OLLAMA_EMBEDDING_MODEL"; then
   log "Pulling embedding model $OLLAMA_EMBEDDING_MODEL"
-  ollama pull "$OLLAMA_EMBEDDING_MODEL" >>"$LOG_DIR/ollama.log" 2>&1
+  pull_model "$OLLAMA_EMBEDDING_MODEL"
 else
   log "Embedding model already exists: $OLLAMA_EMBEDDING_MODEL"
 fi
