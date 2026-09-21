@@ -1,5 +1,6 @@
 """Public model IDs mapped to allowlisted Ollama runtime references."""
 import os
+import re
 
 import httpx
 from config import CHAT_MODEL, DEFAULT_GENERATION_MODEL, GENERATION_MODELS, OLLAMA_BASE_URL
@@ -9,9 +10,16 @@ QWEN_3B_OLLAMA_MODEL = os.getenv(
     "OLLAMA_QWEN_3B_MODEL",
     "hf.co/Qwen/Qwen2.5-3B-Instruct-GGUF:Q4_K_M",
 )
-# Kept resolvable (but no longer offered in quiz model selection, and no longer configured by
-# kaggle_run.ipynb or start_kaggle.sh) for backward compatibility with any external deployment
-# that still sets OLLAMA_GENERATION_MODELS/OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL to qwen3-4b.
+# The second chat/Quiz model compared against Qwen2.5-7B: pulled from Hugging Face by Ollama
+# exactly like the Qwen model above (hf.co/<repo>:<quant>, see deployment/start_kaggle.sh).
+DEEPSEEK_R1_14B_OLLAMA_MODEL = os.getenv(
+    "OLLAMA_DEEPSEEK_R1_14B_MODEL",
+    "hf.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q4_K_M",
+)
+# The Qwen3 entries are kept resolvable (but no longer offered in quiz model selection, and no
+# longer configured by kaggle_run.ipynb or start_kaggle.sh) so that quizzes generated earlier keep
+# a readable model name and any external deployment that still sets
+# OLLAMA_GENERATION_MODELS/OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL to qwen3-4b/qwen3-8b keeps working.
 QWEN3_4B_OLLAMA_MODEL = os.getenv(
     "OLLAMA_QWEN3_4B_MODEL",
     "hf.co/Qwen/Qwen3-4B-GGUF:Q4_K_M",
@@ -23,6 +31,9 @@ QWEN3_8B_OLLAMA_MODEL = os.getenv(
 _BUILT_INS = {
     "qwen-2.5-7b": {"id": "qwen-2.5-7b", "label": "Qwen 2.5 7B", "ollama_model": QWEN_OLLAMA_MODEL},
     "qwen-2.5-3b": {"id": "qwen-2.5-3b", "label": "Qwen 2.5 3B", "ollama_model": QWEN_3B_OLLAMA_MODEL},
+    "deepseek-r1-14b": {
+        "id": "deepseek-r1-14b", "label": "DeepSeek R1 Distill Qwen 14B", "ollama_model": DEEPSEEK_R1_14B_OLLAMA_MODEL,
+    },
     "qwen3-4b": {"id": "qwen3-4b", "label": "Qwen3 4B", "ollama_model": QWEN3_4B_OLLAMA_MODEL},
     "qwen3-8b": {"id": "qwen3-8b", "label": "Qwen3 8B", "ollama_model": QWEN3_8B_OLLAMA_MODEL},
 }
@@ -67,6 +78,25 @@ def list_generation_models() -> list[dict]:
     registry = _registry()
     return [{"id": model_id, "label": registry[model_id]["label"], "default": model_id == DEFAULT_GENERATION_MODEL,
              "ready": _is_installed(registry[model_id]["ollama_model"])} for model_id in _configured_ids()]
+
+
+def describe_generation_model(ollama_model: str) -> dict:
+    """Public description of the model that ACTUALLY ran a generation, from its runtime reference.
+
+    `ollama_model` is the reference the backend passed to Ollama (what resolve_generation_model
+    returned), so the name comes from the model used, never from anything the client typed. The
+    runtime reference itself stays private: "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"
+    becomes {"model_id": "qwen-2.5-7b", "name": "Qwen2.5-7B-Instruct", "quantization": "Q4_K_M"}.
+    `model_id` is None for a runtime reference that has no registry entry.
+    """
+    reference = str(ollama_model or "").strip()
+    name, _, quantization = reference.rpartition(":")
+    if not name or "/" in quantization:  # no tag ("bge-m3"), or the colon belonged to a host:port
+        name, quantization = reference, ""
+    name = name.rsplit("/", 1)[-1]
+    name = re.sub(r"[-_.]gguf$", "", name, flags=re.IGNORECASE)
+    public_id = next((item["id"] for item in _registry().values() if item["ollama_model"] == reference), None)
+    return {"model_id": public_id, "name": name or reference, "quantization": quantization or None}
 
 
 def _is_installed(model: str) -> bool:

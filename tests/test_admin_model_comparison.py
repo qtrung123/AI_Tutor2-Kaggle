@@ -101,7 +101,9 @@ class ModelComparisonServiceTests(unittest.TestCase):
         self.assertFalse(by_id["qwen-2.5-3b"]["measured"])
 
     def test_current_production_status_follows_configured_quiz_default(self):
-        comparison = get_quiz_model_comparison()
+        # The status follows whatever the quiz default is; pin it so the test does not depend on it.
+        with patch.object(model_comparison_service, "QUIZ_DEFAULT_GENERATION_MODEL", "qwen3-8b"):
+            comparison = get_quiz_model_comparison()
         by_id = {model["model_id"]: model["status"] for model in comparison["models"]}
         self.assertEqual(by_id["qwen3-8b"], "current_production")
         self.assertEqual(by_id["qwen-2.5-7b"], "benchmark_candidate")

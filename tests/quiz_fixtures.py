@@ -101,7 +101,9 @@ class FakeModel:
         size = max(1, len(content) // self.__class__.pieces)
         for start in range(0, len(content), size):
             yield SimpleNamespace(content=content[start:start + size], response_metadata={})
-        yield SimpleNamespace(content="", response_metadata={"eval_count": 123, "prompt_eval_count": 456})
+        yield SimpleNamespace(content="", response_metadata={
+            "eval_count": 123, "prompt_eval_count": 456, "done_reason": "stop", "eval_duration": 2_000_000_000,
+        })
 
     @classmethod
     def reset(cls, payloads=None):

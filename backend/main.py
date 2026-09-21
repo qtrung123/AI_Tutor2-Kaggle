@@ -292,6 +292,8 @@ class QuizGenerateResponse(BaseModel):
     topic_name: Optional[str] = None
     assessment_scope: str = "topic"
     assessment_plan: dict = Field(default_factory=dict)
+    # The model that actually generated this quiz: {"model_id", "name", "quantization"}.
+    generation_model: Optional[dict] = None
     created_at: str
     questions: list[QuizQuestion]
 

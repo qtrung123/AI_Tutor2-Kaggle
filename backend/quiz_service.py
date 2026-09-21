@@ -39,12 +39,14 @@ from backend.quiz_units import (
     QUIZ_ALLOWED_QUESTION_COUNTS,
     QUIZ_ENGINE_VERSION,
     QUIZ_FIRST_CALL_DEADLINE_S,
+    QUIZ_FOLLOWUP_DEADLINE_S,
     QUIZ_LLM_TIMEOUT_S,
+    QUIZ_MAX_ITEMS_EXTRA,
     QUIZ_MAX_NEW_TOKENS,
-    QUIZ_MIN_TOPUP_S,
+    QUIZ_MIN_CALL_S,
     QUIZ_NUM_CTX,
-    QUIZ_OUTPUT_SCHEMA,
     QUIZ_PROMPT_VERSION,
+    QUIZ_STALL_LIMIT,
     QUIZ_TOKENS_PER_QUESTION,
     QUIZ_TOTAL_DEADLINE_S,
     build_generation_prompt,
@@ -52,11 +54,13 @@ from backend.quiz_units import (
     candidate_target,
     context_budget,
     finalize_questions,
+    followup_request,
+    max_llm_calls,
+    output_schema_for,
     parse_candidates,
     public_unit,
     select_context_units,
     select_questions,
-    topup_request,
     validate_candidate,
 )
 from backend.assessment_planner import (
@@ -68,6 +72,7 @@ from backend.assessment_planner import (
     resolve_concept_evidence, resolve_topic_evidence,
     planner_input_fingerprint,
 )
+from backend.model_registry import describe_generation_model
 from backend.quiz_options import canonicalize_option, strip_leading_option_label
 from backend.mastery_service import calculate_mastery, recompute_topic_mastery
 from backend.rag_service import explain_quiz_answer
@@ -2019,18 +2024,20 @@ def _generate_quiz_from_units(
     """Live Quiz generation: one simple pipeline for ANY document.
 
         chunks -> excerpts -> context that fits a fixed budget
-        -> ONE call writing a surplus of candidates (12 -> 15, 15 -> 18, 18 -> 22, 20 -> 24)
-        -> validation (4 options / 1 answer, grounding in the context, no duplicates)
+        -> call 1 writes a surplus of candidates (12 -> 15, 15 -> 18, 18 -> 22, 20 -> 24)
+        -> parse -> validate -> the valid ones join the pool -> enough? stop
+        -> otherwise another call (at most 4 for 12/15 questions, 5 for 18/20) that writes a
+           moderate batch of only what is missing, is shown every existing question with the
+           sentence it used, and prefers excerpts no call has shown -> repeat
         -> best `question_count` candidates -> quiz
 
     `question_count` is a target, not a condition of success: the quiz holds
-    min(valid candidates, question_count) questions and is "partial" when it is short. Only when
-    there is not a single valid candidate does generation fail. If the first call is short,
-    exactly ONE top-up call writes just the missing questions (on excerpts the first call did not
-    see when there are any). There is never a third call: no Planner, topics, slots, coverage
-    requirement or repair/fill loops, and no rule is relaxed and nothing invented to reach the
-    target. Provenance (excerpt and source_chunk_ids) is derived by the backend from where the
-    model's evidence_quote is really found in the context it was given.
+    min(valid candidates, question_count) questions and is "partial" when the calls run out first
+    (or the time budget does, or two calls in a row add nothing). Only when there is not a single
+    valid candidate does generation fail. No rule is relaxed and nothing is invented to reach the
+    target; every question keeps its evidence in the context the model was shown. No Planner,
+    topics, slots, coverage requirement or per-question calls. Provenance (excerpt and
+    source_chunk_ids) is derived by the backend from where the model's evidence_quote is found.
     """
     diag = quiz_diagnostics.get_current()
     total_started = time.perf_counter()
@@ -2053,6 +2060,9 @@ def _generate_quiz_from_units(
         )
     units_by_id = {unit["unit_id"]: unit for unit in units}
     pool_target = candidate_target(question_count)
+    max_calls = max_llm_calls(question_count)
+    # The model every call below is sent to (ChatOllama(model=model_id)); stored with the quiz.
+    generation_model = describe_generation_model(model_id)
 
     accepted: list[dict] = []
     shown_ids: set[str] = set()
@@ -2065,52 +2075,61 @@ def _generate_quiz_from_units(
         "response_failures": 0,
     }
     generation_ms = validation_ms = model_load_ms = prompt_eval_ms = 0
-    token_generation_ms = model_invocation_ms = initial_generation_ms = topup_generation_ms = 0
+    token_generation_ms = model_invocation_ms = initial_generation_ms = followup_generation_ms = 0
     candidates_requested_total = candidates_returned_total = 0
     candidate_counter = 0
-    retry_log: list[dict] = []
-    topup_calls = 0
+    call_log: list[dict] = []
+    stalled_calls = 0
+    stop_reason = ""
 
-    for attempt_index, phase in enumerate(("initial", "topup")):
-        if phase == "initial":
+    for call_number in range(1, max_calls + 1):
+        first_call = call_number == 1
+        elapsed_s = time.perf_counter() - total_started
+        remaining_s = QUIZ_TOTAL_DEADLINE_S - elapsed_s
+        if first_call:
             requested = pool_target
             shown_units = select_context_units(units, context_budget(requested))
-            avoid_stems = None
+            avoid_stems = avoid_quotes = None
+            deadline_s = min(QUIZ_FIRST_CALL_DEADLINE_S, remaining_s)
         else:
             missing = question_count - len(accepted)
             if missing <= 0:
                 break
-            remaining_s = QUIZ_TOTAL_DEADLINE_S - (time.perf_counter() - total_started)
-            if remaining_s < QUIZ_MIN_TOPUP_S:
-                print(f"[quiz-units-topup] skipped: only {remaining_s:.0f}s of the time budget left")
-                validation_results["reasons"].append("top-up skipped: time budget used up")
+            if stalled_calls >= QUIZ_STALL_LIMIT:
+                stop_reason = f"stopped after {stalled_calls} calls in a row added no valid question"
                 break
-            requested = topup_request(missing)
+            if remaining_s < QUIZ_MIN_CALL_S:
+                stop_reason = "time budget used up"
+                break
+            requested = followup_request(missing)
             budget = context_budget(requested)
-            # Prefer excerpts the first call never saw; if there are none, look at the same
-            # material again (the avoid-list keeps the new questions different).
-            shown_units = select_context_units(units, budget, exclude_ids=shown_ids) or select_context_units(units, budget)
+            # Prefer excerpts no call has shown; once every excerpt was shown, prefer the ones no
+            # accepted question came from; only then look at everything again (the list of existing
+            # questions and their sentences keeps the new ones different).
+            shown_units = select_context_units(units, budget, exclude_ids=shown_ids)
+            if not shown_units:
+                used_ids = {question["concept_id"] for question in accepted}
+                shown_units = (select_context_units(units, budget, exclude_ids=used_ids)
+                               or select_context_units(units, budget))
             avoid_stems = [question["question"] for question in accepted]
-            topup_calls += 1
-            retry_state = {
-                "phase": phase, "missing": missing, "requested": requested,
-                "units": [unit["unit_id"] for unit in shown_units],
-            }
-            retry_log.append(retry_state)
-            print(f"[quiz-units-topup] {json.dumps(retry_state)}")
+            avoid_quotes = [question["_meta"]["quote"] for question in accepted]
+            deadline_s = min(QUIZ_FOLLOWUP_DEADLINE_S, remaining_s)
+            print(f"[quiz-units-followup] call={call_number}/{max_calls} missing={missing} asking={requested}")
             diag.record_retry(
-                concept_id="pool", original_attempt=1, retry_attempt=1,
-                reason=f"{len(accepted)}/{question_count} valid questions after the first call",
+                concept_id="pool", original_attempt=1, retry_attempt=call_number - 1,
+                reason=f"{len(accepted)}/{question_count} valid questions after call {call_number - 1}",
                 stage="validation",
             )
         shown_ids.update(unit["unit_id"] for unit in shown_units)
-        deadline_s = QUIZ_FIRST_CALL_DEADLINE_S if phase == "initial" else remaining_s
         # Grounding is judged against everything the model has been shown so far.
         context_units = [unit for unit in units if unit["unit_id"] in shown_ids]
-        prompt = build_generation_prompt(scope_label, difficulty, shown_units, requested, avoid_stems)
+        prompt = build_generation_prompt(scope_label, difficulty, shown_units, requested, avoid_stems, avoid_quotes)
+        material_chars = sum(unit["char_count"] for unit in shown_units)
+        output_schema = output_schema_for(requested, material_chars)
+        num_predict = min(QUIZ_MAX_NEW_TOKENS, max(600, (requested + QUIZ_MAX_ITEMS_EXTRA) * QUIZ_TOKENS_PER_QUESTION))
         unit_ids = ",".join(unit["unit_id"] for unit in shown_units)[:120]
         diag.record_context(
-            stage="generator" if phase == "initial" else "repair",
+            stage="generator" if first_call else "repair",
             num_chunks=len(shown_units),
             total_chars=sum(unit["char_count"] for unit in shown_units),
             prompt=prompt,
@@ -2119,71 +2138,64 @@ def _generate_quiz_from_units(
         stage_started = time.perf_counter()
         llm_calls += 1
         candidates_requested_total += requested
-        # One fixed context window for both calls so Ollama never reloads the model between them;
+        # One fixed context window for every call so Ollama never reloads the model between them;
         # the evidence per call is bounded by context_budget whatever the document size.
         llm = ChatOllama(
             model=model_id,
             reasoning=False,
-            temperature=0.1 if phase == "initial" else 0.25,
-            format=QUIZ_OUTPUT_SCHEMA,
+            temperature=0.1 if first_call else 0.25,
+            format=output_schema,
             num_ctx=QUIZ_NUM_CTX,
-            num_predict=min(QUIZ_MAX_NEW_TOKENS, max(600, requested * QUIZ_TOKENS_PER_QUESTION)),
+            num_predict=num_predict,
             keep_alive=QUIZ_GENERATION_KEEP_ALIVE,
             client_kwargs={"timeout": min(QUIZ_LLM_TIMEOUT_S, max(30, deadline_s))},
         )
-        print(
-            f"[quiz-units-llm] attempt={attempt_index + 1}, phase={phase}, model={model_id}, "
-            f"requested={requested}, excerpts={len(shown_units)}, prompt_chars={len(prompt)}"
-        )
         invocation_started = time.perf_counter()
         call_invocation_ms = 0
+        metadata: dict = {}
+        parse_report: dict = {}
+        cut = False
+        error_text = ""
         try:
             response_text, metadata, cut = _generate_with_deadline(llm, prompt, deadline_s)
             call_invocation_ms = round((time.perf_counter() - invocation_started) * 1000)
             if cut:
-                validation_results["reasons"].append("response: time limit reached; kept the complete questions written so far")
+                validation_results["reasons"].append(f"call {call_number}: time limit reached; kept the complete questions written so far")
                 timings["deadline_hit"] = True
-            call_model_load_ms = round(float(metadata.get("load_duration") or 0) / 1_000_000)
-            call_prompt_eval_ms = round(float(metadata.get("prompt_eval_duration") or 0) / 1_000_000)
-            call_token_generation_ms = round(float(metadata.get("eval_duration") or 0) / 1_000_000)
-            model_load_ms += call_model_load_ms
-            prompt_eval_ms += call_prompt_eval_ms
-            token_generation_ms += call_token_generation_ms
-            candidates = parse_candidates(response_text)
+            model_load_ms += round(float(metadata.get("load_duration") or 0) / 1_000_000)
+            prompt_eval_ms += round(float(metadata.get("prompt_eval_duration") or 0) / 1_000_000)
+            token_generation_ms += round(float(metadata.get("eval_duration") or 0) / 1_000_000)
+            candidates = parse_candidates(response_text, parse_report)
             candidates_returned_total += len(candidates)
-            print(
-                f"[quiz-units-ollama] attempt={attempt_index + 1}, returned={len(candidates)}, "
-                f"model_load_ms={call_model_load_ms}, prompt_eval_ms={call_prompt_eval_ms}, "
-                f"token_generation_ms={call_token_generation_ms}, "
-                f"prompt_tokens={metadata.get('prompt_eval_count', 0)}, generated_tokens={metadata.get('eval_count', 0)}"
-            )
             diag.record_llm_call(
-                stage="generator" if phase == "initial" else "repair", model=model_id,
+                stage="generator" if first_call else "repair", model=model_id,
                 elapsed_ms=call_invocation_ms, success=True, concept_id=unit_ids,
-                attempt=attempt_index + 1,
+                attempt=call_number,
                 input_tokens=int(metadata["prompt_eval_count"]) if "prompt_eval_count" in metadata else None,
                 output_tokens=int(metadata["eval_count"]) if "eval_count" in metadata else None,
             )
         except Exception as error:
             call_invocation_ms = call_invocation_ms or round((time.perf_counter() - invocation_started) * 1000)
             candidates = []
+            error_text = f"{type(error).__name__}: {error}"[:200]
             validation_results["rejected"] += requested
             validation_results["response_failures"] += requested
             validation_results["reasons"].append(f"response: {error}")
             diag.record_llm_call(
-                stage="generator" if phase == "initial" else "repair", model=model_id,
+                stage="generator" if first_call else "repair", model=model_id,
                 elapsed_ms=call_invocation_ms, success=False, concept_id=unit_ids,
-                attempt=attempt_index + 1, exception_type=type(error).__name__, reason=str(error)[:200],
+                attempt=call_number, exception_type=type(error).__name__, reason=str(error)[:200],
             )
         elapsed = round((time.perf_counter() - stage_started) * 1000)
         generation_ms += elapsed
         model_invocation_ms += call_invocation_ms
-        if phase == "initial":
+        if first_call:
             initial_generation_ms += elapsed
         else:
-            topup_generation_ms += elapsed
+            followup_generation_ms += elapsed
 
         validation_started = time.perf_counter()
+        accepted_before, rejected_here = len(accepted), 0
         for raw in candidates:
             candidate_counter += 1
             try:
@@ -2193,11 +2205,12 @@ def _generate_quiz_from_units(
             except (ValueError, TypeError, KeyError, AttributeError) as error:
                 category = getattr(error, "category", "structure")
                 validation_results["rejected"] += 1
+                rejected_here += 1
                 validation_results["hard_rejections"] += 1
                 validation_results["reasons"].append(str(error))
                 bucket = category if category in {"duplicate", "grounding"} else "structural"
                 validation_results[f"{bucket}_rejections"] += 1
-                print(f"[quiz-units-validation] discarded candidate ({bucket}): {error}")
+                print(f"[quiz-units-validation] call={call_number} discarded candidate ({bucket}): {error}")
                 continue
             accepted.append(normalized)
             validation_results["accepted_with_warnings" if warnings else "accepted"] += 1
@@ -2211,7 +2224,7 @@ def _generate_quiz_from_units(
                 "topic_schema_version": int(document.get("topic_schema_version", 0)),
                 "difficulty": difficulty,
                 "batch_index": 1,
-                "generation_attempt": attempt_index + 1,
+                "generation_attempt": call_number,
                 "candidate_index": len(accepted),
                 "generator_model": model_id,
                 "generation_prompt_version": QUIZ_PROMPT_VERSION,
@@ -2229,22 +2242,48 @@ def _generate_quiz_from_units(
                 "latency_ms": 0,
             })
         validation_ms += round((time.perf_counter() - validation_started) * 1000)
+        added = len(accepted) - accepted_before
+        stalled_calls = 0 if added else stalled_calls + 1
 
+        # One line per call: the evidence for "the model wrote few" versus "the output was cut".
+        eval_count = metadata.get("eval_count")
+        eval_seconds = float(metadata.get("eval_duration") or 0) / 1e9
+        call_record = {
+            "call": call_number, "asked": requested, "min_items": output_schema["properties"]["questions"]["minItems"],
+            "returned": len(candidates), "valid_added": added,
+            "rejected": rejected_here,
+            "excerpts": len(shown_units), "material_chars": material_chars, "prompt_chars": len(prompt),
+            "num_predict": num_predict,
+            "prompt_tokens": metadata.get("prompt_eval_count"), "generated_tokens": eval_count,
+            "done_reason": metadata.get("done_reason"), "cut": cut,
+            "salvaged": parse_report.get("salvaged"), "quote_keys": parse_report.get("quote_keys"),
+            "elapsed_ms": call_invocation_ms,
+            "tokens_per_s": round(eval_count / eval_seconds, 1) if eval_count and eval_seconds else None,
+            "error": error_text or None,
+        }
+        call_log.append(call_record)
+        print(f"[quiz-units-call] {json.dumps(call_record)}")
+    else:
+        stop_reason = stop_reason or "call limit reached"
+    if len(accepted) < question_count and stop_reason:
+        validation_results["reasons"].append(f"more questions were not generated: {stop_reason}")
+
+    followups = max(0, llm_calls - 1)
     timings["generation_ms"] = generation_ms
     timings["model_load_ms"] = model_load_ms
     timings["prompt_eval_ms"] = prompt_eval_ms
     timings["token_generation_ms"] = token_generation_ms
     timings["model_invocation_ms"] = model_invocation_ms
     timings["initial_generation_ms"] = initial_generation_ms
-    timings["repair_generation_ms"] = topup_generation_ms
+    timings["repair_generation_ms"] = followup_generation_ms
     timings["fill_generation_ms"] = 0
     timings["validation_ms"] = validation_ms
-    timings["repair_ms"] = topup_generation_ms
-    timings["repair_llm_calls"] = topup_calls
+    timings["repair_ms"] = followup_generation_ms
+    timings["repair_llm_calls"] = followups
     timings["repair_attempt_count"] = 0
-    timings["fill_attempt_count"] = topup_calls
-    timings["missing_slots_before_each_retry"] = retry_log
-    timings["final_fill_llm_calls"] = topup_calls
+    timings["fill_attempt_count"] = followups
+    timings["missing_slots_before_each_retry"] = call_log[1:]
+    timings["final_fill_llm_calls"] = followups
     timings["deterministic_fallback_count"] = 0
     timings["candidate_pool_size"] = len(accepted)  # valid candidates, pre-selection
     timings["desired_candidate_count"] = pool_target
@@ -2317,7 +2356,11 @@ def _generate_quiz_from_units(
             "validation_results": validation_results,
             "question_evidence": question_evidence,
             "llm_calls": llm_calls,
+            "max_llm_calls": max_calls,
+            "calls": call_log,
+            "generation_model": generation_model,
         },
+        "generation_model": generation_model,
         "topic_schema_version": int(document.get("topic_schema_version", 0)),
         "question_count": actual_count,
         "created_at": utc_now_iso(),

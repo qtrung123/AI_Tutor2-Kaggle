@@ -3,8 +3,9 @@
 Flow (see backend.quiz_service._generate_quiz_from_units for the orchestration):
 
     document chunks -> excerpts ("units") -> context that fits a fixed budget
-    -> ONE call that writes a surplus of candidates -> validation -> best `requested_count`
-    -> (only if short) ONE top-up call that writes just the missing questions -> quiz
+    -> call 1 writes a surplus of candidates -> validate -> add the valid ones to the pool
+    -> while the pool is short of `requested_count` (and calls remain): another, smaller call
+       that writes only what is missing and is told what already exists -> best N -> quiz
 
 The requested question count is a TARGET, never a condition of success: the quiz contains
 min(valid candidates, requested_count) questions and is "partial" when it is short.
@@ -25,6 +26,7 @@ the backend from where its evidence_quote is really found in the context the mod
 
 from __future__ import annotations
 
+import copy
 import difflib
 import json
 import math
@@ -38,8 +40,19 @@ QUIZ_PROMPT_VERSION = "simple_context_v7_single_choice"
 # --- how many questions / candidates ------------------------------------------------------------
 QUIZ_ALLOWED_QUESTION_COUNTS = (12, 15, 18, 20)
 QUIZ_CANDIDATE_BUFFER_RATIO = 0.2     # 12 -> 15, 15 -> 18, 18 -> 22, 20 -> 24
-QUIZ_TOPUP_MIN_BUFFER = 2             # the top-up asks for the missing questions + a small surplus
-QUIZ_TOPUP_BUFFER_RATIO = 0.25
+# Models tend to write far fewer questions than asked in one big list, so after the first call
+# the pipeline keeps asking, in moderate batches, until the target is met or the calls run out.
+QUIZ_MAX_CALLS = {12: 4, 15: 4, 18: 5, 20: 5}
+QUIZ_DEFAULT_MAX_CALLS = 4
+QUIZ_FOLLOWUP_MIN_BUFFER = 2          # a follow-up asks for the missing questions + a small surplus
+QUIZ_FOLLOWUP_BUFFER_RATIO = 0.25
+QUIZ_FOLLOWUP_MIN_ASK = 3
+QUIZ_FOLLOWUP_MAX_ASK = 8             # ... but never a big batch: that is what models under-deliver
+QUIZ_STALL_LIMIT = 2                  # stop after this many calls in a row that add no valid question
+QUIZ_MIN_ITEMS_RATIO = 0.7            # the schema makes the model write at least this share of the ask
+QUIZ_MAX_ITEMS_EXTRA = 3              # ... and at most `ask` + this many
+QUIZ_CHARS_PER_MIN_ITEM = 500         # ... but never more than the shown text can carry: 1 question per 500 chars
+QUIZ_AVOID_QUOTE_CHARS = 110          # evidence shown to a follow-up call for every existing question
 
 # --- excerpts and context -----------------------------------------------------------------------
 QUIZ_UNIT_MAX_CHARS = 1000            # an excerpt is never truncated; larger chunks are split instead
@@ -62,12 +75,14 @@ QUIZ_MAX_NEW_TOKENS = 6400
 # The HTTP request that triggers generation is cut by the reverse proxy after 600 s
 # (deployment/nginx.kaggle.conf), and the HTTP client's own timeout only measures silence between
 # tokens, so a slow GPU could stream for far longer. The whole pipeline therefore has a wall-clock
-# budget: the first call stops streaming at QUIZ_FIRST_CALL_DEADLINE_S and keeps every complete
-# question written so far; the top-up only runs if QUIZ_MIN_TOPUP_S is left of QUIZ_TOTAL_DEADLINE_S.
+# budget: every call stops streaming at its deadline and keeps every complete question written so
+# far, and a call only starts if QUIZ_MIN_CALL_S is left of QUIZ_TOTAL_DEADLINE_S. When a run is
+# slow, the log line of each call (tokens/s, cut, done_reason) shows it.
 QUIZ_LLM_TIMEOUT_S = 300              # silence limit (e.g. a stalled model), not a total limit
-QUIZ_FIRST_CALL_DEADLINE_S = 400
-QUIZ_TOTAL_DEADLINE_S = 560
-QUIZ_MIN_TOPUP_S = 60
+QUIZ_FIRST_CALL_DEADLINE_S = 300
+QUIZ_FOLLOWUP_DEADLINE_S = 150
+QUIZ_TOTAL_DEADLINE_S = 570
+QUIZ_MIN_CALL_S = 45
 
 # --- grounding ----------------------------------------------------------------------------------
 QUIZ_MIN_QUOTE_CHARS = 20             # letters/digits only; shorter quotes prove nothing
@@ -91,6 +106,7 @@ QUIZ_CONTENT_DUPLICATE_JACCARD = 0.6
 QUIZ_QUOTE_DUPLICATE_JACCARD = 0.6
 QUIZ_STEM_DUPLICATE_RATIO = 0.9
 QUIZ_OPTION_DUPLICATE_RATIO = 0.94
+QUIZ_OPTION_BAG_JACCARD = 0.8
 QUIZ_MIN_STEM_CHARS = 12
 QUIZ_MAX_STEM_CHARS = 320
 QUIZ_MAX_OPTION_CHARS = 200
@@ -137,9 +153,38 @@ def candidate_target(question_count: int) -> int:
     return question_count + math.ceil(QUIZ_CANDIDATE_BUFFER_RATIO * question_count)
 
 
-def topup_request(missing: int) -> int:
-    """How many candidates the (single) top-up writes: only what is missing, plus a small surplus."""
-    return missing + max(QUIZ_TOPUP_MIN_BUFFER, math.ceil(QUIZ_TOPUP_BUFFER_RATIO * missing))
+def max_llm_calls(question_count: int) -> int:
+    """Upper bound on model calls for one quiz: 12 -> 4, 15 -> 4, 18 -> 5, 20 -> 5."""
+    return QUIZ_MAX_CALLS.get(question_count, QUIZ_DEFAULT_MAX_CALLS)
+
+
+def followup_request(missing: int) -> int:
+    """How many candidates a follow-up call writes: what is missing plus a small surplus, but a
+    moderate batch (3-8) -- a model asked for a long list stops early, a short one it completes."""
+    wanted = missing + max(QUIZ_FOLLOWUP_MIN_BUFFER, math.ceil(QUIZ_FOLLOWUP_BUFFER_RATIO * missing))
+    return max(QUIZ_FOLLOWUP_MIN_ASK, min(QUIZ_FOLLOWUP_MAX_ASK, wanted))
+
+
+def min_items_for(ask: int, material_chars: int | None = None) -> int:
+    """The fewest questions the decoder may write: QUIZ_MIN_ITEMS_RATIO of `ask`, capped by how much
+    text the call shows (one question per QUIZ_CHARS_PER_MIN_ITEM characters), so a small document
+    is not forced to be padded with questions it cannot support."""
+    wanted = int(ask * QUIZ_MIN_ITEMS_RATIO)
+    if material_chars is not None:
+        wanted = min(wanted, int(material_chars // QUIZ_CHARS_PER_MIN_ITEM))
+    return max(1, wanted)
+
+
+def output_schema_for(ask: int, material_chars: int | None = None) -> dict:
+    """The output schema of one call. Beside the fixed shape of a question it bounds the LIST:
+    at least `min_items_for(ask, material_chars)` (the decoder cannot close the array early, the
+    failure seen with real models) and at most `ask` + QUIZ_MAX_ITEMS_EXTRA. Padding items that
+    turn out invalid or duplicate are simply rejected by the validator."""
+    schema = copy.deepcopy(QUIZ_OUTPUT_SCHEMA)
+    questions = schema["properties"]["questions"]
+    questions["minItems"] = min_items_for(ask, material_chars)
+    questions["maxItems"] = ask + QUIZ_MAX_ITEMS_EXTRA
+    return schema
 
 
 def context_budget(candidates: int) -> int:
@@ -316,7 +361,7 @@ def select_context_units(units: list[dict], budget_chars: int, exclude_ids=froze
 
     No importance model and no coverage requirement -- a document that does not fit is simply
     sampled at regular intervals so the model is not shown only its beginning. `exclude_ids` lets
-    the top-up prefer excerpts the first call did not see.
+    a follow-up call prefer excerpts no call has shown yet.
     """
     pool = [unit for unit in units if unit["unit_id"] not in exclude_ids]
     total = sum(unit["char_count"] for unit in pool)
@@ -352,14 +397,32 @@ def build_generation_prompt(
     units: list[dict],
     count: int,
     avoid_stems: list[str] | None = None,
+    avoid_quotes: list[str] | None = None,
 ) -> str:
+    """`avoid_stems` / `avoid_quotes` (same order) describe the questions that already exist: a
+    follow-up call is shown each stem with the sentence it was written from, so it can pick other
+    facts instead of asking the same one again."""
     excerpts = "\n\n".join(f"[{unit['unit_id']}]\n{unit['evidence_excerpt']}" for unit in units)
     avoid = ""
     if avoid_stems:
+        quotes = list(avoid_quotes or [])
+        lines = []
+        for index, stem in enumerate(avoid_stems):
+            source = _clean_inline(quotes[index])[:QUIZ_AVOID_QUOTE_CHARS] if index < len(quotes) and quotes[index] else ""
+            lines.append(f'- {stem}  [source: "{source}"]' if source else f"- {stem}")
         avoid = (
-            "Questions already written -- do not repeat or reword them, and do not test the same fact:\n"
-            + "\n".join(f"- {stem}" for stem in avoid_stems) + "\n"
+            "The list below holds the questions that already exist (each with the sentence it used). "
+            "Do not repeat them, do not reword them, and do not ask about the same or a nearly identical "
+            "fact again; choose OTHER facts. Questions already written:\n"
+            + "\n".join(lines) + "\n"
         )
+    spread_rule = (
+        "- The questions already written are listed below the rules; use sentences and parts of the "
+        "excerpts that they did not use.\n"
+        if avoid_stems else
+        "- Each question tests a different fact; never ask the same fact twice, even reworded. Draw the "
+        "questions from different excerpts (at most 2 per excerpt) whenever the material allows.\n"
+    )
     return (
         f"Write exactly {count} {difficulty} multiple-choice revision questions about \"{scope_name}\", "
         "using ONLY the excerpts below. Every fact in a question and in its correct answer must be stated "
@@ -374,9 +437,11 @@ def build_generation_prompt(
         "- Exactly 4 options and exactly 1 correct option; answer_index is the 0-based position (0-3) of the "
         "correct option. Vary the position of the correct option.\n"
         "- The 3 wrong options must be plausible but clearly wrong according to the excerpts.\n"
-        "- Each question tests a different fact; never ask the same fact twice, even reworded. Draw the "
-        "questions from different excerpts (at most 2 per excerpt) whenever the material allows.\n"
-        "- No 'all/none of the above' options. No option may be a shorter or longer version of another.\n"
+        "- The 4 options must have clearly different meanings: never write two options that say the same "
+        "thing in different words, and no option may be a shorter or longer version of another.\n"
+        f"{spread_rule}"
+        "- No 'all/none of the above' options.\n"
+        f"- Write ALL {count} questions: do not stop early.\n"
         "- Write in the main language of the excerpts. Question <=25 words, each option <=15 words, "
         "explanation <=25 words. No markdown, no extra fields.\n"
         f"{_DIFFICULTY_CONTRACTS[difficulty]}\n"
@@ -389,14 +454,20 @@ def build_generation_prompt(
 # Parsing
 # ---------------------------------------------------------------------------------------------
 
-def parse_candidates(text: str) -> list:
+def parse_candidates(text: str, report: dict | None = None) -> list:
     """Return the list under "questions".
+
+    If `report` is given it is filled with {"salvaged": bool, "quote_keys": int}: how many
+    question objects the text started, and whether the JSON was broken (so only complete objects
+    were kept) -- the evidence needed to tell "the model wrote few" from "the output was cut".
 
     Falls back to salvaging every COMPLETE question object from truncated or slightly malformed
     output (e.g. generation stopped at num_predict), so one cut-off never discards a whole call.
     Raises ValueError when nothing usable can be recovered.
     """
     cleaned = re.sub(r"^```(?:json)?|```$", "", str(text or "").strip(), flags=re.IGNORECASE).strip()
+    if report is not None:
+        report.update({"salvaged": False, "quote_keys": cleaned.count('"evidence_quote"')})
     try:
         data = json.loads(cleaned)
         if isinstance(data, dict) and isinstance(data.get("questions"), list):
@@ -405,6 +476,8 @@ def parse_candidates(text: str) -> list:
             return data
     except json.JSONDecodeError:
         pass
+    if report is not None:
+        report["salvaged"] = True
     marker = re.search(r'"questions"\s*:\s*\[', cleaned)
     if not marker:
         raise ValueError("Quiz JSON does not contain a questions list.")
@@ -550,6 +623,30 @@ def context_support(stem: str, correct_option: str, unit: dict, units: list[dict
 # Validation
 # ---------------------------------------------------------------------------------------------
 
+def _options_too_similar(options: list[str]) -> bool:
+    """Two options that are one answer written twice.
+
+    Compared as bags of meaningful words: identical bags (order, articles and punctuation
+    changed), or -- for options of 3+ words -- bags that overlap by QUIZ_OPTION_BAG_JACCARD after
+    cutting every word to its first 4 letters (moved/moves, process/processes). Deliberately
+    narrow: an antonym pair ("increases ..." / "decreases ...") and nested names ("Preemptive" /
+    "Non-preemptive", "I/O bound" / "CPU bound") are good distractors and are NOT flagged.
+    """
+    bags = [content_tokens(option, 2) for option in options]
+    for left in range(len(bags)):
+        for right in range(left + 1, len(bags)):
+            first, second = bags[left], bags[right]
+            if not first or not second:
+                continue
+            if first == second:
+                return True
+            if min(len(first), len(second)) >= 3:
+                stems_first, stems_second = frozenset(t[:4] for t in first), frozenset(t[:4] for t in second)
+                if _jaccard(stems_first, stems_second) >= QUIZ_OPTION_BAG_JACCARD:
+                    return True
+    return False
+
+
 def validate_candidate(
     raw,
     units: list[dict],
@@ -595,6 +692,8 @@ def validate_candidate(
         for a in range(4) for b in range(a + 1, 4)
     ):
         raise CandidateRejected("structure", "Options are not distinct.")
+    if _options_too_similar(options):
+        raise CandidateRejected("structure", "Two options say the same thing in different words.")
 
     answer_index = raw.get("answer_index")
     if isinstance(answer_index, bool) or not isinstance(answer_index, int) or answer_index not in range(4):

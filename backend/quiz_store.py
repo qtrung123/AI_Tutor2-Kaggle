@@ -466,6 +466,7 @@ def _row_to_quiz(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
         """,
         (row["quiz_id"],),
     ).fetchall()
+    assessment_plan = json.loads(row["assessment_plan_json"] or "{}")
     questions = []
     for question_row in question_rows:
         options = connection.execute(
@@ -512,7 +513,9 @@ def _row_to_quiz(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
             "document" if row["topic_id"] == LEGACY_TOPIC_ID and row["planner_version"] == "legacy"
             else row["assessment_scope"]
         ),
-        "assessment_plan": json.loads(row["assessment_plan_json"] or "{}"),
+        "assessment_plan": assessment_plan,
+        # The model that generated this quiz (stored inside the plan); None for older quizzes.
+        "generation_model": assessment_plan.get("generation_model"),
         "created_at": row["created_at"],
         "questions": questions,
     }
