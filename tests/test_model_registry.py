@@ -116,7 +116,7 @@ class ModelRegistryTests(unittest.TestCase):
         startup = (ROOT / "deployment" / "start_kaggle.sh").read_text(encoding="utf-8")
         notebook = (ROOT / "kaggle_run.ipynb").read_text(encoding="utf-8")
 
-        self.assertIn('ollama pull "$OLLAMA_QWEN3_8B_MODEL"', startup)
+        self.assertIn('pull_model "$OLLAMA_QWEN3_8B_MODEL"', startup)
         self.assertIn('ollama_has_model "$OLLAMA_QWEN3_8B_MODEL"', startup)
         self.assertIn('\\"OLLAMA_QWEN3_8B_MODEL\\": OLLAMA_QWEN3_8B_MODEL', notebook)
         self.assertIn('OLLAMA_QWEN3_8B_MODEL = \\"hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M\\"', notebook)
