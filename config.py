@@ -60,6 +60,14 @@ QUIZ_VALIDATION_ATTEMPTS = int(os.getenv("QUIZ_VALIDATION_ATTEMPTS", "2"))
 QUIZ_QUALITY_RETRY_LIMIT = int(os.getenv("QUIZ_QUALITY_RETRY_LIMIT", "1"))
 QUIZ_GENERATION_RETRY_LIMIT = int(os.getenv("QUIZ_GENERATION_RETRY_LIMIT", "3"))
 
+# Flashcard generation: bounded retry (never infinite) that also covers transient model failures
+# such as an Ollama "token repeat limit reached" abort or a malformed/truncated JSON reply, not
+# just the pre-existing "missing topic coverage" retry. FLASHCARD_MAX_CARDS_PER_TOPIC caps both the
+# prompt's requested count and the parsed output per topic, which shortens generation and lowers
+# the odds of a repetition-prone model (e.g. Gemma 3) looping into that same abort.
+FLASHCARD_GENERATION_RETRY_LIMIT = int(os.getenv("FLASHCARD_GENERATION_RETRY_LIMIT", "2"))
+FLASHCARD_MAX_CARDS_PER_TOPIC = int(os.getenv("FLASHCARD_MAX_CARDS_PER_TOPIC", "12"))
+
 MASTERY_DIFFICULTY_WEIGHTS = {
     "easy": float(os.getenv("MASTERY_EASY_WEIGHT", "1.0")),
     "medium": float(os.getenv("MASTERY_MEDIUM_WEIGHT", "1.5")),

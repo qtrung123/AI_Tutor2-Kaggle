@@ -43,7 +43,7 @@ from backend.rag_service import answer_conversation_message, list_uploaded_sourc
 from backend.model_registry import list_generation_models, prepare_generation_model, resolve_generation_model
 from backend.summary_service import generate_document_summary
 from backend.summary_store import delete_document_summaries
-from backend.flashcard_service import authoritative_card_fields, generate_flashcards
+from backend.flashcard_service import FlashcardGenerationError, authoritative_card_fields, generate_flashcards
 from backend.flashcard_store import add_flashcard, delete_document_flashcards, delete_flashcard, update_flashcard
 from backend import study_planner_service, study_planner_store
 from backend.subject_grouping import group_documents_into_subjects
@@ -714,10 +714,16 @@ def flashcards_detail(document_id: str, topic_ids: list[str] | None = Query(defa
                                        language=language, cache_only=True)
         prepare_generation_model(model_id)
         return generate_flashcards(current_user["id"], document_id, topic_ids=topic_ids, model_id=model_id, language=language)
+    except FlashcardGenerationError as error:
+        # Technical detail (model/runtime failure, e.g. an Ollama repeat-limit abort or malformed
+        # JSON) stays server-side; the client only ever sees the safe, model-agnostic message.
+        print(f"[flashcards] generation failed for document_id={document_id}: {error.technical_message}")
+        raise HTTPException(status_code=502, detail=error.safe_message) from error
     except ValueError as error:
         raise HTTPException(status_code=404 if str(error) == "Document not found." else 400, detail=str(error)) from error
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Could not load flashcards: {error}") from error
+        print(f"[flashcards] unexpected failure for document_id={document_id}: {error}")
+        raise HTTPException(status_code=500, detail=FlashcardGenerationError.SAFE_MESSAGE) from error
 
 
 @app.post("/api/flashcards/{document_id}/cards")

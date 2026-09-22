@@ -11,7 +11,7 @@ from backend.model_registry import resolve_generation_model
 # Read-only reuse of already-proven, generic (non-document-specific) text-quality helpers --
 # quiz_service.py itself is not modified by the flashcard fix.
 from backend.quiz_service import _clean_inline_text, _reject_unsafe_final_text, get_topic_chunks
-from config import DEFAULT_GENERATION_MODEL
+from config import DEFAULT_GENERATION_MODEL, FLASHCARD_GENERATION_RETRY_LIMIT, FLASHCARD_MAX_CARDS_PER_TOPIC
 
 # v2: fixes the English-front/Vietnamese-back bilingual bug, the whitespace-corruption bug, and
 # adds language-aware generation -- bumped so any pre-existing v1 cache (including malformed
@@ -20,6 +20,37 @@ FLASHCARD_VERSION = "grounded_flashcards_v2"
 MAX_CHARS_PER_CHUNK = 1400
 FLASHCARD_LANGUAGES = {"auto", "english", "vietnamese"}
 DEFAULT_FLASHCARD_LANGUAGE = "auto"
+
+# Per-attempt sampling options: temperature/repeat_penalty escalate on retry so a model that hit a
+# repeat-limit abort (or produced malformed JSON) gets a less repetitive decode next time, instead
+# of retrying with the exact settings that just failed. The selected model itself never changes.
+_GENERATION_ATTEMPT_OPTIONS = (
+    {"temperature": 0.1, "repeat_penalty": 1.2},
+    {"temperature": 0.3, "repeat_penalty": 1.4},
+    {"temperature": 0.4, "repeat_penalty": 1.5},
+)
+
+
+def _generation_kwargs(attempt_index: int) -> dict:
+    return _GENERATION_ATTEMPT_OPTIONS[min(attempt_index, len(_GENERATION_ATTEMPT_OPTIONS) - 1)]
+
+
+class FlashcardGenerationError(ValueError):
+    """Structured flashcard-generation failure.
+
+    `str(error)` stays the precise technical message (existing callers/tests match on it, e.g. a
+    missing topic_id), but it is never sent to the client as-is: backend/main.py catches this type
+    and responds with `SAFE_MESSAGE` instead, keeping `technical_message` (and `reason`) for
+    logs/debugging only.
+    """
+
+    SAFE_MESSAGE = "Couldn't generate flashcards with the selected model. Please try again or switch models."
+
+    def __init__(self, technical_message: str, *, reason: str = "generation_failed"):
+        super().__init__(technical_message)
+        self.reason = reason
+        self.technical_message = technical_message
+        self.safe_message = self.SAFE_MESSAGE
 
 # Vietnamese-specific letters/diacritics that never appear in plain English text -- a
 # conservative, generic (non-document-specific) language signal used to catch a card whose Front
@@ -173,7 +204,11 @@ Prioritize important definitions, concepts, characteristics, mechanisms, compone
 Use ONLY evidence from the card's own TOPIC block. Never transfer facts between topics or add outside facts.
 Include source_chunk_ids that directly support each card. A subtopic_id is optional and must come from evidence metadata.
 Do not pad to an exact count. Avoid duplicates or near-duplicates. Never copy a raw header, footer, page number, or email address into a card. Return one topic group per input block, in the same order.
-Return JSON only: {{"topics":[{{"topic_id":"id","cards":[{{"front":"...","back":"...",
+Generate at most {FLASHCARD_MAX_CARDS_PER_TOPIC} cards per topic block -- fewer is fine, prioritize
+the most important content over exhaustive coverage. Stop as soon as each topic's most important
+content is covered; never repeat a card or a near-identical card to reach a higher count.
+Return JSON only, with no extra text before or after it, in exactly this shape:
+{{"topics":[{{"topic_id":"id","cards":[{{"front":"...","back":"...",
 "subtopic_id":"optional","source_chunk_ids":["..."]}}]}}]}}
 
 DOCUMENT: {document_id}
@@ -225,16 +260,29 @@ def generate_flashcards(owner_id: str, document_id: str, topic_ids: list[str] | 
     llm_calls = 0
     cards: list[dict] = []
     missing_topic_ids: list[str] = list(selected_ids)
-    # One bounded retry: a set that comes back with zero valid cards -- for the whole set, or for
-    # any individual selected topic -- after quality/language filtering is regenerated once
-    # rather than persisted as a partial set or failing outright on a single bad sample.
-    for _attempt in range(2):
+    generation_errors: list[str] = []
+    retry_limit = max(1, FLASHCARD_GENERATION_RETRY_LIMIT)
+    # A bounded retry (never infinite -- see FLASHCARD_GENERATION_RETRY_LIMIT) covers three
+    # distinct failure shapes with the same next attempt: a set that comes back with zero valid
+    # cards for the whole set or for any individual selected topic after quality/language
+    # filtering; a malformed/truncated JSON reply; and a raised runtime error from the model call
+    # itself (e.g. Ollama's "token repeat limit reached" abort). None of these ever falls back to
+    # another model -- only sampling options change between attempts, see _generation_kwargs.
+    for attempt_index in range(retry_limit):
         llm_calls += 1
-        response = ChatOllama(model=runtime_model, temperature=0.1, format="json").invoke(
-            _prompt(document_id, groups, requested_language)
-        )
-        raw_topics = _json_object(response.content).get("topics")
+        try:
+            response = ChatOllama(
+                model=runtime_model, format="json", **_generation_kwargs(attempt_index),
+            ).invoke(_prompt(document_id, groups, requested_language))
+            raw_topics = _json_object(response.content).get("topics")
+        except Exception as error:  # malformed output or a raised model/runtime failure
+            generation_errors.append(f"attempt {attempt_index + 1}: {error}")
+            print(f"[flashcards] generation attempt {attempt_index + 1} failed: {error}")
+            continue
         if not isinstance(raw_topics, list) or len(raw_topics) != len(selected):
+            generation_errors.append(
+                f"attempt {attempt_index + 1}: model returned an unexpected topic structure"
+            )
             continue
 
         candidate_cards: list[dict] = []
@@ -245,7 +293,7 @@ def generate_flashcards(owner_id: str, document_id: str, topic_ids: list[str] | 
                 continue
             subtopics = {str(item["subtopic_id"]): item for item in topic.get("subtopics") or [] if item.get("subtopic_id")}
             chunk_ids = {str((chunk.get("metadata") or {}).get("chunk_id") or (chunk.get("metadata") or {}).get("chunk") or "") for chunk in chunks}
-            for raw in raw_group["cards"]:
+            for raw in raw_group["cards"][:FLASHCARD_MAX_CARDS_PER_TOPIC]:
                 if not isinstance(raw, dict):
                     continue
                 front = _clean_inline_text(raw.get("front") or "")
@@ -284,11 +332,14 @@ def generate_flashcards(owner_id: str, document_id: str, topic_ids: list[str] | 
             break
 
     if not cards:
-        raise ValueError(
+        message = (
             "Flashcard generation could not produce at least one valid card for every selected "
             f"topic after {llm_calls} attempt(s); missing topic_id(s): "
             f"{', '.join(missing_topic_ids) if missing_topic_ids else 'all'}."
         )
+        if generation_errors:
+            message += f" Errors: {'; '.join(generation_errors)}"
+        raise FlashcardGenerationError(message, reason="no_valid_cards")
     saved = save_flashcards(identity, cards)
     return {**saved, **identity, "cache_hit": False, "llm_calls": llm_calls}
 
