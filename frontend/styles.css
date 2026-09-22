@@ -2650,12 +2650,65 @@ body[data-page="session"] [data-session-pane="quiz"].quiz-landing .quiz-history-
 body[data-page="session"] [data-session-pane="quiz"].quiz-landing .quiz-history-scope { display:block; margin-top:3px; color:#65708c; font-size:12px; }
 body[data-page="session"] [data-session-pane="quiz"].quiz-landing .quiz-history-score { min-width:70px; text-align:right; }
 body[data-page="session"] [data-session-pane="quiz"].quiz-landing .quiz-history-filters { margin:0 0 12px; }
-.quiz-create-dialog { position:fixed; z-index:200; inset:0; display:none; align-items:center; justify-content:center; padding:20px; background:rgba(20,27,48,.28); }
+/* Create Quiz sheet: centered iOS-style modal -- white surface, large radius, subtle shadow over a
+   soft backdrop, spacious single-column form. See frontend/app.js's openQuizCreateDialog/
+   closeQuizCreateDialog and the .assessment-control template it builds. */
+.quiz-create-dialog { position:fixed; z-index:200; inset:0; display:none; align-items:center; justify-content:center; padding:20px; background:rgba(15,20,35,.45); }
 .quiz-create-dialog.open { display:flex; }
-.quiz-create-dialog-card { width:min(520px,100%); padding:22px; border:1px solid var(--session-line); border-radius:16px; background:#fff; box-shadow:0 24px 70px rgba(25,32,58,.22); }
-.quiz-dialog-heading { display:flex; justify-content:space-between; gap:18px; margin-bottom:18px; }.quiz-dialog-heading h2 { margin:0; font-size:21px; }.quiz-dialog-heading p { margin:5px 0 0; color:var(--muted); font-size:13px; }
-.quiz-dialog-fields .assessment-control { display:block; padding:0; border:0; box-shadow:none; background:transparent; }.quiz-dialog-fields .assessment-form { display:grid; grid-template-columns:1fr 1fr; gap:14px; }.quiz-dialog-fields .assessment-form > button { grid-column:2; }
-@media (max-width:560px) { body[data-page="session"] .quiz-landing-header { align-items:flex-start; flex-direction:column; }.quiz-dialog-fields .assessment-form { grid-template-columns:1fr; }.quiz-dialog-fields .assessment-form > button { grid-column:auto; } }
+.quiz-create-dialog-card { width:min(480px,100%); max-height:calc(100vh - 40px); overflow-y:auto; padding:28px; box-sizing:border-box; border-radius:26px; background:#fff; box-shadow:0 30px 80px rgba(15,20,35,.28); }
+.quiz-dialog-heading { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:22px; }
+.quiz-dialog-heading h2 { margin:0; font-size:22px; font-weight:800; }
+.quiz-dialog-heading p { margin:6px 0 0; color:var(--muted); font-size:13px; }
+.quiz-dialog-cancel { flex-shrink:0; white-space:nowrap; }
+.quiz-dialog-cancel:disabled { opacity:.5; cursor:not-allowed; }
+
+.quiz-dialog-fields .assessment-control { display:block; padding:0; border:0; box-shadow:none; background:transparent; }
+/* align-items:stretch resets the base .assessment-form's align-items:end (meant for that other
+   layout's grid row-alignment) -- without it every field shrinks to its own content width and
+   sits right-aligned instead of filling the sheet. */
+.quiz-dialog-fields .assessment-form { display:flex; flex-direction:column; align-items:stretch; gap:18px; }
+.quiz-sheet-field { display:grid; gap:8px; order:1; }
+.quiz-sheet-field span { color:var(--muted); font-size:13px; font-weight:800; }
+.quiz-sheet-field input, .quiz-sheet-field select:not(.visually-hidden) { width:100%; min-height:52px; padding:0 16px; border:1px solid var(--session-line); border-radius:14px; font:inherit; background:#fbfcff; box-sizing:border-box; }
+.quiz-sheet-field--name { order:1; }
+.quiz-sheet-field--scope { order:2; }
+.quiz-sheet-field--difficulty { order:3; }
+.quiz-sheet-scope-select { appearance:none; -webkit-appearance:none; color:var(--muted); background:#f2f3f6; cursor:default; }
+#quiz-question-count-field { order:4; display:grid; gap:8px; }
+#quiz-question-count-field span { color:var(--muted); font-size:13px; font-weight:800; }
+
+.quiz-segmented { display:flex; gap:6px; padding:4px; border-radius:14px; background:var(--session-wash,#f2f3ff); flex-wrap:wrap; }
+.quiz-segmented-option { flex:1 1 auto; min-width:60px; padding:11px 10px; border:0; border-radius:11px; background:transparent; color:var(--navy); font-weight:750; font-size:14px; cursor:pointer; text-align:center; transition:background .15s ease,box-shadow .15s ease; }
+.quiz-segmented-option:hover { background:rgba(255,255,255,.6); }
+.quiz-segmented-option.active { background:#fff; color:var(--session-accent,var(--navy-2)); box-shadow:0 3px 10px rgba(18,63,53,.16); }
+
+.quiz-sheet-model-summary { order:5; display:grid; gap:6px; padding:14px 16px; border-radius:16px; background:var(--session-wash,#f2f3ff); }
+.quiz-sheet-model-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.quiz-sheet-model-label { font-size:11px; font-weight:850; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+.quiz-sheet-model-name { font-weight:800; }
+.quiz-sheet-model-badge { padding:3px 10px; border-radius:999px; font-size:11px; font-weight:850; text-transform:uppercase; letter-spacing:.03em; }
+.quiz-sheet-model-badge--ready { background:#e1f5e7; color:#1d5a4a; }
+.quiz-sheet-model-badge--preparing { background:#fff3cd; color:#8a6d00; }
+.quiz-sheet-model-badge--error { background:#fbe4da; color:#c0472a; }
+.quiz-sheet-model-hint { margin:0; color:var(--muted); font-size:12px; }
+
+.quiz-sheet-generating { order:6; display:flex; align-items:center; gap:10px; padding:12px 16px; border-radius:14px; background:var(--session-wash,#f2f3ff); color:var(--session-accent,var(--navy-2)); font-weight:700; font-size:13px; }
+.quiz-sheet-generating p { margin:0; }
+.quiz-sheet-spinner { flex-shrink:0; width:15px; height:15px; border-radius:50%; border:2px solid currentColor; border-top-color:transparent; animation:quizSheetSpin .8s linear infinite; }
+@keyframes quizSheetSpin { to { transform:rotate(360deg); } }
+
+.quiz-sheet-error { order:7; display:grid; gap:10px; padding:14px 16px; border:1px solid #f3d9cf; border-radius:16px; background:#fff8f5; }
+.quiz-sheet-error p { margin:0; color:#7a4433; }
+.quiz-sheet-error .secondary-button { width:auto; padding:10px 18px; }
+.quiz-sheet-error-details summary { cursor:pointer; color:var(--muted); font-size:12px; }
+.quiz-sheet-error-details p { margin-top:6px; font-size:12px; overflow-wrap:anywhere; }
+
+.quiz-dialog-fields .assessment-form > #generate-quiz-button { order:8; width:100%; margin-top:2px; }
+.quiz-empty-create-button { width:auto; margin:14px auto 0; padding:12px 22px; display:block; }
+@media (max-width:560px) {
+  body[data-page="session"] .quiz-landing-header { align-items:flex-start; flex-direction:column; }
+  .quiz-create-dialog-card { padding:20px; border-radius:22px; }
+}
 @media (max-width:680px) { .quiz-history-filters { justify-content:flex-start; flex-wrap:wrap; }.quiz-history-card, body[data-page="session"] [data-session-pane="quiz"].quiz-landing .quiz-history-card { grid-template-columns:1fr; }.quiz-history-actions { justify-content:flex-start; }.quiz-attempt-history { grid-column:1; } }
 
 /* Single-question review and on-demand mastery drawer. */

@@ -58,7 +58,8 @@ MODEL_READY_DOM_STUBS = """
         regenerateSummaryButton = new El(true), generateFlashcardsButton = new El(),
         regenerateFlashcardsButton = new El(true);
 """
-MODEL_READY_FUNCTIONS = ["ensureSelectedModelReady", "ensureSelectedModelReadyWithStatus", "renderModelReadyState"]
+MODEL_READY_FUNCTIONS = ["ensureSelectedModelReady", "ensureSelectedModelReadyWithStatus", "renderModelReadyState",
+                         "renderQuizSheetModelSummary"]
 
 
 def run_node(functions, setup, scenario):

@@ -184,7 +184,7 @@ class BrowserSmokeTests(unittest.TestCase):
         self.assertEqual(self.out["bootstrap"]["modelSelectors"], ["generation-model-select"])       # exactly one, in the header
         self.assertEqual(self.out["bootstrap"]["headerOptions"], ["Qwen 2.5 7B", "DeepSeek R1 Distill Qwen 14B"])
         self.assertEqual(self.out["bootstrap"]["selected"], "qwen-2.5-7b")
-        self.assertEqual(self.out["quizForm"]["labels"], ["Quiz name", "Assessment scope", "Difficulty", "Number of questions"])
+        self.assertEqual(self.out["quizForm"]["labels"], ["Quiz name", "Scope", "Difficulty", "Number of questions"])
         self.assertEqual(self.out["quizForm"]["selects"], ["quiz-scope-select", "quiz-difficulty-select", "quiz-document-select", "quiz-question-count-select"])
         self.assertEqual(self.out["quizForm"]["scopeOptions"], ["Entire document"])
         self.assertFalse(self.out["quizForm"]["topicField"])                                         # no Topic in the quiz

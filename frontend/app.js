@@ -115,6 +115,25 @@ const sourceList = document.getElementById("source-list");
 const sourceFileInput = document.getElementById("source-file-input");
 const uploadSourceButton = document.getElementById("upload-source-button");
 const uploadStatus = document.getElementById("upload-status");
+// Create Quiz sheet: replaces the old always-editable inline form's markup with an iOS-style sheet
+// layout (segmented Difficulty/Question-count controls, a read-only Model summary, and in-sheet
+// Generating/Error states). Element ids are unchanged on purpose -- every id-based binding below,
+// and every other function that reads these controls, keeps working against the new markup.
+(() => {
+  const panel = document.querySelector('[data-session-pane="quiz"] .assessment-control');
+  if (!panel) return;
+  panel.innerHTML = `<div class="assessment-form quiz-sheet-form">
+    <label class="quiz-sheet-field quiz-sheet-field--name"><span>Quiz name</span><input id="quiz-name-input" type="text" maxlength="200" placeholder="e.g. Midterm Embedded Systems"></label>
+    <label class="quiz-sheet-field quiz-sheet-field--scope"><span>Scope</span><select id="quiz-scope-select" class="quiz-sheet-scope-select" disabled><option value="document" selected>Entire document</option></select></label>
+    <label class="quiz-sheet-field quiz-sheet-field--difficulty"><span>Difficulty</span><select id="quiz-difficulty-select" class="visually-hidden"><option value="easy">Easy</option><option value="medium">Medium</option><option value="difficult">Difficult</option></select><div class="quiz-segmented" id="quiz-difficulty-segmented" role="radiogroup" aria-label="Difficulty"></div></label>
+    <select id="quiz-document-select" class="visually-hidden"></select>
+    <div class="quiz-sheet-model-summary"><div class="quiz-sheet-model-row"><span class="quiz-sheet-model-label">Model</span><span class="generate-model-name quiz-sheet-model-name"></span><span class="quiz-sheet-model-badge" id="quiz-sheet-model-badge" hidden></span></div><p class="quiz-sheet-model-hint">Change the model using the Study Session selector above.</p></div>
+    <div class="quiz-sheet-generating" id="quiz-sheet-generating" hidden><span class="quiz-sheet-spinner" aria-hidden="true"></span><p>Generating quiz…</p></div>
+    <div class="quiz-sheet-error" id="quiz-sheet-error" hidden><p id="quiz-sheet-error-message"></p><button class="secondary-button" id="quiz-sheet-retry-button" type="button">Retry</button><details class="quiz-sheet-error-details"><summary>Technical details</summary><p id="quiz-sheet-error-technical"></p></details></div>
+    <button class="primary-button" id="generate-quiz-button" type="button">Generate Quiz</button>
+  </div>`;
+})();
+
 const quizNameInput = document.getElementById("quiz-name-input");
 const quizDocumentSelect = document.getElementById("quiz-document-select");
 const quizScopeSelect = document.getElementById("quiz-scope-select");
@@ -183,6 +202,9 @@ const sessionKnowledgeGapsList = document.getElementById("session-knowledge-gaps
 const sessionRecommendationsList = document.getElementById("session-recommendations-list");
 const assessmentControl = document.querySelector('[data-session-pane="quiz"] .assessment-control');
 let quizCreateDialog = null;
+// True only between a Generate Quiz click and its outcome: blocks a duplicate submission and
+// blocks Cancel/backdrop/Escape from dismissing the sheet mid-generation.
+let quizGenerationInFlight = false;
 const originalContentFrame = document.getElementById("original-content-frame");
 const originalContentFileName = document.getElementById("original-content-file-name");
 const originalContentOpen = document.getElementById("original-content-open");
@@ -433,9 +455,25 @@ function renderModelReadyState() {
       : "";
     if (modelReadyState === "error") badge.title = modelReadyMessage || "Could not prepare model";
   }
+  renderQuizSheetModelSummary();
   [generateQuizButton, generateSummaryButton, regenerateSummaryButton, generateFlashcardsButton, regenerateFlashcardsButton]
     .filter(Boolean)
     .forEach((button) => { button.disabled = modelReadyState === "preparing"; });
+}
+
+// Create Quiz sheet's Model summary: names the Study Session's selected model (via the shared
+// .generate-model-name class, see updateGenerateModelNotes) and mirrors the same Ready/Preparing/
+// Error state as the header badge above -- never a second model picker.
+function renderQuizSheetModelSummary() {
+  const badge = document.getElementById("quiz-sheet-model-badge");
+  if (!badge) return;
+  badge.hidden = modelReadyState === "unknown";
+  badge.className = `quiz-sheet-model-badge quiz-sheet-model-badge--${modelReadyState}`;
+  badge.textContent = modelReadyState === "preparing" ? "Preparing…"
+    : modelReadyState === "ready" ? "Ready"
+    : modelReadyState === "error" ? "Error"
+    : "";
+  if (modelReadyState === "error") badge.title = modelReadyMessage || "Could not prepare model";
 }
 
 // Wraps ensureSelectedModelReady() (the actual prepare/pull contract, shared with the AI Tutor
@@ -2069,6 +2107,33 @@ function updateDifficultyOptions() {
     const label = option.value.charAt(0).toUpperCase() + option.value.slice(1);
     option.textContent = savedLevels.includes(option.value) ? `${label} (saved)` : label;
   });
+  renderQuizDifficultySegments();
+}
+
+// The Create Quiz sheet's visible Difficulty control: segmented buttons that mirror the real
+// (now visually hidden) #quiz-difficulty-select -- same options/labels/"(saved)" hints, same value,
+// same change event, so every existing difficulty-driven behavior keeps working unchanged.
+function renderQuizDifficultySegments() {
+  const container = document.getElementById("quiz-difficulty-segmented");
+  if (!container || !quizDifficultySelect) return;
+  container.innerHTML = "";
+  Array.from(quizDifficultySelect.options).forEach((option) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiz-segmented-option";
+    button.textContent = option.textContent;
+    button.setAttribute("role", "radio");
+    const selected = option.value === quizDifficultySelect.value;
+    button.setAttribute("aria-checked", String(selected));
+    button.classList.toggle("active", selected);
+    button.addEventListener("click", () => {
+      if (quizDifficultySelect.value === option.value) return;
+      quizDifficultySelect.value = option.value;
+      renderQuizDifficultySegments();
+      quizDifficultySelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    container.appendChild(button);
+  });
 }
 
 function formatQuizStatus(status) {
@@ -2436,6 +2501,16 @@ function renderQuizHistory() {
     empty.className = "empty-state";
     empty.textContent = emptyMessage;
     quizHistoryList.appendChild(empty);
+    // The true empty state (no quizzes at all, as opposed to "no filters match") also gets its
+    // own Create Quiz entry point, alongside the landing header's "+ New Quiz".
+    if (emptyMessage.startsWith("No quizzes yet")) {
+      const create = document.createElement("button");
+      create.className = "primary-button quiz-empty-create-button";
+      create.type = "button";
+      create.textContent = "Create Quiz";
+      create.addEventListener("click", openQuizCreateDialog);
+      quizHistoryList.appendChild(create);
+    }
     return;
   }
   visiblePending.forEach((pending) => quizHistoryList.appendChild(createPendingQuizCard(pending)));
@@ -2754,9 +2829,25 @@ async function handleQuizDifficultyChange() {
 // quiz_id) -- it must never silently hand back whatever happens to already be loaded in
 // currentQuiz (that was the old behavior; see requestGeneratedQuiz's regenerate:true and
 // backend/quiz_service.py's explicit_new_quiz handling).
+// Two distinct entry points share this one button/handler:
+//  - The Create Quiz sheet (currentQuiz empty -- the only way to reach the sheet at all, since the
+//    "+ New Quiz" header button and the Library's empty-state button are both hidden/absent
+//    whenever a quiz is loaded): fills the form, clicks Generate, always gets a brand-new quiz
+//    artifact (its own quiz_id, see requestGeneratedQuiz's regenerate:true) -- it is never auto-
+//    loaded into the player; the sheet closes, the Library refreshes, and the user opens it later
+//    with Start/Resume from its card.
+//  - The inline form next to an already-loaded quiz (Start/Resume from the Library put it there):
+//    a player-adjacent affordance, unchanged from before -- clicking it just re-shows what is
+//    already loaded rather than generating anything.
 async function generateAssessmentQuiz() {
+  if (quizGenerationInFlight) return;   // no duplicate submissions
   if (!quizDocumentSelect.value) {
     showToast("Choose an indexed document first");
+    return;
+  }
+  if (currentQuiz?.questions?.length) {
+    renderAssessmentQuiz();
+    showToast(quizSettingsMismatch(currentQuiz) || (currentAttempt?.completed ? "Reviewing saved quiz" : "Quiz ready"));
     return;
   }
 
@@ -2766,55 +2857,35 @@ async function generateAssessmentQuiz() {
     quizNameInput?.focus();
     return;
   }
-  // Model preparation happens BEFORE generation timing starts: a lazily-pulled model is fetched
-  // here, not inside the "Generating assessment" state below (see model_prepare_ms).
-  try { await ensureSelectedModelReadyWithStatus(); }
-  catch (error) { showToast(error.message || "Model could not be prepared."); return; }
+  hideQuizSheetError();
+  setQuizSheetGenerating(true);   // set synchronously, before any await, so a rapid double-click is blocked
 
-  const requestedQuizKey = quizGenerationRequestKey(generationRequest);
+  // Model preparation happens BEFORE generation timing starts: a lazily-pulled model is fetched
+  // here, not inside the "Generating…" state below (see model_prepare_ms).
+  try { await ensureSelectedModelReadyWithStatus(); }
+  catch (error) {
+    showToast(error.message || "Model could not be prepared.");
+    setQuizSheetGenerating(false);
+    return;
+  }
+
   const pendingId = registerPendingQuiz(generationRequest);
   setAssessmentLoading(true);
-  quizList.innerHTML = "";
-  assessmentTitle.textContent = "Generating assessment";
 
-  let generatedQuiz = null;
   try {
-    generatedQuiz = await requestGeneratedQuiz(generationRequest);
-    if (requestedQuizKey !== currentQuizKey()) return;
-    currentQuiz = generatedQuiz;
-    currentAttempt = null;
-    quizAttemptSummary = null;
-    quizAnswers = {};
-    quizExplanations = {};
-    quizQuestionIndex = 0;
+    const generatedQuiz = await requestGeneratedQuiz(generationRequest);
     if (quizNameInput) quizNameInput.value = "";
-    await loadQuizStatuses();
-    updateDifficultyOptions();
-    closeQuizCreateDialog();
-    renderAssessmentQuiz();
-    const reusedOtherModel = quizSettingsMismatch(currentQuiz, generationRequest);
-    showToast(reusedOtherModel ? reusedOtherModel : currentQuiz.assessment_plan?.partial
-      ? `Quiz ready with ${currentQuiz.assessment_plan?.actual_count ?? currentQuiz.questions.length}/${currentQuiz.assessment_plan?.requested_count ?? currentQuiz.assessment_plan?.target_questions ?? selectedQuestionCount()} grounded questions`
-      : "Quiz ready");
+    closeQuizCreateDialog({ force: true });
+    // A partial result (fewer grounded questions than requested) is still a success -- grounding
+    // quality was prioritized over hitting the exact requested count.
+    showToast(generatedQuiz.status === "partial"
+      ? `Quiz created with ${generatedQuiz.actual_count ?? generatedQuiz.question_count} questions. Grounded quality was prioritized.`
+      : "Quiz created");
   } catch (error) {
-    if (requestedQuizKey !== currentQuizKey()) return;
-    if (generatedQuiz) {
-      console.error("Quiz was generated and persisted, but the UI could not render it", error);
-      showToast("Quiz was generated and saved, but the screen could not update");
-      return;
-    }
-    currentQuiz = null;
-    quizAnswers = {};
-    quizList.innerHTML = "";
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.textContent = error.message || "Assessment Agent could not generate a quiz.";
-    quizList.appendChild(empty);
-    assessmentTitle.textContent = "Assessment Agent";
-    showToast(error.message || "Quiz generation failed");
+    showQuizSheetError(error.message || "Assessment Agent could not generate a quiz.");
   } finally {
+    setQuizSheetGenerating(false);
     setAssessmentLoading(false);
-    updateAssessmentSummary();
     finishPendingQuiz(pendingId);
   }
 }
@@ -3619,6 +3690,10 @@ document.addEventListener("keydown", (event) => {
   }
 });
 generateQuizButton.addEventListener("click", generateAssessmentQuiz);
+document.getElementById("quiz-sheet-retry-button")?.addEventListener("click", () => generateAssessmentQuiz());
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && quizCreateDialog?.classList.contains("open")) closeQuizCreateDialog();
+});
 newQuizButton.addEventListener("click", regenerateAssessmentQuiz);
 resetQuizButton.addEventListener("click", resetAssessmentQuiz);
 deleteQuizButton?.addEventListener("click", deleteAssessmentQuiz);
@@ -3710,6 +3785,7 @@ function ensureQuizQuestionCountSelect() {
   caption.textContent = "Number of questions";
   quizQuestionCountSelect = document.createElement("select");
   quizQuestionCountSelect.id = "quiz-question-count-select";
+  quizQuestionCountSelect.className = "visually-hidden";
   [12, 15, 18, 20].forEach((count) => {
     const option = document.createElement("option");
     option.value = String(count);
@@ -3717,25 +3793,90 @@ function ensureQuizQuestionCountSelect() {
     option.selected = count === 12;
     quizQuestionCountSelect.appendChild(option);
   });
+  const segmented = document.createElement("div");
+  segmented.className = "quiz-segmented";
+  segmented.id = "quiz-count-segmented";
+  segmented.setAttribute("role", "radiogroup");
+  segmented.setAttribute("aria-label", "Number of questions");
   // Changing the settings never changes a saved quiz: only the "saved" marks and the hint update.
   quizQuestionCountSelect.addEventListener("change", () => {
     updateDifficultyOptions();
+    renderQuizCountSegments();
     if (currentQuiz?.questions?.length) assessmentTitle.textContent = assessmentTitleText(currentQuiz);
   });
-  label.append(caption, quizQuestionCountSelect);
+  label.append(caption, quizQuestionCountSelect, segmented);
   generateQuizButton.before(label);
   quizQuestionCountField = label;
+  renderQuizCountSegments();
+}
+
+// The Create Quiz sheet's visible Question count control: segmented buttons mirroring the real
+// (visually hidden) #quiz-question-count-select.
+function renderQuizCountSegments() {
+  const container = document.getElementById("quiz-count-segmented");
+  if (!container || !quizQuestionCountSelect) return;
+  container.innerHTML = "";
+  Array.from(quizQuestionCountSelect.options).forEach((option) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiz-segmented-option";
+    button.textContent = option.value;
+    button.setAttribute("role", "radio");
+    const selected = option.value === quizQuestionCountSelect.value;
+    button.setAttribute("aria-checked", String(selected));
+    button.classList.toggle("active", selected);
+    button.addEventListener("click", () => {
+      if (quizQuestionCountSelect.value === option.value) return;
+      quizQuestionCountSelect.value = option.value;
+      renderQuizCountSegments();
+      quizQuestionCountSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    container.appendChild(button);
+  });
+}
+
+// Keeps the friendly failure text as the only thing shown by default; whatever the backend sent is
+// still reachable through the collapsed "Technical details" toggle, never as the primary line.
+function showQuizSheetError(message) {
+  const container = document.getElementById("quiz-sheet-error");
+  if (!container) return;
+  const messageElement = document.getElementById("quiz-sheet-error-message");
+  const technicalElement = document.getElementById("quiz-sheet-error-technical");
+  if (messageElement) messageElement.textContent = "Couldn't create the quiz. Please try again or switch models.";
+  if (technicalElement) technicalElement.textContent = message || "Unknown error.";
+  container.hidden = false;
+}
+
+function hideQuizSheetError() {
+  const container = document.getElementById("quiz-sheet-error");
+  if (container) container.hidden = true;
+}
+
+// isGenerating toggles the in-sheet "Generating…" indicator, disables Cancel (so a mid-generation
+// click can never discard the request), and gates duplicate-submission/close-while-generating via
+// quizGenerationInFlight.
+function setQuizSheetGenerating(isGenerating) {
+  quizGenerationInFlight = isGenerating;
+  const generating = document.getElementById("quiz-sheet-generating");
+  if (generating) generating.hidden = !isGenerating;
+  const cancelButton = quizCreateDialog?.querySelector(".quiz-dialog-cancel");
+  if (cancelButton) cancelButton.disabled = isGenerating;
 }
 
 function openQuizCreateDialog() {
   if (!assessmentControl) return;
   if (quizNameInput) quizNameInput.value = "";
+  hideQuizSheetError();
+  setQuizSheetGenerating(false);
   ensureQuizQuestionCountSelect();
+  renderQuizDifficultySegments();
+  renderQuizCountSegments();
+  renderQuizSheetModelSummary();
   if (!quizCreateDialog) {
     quizCreateDialog = document.createElement("div");
     quizCreateDialog.className = "quiz-create-dialog";
     quizCreateDialog.innerHTML = '<div class="quiz-create-dialog-card" role="dialog" aria-modal="true" aria-labelledby="quiz-create-title"><div class="quiz-dialog-heading"><div><h2 id="quiz-create-title">Create a Quiz</h2><p>Choose how you want to assess this material.</p></div><button class="text-button quiz-dialog-cancel" type="button">Cancel</button></div><div class="quiz-dialog-fields"></div></div>';
-    quizCreateDialog.querySelector(".quiz-dialog-cancel").addEventListener("click", closeQuizCreateDialog);
+    quizCreateDialog.querySelector(".quiz-dialog-cancel").addEventListener("click", () => closeQuizCreateDialog());
     quizCreateDialog.addEventListener("click", (event) => { if (event.target === quizCreateDialog) closeQuizCreateDialog(); });
     document.body.appendChild(quizCreateDialog);
   }
@@ -3744,7 +3885,12 @@ function openQuizCreateDialog() {
   assessmentControl.hidden = false;
 }
 
-function closeQuizCreateDialog() {
+// Cancel / backdrop click / Escape all funnel through here: while a generation is in flight this is
+// a safe no-op (never interrupts the request); otherwise it closes with no side effects -- nothing
+// is sent, nothing already entered is discarded beyond the dialog simply closing.
+function closeQuizCreateDialog(options = {}) {
+  const force = Boolean(options && options.force);
+  if (quizGenerationInFlight && !force) return;
   if (!quizCreateDialog || !assessmentControl) return;
   const shell = document.querySelector('[data-session-pane="quiz"] .assessment-shell');
   shell?.insertBefore(assessmentControl, shell.firstChild);
