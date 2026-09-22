@@ -165,7 +165,7 @@ class QuizNameApiRouteTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database_path = Path(self.temp_dir.name) / "auth.db"
-        self.patchers = [patch("backend.main.generate_quiz")]
+        self.patchers = [patch("backend.main.generate_quiz"), patch("backend.main.prepare_generation_model")]
         import backend.auth_store as auth_store
         self.patchers.append(patch.object(auth_store, "DATABASE_PATH", self.database_path))
         import backend.conversation_store as conversation_store
@@ -179,6 +179,7 @@ class QuizNameApiRouteTests(unittest.TestCase):
         self.mock_generate_quiz = None
         started = [patcher.start() for patcher in self.patchers]
         self.mock_generate_quiz = started[0]
+        self.mock_prepare_generation_model = started[1]
         self.mock_generate_quiz.return_value = {
             "quiz_id": "quiz-1", "document_id": "doc.pdf", "document_hash": "hash",
             "title": "Midterm Embedded Systems", "difficulty": "easy", "topic_id": "document",
@@ -235,6 +236,33 @@ class QuizNameApiRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         called_kwargs = self.mock_generate_quiz.call_args.kwargs
         self.assertIsNone(called_kwargs["quiz_name"])
+
+    def test_model_preparation_completes_before_quiz_generation_timing_starts(self):
+        """Model preparation and Quiz generation timing must be separate: prepare_generation_model()
+        is called, and returns, before generate_quiz() (whose own diagnostics clock - total_ms etc -
+        only starts once it is entered) is ever invoked, for both generate and regenerate."""
+        call_order = []
+        self.mock_prepare_generation_model.side_effect = lambda *_a, **_k: call_order.append("prepare")
+        self.mock_generate_quiz.side_effect = lambda *_a, **_k: call_order.append("generate") or {
+            "quiz_id": "quiz-1", "document_id": "doc.pdf", "document_hash": "hash",
+            "title": "Midterm Embedded Systems", "difficulty": "easy", "topic_id": "document",
+            "topic_name": "Entire document", "assessment_scope": "document", "assessment_plan": {},
+            "created_at": "2026-01-01T00:00:00+00:00", "question_count": 0, "questions": [],
+        }
+        client = self._signed_in_client()
+
+        call_order.clear()
+        response = client.post("/api/quiz/generate", json={
+            "document_id": "doc.pdf", "assessment_scope": "document", "difficulty": "easy",
+            "quiz_name": "Midterm Embedded Systems",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(call_order, ["prepare", "generate"])
+
+        call_order.clear()
+        response = client.post("/api/quiz/doc.pdf/regenerate", json={"difficulty": "easy", "assessment_scope": "document"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(call_order, ["prepare", "generate"])
 
 
 class QuizNameGenerationTests(unittest.TestCase):

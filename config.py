@@ -41,10 +41,14 @@ COLLECTION_NAME = "study_documents"
 
 # Model dùng để trả lời
 CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M")
-# Comma-separated allowlist. Existing OLLAMA_CHAT_MODEL deployments continue to expose one model.
+# Comma-separated allowlist: which models the Study Session selector offers/resolves (never which
+# models are pulled at Kaggle startup - only Qwen, the default, is pulled/warmed there; every other
+# configured model here is pulled lazily on first use, see backend/model_registry.py and
+# deployment/start_kaggle.sh). Existing OLLAMA_CHAT_MODEL deployments continue to expose one model.
+_DEFAULT_GENERATION_MODELS = "qwen-2.5-7b,deepseek-r1-14b,gemma3-12b,glm4-9b"
 GENERATION_MODELS = tuple(dict.fromkeys(
-    model.strip() for model in os.getenv("OLLAMA_GENERATION_MODELS", "qwen-2.5-7b,deepseek-r1-14b").split(",") if model.strip()
-)) or ("qwen-2.5-7b", "deepseek-r1-14b")
+    model.strip() for model in os.getenv("OLLAMA_GENERATION_MODELS", _DEFAULT_GENERATION_MODELS).split(",") if model.strip()
+)) or tuple(_DEFAULT_GENERATION_MODELS.split(","))
 DEFAULT_GENERATION_MODEL = os.getenv("OLLAMA_DEFAULT_GENERATION_MODEL", "qwen-2.5-7b")
 QUIZ_DEFAULT_GENERATION_MODEL = os.getenv("OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL", "qwen-2.5-7b")
 QUIZ_VALIDATION_MODEL = os.getenv("QUIZ_VALIDATION_MODEL", CHAT_MODEL)

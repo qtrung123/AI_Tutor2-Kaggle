@@ -72,6 +72,10 @@ let authMode = "login";
 let activeConversation = null;
 let generationModels = [];
 let selectedModelId = localStorage.getItem("aiTutorModelId") || "";
+// Visible "Preparing…/Ready/error" state for the selected model, shared by the selector and every
+// generation surface (Quiz, Summary, Flashcards): "unknown" | "preparing" | "ready" | "error".
+let modelReadyState = "unknown";
+let modelReadyMessage = "";
 let activeDocumentId = "";
 let loadedSummaryKey = "";
 let summaryInFlightKey = "";
@@ -364,6 +368,9 @@ async function loadGenerationModels() {
     if (!generationModels.some((model) => model.id === selectedModelId)) selectedModelId = generationModels.find((model) => model.default)?.id || generationModels[0]?.id || "";
     renderModelSelector();
     if (currentQuiz?.questions?.length) assessmentTitle.textContent = assessmentTitleText(currentQuiz);   // labels of the models are known now
+    // The restored/default selection may not be pulled yet (e.g. a lazy model chosen last session):
+    // prepare it now rather than waiting for the user to touch the selector or click Generate.
+    ensureSelectedModelReadyWithStatus().catch(() => {});
   } catch (error) { generationModels = []; }
 }
 
@@ -385,18 +392,57 @@ function renderModelSelector() {
   if (!select) {
     const label = document.createElement("label"); label.className = "generation-model-control"; label.textContent = "Model:";
     select = document.createElement("select"); select.id = "generation-model-select";
-    label.appendChild(select); header.appendChild(label);
+    label.appendChild(select);
+    const badge = document.createElement("span"); badge.id = "model-ready-badge"; badge.className = "model-ready-badge"; badge.hidden = true;
+    label.appendChild(badge);
+    header.appendChild(label);
     select.addEventListener("change", () => setSelectedModel(select.value));
   }
   select.innerHTML = "";
   generationModels.forEach((model) => select.add(new Option(model.label, model.id, false, model.id === selectedModelId)));
   updateGenerateModelNotes();
+  renderModelReadyState();
+}
+
+// Every generation surface (Quiz, Summary, Flashcards) is gated on this same visible state: while
+// preparing, their Generate buttons are disabled so preparation time never hides inside a
+// "Generating…" state (model preparation happens BEFORE generation, and is timed separately -
+// see backend/model_registry.py's prepare_generation_model / model_prepare_ms).
+function renderModelReadyState() {
+  const badge = document.getElementById("model-ready-badge");
+  if (badge) {
+    badge.hidden = modelReadyState === "unknown";
+    badge.className = `model-ready-badge model-ready-${modelReadyState}`;
+    badge.textContent = modelReadyState === "preparing" ? "Preparing…"
+      : modelReadyState === "ready" ? "Ready"
+      : modelReadyState === "error" ? (modelReadyMessage || "Could not prepare model")
+      : "";
+    if (modelReadyState === "error") badge.title = modelReadyMessage || "Could not prepare model";
+  }
+  [generateQuizButton, generateSummaryButton, regenerateSummaryButton, generateFlashcardsButton]
+    .filter(Boolean)
+    .forEach((button) => { button.disabled = modelReadyState === "preparing"; });
+}
+
+// Wraps ensureSelectedModelReady() (the actual prepare/pull contract, shared with the AI Tutor
+// chat) with the visible Preparing…/Ready/error state and the Generate-button disable gate.
+async function ensureSelectedModelReadyWithStatus() {
+  modelReadyState = "preparing"; modelReadyMessage = ""; renderModelReadyState();
+  try {
+    const modelId = await ensureSelectedModelReady();
+    modelReadyState = "ready"; modelReadyMessage = ""; renderModelReadyState();
+    return modelId;
+  } catch (error) {
+    modelReadyState = "error"; modelReadyMessage = error.message || "Model could not be prepared.";
+    renderModelReadyState();
+    throw error;
+  }
 }
 
 async function setSelectedModel(modelId) {
   selectedModelId = modelId; localStorage.setItem("aiTutorModelId", selectedModelId);
   const select = document.getElementById("generation-model-select");
-  if (select) { select.value = selectedModelId; select.disabled = true; }
+  if (select) select.value = selectedModelId;
   updateGenerateModelNotes();
   // Changing the model never generates anything: saved states are re-read and the screens
   // re-evaluated for the new model; a saved quiz keeps the model that made it.
@@ -405,9 +451,8 @@ async function setSelectedModel(modelId) {
   const tab = document.body.dataset.sessionTab;
   if (tab === "summary") showSummaryState();
   if (tab === "flashcards") showFlashcardsState();
-  try { await fetchJson(`${MODELS_API_URL}/${encodeURIComponent(selectedModelId)}/prepare`, { method: "POST" }); showToast("Model ready"); }
-  catch (error) { showToast(error.message || "Model is still preparing"); }
-  finally { if (select) select.disabled = false; }
+  try { await ensureSelectedModelReadyWithStatus(); showToast("Model ready"); }
+  catch (error) { showToast(error.message || "Model could not be prepared."); }
 }
 
 function formatBenchmarkPercent(value) {
@@ -586,6 +631,13 @@ async function loadDocumentFlashcards() {
   if (!activeDocumentId || !flashcardsPane) return;
   const requestDocumentId = activeDocumentId, key = flashcardsKey();
   if (loadedFlashcardKey === key && flashcards.length) { renderCurrentFlashcard(); return; }
+  // Model preparation happens BEFORE generation timing starts, not inside the "Generating…" state.
+  try { await ensureSelectedModelReadyWithStatus(); }
+  catch (error) {
+    if (activeDocumentId === requestDocumentId) { flashcardsError.textContent = error.message || "Model could not be prepared."; flashcardsError.hidden = false; }
+    return;
+  }
+  if (activeDocumentId !== requestDocumentId || key !== flashcardsKey()) return;   // another document/model/language is on screen now
   flashcardsLoading.hidden = false; flashcardsError.hidden = true; flashcardsStage.hidden = true; flashcardsGenerate.hidden = true;
   flashcardsInFlightKey = key;
   let generated = false;
@@ -729,6 +781,13 @@ async function loadDocumentSummary(regenerate = false) {
   const requestDocumentId = activeDocumentId;
   const key = `${requestDocumentId}:${selectedModelId}`;
   if (!regenerate && loadedSummaryKey === key && summaryContent.children.length) return;
+  // Model preparation happens BEFORE generation timing starts, not inside the "Generating…" state.
+  try { await ensureSelectedModelReadyWithStatus(); }
+  catch (error) {
+    if (activeDocumentId === requestDocumentId) { summaryError.textContent = error.message || "Model could not be prepared."; summaryError.hidden = false; }
+    return;
+  }
+  if (activeDocumentId !== requestDocumentId || key !== `${activeDocumentId}:${selectedModelId}`) return;   // another document/model is on screen now
   summaryLoading.hidden = false; summaryError.hidden = true; summaryContent.hidden = true; summaryGenerate.hidden = true;
   regenerateSummaryButton.disabled = true; summaryInFlightKey = key;
   try {
@@ -2544,6 +2603,11 @@ async function generateAssessmentQuiz() {
     quizNameInput?.focus();
     return;
   }
+  // Model preparation happens BEFORE generation timing starts: a lazily-pulled model is fetched
+  // here, not inside the "Generating assessment" state below (see model_prepare_ms).
+  try { await ensureSelectedModelReadyWithStatus(); }
+  catch (error) { showToast(error.message || "Model could not be prepared."); return; }
+
   const requestedQuizKey = quizGenerationRequestKey(generationRequest);
   const pendingId = registerPendingQuiz(generationRequest);
   setAssessmentLoading(true);
@@ -2597,6 +2661,9 @@ async function regenerateAssessmentQuiz() {
     showToast("Choose an indexed document first");
     return;
   }
+  try { await ensureSelectedModelReadyWithStatus(); }
+  catch (error) { showToast(error.message || "Model could not be prepared."); return; }
+
   const generationRequest = selectedQuizGenerationRequest();
   const requestedQuizKey = quizGenerationRequestKey(generationRequest);
   const pendingId = registerPendingQuiz(generationRequest, currentQuiz?.title || "");

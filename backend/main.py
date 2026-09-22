@@ -675,7 +675,9 @@ def summary_detail(document_id: str, model_id: Optional[str] = None, cache_only:
     """
     try:
         if cache_only:
+            # A pure existence check never prepares/pulls anything.
             return generate_document_summary(current_user["id"], document_id, model_id=model_id, cache_only=True)
+        prepare_generation_model(model_id)
         return generate_document_summary(current_user["id"], document_id, model_id=model_id)
     except ValueError as error:
         message = str(error)
@@ -688,6 +690,7 @@ def summary_detail(document_id: str, model_id: Optional[str] = None, cache_only:
 def summary_regenerate(document_id: str, request: SummaryGenerateRequest, current_user: dict = Depends(require_current_user)) -> dict:
     """Explicitly generate and persist a fresh summary version."""
     try:
+        prepare_generation_model(request.model_id)
         return generate_document_summary(current_user["id"], document_id, model_id=request.model_id, regenerate=True)
     except ValueError as error:
         message = str(error)
@@ -706,8 +709,10 @@ def flashcards_detail(document_id: str, topic_ids: list[str] | None = Query(defa
     """
     try:
         if cache_only:
+            # A pure existence check never prepares/pulls anything.
             return generate_flashcards(current_user["id"], document_id, topic_ids=topic_ids, model_id=model_id,
                                        language=language, cache_only=True)
+        prepare_generation_model(model_id)
         return generate_flashcards(current_user["id"], document_id, topic_ids=topic_ids, model_id=model_id, language=language)
     except ValueError as error:
         raise HTTPException(status_code=404 if str(error) == "Document not found." else 400, detail=str(error)) from error
@@ -811,6 +816,11 @@ def quiz_generate(request: QuizGenerateRequest, current_user: dict = Depends(req
             f"[quiz-api] document_id={request.document_id}, "
             f"assessment_scope={request.assessment_scope}, difficulty={request.difficulty}"
         )
+        quiz_model_id = request.model_id or QUIZ_DEFAULT_GENERATION_MODEL
+        # Kaggle only pulls the default (Qwen) at startup; every other model is lazy, so make sure
+        # the selected model is actually in the Ollama cache before generation ever touches it.
+        # Never falls back to another model: a failed pull raises and this request fails.
+        prepare_generation_model(quiz_model_id)
         result = generate_quiz(
             document_id=request.document_id,
             difficulty=request.difficulty,
@@ -818,7 +828,7 @@ def quiz_generate(request: QuizGenerateRequest, current_user: dict = Depends(req
             topic_id=request.topic_id,
             question_count=request.question_count,
             owner_id=current_user["id"],
-            model_id=resolve_generation_model(request.model_id or QUIZ_DEFAULT_GENERATION_MODEL),
+            model_id=resolve_generation_model(quiz_model_id),
             quiz_name=quiz_name,
         )
         return QuizGenerateResponse(**result)
@@ -911,6 +921,8 @@ def quiz_regenerate(document_id: str, request: QuizRegenerateRequest, current_us
     old answers are not shown against a new question set.
     """
     try:
+        quiz_model_id = getattr(request, "model_id", None) or QUIZ_DEFAULT_GENERATION_MODEL
+        prepare_generation_model(quiz_model_id)
         result = generate_quiz(
             document_id=document_id,
             difficulty=request.difficulty,
@@ -919,7 +931,7 @@ def quiz_regenerate(document_id: str, request: QuizRegenerateRequest, current_us
             question_count=request.question_count,
             regenerate=True,
             owner_id=current_user["id"],
-            model_id=resolve_generation_model(getattr(request, "model_id", None) or QUIZ_DEFAULT_GENERATION_MODEL),
+            model_id=resolve_generation_model(quiz_model_id),
             quiz_name=(request.quiz_name or "").strip() or None,
         )
         return QuizGenerateResponse(**result)
@@ -1064,6 +1076,7 @@ def conversation_message(conversation_id: str, request: ConversationMessageReque
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message is required.")
     try:
+        prepare_generation_model(request.model_id)
         return answer_conversation_message(current_user["id"], conversation_id, request.message, request.model_id)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error

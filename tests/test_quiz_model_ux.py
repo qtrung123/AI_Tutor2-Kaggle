@@ -46,7 +46,18 @@ DRIVER = textwrap.dedent("""
       .catch((error) => { console.error(error); process.exit(1); });
 """)
 
-MODELS = 'generationModels = [{id:"qwen-2.5-7b",label:"Qwen 2.5 7B"},{id:"deepseek-r1-14b",label:"DeepSeek R1 Distill Qwen 14B"}];'
+# ready:true so ensureSelectedModelReady() short-circuits without a network call in scenarios that
+# do not care about model preparation - readiness gating itself is covered separately below.
+MODELS = 'generationModels = [{id:"qwen-2.5-7b",label:"Qwen 2.5 7B",ready:true},{id:"deepseek-r1-14b",label:"DeepSeek R1 Distill Qwen 14B",ready:true}];'
+# Stubs every scenario that reaches ensureSelectedModelReadyWithStatus()/renderModelReadyState()
+# needs: a document with a no-op getElementById, and every Generate button renderModelReadyState()
+# disables/enables while a model is preparing.
+MODEL_READY_DOM_STUBS = """
+    var document = { getElementById: () => null };
+    var generateQuizButton = new El(), generateSummaryButton = new El(),
+        regenerateSummaryButton = new El(true), generateFlashcardsButton = new El();
+"""
+MODEL_READY_FUNCTIONS = ["ensureSelectedModelReady", "ensureSelectedModelReadyWithStatus", "renderModelReadyState"]
 
 
 def run_node(functions, setup, scenario):
@@ -193,8 +204,8 @@ class QuizzesScreenStateTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("node"), "node is not installed")
 class SummaryAndFlashcardsWaitForGenerateTests(unittest.TestCase):
-    SUMMARY_FUNCTIONS = ["updateSummaryChrome", "showSummaryState", "loadDocumentSummary"]
-    SUMMARY_SETUP = MODELS + """
+    SUMMARY_FUNCTIONS = ["updateSummaryChrome", "showSummaryState", "loadDocumentSummary"] + MODEL_READY_FUNCTIONS
+    SUMMARY_SETUP = MODELS + MODEL_READY_DOM_STUBS + """
         var activeDocumentId = "doc.pdf", selectedModelId = "qwen-2.5-7b", loadedSummaryKey = "", summaryInFlightKey = "";
         var SUMMARY_API_BASE_URL = "/api/summary";
         var summaryContent = new El(), summaryLoading = new El(true), summaryGenerate = new El(true), summaryError = new El(true);
@@ -252,8 +263,8 @@ class SummaryAndFlashcardsWaitForGenerateTests(unittest.TestCase):
         self.assertEqual(result["afterSwitch"], {"prompt": True, "shown": 0})
         self.assertEqual(result["back"], {"prompt": False, "shown": 1})
 
-    FLASHCARD_FUNCTIONS = ["flashcardsKey", "flashcardsUrl", "applyFlashcardSet", "showFlashcardsState", "loadDocumentFlashcards"]
-    FLASHCARD_SETUP = MODELS + """
+    FLASHCARD_FUNCTIONS = ["flashcardsKey", "flashcardsUrl", "applyFlashcardSet", "showFlashcardsState", "loadDocumentFlashcards"] + MODEL_READY_FUNCTIONS
+    FLASHCARD_SETUP = MODELS + MODEL_READY_DOM_STUBS + """
         var activeDocumentId = "doc.pdf", selectedModelId = "qwen-2.5-7b", flashcardLanguage = "auto", loadedFlashcardKey = "";
         var flashcardsInFlightKey = "", FLASHCARDS_API_BASE_URL = "/api/flashcards", flashcardsPane = {};
         var flashcardsLoading = new El(true), flashcardsError = new El(true), flashcardsStage = new El(true), flashcardsGenerate = new El(true);
@@ -287,6 +298,71 @@ class SummaryAndFlashcardsWaitForGenerateTests(unittest.TestCase):
         self.assertTrue(all("cache_only=true" in url for url in result["calls"]), result["calls"])
         self.assertEqual(result["deepseek"], {"prompt": True, "cards": 0})
         self.assertEqual(result["vietnamese"], {"prompt": True, "cards": 0})   # Qwen's saved set is for language=auto only
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not installed")
+class ModelPreparationGatingTests(unittest.TestCase):
+    """select model -> if not ready, prepare it -> UI shows Preparing... -> Ready -> only then are
+    the Quiz/Summary/Flashcards Generate buttons enabled. The prepare/pull itself is timed and
+    reported separately (model_prepare_ms, see backend/model_registry.py) from any generation call -
+    these tests only cover the frontend gating, not backend timing."""
+
+    def test_generate_buttons_disable_while_preparing_and_enable_once_ready(self):
+        setup = MODEL_READY_DOM_STUBS + """
+            generationModels = [{id: "qwen-2.5-7b", label: "Qwen 2.5 7B", ready: false}];
+            var selectedModelId = "qwen-2.5-7b", MODELS_API_URL = "/api/models";
+            async function fetchJson(url) { calls.push(url); return { status: "ready", ready: true }; }
+        """
+        result = run_node(MODEL_READY_FUNCTIONS, setup, """
+            const promise = ensureSelectedModelReadyWithStatus();
+            // Synchronous up to the first await inside ensureSelectedModelReady(): the Preparing
+            // state and the button-disable gate are already applied before any network call resolves.
+            const duringPrepare = {
+                quiz: generateQuizButton.disabled, summary: generateSummaryButton.disabled,
+                regenerate: regenerateSummaryButton.disabled, flashcards: generateFlashcardsButton.disabled,
+            };
+            const modelId = await promise;
+            const afterReady = {
+                quiz: generateQuizButton.disabled, summary: generateSummaryButton.disabled,
+                regenerate: regenerateSummaryButton.disabled, flashcards: generateFlashcardsButton.disabled,
+            };
+            return { duringPrepare, afterReady, modelId, ready: generationModels[0].ready, calls };
+        """)
+        self.assertEqual(result["duringPrepare"], {"quiz": True, "summary": True, "regenerate": True, "flashcards": True})
+        self.assertEqual(result["afterReady"], {"quiz": False, "summary": False, "regenerate": False, "flashcards": False})
+        self.assertEqual(result["modelId"], "qwen-2.5-7b")
+        self.assertTrue(result["ready"])   # generationModels' cached ready flag is updated too
+        self.assertEqual(result["calls"], ["/api/models/qwen-2.5-7b/prepare"])
+
+    def test_an_already_ready_model_never_disables_the_buttons(self):
+        setup = MODEL_READY_DOM_STUBS + """
+            generationModels = [{id: "qwen-2.5-7b", label: "Qwen 2.5 7B", ready: true}];
+            var selectedModelId = "qwen-2.5-7b", MODELS_API_URL = "/api/models";
+            async function fetchJson(url) { calls.push(url); return { status: "ready", ready: true }; }
+        """
+        result = run_node(MODEL_READY_FUNCTIONS, setup, """
+            await ensureSelectedModelReadyWithStatus();
+            return { quiz: generateQuizButton.disabled, calls };
+        """)
+        self.assertFalse(result["quiz"])
+        self.assertEqual(result["calls"], [])   # no network call at all: already ready
+
+    def test_a_preparation_failure_re_enables_buttons_and_reports_a_clear_error(self):
+        """No silent fallback in the UI either: a failed prepare re-enables the buttons (so the user
+        can retry) and the visible state carries the real error message, not a generic one."""
+        setup = MODEL_READY_DOM_STUBS + """
+            generationModels = [{id: "gemma3-12b", label: "Gemma 3 12B", ready: false}];
+            var selectedModelId = "gemma3-12b", MODELS_API_URL = "/api/models";
+            async function fetchJson(_url) { throw new Error("Could not prepare model: pull failed"); }
+        """
+        result = run_node(MODEL_READY_FUNCTIONS, setup, """
+            let error = null;
+            try { await ensureSelectedModelReadyWithStatus(); } catch (e) { error = e.message; }
+            return { error, quizDisabled: generateQuizButton.disabled, ready: generationModels[0].ready };
+        """)
+        self.assertIn("pull failed", result["error"])
+        self.assertFalse(result["quizDisabled"])   # not stuck disabled after a failure: the user can retry
+        self.assertFalse(result["ready"])          # never marked ready on failure
 
 
 class WiringTests(unittest.TestCase):

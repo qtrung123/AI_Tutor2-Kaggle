@@ -10,8 +10,15 @@ PUBLIC_PORT="${PUBLIC_PORT:-7860}"
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
 OLLAMA_CHAT_MODEL="${OLLAMA_CHAT_MODEL:-hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M}"
 OLLAMA_DEEPSEEK_R1_14B_MODEL="${OLLAMA_DEEPSEEK_R1_14B_MODEL:-hf.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q4_K_M}"
+# Configured but lazy: pulled on demand (see /api/models/{id}/prepare) the first time a user
+# actually selects and uses them, never pulled or warmed here at startup. Official Ollama library
+# references, not Hugging Face GGUF.
+OLLAMA_GEMMA3_12B_MODEL="${OLLAMA_GEMMA3_12B_MODEL:-gemma3:12b-it-q4_K_M}"
+OLLAMA_GLM4_9B_MODEL="${OLLAMA_GLM4_9B_MODEL:-glm4:9b-chat-q4_K_M}"
 OLLAMA_GENERATION_MODELS="${OLLAMA_GENERATION_MODELS:-}"
-for required_model_id in qwen-2.5-7b deepseek-r1-14b; do
+# Repairs the app-level model allowlist only (which models the Study Session selector offers and
+# resolves) - it does not affect what gets pulled or warmed at startup, which is Qwen alone below.
+for required_model_id in qwen-2.5-7b deepseek-r1-14b gemma3-12b glm4-9b; do
   case ",$OLLAMA_GENERATION_MODELS," in
     *",$required_model_id,"*) ;;
     *) OLLAMA_GENERATION_MODELS="${OLLAMA_GENERATION_MODELS:+$OLLAMA_GENERATION_MODELS,}$required_model_id" ;;
@@ -19,7 +26,9 @@ for required_model_id in qwen-2.5-7b deepseek-r1-14b; do
 done
 DEFAULT_MODEL="${OLLAMA_DEFAULT_GENERATION_MODEL:-qwen-2.5-7b}"
 QUIZ_DEFAULT_MODEL="${OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL:-qwen-2.5-7b}"
-AVAILABLE_MODELS="${AVAILABLE_MODELS:-$OLLAMA_CHAT_MODEL,$OLLAMA_DEEPSEEK_R1_14B_MODEL}"
+# Only consulted when PRELOAD_ALL_MODELS=true (benchmarking): every configured model, pulled once
+# up front instead of lazily. Startup itself only ever pulls/warms $OLLAMA_CHAT_MODEL.
+AVAILABLE_MODELS="${AVAILABLE_MODELS:-$OLLAMA_CHAT_MODEL,$OLLAMA_DEEPSEEK_R1_14B_MODEL,$OLLAMA_GEMMA3_12B_MODEL,$OLLAMA_GLM4_9B_MODEL}"
 PRELOAD_ALL_MODELS="${PRELOAD_ALL_MODELS:-false}"
 OLLAMA_EMBEDDING_MODEL="${OLLAMA_EMBEDDING_MODEL:-bge-m3}"
 GGUF_MODEL_PATH="${GGUF_MODEL_PATH:-}"
@@ -27,7 +36,8 @@ RECREATE_OLLAMA_MODEL="${RECREATE_OLLAMA_MODEL:-0}"
 REBUILD_CHROMA_ON_EMBEDDING_CHANGE="${REBUILD_CHROMA_ON_EMBEDDING_CHANGE:-1}"
 
 export PROJECT_ROOT BACKEND_PORT FRONTEND_PORT PUBLIC_PORT OLLAMA_HOST
-export OLLAMA_CHAT_MODEL OLLAMA_DEEPSEEK_R1_14B_MODEL OLLAMA_GENERATION_MODELS OLLAMA_DEFAULT_GENERATION_MODEL="$DEFAULT_MODEL"
+export OLLAMA_CHAT_MODEL OLLAMA_DEEPSEEK_R1_14B_MODEL OLLAMA_GEMMA3_12B_MODEL OLLAMA_GLM4_9B_MODEL
+export OLLAMA_GENERATION_MODELS OLLAMA_DEFAULT_GENERATION_MODEL="$DEFAULT_MODEL"
 export OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL="$QUIZ_DEFAULT_MODEL" OLLAMA_EMBEDDING_MODEL
 export AI_TUTOR_DATA_DIR="${AI_TUTOR_DATA_DIR:-$PROJECT_ROOT/data}"
 export AI_TUTOR_VECTORSTORE_DIR="${AI_TUTOR_VECTORSTORE_DIR:-$PROJECT_ROOT/vectorstore}"
@@ -162,7 +172,9 @@ PY
 
 warm_models_once() {
   local key marker
-  key="$(printf '%s\n%s\n%s\n' "$OLLAMA_CHAT_MODEL" "$OLLAMA_DEEPSEEK_R1_14B_MODEL" "$OLLAMA_EMBEDDING_MODEL" | sha256sum | awk '{print $1}')"
+  # Only the startup default (Qwen) and the embedding model are warmed here: DeepSeek, Gemma and
+  # GLM are lazy (see /api/models/{id}/prepare) and are never pulled or warmed at startup.
+  key="$(printf '%s\n%s\n' "$OLLAMA_CHAT_MODEL" "$OLLAMA_EMBEDDING_MODEL" | sha256sum | awk '{print $1}')"
   marker="$RUNTIME_DIR/models-warmed-$key"
   if [[ -f "$marker" ]]; then
     log "Model warmup already completed in this runtime"
@@ -172,17 +184,13 @@ warm_models_once() {
   curl --fail --silent --show-error --max-time 600 \
     -H 'Content-Type: application/json' "$OLLAMA_HOST/api/generate" \
     -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_CHAT_MODEL"], "prompt": "Reply with OK.", "stream": False, "keep_alive": 0}))')" >/dev/null
-  log "Warming second chat/quiz model without keeping it resident"
-  curl --fail --silent --show-error --max-time 600 \
-    -H 'Content-Type: application/json' "$OLLAMA_HOST/api/generate" \
-    -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_DEEPSEEK_R1_14B_MODEL"], "prompt": "Reply with {} only.", "stream": False, "think": False, "format": "json", "keep_alive": 0}))')" >/dev/null
   log "Warming embedding model"
   curl --fail --silent --show-error --max-time 180 \
     -H 'Content-Type: application/json' "$OLLAMA_HOST/api/embed" \
     -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_EMBEDDING_MODEL"], "input": "AI Tutor embedding health check.", "keep_alive": "10m"}))')" \
     | python -c 'import json, sys; data=json.load(sys.stdin); assert data.get("embeddings"), "Embedding warmup returned no vector"'
-  # Evidence for the log: only the embedding model may still be resident here (both chat models were
-  # warmed one after the other with keep_alive 0, so neither is in VRAM now).
+  # Evidence for the log: only the embedding model may still be resident here (the chat model was
+  # warmed with keep_alive 0, so it is not in VRAM now).
   log "Models resident after warmup (expected: only $OLLAMA_EMBEDDING_MODEL):"
   ollama ps || true
   touch "$marker"
@@ -214,21 +222,16 @@ elif [[ "$RECREATE_OLLAMA_MODEL" == "1" ]] || ! ollama_has_model "$OLLAMA_CHAT_M
   ollama create "$OLLAMA_CHAT_MODEL" -f "$MODELFILE" >>"$LOG_DIR/ollama.log" 2>&1
 fi
 
-if ! ollama_has_model "$OLLAMA_DEEPSEEK_R1_14B_MODEL"; then
-  log "Pulling second chat/quiz model $OLLAMA_DEEPSEEK_R1_14B_MODEL"
-  pull_model "$OLLAMA_DEEPSEEK_R1_14B_MODEL"
-else
-  log "Second chat/quiz model already exists: $OLLAMA_DEEPSEEK_R1_14B_MODEL"
-fi
-
+# DeepSeek, Gemma and GLM are lazy: only Qwen (above) is pulled at startup. Every other configured
+# model is pulled on demand the first time a user actually selects and uses it (see
+# backend.model_registry.prepare_generation_model, reached through /api/models/{id}/prepare).
 if [[ "$PRELOAD_ALL_MODELS" == "true" || "$PRELOAD_ALL_MODELS" == "1" ]]; then
   IFS=',' read -r -a generation_models <<< "$AVAILABLE_MODELS"
   for generation_model in "${generation_models[@]}"; do
     generation_model="${generation_model//[[:space:]]/}"
     [[ -z "$generation_model" || "$generation_model" == "$OLLAMA_CHAT_MODEL" ]] && continue
     if ollama_has_model "$generation_model"; then log "Generation model already exists: $generation_model"
-    elif [[ "$generation_model" == hf.co/* ]]; then log "Preloading optional generation model $generation_model"; pull_model "$generation_model"
-    else fail "Optional model '$generation_model' is absent and cannot be pulled automatically."
+    else log "Preloading optional generation model $generation_model"; pull_model "$generation_model"
     fi
   done
 else
