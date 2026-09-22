@@ -198,12 +198,23 @@ const summaryContent = document.getElementById("summary-content");
 const regenerateSummaryButton = document.getElementById("regenerate-summary-button");
 const flashcardsPane = document.querySelector('[data-session-pane="flashcards"]');
 flashcardsPane?.classList.remove("placeholder-pane");
-if (flashcardsPane) flashcardsPane.innerHTML = `<article class="panel flashcards-panel"><div class="flashcards-toolbar"><div><p class="eyebrow">Flashcards</p><h2>Study Cards</h2></div><div class="flashcards-actions"><label>Filter Topics<select id="flashcard-topic-filter"><option value="all">All topics</option></select></label><label>Flashcard language<select id="flashcard-language-select"><option value="auto">Auto</option><option value="english">English</option><option value="vietnamese">Vietnamese</option></select></label><button class="secondary-button" id="shuffle-flashcards" type="button">Shuffle</button><button class="secondary-button" id="manage-flashcards" type="button">Manage Cards</button></div></div><div id="flashcards-generate" class="generate-prompt" hidden><h3>Generate flashcards</h3><p>No flashcards have been generated for this document with the selected model and language yet.</p><p class="generate-model-note">Model: <span class="generate-model-name"></span> (change it in the Model selector above)</p><button class="primary-button" id="generate-flashcards-button" type="button">Generate Flashcards</button></div><div id="flashcards-loading" class="empty-state" hidden>Generating grounded flashcards…</div><div id="flashcards-error" class="empty-state" hidden></div><div id="flashcards-stage" hidden><div class="flashcard-topic-title" id="flashcard-topic-title"></div><button class="flashcard" id="flashcard" type="button" aria-label="Flip flashcard"><span class="flashcard-side-label" id="flashcard-side-label">Front</span><span class="flashcard-copy" id="flashcard-copy"></span><span class="flashcard-flip-hint">Click to flip</span></button><div class="flashcard-navigation"><button class="secondary-button" id="previous-flashcard" type="button">Previous</button><span id="flashcard-position">0 of 0</span><button class="secondary-button" id="next-flashcard" type="button">Next</button><button class="favorite-button" id="favorite-flashcard" type="button" aria-label="Favorite card">☆</button></div></div></article>`;
+if (flashcardsPane) flashcardsPane.innerHTML = `<article class="panel flashcards-panel"><div class="flashcards-toolbar"><div><p class="eyebrow">Flashcards</p><h2>Study Cards</h2></div><div class="flashcards-actions"><label>Filter Topics<select id="flashcard-topic-filter"><option value="all">All topics</option></select></label><label>Flashcard language<select id="flashcard-language-select"><option value="auto">Auto</option><option value="english">English</option><option value="vietnamese">Vietnamese</option></select></label><button class="secondary-button" id="shuffle-flashcards" type="button">Shuffle</button><button class="secondary-button" id="regenerate-flashcards-button" type="button" hidden>Regenerate</button><button class="secondary-button" id="manage-flashcards" type="button">Manage Cards</button></div></div><div id="flashcards-generate" class="generate-prompt flashcards-empty-state" hidden><div class="flashcards-empty-icon" aria-hidden="true">🗂️</div><h3>No flashcards yet</h3><p>Generate grounded study cards for this document with the selected model and language.</p><p class="generate-model-note">Model: <span class="generate-model-name"></span> (change it in the Model selector above)</p><p class="flashcards-language-note">Language: <span id="flashcards-empty-language"></span></p><button class="primary-button" id="generate-flashcards-button" type="button">Generate Flashcards</button></div><div id="flashcards-loading" class="empty-state flashcards-loading-state" hidden><div class="flashcards-skeleton-card" aria-hidden="true"><span class="flashcards-skeleton-line long"></span><span class="flashcards-skeleton-line short"></span></div><p class="flashcards-loading-label" id="flashcards-loading-label">Preparing model…</p></div><div id="flashcards-error" class="empty-state flashcards-error-state" hidden><div class="flashcards-error-icon" aria-hidden="true">!</div><h3>Couldn't load flashcards</h3><p id="flashcards-error-message"></p><button class="primary-button" id="retry-flashcards-button" type="button">Retry</button><details class="flashcards-error-details"><summary>Technical details</summary><p id="flashcards-error-technical"></p></details></div><div id="flashcards-filter-empty" class="flashcards-filter-empty" hidden>No cards are available for this topic.</div><div id="flashcards-stage" hidden><div class="flashcards-regenerate-status" id="flashcards-regenerate-status" hidden>Regenerating…</div><div class="flashcards-regenerate-error" id="flashcards-regenerate-error" hidden><span id="flashcards-regenerate-error-message"></span><button class="text-button" id="retry-regenerate-flashcards-button" type="button">Retry</button></div><div class="flashcards-stage-meta"><span class="flashcard-topic-title" id="flashcard-topic-title"></span><span class="flashcards-model-note" id="flashcards-model-note"></span></div><button class="flashcard" id="flashcard" type="button" aria-label="Flip flashcard"><span class="flashcard-side-label" id="flashcard-side-label">Front</span><span class="flashcard-copy" id="flashcard-copy"></span><span class="flashcard-flip-hint">Tap to flip</span></button><div class="flashcard-progress-track"><span class="flashcard-progress-bar" id="flashcard-progress-bar"></span></div><div class="flashcard-navigation"><button class="secondary-button" id="previous-flashcard" type="button">Previous</button><span id="flashcard-position">0 / 0</span><button class="secondary-button" id="next-flashcard" type="button">Next</button><button class="favorite-button" id="favorite-flashcard" type="button" aria-label="Favorite card">☆</button></div></div></article>`;
 const flashcardsLoading = document.getElementById("flashcards-loading");
+const flashcardsLoadingLabel = document.getElementById("flashcards-loading-label");
 const flashcardsGenerate = document.getElementById("flashcards-generate");
 const generateFlashcardsButton = document.getElementById("generate-flashcards-button");
+const regenerateFlashcardsButton = document.getElementById("regenerate-flashcards-button");
 const flashcardsError = document.getElementById("flashcards-error");
+const flashcardsErrorMessage = document.getElementById("flashcards-error-message");
+const flashcardsErrorTechnical = document.getElementById("flashcards-error-technical");
+const retryFlashcardsButton = document.getElementById("retry-flashcards-button");
+const flashcardsFilterEmpty = document.getElementById("flashcards-filter-empty");
 const flashcardsStage = document.getElementById("flashcards-stage");
+const flashcardsModelNote = document.getElementById("flashcards-model-note");
+const flashcardsRegenerateStatus = document.getElementById("flashcards-regenerate-status");
+const flashcardsRegenerateError = document.getElementById("flashcards-regenerate-error");
+const flashcardsRegenerateErrorMessage = document.getElementById("flashcards-regenerate-error-message");
+const retryRegenerateFlashcardsButton = document.getElementById("retry-regenerate-flashcards-button");
 const flashcardTopicSelect = document.getElementById("flashcard-topic-filter");
 const flashcardLanguageSelect = document.getElementById("flashcard-language-select");
 if (flashcardLanguageSelect) flashcardLanguageSelect.value = flashcardLanguage;
@@ -212,8 +223,11 @@ const flashcardCopy = document.getElementById("flashcard-copy");
 const flashcardSideLabel = document.getElementById("flashcard-side-label");
 const flashcardTopicTitle = document.getElementById("flashcard-topic-title");
 const flashcardPosition = document.getElementById("flashcard-position");
+const flashcardProgressBar = document.getElementById("flashcard-progress-bar");
 const favoriteFlashcardButton = document.getElementById("favorite-flashcard");
 let flashcardManager = null;
+
+const FLASHCARD_LANGUAGE_LABELS = { auto: "Auto", english: "English", vietnamese: "Vietnamese" };
 
 const plannerView = document.getElementById("planner-view");
 if (plannerView) {
@@ -419,7 +433,7 @@ function renderModelReadyState() {
       : "";
     if (modelReadyState === "error") badge.title = modelReadyMessage || "Could not prepare model";
   }
-  [generateQuizButton, generateSummaryButton, regenerateSummaryButton, generateFlashcardsButton]
+  [generateQuizButton, generateSummaryButton, regenerateSummaryButton, generateFlashcardsButton, regenerateFlashcardsButton]
     .filter(Boolean)
     .forEach((button) => { button.disabled = modelReadyState === "preparing"; });
 }
@@ -575,15 +589,16 @@ function visibleFlashcards() {
 
 function renderCurrentFlashcard() {
   const cards = visibleFlashcards();
-  if (!cards.length) { flashcardsStage.hidden = true; flashcardsError.hidden = false; flashcardsError.textContent = "No cards are available for this topic."; return; }
-  flashcardsError.hidden = true; flashcardsStage.hidden = false;
+  if (!cards.length) { flashcardsStage.hidden = true; flashcardsFilterEmpty.hidden = false; return; }
+  flashcardsFilterEmpty.hidden = true; flashcardsStage.hidden = false;
   flashcardIndex = Math.min(flashcardIndex, cards.length - 1);
   const card = cards[flashcardIndex];
   flashcardElement.classList.toggle("flipped", flashcardFlipped);
   flashcardSideLabel.textContent = flashcardFlipped ? "Back" : "Front";
   flashcardCopy.textContent = flashcardFlipped ? card.back : card.front;
   flashcardTopicTitle.textContent = card.subtopic_name ? `${card.topic_name} · ${card.subtopic_name}` : card.topic_name;
-  flashcardPosition.textContent = `${flashcardIndex + 1} of ${cards.length}`;
+  flashcardPosition.textContent = `${flashcardIndex + 1} / ${cards.length}`;
+  if (flashcardProgressBar) flashcardProgressBar.style.width = `${((flashcardIndex + 1) / cards.length) * 100}%`;
   favoriteFlashcardButton.textContent = card.is_favorite ? "★" : "☆";
   favoriteFlashcardButton.classList.toggle("active", card.is_favorite);
 }
@@ -604,9 +619,44 @@ function flashcardsUrl(extra = "") {
   return `${FLASHCARDS_API_BASE_URL}/${encodeURIComponent(activeDocumentId)}?model_id=${encodeURIComponent(selectedModelId)}&language=${encodeURIComponent(flashcardLanguage)}${extra}`;
 }
 
+// Keeps the friendly failure text as the only thing shown by default; whatever the backend sent
+// (already sanitized -- never raw Ollama/model text, see backend/flashcard_service.py's
+// FlashcardGenerationError) is still reachable through the collapsed "Technical details" toggle.
+function showFlashcardsError(message) {
+  const safeMessage = message || "Couldn't generate flashcards with the selected model. Please try again or switch models.";
+  flashcardsErrorMessage.textContent = safeMessage;
+  flashcardsErrorTechnical.textContent = safeMessage;
+  flashcardsError.hidden = false;
+}
+
+function setFlashcardsBusy(isBusy) {
+  [generateFlashcardsButton, regenerateFlashcardsButton].filter(Boolean).forEach((button) => { button.disabled = isBusy; });
+}
+
+function resetRegenerateButton() {
+  if (regenerateFlashcardsButton) regenerateFlashcardsButton.textContent = "Regenerate";
+}
+
+// A regenerate error is shown as a small inline banner ON the still-visible deck, never as the
+// full-page error state -- the existing deck must never disappear just because a regenerate failed.
+function showRegenerateError(message) {
+  if (!flashcardsRegenerateError) return;
+  flashcardsRegenerateErrorMessage.textContent = message || "Couldn't regenerate flashcards with the selected model. Please try again or switch models.";
+  flashcardsRegenerateError.hidden = false;
+}
+
+function updateFlashcardsEmptyLanguageNote() {
+  const note = document.getElementById("flashcards-empty-language");
+  if (note) note.textContent = FLASHCARD_LANGUAGE_LABELS[flashcardLanguage] || flashcardLanguage;
+}
+
 function applyFlashcardSet(set, key) {
   flashcardSet = set; flashcards = set.cards || []; flashcardIndex = 0; flashcardFlipped = false; loadedFlashcardKey = key;
   flashcardsGenerate.hidden = true;
+  if (regenerateFlashcardsButton) regenerateFlashcardsButton.hidden = false;
+  if (flashcardsModelNote) flashcardsModelNote.textContent = set.model_id ? `Generated by ${modelLabel(set.model_id)}` : "";
+  if (flashcardsRegenerateError) flashcardsRegenerateError.hidden = true;
+  if (flashcardsRegenerateStatus) flashcardsRegenerateStatus.hidden = true;
   renderFlashcardTopicFilter(); renderCurrentFlashcard();
 }
 
@@ -614,11 +664,15 @@ function applyFlashcardSet(set, key) {
 async function showFlashcardsState() {
   if (!activeDocumentId || !flashcardsPane) return;
   const requestDocumentId = activeDocumentId, key = flashcardsKey();
+  updateFlashcardsEmptyLanguageNote();
   flashcardsLoading.hidden = flashcardsInFlightKey !== key;   // a generation of these very cards may still be running
   if (loadedFlashcardKey === key && flashcards.length) { flashcardsGenerate.hidden = true; renderCurrentFlashcard(); return; }
   flashcards = []; flashcardSet = null; loadedFlashcardKey = "";
-  if (flashcardsInFlightKey === key) { flashcardsError.hidden = true; flashcardsStage.hidden = true; flashcardsGenerate.hidden = true; return; }
-  flashcardsError.hidden = true; flashcardsStage.hidden = true; flashcardsGenerate.hidden = true;
+  if (regenerateFlashcardsButton) regenerateFlashcardsButton.hidden = true;
+  if (flashcardsRegenerateError) flashcardsRegenerateError.hidden = true;
+  if (flashcardsRegenerateStatus) flashcardsRegenerateStatus.hidden = true;
+  if (flashcardsInFlightKey === key) { flashcardsError.hidden = true; flashcardsStage.hidden = true; flashcardsFilterEmpty.hidden = true; flashcardsGenerate.hidden = true; return; }
+  flashcardsError.hidden = true; flashcardsStage.hidden = true; flashcardsFilterEmpty.hidden = true; flashcardsGenerate.hidden = true;
   let saved = null;
   try { saved = await fetchJson(flashcardsUrl("&cache_only=true")); } catch (error) { saved = null; }
   if (activeDocumentId !== requestDocumentId || key !== flashcardsKey()) return;
@@ -626,30 +680,74 @@ async function showFlashcardsState() {
   else flashcardsGenerate.hidden = false;
 }
 
-// Only the Generate button (or a saved-set reload) reaches this: it is the one place that generates.
-async function loadDocumentFlashcards() {
+// Only the Generate/Regenerate buttons (or a saved-set reload) reach this: it is the one place
+// that generates. `regenerate` bypasses the cache and always requests a fresh set.
+//
+// Regenerating over an already-visible deck never uses the full empty/skeleton state: the current
+// deck stays on screen (a small status replaces it only above the card), and a failure leaves that
+// same deck in place with an inline retryable banner instead of the full-page error state. Only an
+// initial generation (no deck yet) uses the full Preparing/Generating skeleton and full error state.
+async function loadDocumentFlashcards(regenerate = false) {
   if (!activeDocumentId || !flashcardsPane) return;
   const requestDocumentId = activeDocumentId, key = flashcardsKey();
-  if (loadedFlashcardKey === key && flashcards.length) { renderCurrentFlashcard(); return; }
-  // Model preparation happens BEFORE generation timing starts, not inside the "Generating…" state.
+  if (!regenerate && loadedFlashcardKey === key && flashcards.length) { renderCurrentFlashcard(); return; }
+  const hasVisibleDeck = regenerate && flashcards.length > 0;
+  setFlashcardsBusy(true);
+  if (hasVisibleDeck) {
+    regenerateFlashcardsButton.textContent = "Regenerating…";
+    flashcardsRegenerateError.hidden = true;
+    flashcardsRegenerateStatus.textContent = "Preparing model…";
+    flashcardsRegenerateStatus.hidden = false;
+  } else {
+    flashcardsLoadingLabel.textContent = "Preparing model…";
+    flashcardsLoading.hidden = false; flashcardsError.hidden = true; flashcardsStage.hidden = true;
+    flashcardsFilterEmpty.hidden = true; flashcardsGenerate.hidden = true;
+  }
+  // Model preparation happens BEFORE generation timing starts, not inside the "Generating…" state,
+  // but it is still shown here so Preparing/Generating are two visibly distinct sub-states.
   try { await ensureSelectedModelReadyWithStatus(); }
   catch (error) {
-    if (activeDocumentId === requestDocumentId) { flashcardsError.textContent = error.message || "Model could not be prepared."; flashcardsError.hidden = false; }
+    if (activeDocumentId === requestDocumentId) {
+      if (hasVisibleDeck) {
+        flashcardsRegenerateStatus.hidden = true;
+        showRegenerateError(error.message || "Model could not be prepared.");
+      } else {
+        flashcardsLoading.hidden = true;
+        showFlashcardsError(error.message || "Model could not be prepared.");
+        if (!flashcards.length) flashcardsGenerate.hidden = false;
+      }
+    }
+    resetRegenerateButton(); setFlashcardsBusy(false);
     return;
   }
-  if (activeDocumentId !== requestDocumentId || key !== flashcardsKey()) return;   // another document/model/language is on screen now
-  flashcardsLoading.hidden = false; flashcardsError.hidden = true; flashcardsStage.hidden = true; flashcardsGenerate.hidden = true;
+  if (activeDocumentId !== requestDocumentId || key !== flashcardsKey()) { resetRegenerateButton(); setFlashcardsBusy(false); return; }   // another document/model/language is on screen now
+  // ensureSelectedModelReadyWithStatus() just re-enabled every Generate/Regenerate button via
+  // renderModelReadyState() (model is "ready" now) -- re-assert busy for the generation call itself.
+  setFlashcardsBusy(true);
+  if (hasVisibleDeck) flashcardsRegenerateStatus.textContent = "Regenerating flashcards…";
+  else flashcardsLoadingLabel.textContent = "Generating flashcards…";
   flashcardsInFlightKey = key;
   let generated = false;
   try {
-    const set = await fetchJson(flashcardsUrl());
+    const url = regenerate ? `${FLASHCARDS_API_BASE_URL}/${encodeURIComponent(activeDocumentId)}/regenerate` : flashcardsUrl();
+    const set = await fetchJson(url, regenerate ? {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model_id: selectedModelId || null, language: flashcardLanguage }),
+    } : {});
     if (activeDocumentId !== requestDocumentId || key !== flashcardsKey()) return;   // another document/model/language is on screen now
-    applyFlashcardSet(set, key); generated = true;
+    applyFlashcardSet(set, key); generated = true;   // resets to card 1 and updates the model/progress labels
   } catch (error) {
-    if (activeDocumentId === requestDocumentId) { flashcardsError.textContent = error.message || "Could not load flashcards."; flashcardsError.hidden = false; }
+    if (activeDocumentId === requestDocumentId) {
+      if (hasVisibleDeck) showRegenerateError(error.message || "Could not regenerate flashcards.");
+      else showFlashcardsError(error.message || "Could not load flashcards.");
+    }
   } finally {
     if (flashcardsInFlightKey === key) flashcardsInFlightKey = "";
-    if (activeDocumentId === requestDocumentId) { flashcardsLoading.hidden = true; if (!generated && !flashcards.length) flashcardsGenerate.hidden = false; }
+    resetRegenerateButton(); setFlashcardsBusy(false);
+    if (activeDocumentId === requestDocumentId) {
+      if (hasVisibleDeck) { flashcardsRegenerateStatus.hidden = true; }
+      else { flashcardsLoading.hidden = true; if (!generated && !flashcards.length) flashcardsGenerate.hidden = false; }
+    }
   }
 }
 
@@ -3412,6 +3510,9 @@ flashcardLanguageSelect?.addEventListener("change", () => {
   showFlashcardsState();
 });
 generateFlashcardsButton?.addEventListener("click", () => loadDocumentFlashcards());
+regenerateFlashcardsButton?.addEventListener("click", () => loadDocumentFlashcards(true));
+retryFlashcardsButton?.addEventListener("click", () => loadDocumentFlashcards(flashcards.length > 0));
+retryRegenerateFlashcardsButton?.addEventListener("click", () => loadDocumentFlashcards(true));
 document.getElementById("shuffle-flashcards")?.addEventListener("click", () => { for (let index = flashcards.length - 1; index > 0; index -= 1) { const swap = Math.floor(Math.random() * (index + 1)); [flashcards[index], flashcards[swap]] = [flashcards[swap], flashcards[index]]; } flashcardIndex = 0; flashcardFlipped = false; renderCurrentFlashcard(); });
 document.getElementById("manage-flashcards")?.addEventListener("click", openFlashcardManager);
 favoriteFlashcardButton?.addEventListener("click", async () => { const card = visibleFlashcards()[flashcardIndex]; if (!card) return; try { await patchFlashcard(card, { is_favorite: !card.is_favorite }); renderCurrentFlashcard(); } catch (error) { showToast(error.message); } });

@@ -222,7 +222,8 @@ def _topic_maps(document: dict) -> tuple[list[dict], dict[str, dict]]:
 
 
 def generate_flashcards(owner_id: str, document_id: str, topic_ids: list[str] | None = None,
-                        model_id: str | None = None, language: str | None = None, cache_only: bool = False) -> dict:
+                        model_id: str | None = None, language: str | None = None, cache_only: bool = False,
+                        regenerate: bool = False) -> dict:
     document = get_indexed_document(owner_id, document_id)
     if not document:
         raise ValueError("Document not found.")
@@ -245,13 +246,14 @@ def generate_flashcards(owner_id: str, document_id: str, topic_ids: list[str] | 
         "runtime_model": runtime_model, "topic_ids": selected_ids,
         "flashcard_language": requested_language,
     }
-    cached = get_compatible_flashcards(identity)
-    if cached:
-        return {**cached, **identity, "cache_hit": True, "llm_calls": 0}
-    if cache_only:
-        # The screen only asks "do these cards exist?": answer without generating anything.
-        return {"status": "not_generated", "document_id": document_id, "model_id": public_model,
-                "language": requested_language, "cards": [], "cache_hit": False, "llm_calls": 0}
+    if not regenerate:
+        cached = get_compatible_flashcards(identity)
+        if cached:
+            return {**cached, **identity, "cache_hit": True, "llm_calls": 0}
+        if cache_only:
+            # The screen only asks "do these cards exist?": answer without generating anything.
+            return {"status": "not_generated", "document_id": document_id, "model_id": public_model,
+                    "language": requested_language, "cards": [], "cache_hit": False, "llm_calls": 0}
 
     groups = [(topic, get_topic_chunks(document_id, str(topic["topic_id"]), owner_id)) for topic in selected]
     if any(not chunks for _, chunks in groups):

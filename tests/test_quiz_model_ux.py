@@ -55,7 +55,8 @@ MODELS = 'generationModels = [{id:"qwen-2.5-7b",label:"Qwen 2.5 7B",ready:true},
 MODEL_READY_DOM_STUBS = """
     var document = { getElementById: () => null };
     var generateQuizButton = new El(), generateSummaryButton = new El(),
-        regenerateSummaryButton = new El(true), generateFlashcardsButton = new El();
+        regenerateSummaryButton = new El(true), generateFlashcardsButton = new El(),
+        regenerateFlashcardsButton = new El(true);
 """
 MODEL_READY_FUNCTIONS = ["ensureSelectedModelReady", "ensureSelectedModelReadyWithStatus", "renderModelReadyState"]
 
@@ -263,11 +264,16 @@ class SummaryAndFlashcardsWaitForGenerateTests(unittest.TestCase):
         self.assertEqual(result["afterSwitch"], {"prompt": True, "shown": 0})
         self.assertEqual(result["back"], {"prompt": False, "shown": 1})
 
-    FLASHCARD_FUNCTIONS = ["flashcardsKey", "flashcardsUrl", "applyFlashcardSet", "showFlashcardsState", "loadDocumentFlashcards"] + MODEL_READY_FUNCTIONS
+    FLASHCARD_FUNCTIONS = ["flashcardsKey", "flashcardsUrl", "applyFlashcardSet", "showFlashcardsState", "loadDocumentFlashcards",
+                           "setFlashcardsBusy", "showFlashcardsError", "updateFlashcardsEmptyLanguageNote", "modelLabel",
+                           "resetRegenerateButton", "showRegenerateError"] + MODEL_READY_FUNCTIONS
     FLASHCARD_SETUP = MODELS + MODEL_READY_DOM_STUBS + """
         var activeDocumentId = "doc.pdf", selectedModelId = "qwen-2.5-7b", flashcardLanguage = "auto", loadedFlashcardKey = "";
         var flashcardsInFlightKey = "", FLASHCARDS_API_BASE_URL = "/api/flashcards", flashcardsPane = {};
         var flashcardsLoading = new El(true), flashcardsError = new El(true), flashcardsStage = new El(true), flashcardsGenerate = new El(true);
+        var flashcardsLoadingLabel = new El(), flashcardsErrorMessage = new El(), flashcardsErrorTechnical = new El(), flashcardsFilterEmpty = new El(true);
+        var flashcardsModelNote = new El();
+        var flashcardsRegenerateStatus = new El(true), flashcardsRegenerateError = new El(true), flashcardsRegenerateErrorMessage = new El();
         var flashcards = [], flashcardSet = null, flashcardIndex = 0, flashcardFlipped = false, shown = [], saved = {};
         function renderFlashcardTopicFilter() {}
         function renderCurrentFlashcard() { shown.push(flashcards.length); }
@@ -320,16 +326,18 @@ class ModelPreparationGatingTests(unittest.TestCase):
             const duringPrepare = {
                 quiz: generateQuizButton.disabled, summary: generateSummaryButton.disabled,
                 regenerate: regenerateSummaryButton.disabled, flashcards: generateFlashcardsButton.disabled,
+                regenerateFlashcards: regenerateFlashcardsButton.disabled,
             };
             const modelId = await promise;
             const afterReady = {
                 quiz: generateQuizButton.disabled, summary: generateSummaryButton.disabled,
                 regenerate: regenerateSummaryButton.disabled, flashcards: generateFlashcardsButton.disabled,
+                regenerateFlashcards: regenerateFlashcardsButton.disabled,
             };
             return { duringPrepare, afterReady, modelId, ready: generationModels[0].ready, calls };
         """)
-        self.assertEqual(result["duringPrepare"], {"quiz": True, "summary": True, "regenerate": True, "flashcards": True})
-        self.assertEqual(result["afterReady"], {"quiz": False, "summary": False, "regenerate": False, "flashcards": False})
+        self.assertEqual(result["duringPrepare"], {"quiz": True, "summary": True, "regenerate": True, "flashcards": True, "regenerateFlashcards": True})
+        self.assertEqual(result["afterReady"], {"quiz": False, "summary": False, "regenerate": False, "flashcards": False, "regenerateFlashcards": False})
         self.assertEqual(result["modelId"], "qwen-2.5-7b")
         self.assertTrue(result["ready"])   # generationModels' cached ready flag is updated too
         self.assertEqual(result["calls"], ["/api/models/qwen-2.5-7b/prepare"])

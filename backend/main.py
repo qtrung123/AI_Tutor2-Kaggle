@@ -149,6 +149,11 @@ class SummaryGenerateRequest(BaseModel):
     model_id: Optional[str] = None
 
 
+class FlashcardGenerateRequest(BaseModel):
+    model_id: Optional[str] = None
+    language: Optional[str] = None
+
+
 class FlashcardCreateRequest(BaseModel):
     set_id: str
     topic_id: str
@@ -723,6 +728,24 @@ def flashcards_detail(document_id: str, topic_ids: list[str] | None = Query(defa
         raise HTTPException(status_code=404 if str(error) == "Document not found." else 400, detail=str(error)) from error
     except Exception as error:
         print(f"[flashcards] unexpected failure for document_id={document_id}: {error}")
+        raise HTTPException(status_code=500, detail=FlashcardGenerationError.SAFE_MESSAGE) from error
+
+
+@app.post("/api/flashcards/{document_id}/regenerate")
+def flashcards_regenerate(document_id: str, request: FlashcardGenerateRequest,
+                          current_user: dict = Depends(require_current_user)) -> dict:
+    """Explicitly generate and persist a fresh flashcard set (bypasses the cache lookup)."""
+    try:
+        prepare_generation_model(request.model_id)
+        return generate_flashcards(current_user["id"], document_id, model_id=request.model_id,
+                                   language=request.language, regenerate=True)
+    except FlashcardGenerationError as error:
+        print(f"[flashcards] regeneration failed for document_id={document_id}: {error.technical_message}")
+        raise HTTPException(status_code=502, detail=error.safe_message) from error
+    except ValueError as error:
+        raise HTTPException(status_code=404 if str(error) == "Document not found." else 400, detail=str(error)) from error
+    except Exception as error:
+        print(f"[flashcards] unexpected regeneration failure for document_id={document_id}: {error}")
         raise HTTPException(status_code=500, detail=FlashcardGenerationError.SAFE_MESSAGE) from error
 
 
