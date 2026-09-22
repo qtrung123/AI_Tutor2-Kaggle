@@ -333,12 +333,19 @@ def initialize_quiz_store() -> None:
             )
         connection.executescript(
             """
+            -- Multiple quizzes (different models, counts, or plain re-runs) may legitimately share
+            -- one (owner, document, topic, difficulty) slot as separate artifacts -- this index is
+            -- for lookup performance only, never a uniqueness guarantee (see quiz_id as the real
+            -- identity of a quiz artifact, enforced by the quizzes.quiz_id primary key instead).
             DROP INDEX IF EXISTS idx_active_quiz_variant;
-            CREATE UNIQUE INDEX idx_active_quiz_variant
+            CREATE INDEX idx_active_quiz_variant
                 ON quizzes(owner_id, document_id, topic_id, difficulty) WHERE is_active = 1;
+            -- "Latest attempt" is tracked per quiz_id, not per slot, so an in-progress attempt on
+            -- one quiz is never demoted just because a sibling quiz (same slot) is generated or
+            -- answered.
             DROP INDEX IF EXISTS idx_latest_attempt_variant;
             CREATE UNIQUE INDEX idx_latest_attempt_variant
-                ON quiz_attempts(student_id, document_id, topic_id, difficulty) WHERE is_latest = 1;
+                ON quiz_attempts(student_id, document_id, topic_id, difficulty, quiz_id) WHERE is_latest = 1;
             DROP INDEX IF EXISTS idx_attempt_variant;
             CREATE INDEX idx_attempt_variant
                 ON quiz_attempts(student_id, document_id, topic_id, difficulty, is_latest, updated_at);
@@ -378,10 +385,10 @@ def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: s
         "question_count": len(questions),
         "created_at": quiz.get("created_at") or utc_now_iso(),
     }
-    connection.execute(
-        "UPDATE quizzes SET is_active = 0 WHERE owner_id = ? AND document_id = ? AND topic_id = ? AND difficulty = ?",
-        (owner_id, document_id, stored["topic_id"], difficulty),
-    )
+    # Every saved quiz is its own persistent artifact identified by quiz_id -- generating a new one
+    # (a different model, count, or a plain re-run) must never deactivate/hide an older quiz that
+    # happens to share the same (owner, document, topic, difficulty) slot. Only an explicit delete
+    # (delete_quiz) or a topic-schema invalidation removes/deactivates a quiz.
     connection.execute("DELETE FROM quizzes WHERE quiz_id = ?", (quiz_id,))
     connection.execute(
         """
@@ -522,12 +529,17 @@ def _row_to_quiz(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
 
 
 def get_quiz(document_id: str, difficulty: str, topic_id: str = LEGACY_TOPIC_ID, owner_id: str = LEGACY_USER_ID) -> dict | None:
+    """The most recently created quiz for this slot -- used only to decide whether a NEW generation
+    request can reuse a compatible quiz (same model/count/planner, see _generate_quiz's cache-hit
+    check) or must create another one. Multiple quizzes can share a slot; this never hides the
+    others from listings (see list_document_quizzes) or deletes them."""
     initialize_quiz_store()
     with _connect() as connection:
         row = connection.execute(
             """
             SELECT * FROM quizzes
             WHERE owner_id = ? AND document_id = ? AND topic_id = ? AND difficulty = ? AND is_active = 1
+            ORDER BY created_at DESC LIMIT 1
             """,
             (owner_id, document_id, topic_id, difficulty),
         ).fetchone()
@@ -612,16 +624,17 @@ def get_quiz_titles(quiz_ids: list[str], owner_id: str = LEGACY_USER_ID) -> dict
 
 
 def list_document_quizzes(document_id: str, owner_id: str = LEGACY_USER_ID) -> dict[str, dict]:
+    """Every saved quiz for this document (one entry per quiz_id, never deduped by slot) -- the
+    Quiz Library must show every generated quiz across every model/count/run, newest first.
+    Dict order follows SQL order (Python dicts preserve insertion order), so callers iterating
+    .values() see the same newest-first order."""
     initialize_quiz_store()
     with _connect() as connection:
         rows = connection.execute(
-            "SELECT * FROM quizzes WHERE owner_id = ? AND document_id = ? AND is_active = 1",
+            "SELECT * FROM quizzes WHERE owner_id = ? AND document_id = ? AND is_active = 1 ORDER BY created_at DESC",
             (owner_id, document_id),
         ).fetchall()
-        return {
-            f"{row['topic_id']}::{row['difficulty']}": _row_to_quiz(connection, row)
-            for row in rows
-        }
+        return {row["quiz_id"]: _row_to_quiz(connection, row) for row in rows}
 
 
 def _row_to_attempt(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
@@ -692,18 +705,31 @@ def _row_to_attempt(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
 
 def get_latest_attempt(
     document_id: str, difficulty: str, topic_id: str = LEGACY_TOPIC_ID,
-    student_id: str = "local_student",
+    student_id: str = "local_student", quiz_id: str | None = None,
 ) -> dict | None:
+    """The learner's latest attempt (completed or still in progress).
+
+    When `quiz_id` is given, it is scoped to exactly that quiz -- required once multiple quizzes
+    can share one (document, topic, difficulty) slot, so an in-progress attempt on one quiz is
+    never confused with (or overwritten by) a sibling quiz's attempt. `quiz_id=None` keeps the
+    older slot-only lookup for callers that have no quiz_id to give.
+    """
     initialize_quiz_store()
     with _connect() as connection:
-        row = connection.execute(
-            """
-            SELECT * FROM quiz_attempts
-            WHERE student_id = ? AND document_id = ? AND topic_id = ? AND difficulty = ? AND is_latest = 1
-            ORDER BY updated_at DESC LIMIT 1
-            """,
-            (student_id, document_id, topic_id, difficulty),
-        ).fetchone()
+        if quiz_id:
+            row = connection.execute(
+                "SELECT * FROM quiz_attempts WHERE student_id = ? AND quiz_id = ? ORDER BY updated_at DESC LIMIT 1",
+                (student_id, quiz_id),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT * FROM quiz_attempts
+                WHERE student_id = ? AND document_id = ? AND topic_id = ? AND difficulty = ? AND is_latest = 1
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (student_id, document_id, topic_id, difficulty),
+            ).fetchone()
         return _row_to_attempt(connection, row) if row else None
 
 
@@ -824,21 +850,45 @@ def save_quiz_progress(
     document_id: str, difficulty: str, progress: dict, topic_id: str = LEGACY_TOPIC_ID,
     student_id: str = "local_student",
 ) -> dict:
+    """Persist one attempt (in-progress or a completed submission).
+
+    Scoped by `progress["quiz_id"]` when present (every live caller sets it -- see
+    update_quiz_progress/submit_quiz_attempt): the previous-attempt lookup and the is_latest
+    handoff only ever touch attempts for that exact quiz, so answering/submitting one quiz can
+    never demote or overwrite a sibling quiz's in-progress attempt at the same slot. Falls back to
+    the older slot-wide behavior only when no quiz_id is given.
+    """
     initialize_quiz_store()
+    quiz_id = progress.get("quiz_id") or None
     with _connect() as connection:
-        previous_row = connection.execute(
-            """
-            SELECT * FROM quiz_attempts
-            WHERE student_id = ? AND document_id = ? AND topic_id = ? AND difficulty = ? AND is_latest = 1
-            ORDER BY updated_at DESC LIMIT 1
-            """,
-            (student_id, document_id, topic_id, difficulty),
-        ).fetchone()
+        if quiz_id:
+            # is_latest = 1 still gates reuse (not just quiz_id) so an explicit reset_quiz_progress
+            # keeps meaning "start a new attempt row next time", exactly as it did before this quiz
+            # could share its slot with siblings.
+            previous_row = connection.execute(
+                "SELECT * FROM quiz_attempts WHERE student_id = ? AND quiz_id = ? AND is_latest = 1 ORDER BY updated_at DESC LIMIT 1",
+                (student_id, quiz_id),
+            ).fetchone()
+        else:
+            previous_row = connection.execute(
+                """
+                SELECT * FROM quiz_attempts
+                WHERE student_id = ? AND document_id = ? AND topic_id = ? AND difficulty = ? AND is_latest = 1
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (student_id, document_id, topic_id, difficulty),
+            ).fetchone()
         previous = _row_to_attempt(connection, previous_row) if previous_row else None
-        connection.execute(
-            "UPDATE quiz_attempts SET is_latest = 0 WHERE student_id = ? AND document_id = ? AND topic_id = ? AND difficulty = ?",
-            (student_id, document_id, topic_id, difficulty),
-        )
+        if quiz_id:
+            connection.execute(
+                "UPDATE quiz_attempts SET is_latest = 0 WHERE student_id = ? AND quiz_id = ?",
+                (student_id, quiz_id),
+            )
+        else:
+            connection.execute(
+                "UPDATE quiz_attempts SET is_latest = 0 WHERE student_id = ? AND document_id = ? AND topic_id = ? AND difficulty = ?",
+                (student_id, document_id, topic_id, difficulty),
+            )
         attempt_id = _save_attempt_row(
             connection, document_id, difficulty, topic_id, student_id, progress, previous, is_latest=True
         )

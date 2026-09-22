@@ -2372,8 +2372,8 @@ def _generate_quiz_from_units(
         "created_at": utc_now_iso(),
         "questions": selected,
     }
-    if regenerate:
-        delete_document_attempts(document["id"], difficulty, scope_topic_id, owner_id)
+    # Regenerating creates a brand-new quiz artifact (its own quiz_id) alongside the previous one --
+    # it never replaces it, so the previous quiz's own attempts/progress are left untouched here.
     persistence_started = time.perf_counter()
     saved = save_quiz(document["id"], difficulty, quiz, owner_id)
     timings["persistence_ms"] = round((time.perf_counter() - persistence_started) * 1000)
@@ -4516,17 +4516,29 @@ def _saved_quiz_uses_model(quiz: dict, model_id: str) -> bool:
     return (saved.get("name"), saved.get("quantization")) == (requested["name"], requested["quantization"])
 
 
-def _quiz_variant_status(quiz: dict) -> dict:
-    """What the Quiz screen needs to know about one saved quiz (no questions)."""
+def _quiz_variant_status(quiz: dict, owner_id: str = LEGACY_USER_ID) -> dict:
+    """What the Quiz Library needs to know about one saved quiz artifact (no questions).
+
+    Every field here is scoped to this exact quiz_id -- in particular the progress/status fields
+    are read from the latest attempt for THIS quiz specifically, so a sibling quiz sharing the same
+    (document, topic, difficulty) slot never bleeds its progress into this one.
+    """
     plan = quiz.get("assessment_plan") or {}
     model = quiz.get("generation_model") or plan.get("generation_model") or {}
     requested = int(plan.get("requested_count") or plan.get("target_questions") or quiz.get("question_count") or 0)
     actual = int(quiz.get("question_count") or 0)
+    attempt = get_latest_attempt(
+        quiz["document_id"], quiz["difficulty"], quiz["topic_id"], owner_id, quiz_id=quiz.get("quiz_id")
+    )
+    completed = bool(attempt and attempt.get("completed"))
+    in_progress = bool(attempt and not completed and int(attempt.get("answered") or 0) > 0)
+    progress_status = "completed" if completed else "in_progress" if in_progress else "not_started"
     return {
         "quiz_id": quiz.get("quiz_id"),
         "title": quiz.get("title") or "",
         "topic_id": quiz["topic_id"],
         "topic_name": quiz.get("topic_name") or "",
+        "assessment_scope": quiz.get("assessment_scope") or ("document" if quiz["topic_id"] == "document" else "topic"),
         "difficulty": quiz["difficulty"],
         "question_count": actual,
         "requested_count": requested,
@@ -4534,6 +4546,12 @@ def _quiz_variant_status(quiz: dict) -> dict:
         "model_id": model.get("model_id"),
         "model_name": model.get("name"),
         "created_at": quiz.get("created_at"),
+        "updated_at": (attempt.get("updated_at") if attempt else None) or quiz.get("created_at"),
+        "progress_status": progress_status,
+        "answered": int(attempt.get("answered") or 0) if attempt else 0,
+        "total": int(attempt.get("total") or 0) if attempt and attempt.get("total") else actual,
+        "score": int(attempt.get("score") or 0) if completed else None,
+        "percentage": float(attempt.get("percentage") or 0) if completed else None,
     }
 
 
@@ -4698,22 +4716,40 @@ def _generate_quiz(
 
 
 def load_quiz_with_attempt(
-    document_id: str, difficulty: str, topic_id: str, student_id: str = LEGACY_USER_ID
+    document_id: str, difficulty: str, topic_id: str, student_id: str = LEGACY_USER_ID,
+    quiz_id: str | None = None,
 ) -> dict:
-    """Return a saved quiz plus the latest attempt for the Practice page."""
+    """Return a saved quiz plus its latest attempt.
+
+    With `quiz_id`, resolves exactly that quiz artifact via get_quiz_by_id -- never a different one
+    from the same slot, and never falls back to "the newest quiz in this slot" if that exact id is
+    missing/not owned (the Quiz Library's Start/Resume must open precisely the quiz the user
+    clicked). Without a quiz_id, keeps the older slot lookup (get_quiz's "newest compatible-ish
+    quiz here") for callers that have no specific artifact to ask for.
+    """
     known_documents = _document_lookup(student_id)
     if document_id not in known_documents:
         raise ValueError("document_id was not found in indexed documents.")
     if difficulty not in QUIZ_DIFFICULTIES:
         raise ValueError("difficulty must be easy, medium, or difficult.")
 
-    quiz = get_quiz(document_id, difficulty, topic_id, student_id)
+    if quiz_id:
+        quiz = get_quiz_by_id(quiz_id, student_id)
+        if quiz and quiz.get("document_id") != document_id:
+            quiz = None
+    else:
+        quiz = get_quiz(document_id, difficulty, topic_id, student_id)
+    # Scoped to this exact quiz_id so "latest_attempt" can never belong to a different sibling
+    # quiz sharing the same (document, topic, difficulty) slot.
+    latest_attempt = get_latest_attempt(
+        document_id, difficulty, topic_id, student_id, quiz_id=quiz.get("quiz_id") if quiz else None
+    )
     return {
         "document_id": document_id,
         "difficulty": difficulty,
         "topic_id": topic_id,
         "quiz": quiz,
-        "latest_attempt": get_latest_attempt(document_id, difficulty, topic_id, student_id),
+        "latest_attempt": latest_attempt,
         "attempt_summary": get_quiz_attempt_summary(quiz["quiz_id"], student_id) if quiz else None,
     }
 
@@ -4773,7 +4809,7 @@ def list_quiz_statuses(owner_id: str = LEGACY_USER_ID) -> list[dict]:
     for document in list_indexed_documents(owner_id):
         document_id = document["id"]
         document_quizzes = list_document_quizzes(document_id, owner_id)
-        variants = [_quiz_variant_status(quiz) for quiz in document_quizzes.values()]
+        variants = [_quiz_variant_status(quiz, owner_id) for quiz in document_quizzes.values()]
 
         statuses.append(
             {

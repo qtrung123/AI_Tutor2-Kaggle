@@ -221,7 +221,7 @@ class BrowserSmokeTests(unittest.TestCase):
         self.assertIn("Current settings differ", saved["titleAfterSwitch"])
 
     def test_a_generating_quiz_stays_visible_and_a_partial_quiz_is_listed_when_done(self):
-        self.assertIn("not attempted yet", self.out["landingSaved"])
+        self.assertIn("Not Started", self.out["landingSaved"])
         during = self.out["whileGenerating"]
         self.assertFalse(during["noCompletedMsg"])
         self.assertIn("Generating 12 questions", during["history"])

@@ -2172,6 +2172,9 @@ function setAssessmentLoading(isLoading) {
 }
 
 async function requestGeneratedQuiz(request) {
+  // An explicit Generate/Create Quiz click always creates a new quiz artifact -- it must never be
+  // silently answered with an older compatible quiz just because the settings match one.
+  request = { ...request, regenerate: true };
   const response = await fetch(QUIZ_GENERATE_API_URL, {
     method: "POST",
     headers: {
@@ -2196,8 +2199,12 @@ async function requestGeneratedQuiz(request) {
   return response.json();
 }
 
-async function requestQuizDetail(documentId) {
+// With quizId, the backend loads exactly that quiz artifact -- never a different (e.g. newer)
+// quiz sharing the same document/topic/difficulty slot. Required now that several quizzes can
+// share one slot (see backend/quiz_service.load_quiz_with_attempt).
+async function requestQuizDetail(documentId, quizId) {
   const query = new URLSearchParams({ difficulty: selectedDifficulty(), topic_id: selectedTopicId() });
+  if (quizId) query.set("quiz_id", quizId);
   const response = await fetch(`${QUIZ_API_BASE_URL}/${encodeURIComponent(documentId)}?${query}`);
   if (!response.ok) {
     let detail = `Quiz detail API returned ${response.status}`;
@@ -2447,10 +2454,12 @@ function renderQuizHistory() {
     meta.textContent = `${scopeName} · ${attempt.difficulty}`;
     const date = document.createElement("small");
     date.textContent = attempt.completed_at ? `Latest activity ${new Date(attempt.completed_at).toLocaleString()}` : "Activity time unavailable";
-    const scope = document.createElement("span");
-    scope.className = "quiz-history-scope";
+    const status = document.createElement("span");
+    status.className = "quiz-history-scope";
+    status.textContent = "Completed";
+    const scope = document.createElement("small");
     scope.textContent = `${attempt.total} questions · ${group.attempts.length} attempt${group.attempts.length === 1 ? "" : "s"}`;
-    info.append(title, meta, scope, date);
+    info.append(title, meta, status, scope, date);
 
     const score = document.createElement("div");
     score.className = "quiz-history-score";
@@ -2475,6 +2484,7 @@ function renderQuizHistory() {
     // Older quizzes made per topic can still be retaken/reviewed, but new quizzes are whole-document only.
     if ((attempt.topic_id || "document") === "document") actions.append(retake, review, regenerate);
     else actions.append(retake, review);
+    if (attempt.quiz_id) actions.appendChild(createQuizCardMenu(attempt.quiz_id, (attempt.title || "").trim() || "Untitled Quiz"));
     const history = document.createElement("details");
     history.className = "quiz-attempt-history";
     const historySummary = document.createElement("summary");
@@ -2520,25 +2530,73 @@ function createPendingQuizCard(pending) {
   ).card;
 }
 
+// "..." menu: Delete only, for now -- Rename has no backend support yet (see backend/main.py,
+// there is no quiz-title PATCH endpoint), so it is intentionally left out rather than half-built.
+function createQuizCardMenu(quizId, titleText) {
+  const menu = document.createElement("details");
+  menu.className = "quiz-card-menu";
+  const summary = document.createElement("summary");
+  summary.setAttribute("aria-label", `More actions for ${titleText}`);
+  summary.textContent = "⋯";
+  const list = document.createElement("div");
+  list.className = "quiz-card-menu-list";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "text-button danger-button";
+  remove.textContent = "Delete";
+  remove.addEventListener("click", async (event) => {
+    event.preventDefault();
+    if (!window.confirm(`Delete "${titleText}"? Its questions, attempts, and answers cannot be recovered.`)) return;
+    try {
+      await fetchJson(`${QUIZZES_API_URL}/${encodeURIComponent(quizId)}`, { method: "DELETE" });
+      if (currentQuiz?.quiz_id === quizId) { currentQuiz = null; currentAttempt = null; renderAssessmentQuiz(); }
+      await loadQuizStatuses();
+      await loadQuizHistory();
+      await loadDashboard();
+      showToast("Quiz deleted");
+    } catch (error) { showToast(error.message || "Could not delete quiz"); }
+  });
+  list.appendChild(remove);
+  menu.append(summary, list);
+  return menu;
+}
+
+function formatQuizCardTimestamp(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
+}
+
+// The Quiz Library card for a quiz with no completed attempt yet -- Not Started or In Progress.
+// (A quiz with a completed attempt is represented by its history group instead; see
+// quizListState's attemptedQuizIds exclusion.)
 function createSavedQuizCard(variant) {
   const partial = variant.status === "partial";
   const counts = partial ? `${variant.question_count}/${variant.requested_count} questions (partial)` : `${variant.question_count} questions`;
   const model = variant.model_name ? modelLabel(variant.model_id, variant.model_name) : "";
+  const scopeName = (variant.assessment_scope || variant.topic_id) === "document" || variant.topic_id === "document"
+    ? "Entire Document" : (variant.topic_name || variant.topic_id || "Topic");
+  const inProgress = variant.progress_status === "in_progress";
+  const statusLabel = inProgress ? "In Progress" : "Not Started";
+  const progressText = inProgress ? `${variant.answered || 0} / ${variant.total || variant.question_count} answered` : "";
+  const updated = formatQuizCardTimestamp(variant.updated_at || variant.created_at);
+  const detailParts = [counts, progressText, model ? `Generated by ${model}` : "Saved quiz", updated].filter(Boolean);
   const { card } = createQuizStatusCard(
-    "quiz-saved-card", (variant.title || "").trim() || "Untitled Quiz", `Entire Document · ${variant.difficulty}`,
-    `${counts} · not attempted yet`, model ? `Generated by ${model}` : "Saved quiz",
+    "quiz-saved-card", (variant.title || "").trim() || "Untitled Quiz", `${scopeName} · ${variant.difficulty}`,
+    statusLabel, detailParts.join(" · "),
   );
   const actions = document.createElement("div");
   actions.className = "quiz-history-actions";
   const start = document.createElement("button");
   start.className = "text-button";
   start.type = "button";
-  start.textContent = "Start Quiz";
+  start.textContent = inProgress ? "Resume" : "Start";
   start.addEventListener("click", async () => {
-    try { await selectHistoryQuizVariant({ document_id: activeDocumentId, topic_id: variant.topic_id, difficulty: variant.difficulty }); }
+    try { await selectHistoryQuizVariant({ document_id: activeDocumentId, topic_id: variant.topic_id, difficulty: variant.difficulty, quiz_id: variant.quiz_id }); }
     catch (error) { showToast(error.message || "Could not open this quiz"); }
   });
   actions.appendChild(start);
+  if (variant.quiz_id) actions.appendChild(createQuizCardMenu(variant.quiz_id, (variant.title || "").trim() || "Untitled Quiz"));
   card.appendChild(actions);
   return card;
 }
@@ -2632,9 +2690,16 @@ async function showQuizHistoryDetail(attemptId) {
   }
 }
 
-async function loadSelectedQuiz() {
+// With quizId, opens exactly that quiz artifact (Quiz Library Start/Resume) -- staleness is then
+// tracked by request sequence (quizId never changes with the settings selectors, so the old
+// settings-key comparison would never catch a superseded request). Without quizId, keeps the
+// older settings-key staleness check for callers that have no specific artifact to open.
+let quizDetailRequestSeq = 0;
+
+async function loadSelectedQuiz(quizId) {
   const documentId = quizDocumentSelect?.value;
   const requestedQuizKey = currentQuizKey();
+  const requestSeq = ++quizDetailRequestSeq;
   updateDifficultyOptions();
   currentQuiz = null;
   currentAttempt = null;
@@ -2648,8 +2713,9 @@ async function loadSelectedQuiz() {
   }
 
   try {
-    const detail = await requestQuizDetail(documentId);
-    if (requestedQuizKey !== currentQuizKey()) {
+    const detail = await requestQuizDetail(documentId, quizId);
+    const stale = quizId ? requestSeq !== quizDetailRequestSeq : requestedQuizKey !== currentQuizKey();
+    if (stale) {
       return;
     }
     currentQuiz = detail.quiz || null;
@@ -2684,14 +2750,13 @@ async function handleQuizDifficultyChange() {
   await loadSelectedQuiz();
 }
 
+// An explicit Generate/Create Quiz submission always produces a brand-new quiz artifact (its own
+// quiz_id) -- it must never silently hand back whatever happens to already be loaded in
+// currentQuiz (that was the old behavior; see requestGeneratedQuiz's regenerate:true and
+// backend/quiz_service.py's explicit_new_quiz handling).
 async function generateAssessmentQuiz() {
   if (!quizDocumentSelect.value) {
     showToast("Choose an indexed document first");
-    return;
-  }
-  if (currentQuiz?.questions?.length) {
-    renderAssessmentQuiz();
-    showToast(quizSettingsMismatch(currentQuiz) || (currentAttempt?.completed ? "Reviewing saved quiz" : "Quiz ready"));
     return;
   }
 
@@ -2811,6 +2876,9 @@ async function deleteAssessmentQuiz() {
   }
 }
 
+// Opens the exact quiz artifact the user picked (Start/Resume/Regenerate-from-history) -- when
+// attempt.quiz_id is given, that quiz_id is what gets loaded, never "whatever quiz is newest in
+// this document/topic/difficulty slot" (several quizzes can share a slot).
 async function selectHistoryQuizVariant(attempt) {
   if ((attempt.topic_id || "document") !== "document") {
     throw new Error("Quizzes are no longer created per topic. Create a quiz for the whole document instead.");
@@ -2818,8 +2886,10 @@ async function selectHistoryQuizVariant(attempt) {
   quizDocumentSelect.value = attempt.document_id;
   quizDifficultySelect.value = attempt.difficulty || "easy";
   quizScopeSelect.value = "document";
-  await loadSelectedQuiz();
-  if (!currentQuiz?.questions?.length) throw new Error("The saved quiz is no longer available. Regenerate it to create new questions.");
+  await loadSelectedQuiz(attempt.quiz_id);
+  if (!currentQuiz?.questions?.length || (attempt.quiz_id && currentQuiz.quiz_id !== attempt.quiz_id)) {
+    throw new Error("The saved quiz is no longer available. Regenerate it to create new questions.");
+  }
 }
 
 async function startHistoryQuizRetake(attempt) {
@@ -3610,18 +3680,20 @@ function updateQuizLandingLayout() {
   if (!header) {
     header = document.createElement("div");
     header.className = "quiz-landing-header";
-    header.innerHTML = '<div><h2>Quiz</h2><p>Test your understanding of this material.</p></div>';
+    header.innerHTML = '<div><h2>Quiz</h2><p>Test your knowledge and track your progress</p></div>';
     const create = document.createElement("button");
     create.className = "primary-button";
     create.type = "button";
-    create.textContent = "+ Create Quiz";
+    create.textContent = "+ New Quiz";
+    // Temporary: reuses the existing creation dialog/flow. A dedicated New Quiz modal is a
+    // separate, later piece of work.
     create.addEventListener("click", openQuizCreateDialog);
     header.appendChild(create);
     pane.insertBefore(header, pane.firstChild);
   }
   header.hidden = Boolean(currentQuiz?.questions?.length);
   const historyTitle = pane.querySelector(".quiz-history-panel h2");
-  if (historyTitle) historyTitle.textContent = "Your Quizzes";
+  if (historyTitle) historyTitle.textContent = "Quiz Library";
   const createDialogOpen = Boolean(quizCreateDialog?.classList.contains("open"));
   if (assessmentControl) {
     assessmentControl.hidden = !currentQuiz?.questions?.length && !createDialogOpen;

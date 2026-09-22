@@ -94,7 +94,7 @@ class QuizStudySessionScopingTests(unittest.TestCase):
         self.assertIn("documentId = quizDocumentSelect?.value || activeDocumentId", SCRIPT)
         self.assertIn("attempt.document_id === requestDocumentId", history_body)
         self.assertIn("!== requestDocumentId) return", history_body)
-        self.assertLess(detail_body.index("currentQuiz = null"), detail_body.index("requestQuizDetail(documentId)"))
+        self.assertLess(detail_body.index("currentQuiz = null"), detail_body.index("requestQuizDetail(documentId, quizId)"))
 
     def test_the_old_quiz_progress_and_mastery_drawer_is_gone(self):
         """The old per-quiz "View Progress" drawer (Progress & Mastery) was removed; mastery lives in the

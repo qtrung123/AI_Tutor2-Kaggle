@@ -221,6 +221,11 @@ class QuizGenerateRequest(BaseModel):
     question_count: Literal[12, 15, 18, 20] = 12
     model_id: Optional[str] = None
     quiz_name: str = Field(min_length=1, max_length=200)
+    # The live frontend always sends true: an explicit Generate/Create Quiz click must always
+    # create a new quiz artifact, never silently reuse an older compatible one (see
+    # backend/quiz_service._generate_quiz's cache-hit branch). Defaults False only so any other,
+    # non-generation caller of this same route keeps the old reuse-if-compatible behavior.
+    regenerate: bool = False
 
 
 class QuizRegenerateRequest(BaseModel):
@@ -809,12 +814,19 @@ def quiz_history_retake(attempt_id: str, current_user: dict = Depends(require_cu
 
 @app.get("/api/quiz/{document_id}")
 def quiz_detail(
-    document_id: str, topic_id: str, difficulty: str = "easy",
+    document_id: str, topic_id: str, difficulty: str = "easy", quiz_id: Optional[str] = None,
     current_user: dict = Depends(require_current_user),
 ) -> dict:
-    """Load the saved quiz and latest attempt for one document."""
+    """Load a saved quiz and its latest attempt for one document.
+
+    With `quiz_id`, loads exactly that quiz artifact (never a different one, even if a newer,
+    "more compatible" quiz exists at the same document/topic/difficulty) -- required now that
+    several quizzes can share that slot. Without it, falls back to the slot's most recently
+    generated quiz (used only by flows that have no specific quiz_id to give, e.g. the create form's
+    "saved" hint).
+    """
     try:
-        return load_quiz_with_attempt(document_id, difficulty, topic_id, current_user["id"])
+        return load_quiz_with_attempt(document_id, difficulty, topic_id, current_user["id"], quiz_id=quiz_id)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except Exception as error:
@@ -859,6 +871,7 @@ def quiz_generate(request: QuizGenerateRequest, current_user: dict = Depends(req
             owner_id=current_user["id"],
             model_id=resolve_generation_model(quiz_model_id),
             quiz_name=quiz_name,
+            regenerate=request.regenerate,
         )
         return QuizGenerateResponse(**result)
     except QuizGenerationError as error:

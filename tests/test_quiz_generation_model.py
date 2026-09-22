@@ -2,7 +2,8 @@
 
 The name comes from the runtime reference the backend sent to Ollama (never from the client), is
 stored with the quiz (inside its persisted assessment plan), is returned by the API and survives a
-regeneration with another model: the superseded quiz keeps the model it was made with.
+regeneration with another model: both the earlier and the newly generated quiz keep the model each
+was made with (see test_quiz_persistence.py for the full multi-quiz persistence suite).
 """
 
 import tempfile
@@ -113,27 +114,32 @@ class ModelSurvivesRegenerationTests(unittest.TestCase):
         self.assertEqual(self.generate(QWEN)["generation_model"], QWEN_INFO)          # cache hit keeps it
         self.assertEqual(len(FakeModel.prompts), 0)
 
-    def test_regenerating_with_another_model_makes_a_new_quiz_and_keeps_the_old_models_name(self):
+    def test_regenerating_with_another_model_makes_a_new_quiz_and_keeps_both_active(self):
+        """Regenerating with a different model creates a separate persistent artifact -- it never
+        overwrites or hides the earlier quiz (Quiz Library must list both, see
+        test_quiz_persistence.py for the full multi-model persistence suite)."""
         qwen_quiz = self.generate(QWEN)
         deepseek_quiz = self.generate(DEEPSEEK, regenerate=True)
 
         self.assertNotEqual(qwen_quiz["quiz_id"], deepseek_quiz["quiz_id"])
         self.assertEqual(deepseek_quiz["generation_model"], DEEPSEEK_INFO)
         self.assertEqual({call["model"] for call in FakeModel.kwargs}, {DEEPSEEK})
+        # get_quiz (the cache-hit lookup only) returns the newest quiz for the slot, but that is not
+        # a listing decision -- both quizzes remain independently active/loadable.
         active = self.store.get_quiz(DOCUMENT["id"], "easy", "document")
         self.assertEqual((active["quiz_id"], active["generation_model"]), (deepseek_quiz["quiz_id"], DEEPSEEK_INFO))
-        old = self.store.get_quiz_by_id(qwen_quiz["quiz_id"])                          # superseded, still stored
+        old = self.store.get_quiz_by_id(qwen_quiz["quiz_id"])
         self.assertIsNotNone(old)
         self.assertEqual(old["generation_model"], QWEN_INFO)
         self.assertEqual(old["assessment_plan"]["generation_model"], QWEN_INFO)
         with self.store._connect() as connection:
             rows = dict(connection.execute("SELECT quiz_id, is_active FROM quizzes").fetchall())
         # (the store also imports legacy quizzes of the real data folder, so look at ours only)
-        self.assertEqual((rows[qwen_quiz["quiz_id"]], rows[deepseek_quiz["quiz_id"]]), (0, 1))
+        self.assertEqual((rows[qwen_quiz["quiz_id"]], rows[deepseek_quiz["quiz_id"]]), (1, 1))
 
     def test_generating_with_deepseek_over_a_saved_qwen_quiz_makes_a_new_deepseek_quiz(self):
         """A saved quiz only answers a request for the model that made it: asking for DeepSeek does not
-        hand back the Qwen quiz, it generates a new one (the Qwen quiz is superseded but kept)."""
+        hand back the Qwen quiz, it generates a new one -- and the Qwen quiz stays fully active."""
         qwen_quiz = self.generate(QWEN)
         deepseek_quiz = self.generate(DEEPSEEK)                           # no regenerate flag
         self.assertNotEqual(deepseek_quiz["quiz_id"], qwen_quiz["quiz_id"])
