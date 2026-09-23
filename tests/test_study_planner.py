@@ -1083,14 +1083,16 @@ class StudyPlannerResetTests(unittest.TestCase):
 
 
 class StudyPlannerFrontendTests(unittest.TestCase):
+    """The planner page is the document-centric v2 flow (see test_study_planner_v2_ui.py); these
+    checks cover the weekly availability calendar it reuses from the original planner."""
+
     def test_study_planner_ui_exists(self):
         html = Path("frontend/index.html").read_text(encoding="utf-8")
         self.assertIn('data-page="planner"', html)
         self.assertIn('id="planner-view"', html)
         script = Path("frontend/app.js").read_text(encoding="utf-8")
         self.assertIn('id="planner-calendar"', script)
-        self.assertIn("Generate Study Plan", script)
-        self.assertIn("Accept Plan", script)
+        self.assertIn("Generate preview", script)
 
     def test_user_can_select_and_remove_availability_cells(self):
         script = Path("frontend/app.js").read_text(encoding="utf-8")
@@ -1099,70 +1101,7 @@ class StudyPlannerFrontendTests(unittest.TestCase):
         self.assertIn("function plannerFinishDrag", script)
         self.assertIn('id="planner-mode-erase"', script)
         self.assertIn("`${PLANNER_AVAILABILITY_API_URL}/remove`", script)
-
-    def test_block_editor_has_editable_start_and_end_with_save_delete_cancel(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
-        self.assertIn('id="planner-block-editor-start" type="time"', script)
-        self.assertIn('id="planner-block-editor-end" type="time"', script)
-        self.assertIn('id="planner-block-editor-save"', script)
-        self.assertIn('id="planner-block-editor-delete"', script)
-        self.assertIn('id="planner-block-editor-cancel"', script)
-        # A real editor, not the old window.prompt shortcut.
-        self.assertNotIn("window.prompt(", script)
-        self.assertIn("start_at: `${dateKey}T${startTime}:00`, end_at: `${dateKey}T${endTime}:00`", script)
-
-    def test_block_editor_has_complete_button_and_progress_indicator(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
-        self.assertIn('id="planner-block-editor-complete"', script)
-        self.assertIn('id="planner-block-editor-progress"', script)
-        self.assertIn('id="planner-block-editor-completed"', script)
-        self.assertIn("function plannerCompleteBlock", script)
-        self.assertIn("/complete", script)
-        self.assertIn("block-completed", script)
-
-    def test_task_cards_show_progress_and_regenerate_action(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
-        self.assertIn("function plannerComputeTaskProgress", script)
-        self.assertIn("planner-task-progress", script)
-        self.assertIn("Regenerate Study Plan", script)
-        self.assertIn("/regenerate", script)
-
-    def test_task_form_supports_linking_a_topic_within_a_document(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
-        self.assertIn('id="planner-task-topic-field"', script)
-        self.assertIn('id="planner-task-topic"', script)
-        self.assertIn("function plannerRefreshTaskTopicOptions", script)
-        self.assertIn("topic_id: plannerTaskTopicSelect", script)
-
-    def test_block_editor_shows_material_topic_objective_and_goal(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
-        self.assertIn('id="planner-block-editor-material"', script)
-        self.assertIn('id="planner-block-editor-topic"', script)
-        self.assertIn('id="planner-block-editor-objective"', script)
-        self.assertIn('id="planner-block-editor-goal"', script)
-        self.assertIn("block.objective", script)
-        self.assertIn("block.study_goal", script)
-
-    def test_block_editor_has_quiz_flashcards_and_ai_tutor_actions(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
-        self.assertIn('id="planner-block-editor-open"', script)
-        self.assertIn('id="planner-block-editor-quiz"', script)
-        self.assertIn('id="planner-block-editor-flashcards"', script)
-        self.assertIn('id="planner-block-editor-tutor"', script)
-        self.assertIn("openBlockStudySession", script)
-
-    def test_blocks_support_drag_move_and_resize_on_the_calendar(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
-        self.assertIn("function plannerStartBlockDrag", script)
-        self.assertIn("function plannerUpdateBlockDragPreview", script)
-        self.assertIn("function plannerFinishBlockDrag", script)
-        self.assertIn("planner-block-resize-handle", script)
-        self.assertIn('plannerStartBlockDrag(block, cell, "resize")', script)
-        self.assertIn('plannerStartBlockDrag(block, cell, "move")', script)
-        # Drag/resize is scoped to still-suggested blocks -- a confirmed/completed/missed block
-        # is only edited through the block editor modal, never dragged on the grid.
-        self.assertIn('block.status === "suggested" && block.completion_status !== "completed"', script)
-
+        self.assertIn('id="planner-repeat-weekly"', script)
 
 if __name__ == "__main__":
     unittest.main()

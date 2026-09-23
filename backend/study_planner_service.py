@@ -510,9 +510,6 @@ def add_plan_material(owner_id: str, plan_id: str, document_id: str, deadline: s
     )
 
 
-SCHEDULING_BUSY_STATUSES = ("scheduled", "in_progress", "completed")
-
-
 def utc_offset_for_local_now(local_now: datetime, utc_now: datetime | None = None) -> timedelta:
     """The learner's UTC offset, derived from their browser's naive local clock (local_now) versus
     the real UTC clock, rounded to the nearest 15 minutes -- no timezone is assumed."""
@@ -525,7 +522,8 @@ def build_scheduling_context(owner_id: str, plan_id: str, now: datetime | None =
                              utc_offset: timedelta | None = None) -> SchedulingContext:
     """Assemble the read-only SchedulingContext the scheduler consumes for one plan: each
     material with its DocumentStudyState, the owner's availability, and sessions (any plan) that
-    already occupy time from today on. No scheduling decisions are made here.
+    already occupy time from today on -- see study_planner_store.list_busy_sessions: an archived
+    plan's still-scheduled sessions no longer block. No scheduling decisions are made here.
 
     `now` is the learner's local time (from the browser); pass their `utc_offset` alongside a naive
     `now` (see utc_offset_for_local_now). No offset is ever inferred from the server's timezone:
@@ -544,9 +542,7 @@ def build_scheduling_context(owner_id: str, plan_id: str, now: datetime | None =
     return SchedulingContext(
         owner_id=owner_id, plan_id=plan_id, now=now, utc_offset=utc_offset, materials=tuple(materials),
         availability=tuple(study_planner_store.list_availability(owner_id)),
-        busy_sessions=tuple(study_planner_store.list_sessions(
-            owner_id, statuses=SCHEDULING_BUSY_STATUSES, start_from=now.date().isoformat(),
-        )),
+        busy_sessions=tuple(study_planner_store.list_busy_sessions(owner_id, start_from=now.date().isoformat())),
     )
 
 

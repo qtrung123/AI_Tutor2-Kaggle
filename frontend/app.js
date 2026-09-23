@@ -32,10 +32,8 @@ const RECOMMENDATIONS_API_URL = apiUrl("/api/recommendations");
 const MODELS_API_URL = apiUrl("/api/models");
 const SUMMARY_API_BASE_URL = apiUrl("/api/summary");
 const FLASHCARDS_API_BASE_URL = apiUrl("/api/flashcards");
-const PLANNER_TASKS_API_URL = apiUrl("/api/planner/tasks");
 const PLANNER_AVAILABILITY_API_URL = apiUrl("/api/planner/availability");
-const PLANNER_BLOCKS_API_URL = apiUrl("/api/planner/blocks");
-const PLANNER_TOPIC_PROGRESS_API_URL = apiUrl("/api/planner/topic-progress");
+const PLANNER_PLANS_API_URL = apiUrl("/api/planner/plans");
 const ADMIN_QUIZ_MODEL_COMPARISON_API_URL = apiUrl("/api/admin/quiz-model-comparison");
 const RECOMMENDATIONS_OVERVIEW_LIMIT = Number(window.APP_CONFIG?.RECOMMENDATIONS_OVERVIEW_LIMIT || 4);
 
@@ -107,16 +105,17 @@ let flashcardTopicFilter = "all";
 let loadedFlashcardKey = "";
 let flashcardLanguage = localStorage.getItem("aiTutorFlashcardLanguage") || "auto";
 
-let plannerLoaded = false;
-let plannerTasks = [];
 let plannerAvailability = [];
-let plannerBlocks = [];
-let plannerSelectedTaskId = "";
 let plannerMode = "available";
 let plannerWeekStart = plannerMondayOf(new Date());
 let plannerDrag = null;
-let plannerBlockDrag = null;
-let plannerSuppressNextBlockClick = false;
+// Study Planner v2 (document-centric): one active plan at a time.
+let plannerPlan = null;          // the plan being built, or already confirmed
+let plannerMaterials = [];       // its documents (with optional deadlines)
+let plannerSessions = [];        // its saved sessions (the confirmed plan)
+let plannerPreview = null;       // the latest read-only preview result
+let plannerStep = "materials";   // materials | availability | preview | plan
+let plannerBusy = false;         // a preview/confirm request is in flight (no double submit)
 
 const navItems = document.querySelectorAll(".nav-item");
 const views = document.querySelectorAll(".view");
@@ -390,31 +389,54 @@ const FLASHCARD_LANGUAGE_LABELS = { auto: "Auto", english: "English", vietnamese
 
 const plannerView = document.getElementById("planner-view");
 if (plannerView) {
-  plannerView.innerHTML = `<div class="planner-shell"><div class="planner-toolbar"><div><p class="eyebrow">Study Planner</p><h2>Plan your study time</h2></div></div><div class="planner-layout"><article class="panel planner-tasks-panel"><div class="panel-heading"><div><p>Study Tasks</p><h2>Your tasks</h2></div><button class="primary-button" id="planner-new-task-button" type="button">+ New Task</button></div><form id="planner-task-form" class="planner-task-form" hidden><label>Task name<input id="planner-task-title" type="text" maxlength="200" required></label><label>Linked Study Session / Document (optional)<select id="planner-task-document"><option value="">None</option></select></label><label id="planner-task-topic-field" hidden>Focus on one topic (optional)<select id="planner-task-topic"><option value="">Whole document</option></select></label><label>Deadline<input id="planner-task-deadline" type="date" required></label><label class="planner-duration-field">Estimated study time<span class="planner-duration-inputs"><input id="planner-task-hours" type="number" min="0" max="500" value="1"> h<input id="planner-task-minutes" type="number" min="0" max="59" step="5" value="0"> m</span></label><div class="planner-task-form-actions"><button class="primary-button" type="submit">Create Task</button><button class="text-button" id="planner-cancel-task" type="button">Cancel</button></div></form><div id="planner-task-list" class="planner-task-list"></div><div id="planner-task-empty" class="empty-state">No study tasks yet. Create one to get started.</div></article><article class="panel planner-calendar-panel"><div class="panel-heading"><div><p>Weekly availability</p><h2 id="planner-week-label">This week</h2></div><div class="planner-calendar-actions"><button class="secondary-button" id="planner-prev-week" type="button">‹ Prev</button><button class="secondary-button" id="planner-next-week" type="button">Next ›</button><label class="planner-repeat-toggle"><input type="checkbox" id="planner-repeat-weekly">Repeat weekly</label><div class="planner-mode-toggle"><button class="secondary-button active" id="planner-mode-available" type="button">Mark Available</button><button class="secondary-button" id="planner-mode-erase" type="button">Erase</button></div></div></div><div id="planner-task-actions" class="planner-task-actions" hidden><span id="planner-buffer-badge" class="planner-buffer-badge"></span><button class="secondary-button" id="planner-generate-button" type="button">Generate Study Plan</button><button class="primary-button" id="planner-accept-button" type="button" disabled>Accept Plan</button></div><div id="planner-calendar" class="planner-calendar"></div><div class="planner-legend"><span class="planner-legend-item"><i class="planner-swatch planner-swatch-available"></i>Available</span><span class="planner-legend-item"><i class="planner-swatch planner-swatch-suggested"></i>Suggested block</span><span class="planner-legend-item"><i class="planner-swatch planner-swatch-confirmed"></i>Confirmed block</span></div></article></div></div>`;
+  plannerView.innerHTML = `<div class="planner-shell">
+  <div class="planner-toolbar"><div><p class="eyebrow">Study Planner</p><h2>Plan your study time</h2><p class="planner-lead">Choose documents, add a deadline if there is one, and mark when you could study. We’ll suggest a balanced plan.</p></div></div>
+  <ol class="planner-steps" aria-label="Planner steps"><li data-step-indicator="materials"><span>1</span>Materials</li><li data-step-indicator="availability"><span>2</span>Availability</li><li data-step-indicator="preview"><span>3</span>Preview</li><li data-step-indicator="plan"><span>4</span>Plan</li></ol>
+  <section class="panel planner-step" data-planner-step="materials">
+    <div class="planner-step-heading"><p class="eyebrow">Step 1</p><h3>What do you want to study?</h3><p class="planner-hint">Pick documents and, if there is one, a deadline for each.</p></div>
+    <div id="planner-material-list" class="planner-material-list"></div>
+    <p id="planner-material-empty" class="empty-state" hidden>Upload a document first, then come back to plan study time for it.</p>
+    <div class="planner-step-actions"><button class="primary-button" id="planner-to-availability" type="button">Next: availability</button></div>
+  </section>
+  <section class="panel planner-step" data-planner-step="availability" hidden>
+    <div class="planner-step-heading"><p class="eyebrow">Step 2</p><h3>When could you study?</h3><p class="planner-hint">Select when you could study. We won’t necessarily fill all of this time.</p></div>
+    <div class="planner-calendar-toolbar"><div class="planner-week-nav"><button class="secondary-button" id="planner-prev-week" type="button" aria-label="Previous week">‹</button><strong id="planner-week-label">This week</strong><button class="secondary-button" id="planner-next-week" type="button" aria-label="Next week">›</button></div><div class="planner-calendar-actions"><label class="planner-repeat-toggle"><input type="checkbox" id="planner-repeat-weekly" checked>Repeat weekly</label><div class="planner-mode-toggle"><button class="secondary-button active" id="planner-mode-available" type="button">Mark available</button><button class="secondary-button" id="planner-mode-erase" type="button">Erase</button></div></div></div>
+    <div id="planner-calendar" class="planner-calendar"></div>
+    <div class="planner-legend"><span class="planner-legend-item"><i class="planner-swatch planner-swatch-available"></i>Available</span><span class="planner-legend-item"><i class="planner-swatch planner-swatch-confirmed"></i>Planned session</span></div>
+    <div class="planner-step-actions"><button class="text-button" data-planner-go="materials" type="button">Back</button><button class="primary-button" id="planner-generate-preview" type="button">Generate preview</button></div>
+  </section>
+  <section class="panel planner-step" data-planner-step="preview" hidden>
+    <div class="planner-step-heading"><p class="eyebrow">Step 3</p><h3>Suggested plan</h3><p class="planner-hint">Nothing is saved until you confirm.</p></div>
+    <div id="planner-preview-error" class="planner-alert" role="alert" hidden></div>
+    <div id="planner-preview-capacity"></div>
+    <div id="planner-preview-sessions" class="planner-day-list"></div>
+    <div class="planner-step-actions"><button class="text-button" data-planner-go="materials" type="button">Adjust deadlines</button><button class="secondary-button" data-planner-go="availability" type="button">Adjust availability</button><button class="primary-button" id="planner-confirm-button" type="button">Looks good, confirm</button></div>
+  </section>
+  <section class="panel planner-step" data-planner-step="plan" hidden>
+    <div class="planner-step-heading"><p class="eyebrow">Your plan</p><h3>Saved study sessions</h3><p class="planner-hint" id="planner-plan-summary"></p></div>
+    <div id="planner-plan-sessions" class="planner-day-list"></div>
+    <div class="planner-step-actions"><button class="secondary-button" id="planner-new-plan" type="button">Start a new plan</button></div>
+  </section>
+</div>`;
 }
-const plannerNewTaskButton = document.getElementById("planner-new-task-button");
-const plannerTaskForm = document.getElementById("planner-task-form");
-const plannerTaskTitleInput = document.getElementById("planner-task-title");
-const plannerTaskDocumentSelect = document.getElementById("planner-task-document");
-const plannerTaskTopicField = document.getElementById("planner-task-topic-field");
-const plannerTaskTopicSelect = document.getElementById("planner-task-topic");
-const plannerTaskDeadlineInput = document.getElementById("planner-task-deadline");
-const plannerTaskHoursInput = document.getElementById("planner-task-hours");
-const plannerTaskMinutesInput = document.getElementById("planner-task-minutes");
-const plannerCancelTaskButton = document.getElementById("planner-cancel-task");
-const plannerTaskList = document.getElementById("planner-task-list");
-const plannerTaskEmpty = document.getElementById("planner-task-empty");
+const plannerMaterialList = document.getElementById("planner-material-list");
+const plannerMaterialEmpty = document.getElementById("planner-material-empty");
+const plannerToAvailabilityButton = document.getElementById("planner-to-availability");
 const plannerWeekLabel = document.getElementById("planner-week-label");
 const plannerPrevWeekButton = document.getElementById("planner-prev-week");
 const plannerNextWeekButton = document.getElementById("planner-next-week");
 const plannerRepeatWeeklyCheckbox = document.getElementById("planner-repeat-weekly");
 const plannerModeAvailableButton = document.getElementById("planner-mode-available");
 const plannerModeEraseButton = document.getElementById("planner-mode-erase");
-const plannerTaskActions = document.getElementById("planner-task-actions");
-const plannerBufferBadge = document.getElementById("planner-buffer-badge");
-const plannerGenerateButton = document.getElementById("planner-generate-button");
-const plannerAcceptButton = document.getElementById("planner-accept-button");
 const plannerCalendar = document.getElementById("planner-calendar");
+const plannerGeneratePreviewButton = document.getElementById("planner-generate-preview");
+const plannerPreviewError = document.getElementById("planner-preview-error");
+const plannerPreviewCapacity = document.getElementById("planner-preview-capacity");
+const plannerPreviewSessions = document.getElementById("planner-preview-sessions");
+const plannerConfirmButton = document.getElementById("planner-confirm-button");
+const plannerPlanSummary = document.getElementById("planner-plan-summary");
+const plannerPlanSessions = document.getElementById("planner-plan-sessions");
+const plannerNewPlanButton = document.getElementById("planner-new-plan");
 
 const authScreen = document.getElementById("auth-screen");
 const appShell = document.getElementById("app-shell");
@@ -4791,16 +4813,20 @@ function closeQuizCreateDialog(options = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Study Planner (Phase 1 / MVP)
+// Study Planner v2 -- document-centric plan creation:
+// Materials (+ optional deadlines) -> Availability -> Preview -> Adjust / Confirm -> saved plan.
+// Reuses the weekly availability calendar and /api/planner/availability. No topics, no scores.
 // ---------------------------------------------------------------------------
 
 const PLANNER_DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const PLANNER_GRID_START_MINUTE = 6 * 60;
 const PLANNER_GRID_END_MINUTE = 23 * 60;
 const PLANNER_CELL_MINUTES = 30;
-let plannerScheduleResults = {};
-let plannerPlanItemsByTask = {};
-let plannerTopicProgress = [];
+const PLANNER_STEPS = ["materials", "availability", "preview", "plan"];
+const PLANNER_ACTIVE_SESSION_STATUSES = ["scheduled", "in_progress"];
+const PLANNER_ACTIVITY_LABELS = {
+  summary: "Summary", flashcards: "Flashcards", quiz: "Quiz", review: "Review", quiz_retry: "Quiz retry",
+};
 
 function plannerMondayOf(reference) {
   const date = new Date(reference);
@@ -4815,14 +4841,6 @@ function plannerDateKey(date) {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
-}
-
-function plannerLocalIso(date) {
-  // Naive LOCAL datetime string (no timezone/UTC suffix) -- matches how every planner time is
-  // stored (see study_planner_service.compute_schedule). Deliberately NOT toISOString(), which
-  // is UTC and would silently misrepresent "now" for a user/server in different timezones.
-  const pad = (value) => String(value).padStart(2, "0");
-  return `${plannerDateKey(date)}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function plannerToMinutes(hhmm) {
@@ -4847,6 +4865,11 @@ function plannerFormatDateLabel(date) {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function plannerDayLabel(dateKey) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  return new Date(year, month - 1, day).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
 function plannerWeekDates() {
   return Array.from({ length: 7 }, (_, index) => {
     const date = new Date(plannerWeekStart);
@@ -4855,121 +4878,182 @@ function plannerWeekDates() {
   });
 }
 
+function plannerUtcOffsetMinutes() {
+  // The learner's own offset from UTC (e.g. 420 for UTC+7) -- the only timezone input the planner
+  // API takes. "now" itself is left to the server (current UTC instant + this offset).
+  return -new Date().getTimezoneOffset();
+}
+
+class PlannerRequestError extends Error {
+  constructor(message, status, detail) {
+    super(message);
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+async function plannerRequest(url, options = {}) {
+  // Like fetchJson, but keeps a structured error detail ({code, message, ...}) intact.
+  const init = { ...options };
+  if (init.body !== undefined && typeof init.body !== "string") {
+    init.body = JSON.stringify(init.body);
+    init.headers = { "Content-Type": "application/json", ...(init.headers || {}) };
+  }
+  const response = await fetch(url, init);
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    payload = null;
+  }
+  if (!response.ok) {
+    if (response.status === 401 && currentUser) showAuthentication();
+    const detail = payload?.detail;
+    const message = typeof detail === "string" ? detail : detail?.message || `Request returned ${response.status}`;
+    throw new PlannerRequestError(message, response.status, detail);
+  }
+  return payload;
+}
+
+function plannerPlanUrl(suffix = "") {
+  return `${PLANNER_PLANS_API_URL}/${encodeURIComponent(plannerPlan.plan_id)}${suffix}`;
+}
+
 async function loadPlannerData() {
   try {
-    const [tasks, availability, blocks, topicProgress] = await Promise.all([
-      fetchJson(PLANNER_TASKS_API_URL),
-      fetchJson(PLANNER_AVAILABILITY_API_URL),
-      fetchJson(PLANNER_BLOCKS_API_URL),
-      fetchJson(PLANNER_TOPIC_PROGRESS_API_URL).catch(() => []),
+    const [plans, availability] = await Promise.all([
+      plannerRequest(PLANNER_PLANS_API_URL), plannerRequest(PLANNER_AVAILABILITY_API_URL),
     ]);
-    plannerTasks = tasks; plannerAvailability = availability; plannerBlocks = blocks;
-    plannerTopicProgress = topicProgress;
-    plannerLoaded = true;
-    if (plannerSelectedTaskId && !plannerTasks.some((task) => task.task_id === plannerSelectedTaskId)) {
-      plannerSelectedTaskId = "";
+    plannerAvailability = availability;
+    const active = plans.filter((plan) => plan.status === "active");
+    plannerPlan = active[active.length - 1] || null;
+    plannerMaterials = [];
+    plannerSessions = [];
+    if (plannerPlan) {
+      const [detail, sessions] = await Promise.all([plannerRequest(plannerPlanUrl()), plannerRequest(plannerPlanUrl("/sessions"))]);
+      plannerMaterials = detail.materials;
+      plannerSessions = sessions.filter((session) => PLANNER_ACTIVE_SESSION_STATUSES.includes(session.status));
     }
-    // Phase 2: fetch each document-linked task's study plan items (one per document topic) so
-    // the task card can show a topic count.
-    const documentTasks = plannerTasks.filter((task) => task.document_id);
-    const itemLists = await Promise.all(
-      documentTasks.map((task) =>
-        fetchJson(`${PLANNER_TASKS_API_URL}/${encodeURIComponent(task.task_id)}/items`).catch(() => []),
-      ),
-    );
-    plannerPlanItemsByTask = {};
-    documentTasks.forEach((task, index) => { plannerPlanItemsByTask[task.task_id] = itemLists[index]; });
-    renderPlannerTasks();
-    renderPlannerCalendar();
-    updatePlannerTaskActions();
+    if (plannerSessions.length) plannerStep = "plan";
+    else if (plannerStep === "plan") plannerStep = "materials";
+    renderPlanner();
   } catch (error) {
     showToast(error.message || "Could not load Study Planner data");
   }
 }
 
-function renderPlannerTasks() {
-  if (!plannerTaskList) return;
-  plannerTaskList.innerHTML = "";
-  if (plannerTaskEmpty) plannerTaskEmpty.hidden = plannerTasks.length > 0;
-  plannerTasks.forEach((task) => {
-    const row = document.createElement("article");
-    row.className = "planner-task-row";
-    row.classList.toggle("active", task.task_id === plannerSelectedTaskId);
-    row.classList.toggle("completed", task.status === "completed");
-    const title = document.createElement("strong");
-    title.textContent = task.status === "completed" ? `✓ ${task.title}` : task.title;
-    const meta = document.createElement("span");
-    meta.textContent = `Due ${task.deadline} · ${plannerFormatDuration(task.remaining_minutes)} left`;
-    const linkedDocument = indexedDocuments.find((doc) => doc.id === task.document_id);
-    const docLine = document.createElement("small");
-    if (task.document_id) {
-      const documentLabel = linkedDocument ? linkedDocument.title : task.document_id;
-      const topicCount = plannerPlanItemsByTask[task.task_id]?.length;
-      docLine.textContent = Number.isInteger(topicCount)
-        ? `${documentLabel} · ${topicCount} topic${topicCount === 1 ? "" : "s"}`
-        : documentLabel;
-    } else {
-      docLine.textContent = "No linked document";
-    }
-    const progress = plannerComputeTaskProgress(task);
-    const progressLine = document.createElement("small");
-    progressLine.className = "planner-task-progress";
-    const topicsLabel = Number.isInteger(progress.topicCount)
-      ? ` · ${progress.completedTopicCount}/${progress.topicCount} topics done` : "";
-    progressLine.textContent = progress.plannedMinutes > 0
-      ? `${plannerFormatDuration(progress.completedMinutes)}/${plannerFormatDuration(progress.plannedMinutes)} · ${progress.progressPercent}%${topicsLabel}`
-      : "No blocks scheduled yet";
-    const deleteButton = document.createElement("button");
-    deleteButton.className = "text-button danger-button planner-task-delete";
-    deleteButton.type = "button";
-    deleteButton.textContent = "Delete";
-    deleteButton.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      if (!window.confirm(`Delete task "${task.title}"? Its study blocks will also be removed.`)) return;
-      try {
-        await fetchJson(`${PLANNER_TASKS_API_URL}/${encodeURIComponent(task.task_id)}`, { method: "DELETE" });
-        if (plannerSelectedTaskId === task.task_id) plannerSelectedTaskId = "";
-        delete plannerScheduleResults[task.task_id];
-        await loadPlannerData();
-        showToast("Task deleted");
-      } catch (error) {
-        showToast(error.message || "Could not delete task");
-      }
-    });
-    row.append(title, meta, docLine, progressLine, deleteButton);
-    row.addEventListener("click", () => {
-      plannerSelectedTaskId = task.task_id;
-      renderPlannerTasks();
-      renderPlannerCalendar();
-      updatePlannerTaskActions();
-    });
-    plannerTaskList.appendChild(row);
-  });
+function plannerSetStep(step) {
+  plannerStep = step;
+  renderPlanner();
 }
 
-function updatePlannerTaskActions() {
-  if (!plannerTaskActions) return;
-  const task = plannerTasks.find((item) => item.task_id === plannerSelectedTaskId);
-  plannerTaskActions.hidden = !task;
-  if (!task) return;
-  const hasSuggested = plannerBlocks.some((block) => block.task_id === task.task_id && block.status === "suggested");
-  plannerAcceptButton.disabled = !hasSuggested;
-  const hasExistingBlocks = plannerBlocks.some((block) => block.task_id === task.task_id);
-  if (plannerGenerateButton) {
-    plannerGenerateButton.textContent = hasExistingBlocks ? "Regenerate Study Plan" : "Generate Study Plan";
+function renderPlanner() {
+  if (!plannerView) return;
+  const current = PLANNER_STEPS.indexOf(plannerStep);
+  plannerView.querySelectorAll("[data-planner-step]").forEach((section) => {
+    section.hidden = section.dataset.plannerStep !== plannerStep;
+  });
+  plannerView.querySelectorAll("[data-step-indicator]").forEach((item) => {
+    const index = PLANNER_STEPS.indexOf(item.dataset.stepIndicator);
+    item.classList.toggle("active", index === current);
+    item.classList.toggle("done", index < current);
+    if (index === current) item.setAttribute("aria-current", "step");
+    else item.removeAttribute("aria-current");
+  });
+  if (plannerStep === "materials") renderPlannerMaterials();
+  if (plannerStep === "availability") renderPlannerCalendar();
+  if (plannerStep === "preview") renderPlannerPreview();
+  if (plannerStep === "plan") renderPlannerPlan();
+}
+
+// ---- Step 1: materials + optional deadlines --------------------------------
+
+function plannerMaterialFor(documentId) {
+  return plannerMaterials.find((material) => material.document_id === documentId) || null;
+}
+
+function renderPlannerMaterials() {
+  if (!plannerMaterialList) return;
+  plannerMaterialList.innerHTML = "";
+  plannerMaterialEmpty.hidden = indexedDocuments.length > 0;
+  const today = plannerDateKey(new Date());
+  indexedDocuments.forEach((doc) => {
+    const material = plannerMaterialFor(doc.id);
+    const row = document.createElement("div");
+    row.className = "planner-material-row";
+    row.classList.toggle("selected", Boolean(material));
+    const pick = document.createElement("label");
+    pick.className = "planner-material-pick";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = Boolean(material);
+    checkbox.dataset.documentId = doc.id;
+    checkbox.addEventListener("change", () => plannerToggleMaterial(doc.id, checkbox));
+    const name = document.createElement("span");
+    name.textContent = doc.title;
+    pick.append(checkbox, name);
+    row.appendChild(pick);
+    if (material) {
+      const deadline = document.createElement("label");
+      deadline.className = "planner-material-deadline";
+      const caption = document.createElement("span");
+      caption.textContent = "Deadline (optional)";
+      const input = document.createElement("input");
+      input.type = "date";
+      input.min = today;
+      input.value = material.deadline || "";
+      input.setAttribute("aria-label", `Deadline for ${doc.title}`);
+      input.addEventListener("change", () => plannerSetDeadline(material, input));
+      deadline.append(caption, input);
+      row.appendChild(deadline);
+    }
+    plannerMaterialList.appendChild(row);
+  });
+  plannerToAvailabilityButton.disabled = plannerMaterials.length === 0;
+}
+
+async function plannerEnsurePlan() {
+  if (!plannerPlan) {
+    plannerPlan = await plannerRequest(PLANNER_PLANS_API_URL, { method: "POST", body: { title: "My study plan" } });
   }
-  const result = plannerScheduleResults[task.task_id];
-  if (result) {
-    plannerBufferBadge.hidden = false;
-    plannerBufferBadge.textContent = result.status === "schedule_risk"
-      ? `Schedule Risk · short ${plannerFormatDuration(result.shortage_minutes)}`
-      : `On Track · buffer ${plannerFormatDuration(result.study_buffer)}`;
-    plannerBufferBadge.classList.toggle("risk", result.status === "schedule_risk");
-    plannerBufferBadge.classList.toggle("on-track", result.status !== "schedule_risk");
-  } else {
-    plannerBufferBadge.hidden = true;
+  return plannerPlan;
+}
+
+async function plannerToggleMaterial(documentId, checkbox) {
+  checkbox.disabled = true;
+  try {
+    if (checkbox.checked) {
+      await plannerEnsurePlan();
+      const material = await plannerRequest(plannerPlanUrl("/materials"), { method: "POST", body: { document_id: documentId } });
+      plannerMaterials = [...plannerMaterials, material];
+    } else {
+      const material = plannerMaterialFor(documentId);
+      if (material) {
+        await plannerRequest(plannerPlanUrl(`/materials/${encodeURIComponent(material.material_id)}`), { method: "DELETE" });
+      }
+      plannerMaterials = plannerMaterials.filter((item) => item.document_id !== documentId);
+    }
+    plannerPreview = null;
+  } catch (error) {
+    showToast(error.message || "Could not update the plan");
+  }
+  renderPlannerMaterials();
+}
+
+async function plannerSetDeadline(material, input) {
+  try {
+    const updated = await plannerRequest(plannerPlanUrl(`/materials/${encodeURIComponent(material.material_id)}`), {
+      method: "PATCH", body: { deadline: input.value || null },
+    });
+    plannerMaterials = plannerMaterials.map((item) => (item.material_id === updated.material_id ? updated : item));
+    plannerPreview = null;
+  } catch (error) {
+    input.value = material.deadline || "";
+    showToast(error.message || "Could not save the deadline");
   }
 }
+
+// ---- Step 2: availability (the existing weekly calendar) --------------------
 
 function plannerAvailabilityCoversDate(slot, dateKey, weekday) {
   return slot.is_recurring ? slot.day_of_week === weekday : slot.date === dateKey;
@@ -4982,63 +5066,13 @@ function plannerIsMinuteAvailable(dateKey, weekday, minute) {
   });
 }
 
-function plannerBlockAt(dateKey, minute) {
-  return plannerBlocks.find((block) => {
-    if (block.status === "suggested" && block.task_id !== plannerSelectedTaskId) return false;
-    if (block.status === "missed") return false;
-    if (block.start_at.slice(0, 10) !== dateKey) return false;
-    const start = plannerToMinutes(block.start_at.slice(11, 16));
-    const end = plannerToMinutes(block.end_at.slice(11, 16));
-    return minute >= start && minute < end;
+function plannerSessionAt(dateKey, minute) {
+  return plannerSessions.find((session) => {
+    if (session.scheduled_start.slice(0, 10) !== dateKey) return false;
+    const start = plannerToMinutes(session.scheduled_start.slice(11, 16));
+    const end = plannerToMinutes(session.scheduled_end.slice(11, 16));
+    return minute < end && minute + PLANNER_CELL_MINUTES > start;
   });
-}
-
-function plannerTopicLabel(documentId, topicId) {
-  if (!topicId) return "";
-  const linkedDocument = indexedDocuments.find((doc) => doc.id === documentId);
-  const topic = linkedDocument?.topics?.find((item) => item.topic_id === topicId);
-  return topic ? topic.name : topicId;
-}
-
-function plannerBlockTooltip(block) {
-  const durationLabel = plannerFormatDuration(block.planned_minutes);
-  const statusLine = block.completion_status && block.completion_status !== "scheduled"
-    ? `\nStatus: ${block.completion_status}` : "";
-  if (!block.document_id) return `${block.title}\nDuration: ${durationLabel}${statusLine}`;
-  const linkedDocument = indexedDocuments.find((doc) => doc.id === block.document_id);
-  const documentLabel = linkedDocument ? linkedDocument.title : block.document_id;
-  const topicLabel = plannerTopicLabel(block.document_id, block.topic_id);
-  const topicLine = topicLabel ? `\nTopic: ${topicLabel}` : "";
-  return `${block.title}\nDocument: ${documentLabel}${topicLine}\nDuration: ${durationLabel}${statusLine}`;
-}
-
-function plannerProgressForTopic(documentId, topicId) {
-  if (!documentId || !topicId) return null;
-  return plannerTopicProgress.find(
-    (entry) => entry.document_id === documentId && entry.topic_id === topicId,
-  ) || null;
-}
-
-function plannerComputeTaskProgress(task) {
-  const blocks = plannerBlocks.filter((block) => block.task_id === task.task_id);
-  const plannedMinutes = blocks.reduce((sum, block) => sum + (block.planned_minutes || 0), 0);
-  const rawCompletedMinutes = blocks
-    .filter((block) => block.completion_status === "completed")
-    .reduce((sum, block) => sum + (block.actual_minutes ?? block.planned_minutes ?? 0), 0);
-  const completedMinutes = plannedMinutes > 0 ? Math.min(rawCompletedMinutes, plannedMinutes) : rawCompletedMinutes;
-  const progressPercent = plannedMinutes > 0 ? Math.min(100, Math.round((completedMinutes / plannedMinutes) * 100)) : 0;
-
-  let topicCount = null;
-  let completedTopicCount = null;
-  if (task.document_id) {
-    const topicIds = new Set((plannerPlanItemsByTask[task.task_id] || []).map((item) => item.topic_id));
-    topicCount = topicIds.size;
-    completedTopicCount = Array.from(topicIds).filter((topicId) => {
-      const progress = plannerProgressForTopic(task.document_id, topicId);
-      return progress && progress.planned_minutes > 0 && progress.completed_minutes >= progress.planned_minutes;
-    }).length;
-  }
-  return { plannedMinutes, completedMinutes, progressPercent, topicCount, completedTopicCount };
 }
 
 function renderPlannerCalendar() {
@@ -5078,53 +5112,23 @@ function renderPlannerCalendar() {
       cell.dataset.minute = String(minute);
       cell.setAttribute("aria-label", `${dateKey} ${plannerMinutesToLabel(minute)}`);
       cell.classList.toggle("available", plannerIsMinuteAvailable(dateKey, weekday, minute));
-      const block = plannerBlockAt(dateKey, minute);
-      if (block) {
-        cell.classList.add(block.status === "suggested" ? "block-suggested" : "block-confirmed");
-        if (block.completion_status === "completed") cell.classList.add("block-completed");
-        if (block.completion_status === "skipped") cell.classList.add("block-skipped");
-        const isStartCell = plannerMinutesToLabel(minute) === block.start_at.slice(11, 16);
-        const isEndCell = plannerMinutesToLabel(minute + PLANNER_CELL_MINUTES) === block.end_at.slice(11, 16);
-        if (isStartCell) {
+      const session = plannerSessionAt(dateKey, minute);
+      if (session) {
+        // A saved session: shown on the calendar, not paintable.
+        cell.classList.add("block-confirmed");
+        cell.title = `${session.document_title || session.document_id} · ${PLANNER_ACTIVITY_LABELS[session.activity_type] || session.activity_type}`;
+        if (plannerSessionAt(dateKey, minute - PLANNER_CELL_MINUTES) !== session) {  // first cell of the session
           const label = document.createElement("span");
           label.className = "planner-cell-block-label";
-          label.textContent = block.completion_status === "completed" ? `✓ ${block.title}` : block.title;
+          label.textContent = session.document_title || session.document_id;
           cell.appendChild(label);
-          cell.title = plannerBlockTooltip(block);
         }
-        // Drag/resize on the grid is scoped to still-suggested blocks only -- once a block is
-        // confirmed (via Accept Plan) or completed/missed, it is edited (if at all) through the
-        // block editor modal, not by dragging it around the calendar.
-        const draggable = block.status === "suggested" && block.completion_status !== "completed";
-        if (draggable) {
-          cell.classList.add("block-draggable");
-          cell.addEventListener("mousedown", (event) => {
-            event.stopPropagation();
-            plannerStartBlockDrag(block, cell, "move");
-          });
-          if (isEndCell) {
-            const handle = document.createElement("span");
-            handle.className = "planner-block-resize-handle";
-            handle.title = "Drag to resize";
-            handle.addEventListener("mousedown", (event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              plannerStartBlockDrag(block, cell, "resize");
-            });
-            cell.appendChild(handle);
-          }
-        }
-        cell.addEventListener("click", (event) => {
-          event.stopPropagation();
-          openPlannerBlockEditor(block);
-        });
       } else {
-        cell.addEventListener("mousedown", () => plannerStartDrag(cell));
+        cell.addEventListener("pointerdown", (event) => {
+          event.preventDefault();
+          plannerStartDrag(cell);
+        });
       }
-      cell.addEventListener("mouseenter", () => {
-        if (plannerDrag) plannerExtendDrag(cell);
-        if (plannerBlockDrag) plannerUpdateBlockDragPreview(cell);
-      });
       body.appendChild(cell);
     });
   }
@@ -5163,317 +5167,236 @@ async function plannerFinishDrag() {
   if (payload.is_recurring) payload.day_of_week = drag.weekday; else payload.date = drag.date;
   const url = drag.mode === "erase" ? `${PLANNER_AVAILABILITY_API_URL}/remove` : PLANNER_AVAILABILITY_API_URL;
   try {
-    plannerAvailability = await fetchJson(url, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
-    });
+    plannerAvailability = await plannerRequest(url, { method: "POST", body: payload });
+    plannerPreview = null;
     renderPlannerCalendar();
   } catch (error) {
     showToast(error.message || "Could not update availability");
   }
 }
 
-// Drag-to-move and drag-to-resize for study blocks directly on the calendar grid. Movement is
-// constrained to the block's own date column (matching the availability drag above, and the
-// backend's edit_block rule that a block must start and end on the same day) -- only the time
-// (vertical axis) changes via direct drag; moving a block to a different day still works via the
-// block editor modal's start/end time fields.
-const PLANNER_MIN_BLOCK_DRAG_MINUTES = PLANNER_CELL_MINUTES;
+// ---- Steps 3 & 4: preview, confirm, saved plan ------------------------------
 
-function plannerStartBlockDrag(block, cell, mode) {
-  plannerSuppressNextBlockClick = false;
-  const startMinute = plannerToMinutes(block.start_at.slice(11, 16));
-  const endMinute = plannerToMinutes(block.end_at.slice(11, 16));
-  const cellMinute = Number(cell.dataset.minute);
-  plannerBlockDrag = {
-    block, mode, dateKey: cell.dataset.date,
-    duration: endMinute - startMinute,
-    cursorOffset: mode === "move" ? cellMinute - startMinute : 0,
-    previewStart: startMinute, previewEnd: endMinute, moved: false,
-  };
-}
-
-function plannerClearBlockDragPreview() {
-  document.querySelectorAll(".planner-cell.block-drag-preview").forEach((element) => element.classList.remove("block-drag-preview"));
-}
-
-function plannerUpdateBlockDragPreview(cell) {
-  const drag = plannerBlockDrag;
-  if (!drag || cell.dataset.date !== drag.dateKey) return;
-  const minute = Number(cell.dataset.minute);
-  if (drag.mode === "move") {
-    let start = minute - drag.cursorOffset;
-    start = Math.max(PLANNER_GRID_START_MINUTE, Math.min(start, PLANNER_GRID_END_MINUTE - drag.duration));
-    drag.previewStart = start;
-    drag.previewEnd = start + drag.duration;
-  } else {
-    let end = minute + PLANNER_CELL_MINUTES;
-    end = Math.max(drag.previewStart + PLANNER_MIN_BLOCK_DRAG_MINUTES, Math.min(end, PLANNER_GRID_END_MINUTE));
-    drag.previewEnd = end;
-  }
-  drag.moved = true;
-  plannerClearBlockDragPreview();
-  document.querySelectorAll(`.planner-cell[data-date="${drag.dateKey}"]`).forEach((element) => {
-    const elementMinute = Number(element.dataset.minute);
-    element.classList.toggle("block-drag-preview", elementMinute >= drag.previewStart && elementMinute < drag.previewEnd);
+function plannerGroupByDay(sessions) {
+  const groups = new Map();
+  sessions.forEach((session) => {
+    const key = session.scheduled_start.slice(0, 10);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(session);
   });
+  return [...groups.entries()];
 }
 
-async function plannerPersistBlockDrag(blockId, changes) {
-  try {
-    await fetchJson(`${PLANNER_BLOCKS_API_URL}/${encodeURIComponent(blockId)}`, {
-      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes),
-    });
-    plannerBlocks = await fetchJson(PLANNER_BLOCKS_API_URL);
-    showToast("Study block updated");
-  } catch (error) {
-    showToast(error.message || "Could not move study block");
-  } finally {
-    renderPlannerCalendar();
-    updatePlannerTaskActions();
-  }
-}
-
-async function plannerFinishBlockDrag() {
-  if (!plannerBlockDrag) return;
-  const drag = plannerBlockDrag;
-  plannerBlockDrag = null;
-  plannerClearBlockDragPreview();
-  const originalStart = plannerToMinutes(drag.block.start_at.slice(11, 16));
-  const originalEnd = plannerToMinutes(drag.block.end_at.slice(11, 16));
-  if (!drag.moved || (drag.previewStart === originalStart && drag.previewEnd === originalEnd)) return;
-  plannerSuppressNextBlockClick = true;
-  await plannerPersistBlockDrag(drag.block.block_id, {
-    start_at: `${drag.dateKey}T${plannerMinutesToLabel(drag.previewStart)}:00`,
-    end_at: `${drag.dateKey}T${plannerMinutesToLabel(drag.previewEnd)}:00`,
-  });
-}
-
-let plannerBlockEditor = null;
-let plannerEditingBlock = null;
-
-function plannerBuildBlockEditor() {
-  plannerBlockEditor = document.createElement("div");
-  plannerBlockEditor.className = "planner-block-editor-backdrop";
-  plannerBlockEditor.innerHTML = `<section class="planner-block-editor" role="dialog" aria-modal="true"><h2 id="planner-block-editor-title">Edit study block</h2><dl class="planner-block-editor-context" id="planner-block-editor-context" hidden><div id="planner-block-editor-material-row" hidden><dt>Material</dt><dd id="planner-block-editor-material"></dd></div><div id="planner-block-editor-topic-row" hidden><dt>Topic</dt><dd id="planner-block-editor-topic"></dd></div><div id="planner-block-editor-goal-row" hidden><dt>Study goal</dt><dd id="planner-block-editor-goal"></dd></div><div id="planner-block-editor-objective-row" hidden><dt>Objective</dt><dd id="planner-block-editor-objective"></dd></div></dl><p class="planner-block-editor-progress" id="planner-block-editor-progress" hidden></p><p class="planner-block-editor-completed" id="planner-block-editor-completed" hidden>Completed</p><label>Start time<input id="planner-block-editor-start" type="time" step="60"></label><label>End time<input id="planner-block-editor-end" type="time" step="60"></label><p class="planner-block-editor-error" id="planner-block-editor-error" hidden></p><div class="planner-block-editor-quick-actions" id="planner-block-editor-quick-actions" hidden><button class="text-button" id="planner-block-editor-open" type="button" hidden>Open material</button><button class="text-button" id="planner-block-editor-quiz" type="button" hidden>Quiz</button><button class="text-button" id="planner-block-editor-flashcards" type="button" hidden>Flashcards</button><button class="text-button" id="planner-block-editor-tutor" type="button" hidden>AI Tutor</button></div><div class="planner-block-editor-actions"><button class="text-button danger-button" id="planner-block-editor-delete" type="button">Delete</button><button class="text-button" id="planner-block-editor-cancel" type="button">Cancel</button><button class="primary-button" id="planner-block-editor-complete" type="button">Complete</button><button class="primary-button" id="planner-block-editor-save" type="button">Save</button></div></section>`;
-  document.body.appendChild(plannerBlockEditor);
-  plannerBlockEditor.addEventListener("click", (event) => {
-    if (event.target === plannerBlockEditor) closePlannerBlockEditor();
-  });
-  document.getElementById("planner-block-editor-cancel").addEventListener("click", closePlannerBlockEditor);
-  const openBlockStudySession = (tab, focusChat) => {
-    if (!plannerEditingBlock?.document_id) return;
-    const { document_id: documentId, topic_id: topicId } = plannerEditingBlock;
-    closePlannerBlockEditor();
-    openStudySession(documentId, tab, topicId || "");
-    if (focusChat) window.requestAnimationFrame(() => chatInput?.focus());
-  };
-  document.getElementById("planner-block-editor-open").addEventListener("click", () => openBlockStudySession("material", false));
-  document.getElementById("planner-block-editor-quiz").addEventListener("click", () => openBlockStudySession("quiz", false));
-  document.getElementById("planner-block-editor-flashcards").addEventListener("click", () => openBlockStudySession("flashcards", false));
-  document.getElementById("planner-block-editor-tutor").addEventListener("click", () => openBlockStudySession("material", true));
-  document.getElementById("planner-block-editor-delete").addEventListener("click", async () => {
-    if (!plannerEditingBlock) return;
-    if (!window.confirm(`Delete "${plannerEditingBlock.title}"?`)) return;
-    const deleted = await plannerDeleteBlock(plannerEditingBlock.block_id);
-    if (deleted) closePlannerBlockEditor();
-  });
-  document.getElementById("planner-block-editor-complete").addEventListener("click", async () => {
-    if (!plannerEditingBlock) return;
-    const completed = await plannerCompleteBlock(plannerEditingBlock.block_id);
-    if (completed) openPlannerBlockEditor(completed);
-  });
-  document.getElementById("planner-block-editor-save").addEventListener("click", async () => {
-    if (!plannerEditingBlock) return;
-    const startTime = document.getElementById("planner-block-editor-start").value;
-    const endTime = document.getElementById("planner-block-editor-end").value;
-    const errorElement = document.getElementById("planner-block-editor-error");
-    if (!startTime || !endTime) {
-      errorElement.hidden = false;
-      errorElement.textContent = "Enter both a start and end time.";
-      return;
-    }
-    const dateKey = plannerEditingBlock.start_at.slice(0, 10);
-    const updated = await plannerUpdateBlock(plannerEditingBlock.block_id, {
-      start_at: `${dateKey}T${startTime}:00`, end_at: `${dateKey}T${endTime}:00`,
-    });
-    if (updated) closePlannerBlockEditor();
-  });
-}
-
-function openPlannerBlockEditor(block) {
-  plannerEditingBlock = block;
-  if (!plannerBlockEditor) plannerBuildBlockEditor();
-  document.getElementById("planner-block-editor-title").textContent = `${block.title} · ${block.start_at.slice(0, 10)}`;
-
-  const contextElement = document.getElementById("planner-block-editor-context");
-  const materialRow = document.getElementById("planner-block-editor-material-row");
-  const topicRow = document.getElementById("planner-block-editor-topic-row");
-  const goalRow = document.getElementById("planner-block-editor-goal-row");
-  const objectiveRow = document.getElementById("planner-block-editor-objective-row");
-  const linkedDocument = block.document_id ? indexedDocuments.find((doc) => doc.id === block.document_id) : null;
-  const documentLabel = linkedDocument ? linkedDocument.title : block.document_id;
-  const topicLabel = plannerTopicLabel(block.document_id, block.topic_id);
-  materialRow.hidden = !block.document_id;
-  if (block.document_id) document.getElementById("planner-block-editor-material").textContent = documentLabel;
-  topicRow.hidden = !topicLabel;
-  if (topicLabel) document.getElementById("planner-block-editor-topic").textContent = topicLabel;
-  goalRow.hidden = !block.study_goal;
-  if (block.study_goal) document.getElementById("planner-block-editor-goal").textContent = block.study_goal;
-  objectiveRow.hidden = !block.objective;
-  if (block.objective) document.getElementById("planner-block-editor-objective").textContent = block.objective;
-  contextElement.hidden = !(block.document_id || block.study_goal || block.objective);
-
-  const quickActions = document.getElementById("planner-block-editor-quick-actions");
-  document.getElementById("planner-block-editor-open").hidden = !block.document_id;
-  document.getElementById("planner-block-editor-quiz").hidden = !block.document_id;
-  document.getElementById("planner-block-editor-flashcards").hidden = !block.document_id;
-  document.getElementById("planner-block-editor-tutor").hidden = !block.document_id;
-  quickActions.hidden = !block.document_id;
-
-  document.getElementById("planner-block-editor-start").value = block.start_at.slice(11, 16);
-  document.getElementById("planner-block-editor-end").value = block.end_at.slice(11, 16);
-  const errorElement = document.getElementById("planner-block-editor-error");
-  errorElement.hidden = true;
-  errorElement.textContent = "";
-
-  const progressElement = document.getElementById("planner-block-editor-progress");
-  const progress = plannerProgressForTopic(block.document_id, block.topic_id);
-  if (progress) {
-    progressElement.textContent = `Topic progress: ${Math.round(progress.progress_percent)}% (${progress.completed_minutes}/${progress.planned_minutes} min)`;
-    progressElement.hidden = false;
-  } else {
-    progressElement.hidden = true;
-  }
-
-  const isCompleted = block.completion_status === "completed";
-  document.getElementById("planner-block-editor-completed").hidden = !isCompleted;
-  document.getElementById("planner-block-editor-complete").hidden = isCompleted;
-  document.getElementById("planner-block-editor-save").hidden = isCompleted;
-  document.getElementById("planner-block-editor-delete").hidden = isCompleted;
-  document.getElementById("planner-block-editor-start").disabled = isCompleted;
-  document.getElementById("planner-block-editor-end").disabled = isCompleted;
-
-  plannerBlockEditor.classList.add("open");
-}
-
-function closePlannerBlockEditor() {
-  plannerEditingBlock = null;
-  plannerBlockEditor?.classList.remove("open");
-}
-
-function plannerShowBlockEditorError(message) {
-  const errorElement = document.getElementById("planner-block-editor-error");
-  if (errorElement) {
-    errorElement.hidden = false;
-    errorElement.textContent = message;
-  } else {
-    showToast(message);
-  }
-}
-
-async function plannerUpdateBlock(blockId, changes) {
-  try {
-    await fetchJson(`${PLANNER_BLOCKS_API_URL}/${encodeURIComponent(blockId)}`, {
-      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes),
-    });
-    plannerBlocks = await fetchJson(PLANNER_BLOCKS_API_URL);
-    renderPlannerCalendar();
-    updatePlannerTaskActions();
-    showToast("Study block updated");
-    return true;
-  } catch (error) {
-    plannerShowBlockEditorError(error.message || "Could not update study block");
-    return false;
-  }
-}
-
-async function plannerCompleteBlock(blockId) {
-  try {
-    const updated = await fetchJson(`${PLANNER_BLOCKS_API_URL}/${encodeURIComponent(blockId)}/complete`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
-    });
-    plannerBlocks = await fetchJson(PLANNER_BLOCKS_API_URL);
-    plannerTopicProgress = await fetchJson(PLANNER_TOPIC_PROGRESS_API_URL).catch(() => plannerTopicProgress);
-    renderPlannerCalendar();
-    updatePlannerTaskActions();
-    showToast("Study block completed");
-    return updated;
-  } catch (error) {
-    plannerShowBlockEditorError(error.message || "Could not complete study block");
-    return null;
-  }
-}
-
-async function plannerDeleteBlock(blockId) {
-  try {
-    await fetchJson(`${PLANNER_BLOCKS_API_URL}/${encodeURIComponent(blockId)}`, { method: "DELETE" });
-    plannerBlocks = plannerBlocks.filter((block) => block.block_id !== blockId);
-    renderPlannerCalendar();
-    updatePlannerTaskActions();
-    showToast("Study block deleted");
-    return true;
-  } catch (error) {
-    plannerShowBlockEditorError(error.message || "Could not delete study block");
-    return false;
-  }
-}
-
-function plannerRefreshTaskTopicOptions() {
-  if (!plannerTaskTopicSelect) return;
-  const documentId = plannerTaskDocumentSelect.value;
-  const linkedDocument = indexedDocuments.find((doc) => doc.id === documentId);
-  const topics = linkedDocument?.topics || [];
-  plannerTaskTopicField.hidden = !documentId || !topics.length;
-  plannerTaskTopicSelect.innerHTML = "";
-  plannerTaskTopicSelect.add(new Option("Whole document", ""));
-  topics.forEach((topic) => plannerTaskTopicSelect.add(new Option(topic.name, topic.topic_id)));
-}
-
-plannerNewTaskButton?.addEventListener("click", () => {
-  plannerTaskForm.hidden = !plannerTaskForm.hidden;
-  if (!plannerTaskForm.hidden) {
-    plannerTaskDocumentSelect.innerHTML = "";
-    plannerTaskDocumentSelect.add(new Option("None", ""));
-    indexedDocuments.forEach((doc) => plannerTaskDocumentSelect.add(new Option(doc.title, doc.id)));
-    plannerRefreshTaskTopicOptions();
-    plannerTaskTitleInput.focus();
-  }
-});
-plannerTaskDocumentSelect?.addEventListener("change", plannerRefreshTaskTopicOptions);
-plannerCancelTaskButton?.addEventListener("click", () => {
-  plannerTaskForm.hidden = true;
-  plannerTaskForm.reset();
-});
-plannerTaskForm?.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const hours = Number(plannerTaskHoursInput.value || 0);
-  const minutes = Number(plannerTaskMinutesInput.value || 0);
-  const estimatedMinutes = hours * 60 + minutes;
-  if (estimatedMinutes <= 0) {
-    showToast("Estimated study time must be greater than zero");
+function renderPlannerSessionList(container, sessions, emptyText) {
+  container.innerHTML = "";
+  if (!sessions.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = emptyText;
+    container.appendChild(empty);
     return;
   }
-  try {
-    const task = await fetchJson(PLANNER_TASKS_API_URL, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        title: plannerTaskTitleInput.value.trim(),
-        document_id: plannerTaskDocumentSelect.value || null,
-        topic_id: plannerTaskTopicSelect?.value || null,
-        deadline: plannerTaskDeadlineInput.value,
-        estimated_minutes: estimatedMinutes,
-      }),
+  plannerGroupByDay(sessions).forEach(([dateKey, daySessions]) => {
+    const day = document.createElement("section");
+    day.className = "planner-day";
+    const heading = document.createElement("h4");
+    heading.textContent = plannerDayLabel(dateKey);
+    const total = document.createElement("small");
+    total.textContent = ` · ${plannerFormatDuration(daySessions.reduce((sum, item) => sum + item.duration_minutes, 0))}`;
+    heading.appendChild(total);
+    day.appendChild(heading);
+    const list = document.createElement("ol");
+    list.className = "planner-session-list";
+    daySessions.forEach((session) => {
+      const item = document.createElement("li");
+      item.className = `planner-session planner-session--${session.activity_type}`;
+      const time = document.createElement("span");
+      time.className = "planner-session-time";
+      time.textContent = `${session.scheduled_start.slice(11, 16)}–${session.scheduled_end.slice(11, 16)}`;
+      const content = document.createElement("div");
+      content.className = "planner-session-body";
+      const title = document.createElement("strong");
+      title.textContent = session.document_title || session.document_id;
+      const meta = document.createElement("span");
+      meta.className = "planner-session-meta";
+      const chip = document.createElement("span");
+      chip.className = "planner-activity-chip";
+      chip.textContent = PLANNER_ACTIVITY_LABELS[session.activity_type] || session.activity_type;
+      const duration = document.createElement("span");
+      duration.textContent = plannerFormatDuration(session.duration_minutes);
+      meta.append(chip, duration);
+      const reason = document.createElement("small");
+      reason.className = "planner-session-reason";
+      reason.textContent = session.reason?.message || "";
+      content.append(title, meta, reason);
+      item.append(time, content);
+      list.appendChild(item);
     });
-    plannerTaskForm.hidden = true;
-    plannerTaskForm.reset();
-    plannerSelectedTaskId = task.task_id;
-    await loadPlannerData();
-    showToast("Task created");
+    day.appendChild(list);
+    container.appendChild(day);
+  });
+}
+
+function plannerStat(label, value) {
+  const wrapper = document.createElement("div");
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const detail = document.createElement("dd");
+  detail.textContent = plannerFormatDuration(value);
+  wrapper.append(term, detail);
+  return wrapper;
+}
+
+function plannerGoButton(label, step, className = "secondary-button") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = label;
+  button.addEventListener("click", () => plannerSetStep(step));
+  return button;
+}
+
+function renderPlannerPreview() {
+  if (!plannerPreviewCapacity) return;
+  plannerPreviewCapacity.innerHTML = "";
+  const preview = plannerPreview;
+  if (!preview) {
+    plannerPreviewSessions.innerHTML = "";
+    plannerConfirmButton.hidden = true;
+    return;
+  }
+  const capacity = preview.capacity;
+  const atRisk = capacity.status === "at_risk";
+  const noAvailability = preview.warnings.some((warning) => warning.code === "no_availability");
+  const box = document.createElement("div");
+  box.className = `planner-capacity ${atRisk ? "at-risk" : "on-track"}`;
+  const title = document.createElement("strong");
+  title.textContent = atRisk ? "Not everything fits" : "Everything fits";
+  const text = document.createElement("p");
+  const count = preview.sessions.length;
+  text.textContent = noAvailability
+    ? "You haven’t selected any study time yet. Add some availability to get a plan."
+    : atRisk
+      ? "Your selected time can’t comfortably hold everything before the deadlines. Add study time, move a deadline, or confirm the part that fits."
+      : `${plannerFormatDuration(capacity.scheduled_minutes)} of study in ${count} session${count === 1 ? "" : "s"}. The rest of your selected time stays free.`;
+  box.append(title, text);
+  if (atRisk) {
+    const stats = document.createElement("dl");
+    stats.className = "planner-capacity-stats";
+    stats.append(
+      plannerStat("Required", capacity.required_minutes),
+      plannerStat("Schedulable", capacity.schedulable_minutes),
+      plannerStat("Shortfall", capacity.shortfall_minutes),
+    );
+    const actions = document.createElement("div");
+    actions.className = "planner-capacity-actions";
+    actions.append(plannerGoButton("Add availability", "availability"), plannerGoButton("Adjust deadlines", "materials"));
+    box.append(stats, actions);
+  }
+  plannerPreviewCapacity.appendChild(box);
+  renderPlannerSessionList(plannerPreviewSessions, preview.sessions, "No sessions could be scheduled yet.");
+  plannerConfirmButton.hidden = !count;
+  plannerConfirmButton.disabled = plannerBusy;
+  plannerConfirmButton.textContent = atRisk ? "Confirm partial plan" : "Looks good, confirm";
+}
+
+function plannerShowPreviewError(error) {
+  plannerPreviewError.innerHTML = "";
+  const message = document.createElement("p");
+  message.textContent = error.message || "Could not build a preview";
+  plannerPreviewError.appendChild(message);
+  const documents = error.detail?.code === "deadline_passed" ? error.detail.documents || [] : [];
+  if (documents.length) {
+    const list = document.createElement("ul");
+    documents.forEach((item) => {
+      const entry = document.createElement("li");
+      entry.textContent = `${item.document_title || item.document_id}: ${item.deadline}`;
+      list.appendChild(entry);
+    });
+    plannerPreviewError.append(list, plannerGoButton("Update deadlines", "materials", "text-button"));
+  }
+  plannerPreviewError.hidden = false;
+}
+
+async function plannerGeneratePreview() {
+  if (plannerBusy || !plannerPlan) return;
+  plannerBusy = true;
+  plannerGeneratePreviewButton.disabled = true;
+  plannerGeneratePreviewButton.textContent = "Generating…";
+  plannerPreviewError.hidden = true;
+  try {
+    plannerPreview = await plannerRequest(plannerPlanUrl("/preview"), {
+      method: "POST", body: { utc_offset_minutes: plannerUtcOffsetMinutes() },
+    });
   } catch (error) {
-    showToast(error.message || "Could not create task");
+    plannerPreview = null;
+    plannerShowPreviewError(error);
+  } finally {
+    plannerBusy = false;
+    plannerGeneratePreviewButton.disabled = false;
+    plannerGeneratePreviewButton.textContent = "Generate preview";
+    plannerSetStep("preview");
+  }
+}
+
+async function plannerConfirm() {
+  if (plannerBusy || !plannerPlan || !plannerPreview?.sessions.length) return;
+  plannerBusy = true;
+  plannerConfirmButton.disabled = true;
+  plannerConfirmButton.textContent = "Saving…";
+  let alreadyConfirmed = false;
+  try {
+    // The server recomputes the schedule itself; only the learner's UTC offset is sent.
+    const result = await plannerRequest(plannerPlanUrl("/confirm"), {
+      method: "POST", body: { utc_offset_minutes: plannerUtcOffsetMinutes() },
+    });
+    plannerSessions = result.sessions;
+    plannerPreview = null;
+    plannerStep = "plan";
+    showToast("Study plan saved");
+  } catch (error) {
+    if (error.status === 409) alreadyConfirmed = true;
+    else plannerShowPreviewError(error);
+  } finally {
+    plannerBusy = false;
+    renderPlanner();
+  }
+  if (alreadyConfirmed) {
+    showToast("This plan is already confirmed");
+    await loadPlannerData();
+  }
+}
+
+function renderPlannerPlan() {
+  if (!plannerPlanSessions) return;
+  const total = plannerSessions.reduce((sum, session) => sum + session.duration_minutes, 0);
+  const days = new Set(plannerSessions.map((session) => session.scheduled_start.slice(0, 10))).size;
+  plannerPlanSummary.textContent = plannerSessions.length
+    ? `${plannerSessions.length} session${plannerSessions.length === 1 ? "" : "s"} · ${plannerFormatDuration(total)} across ${days} day${days === 1 ? "" : "s"}`
+    : "No sessions saved yet.";
+  renderPlannerSessionList(plannerPlanSessions, plannerSessions, "No sessions saved yet.");
+}
+
+plannerView?.querySelectorAll("[data-planner-go]").forEach((button) => {
+  button.addEventListener("click", () => plannerSetStep(button.dataset.plannerGo));
+});
+plannerToAvailabilityButton?.addEventListener("click", () => plannerSetStep("availability"));
+plannerGeneratePreviewButton?.addEventListener("click", plannerGeneratePreview);
+plannerConfirmButton?.addEventListener("click", plannerConfirm);
+plannerNewPlanButton?.addEventListener("click", async () => {
+  if (!plannerPlan) return;
+  try {
+    // Archive the confirmed plan (its saved sessions stay on the calendar) and start fresh.
+    await plannerRequest(plannerPlanUrl(), { method: "PATCH", body: { status: "archived" } });
+    plannerPlan = null;
+    plannerMaterials = [];
+    plannerSessions = [];
+    plannerPreview = null;
+    plannerSetStep("materials");
+  } catch (error) {
+    showToast(error.message || "Could not start a new plan");
   }
 });
-
 plannerPrevWeekButton?.addEventListener("click", () => {
   plannerWeekStart.setDate(plannerWeekStart.getDate() - 7);
   renderPlannerCalendar();
@@ -5492,50 +5415,17 @@ plannerModeEraseButton?.addEventListener("click", () => {
   plannerModeEraseButton.classList.add("active");
   plannerModeAvailableButton?.classList.remove("active");
 });
-document.addEventListener("mouseup", () => {
+// Pointer events so painting availability works with a mouse and with touch (small screens).
+plannerCalendar?.addEventListener("pointermove", (event) => {
+  if (!plannerDrag) return;
+  const cell = document.elementFromPoint(event.clientX, event.clientY)?.closest?.(".planner-cell");
+  if (cell) plannerExtendDrag(cell);
+});
+document.addEventListener("pointerup", () => {
   if (plannerDrag) plannerFinishDrag();
-  if (plannerBlockDrag) plannerFinishBlockDrag();
 });
-document.addEventListener("click", (event) => {
-  if (!plannerSuppressNextBlockClick) return;
-  plannerSuppressNextBlockClick = false;
-  event.stopPropagation();
-}, true);
-
-plannerGenerateButton?.addEventListener("click", async () => {
-  if (!plannerSelectedTaskId) return;
-  const isRegenerate = plannerBlocks.some((block) => block.task_id === plannerSelectedTaskId);
-  const endpoint = isRegenerate ? "regenerate" : "generate";
-  plannerGenerateButton.disabled = true;
-  try {
-    const result = await fetchJson(
-      `${PLANNER_TASKS_API_URL}/${encodeURIComponent(plannerSelectedTaskId)}/${endpoint}`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ local_now: plannerLocalIso(new Date()) }),
-      },
-    );
-    plannerScheduleResults[plannerSelectedTaskId] = result;
-    plannerBlocks = await fetchJson(PLANNER_BLOCKS_API_URL);
-    renderPlannerCalendar();
-    updatePlannerTaskActions();
-    showToast(result.status === "schedule_risk" ? "Schedule risk: not enough availability" : "Study plan generated");
-  } catch (error) {
-    showToast(error.message || "Could not generate study plan");
-  } finally {
-    plannerGenerateButton.disabled = false;
-  }
-});
-plannerAcceptButton?.addEventListener("click", async () => {
-  if (!plannerSelectedTaskId) return;
-  try {
-    await fetchJson(`${PLANNER_TASKS_API_URL}/${encodeURIComponent(plannerSelectedTaskId)}/accept`, { method: "POST" });
-    plannerBlocks = await fetchJson(PLANNER_BLOCKS_API_URL);
-    renderPlannerCalendar();
-    updatePlannerTaskActions();
-    showToast("Plan accepted");
-  } catch (error) {
-    showToast(error.message || "Could not accept plan");
-  }
+document.addEventListener("pointercancel", () => {
+  if (plannerDrag) plannerFinishDrag();
 });
 
 async function initializeApplication() {

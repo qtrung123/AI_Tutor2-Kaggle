@@ -273,6 +273,216 @@ class StudyPlanApiTests(PlannerDatabaseMixin, unittest.TestCase):
         self.assertEqual(study_planner_store.list_sessions(self.alice), [])
         self.assertEqual(study_planner_store.list_plan_schedule_runs(self.alice, plan["plan_id"]), [])
 
+    # -- confirm -----------------------------------------------------------------
+
+    def confirm(self, plan_id, client=None, **body):
+        return (client or self.client).post(f"/api/planner/plans/{plan_id}/confirm",
+                                            json={"utc_offset_minutes": 0, "local_now": MONDAY_LOCAL, **body})
+
+    def golden_plan(self):
+        plan = self.create_plan()
+        self.add(plan["plan_id"], "mkt", deadline="2026-10-01")
+        self.add(plan["plan_id"], "stats", deadline="2026-10-05")
+        self.weekly((0, "18:00", "22:00"), (1, "20:00", "21:00"), (3, "19:00", "22:00"), (5, "09:00", "12:00"))
+        return plan
+
+    def saved(self, plan_id):
+        return (study_planner_store.list_sessions(self.alice, plan_id=plan_id),
+                study_planner_store.list_plan_schedule_runs(self.alice, plan_id))
+
+    def test_confirm_saves_the_server_computed_schedule_and_one_run(self):
+        plan = self.golden_plan()
+        preview = self.preview(plan["plan_id"], utc_offset_minutes=420).json()
+        response = self.confirm(plan["plan_id"], utc_offset_minutes=420)
+        self.assertEqual(response.status_code, 201, response.text)
+        body = response.json()
+        self.assertTrue(body["persisted"])
+        key = lambda s: (s["document_id"], s["activity_type"], s["scheduled_start"], s["scheduled_end"], s["duration_minutes"])
+        self.assertEqual([key(s) for s in body["sessions"]], [key(s) for s in preview["sessions"]])
+        self.assertEqual(body["capacity"], preview["capacity"])
+        first = body["sessions"][0]
+        self.assertEqual(set(first), {"session_id", "document_id", "document_title", "activity_type", "scheduled_start",
+                                      "scheduled_end", "duration_minutes", "status", "reason", "artifact_id"})
+        self.assertEqual((first["status"], first["document_title"]), ("scheduled", "Marketing"))
+        self.assertEqual(first["reason"], {"code": "deadline_approaching", "message": "Deadline is coming up"})
+        sessions, runs = self.saved(plan["plan_id"])
+        self.assertEqual(len(sessions), len(preview["sessions"]))
+        self.assertEqual([(r["schedule_run_id"], r["reason"]) for r in runs], [(body["schedule_run_id"], "confirm")])
+        listed = self.client.get(f"/api/planner/plans/{plan['plan_id']}/sessions").json()
+        self.assertEqual(listed, body["sessions"])
+
+    def test_confirm_never_accepts_client_sessions(self):
+        plan = self.golden_plan()
+        forged = [{"document_id": "mkt", "activity_type": "quiz", "scheduled_start": "2026-09-28T03:00:00",
+                   "scheduled_end": "2026-09-28T04:00:00", "duration_minutes": 60}]
+        self.assertEqual(self.confirm(plan["plan_id"], sessions=forged).status_code, 422)
+        self.assertEqual(self.saved(plan["plan_id"]), ([], []))
+
+    def test_duplicate_confirmation_is_a_conflict(self):
+        plan = self.golden_plan()
+        self.assertEqual(self.confirm(plan["plan_id"]).status_code, 201)
+        before = self.saved(plan["plan_id"])
+        again = self.confirm(plan["plan_id"])
+        self.assertEqual(again.status_code, 409)
+        self.assertEqual(self.saved(plan["plan_id"]), before)
+        # The store re-checks inside the write transaction, so a racing second confirm also fails.
+        with self.assertRaises(study_planner_store.PlanAlreadyConfirmedError):
+            study_planner_store.confirm_plan_sessions(self.alice, plan["plan_id"], [
+                {"document_id": "mkt", "activity_type": "review", "scheduled_start": "2026-09-30T18:00:00",
+                 "scheduled_end": "2026-09-30T18:15:00", "duration_minutes": 15}])
+        self.assertEqual(self.saved(plan["plan_id"]), before)
+
+    def test_confirm_is_atomic(self):
+        plan = self.golden_plan()
+        with patch.object(study_planner_store, "_insert_schedule_run", side_effect=RuntimeError("disk full")):
+            with self.assertRaises(RuntimeError):
+                study_plan_api_service.confirm_plan(self.alice, plan["plan_id"], 0, local_now=MONDAY_LOCAL)
+        self.assertEqual(self.saved(plan["plan_id"]), ([], []))  # no sessions without their run
+        with self.assertRaises(ValueError):  # one invalid session -> nothing written
+            study_planner_store.confirm_plan_sessions(self.alice, plan["plan_id"], [
+                {"document_id": "mkt", "activity_type": "summary", "scheduled_start": "2026-09-28T18:00:00",
+                 "scheduled_end": "2026-09-28T18:45:00", "duration_minutes": 45},
+                {"document_id": "not-in-plan", "activity_type": "quiz", "scheduled_start": "2026-09-29T18:00:00",
+                 "scheduled_end": "2026-09-29T18:30:00", "duration_minutes": 30}])
+        self.assertEqual(self.saved(plan["plan_id"]), ([], []))
+        self.assertEqual(self.confirm(plan["plan_id"]).status_code, 201)  # and it still confirms afterwards
+
+    def test_partial_at_risk_plan_can_be_confirmed(self):
+        plan = self.create_plan()
+        self.add(plan["plan_id"], "mkt", deadline="2026-09-30")
+        self.add(plan["plan_id"], "stats", deadline="2026-09-30")
+        self.weekly((0, "18:00", "19:00"))
+        preview = self.preview(plan["plan_id"]).json()
+        self.assertEqual(preview["capacity"]["status"], "at_risk")
+        response = self.confirm(plan["plan_id"])
+        self.assertEqual(response.status_code, 201, response.text)
+        body = response.json()
+        self.assertEqual(body["capacity"]["status"], "at_risk")
+        self.assertEqual(len(body["sessions"]), len(preview["sessions"]))
+        self.assertTrue(body["capacity"]["unscheduled"])
+
+    def test_confirm_rejects_safely_when_nothing_can_be_scheduled(self):
+        plan = self.create_plan()
+        self.add(plan["plan_id"], "mkt", deadline="2026-10-05")
+        response = self.confirm(plan["plan_id"])  # no availability at all
+        self.assertEqual(response.status_code, 400)
+        detail = response.json()["detail"]
+        self.assertEqual(detail["code"], "nothing_to_schedule")
+        self.assertEqual(detail["capacity"]["status"], "at_risk")
+        self.assertEqual(self.saved(plan["plan_id"]), ([], []))
+
+    def test_confirm_shares_preview_validation(self):
+        plan = self.create_plan()
+        self.assertEqual(self.confirm(plan["plan_id"]).json()["detail"]["code"], "no_materials")
+        self.add(plan["plan_id"], "mkt", deadline="2026-09-27")
+        self.weekly((0, "18:00", "22:00"))
+        self.assertEqual(self.confirm(plan["plan_id"], utc_offset_minutes=7).json()["detail"]["code"], "invalid_utc_offset")
+        self.assertEqual(self.confirm(plan["plan_id"], local_now="2026-09-28T08:00:00Z").json()["detail"]["code"],
+                         "invalid_local_now")
+        self.assertEqual(self.confirm(plan["plan_id"]).json()["detail"]["code"], "deadline_passed")
+        self.assertEqual(self.client.post(f"/api/planner/plans/{plan['plan_id']}/confirm", json={}).status_code, 422)
+        self.assertEqual(self.saved(plan["plan_id"]), ([], []))
+
+    def test_confirm_uses_the_learner_utc_offset(self):
+        plan = self.create_plan()
+        self.add(plan["plan_id"], "stats")
+        self.add_flashcards(self.alice, "stats", 20)
+        self.add_quiz(self.alice, "stats", "q1")
+        self.add_attempt(self.alice, "stats", "q1", score=4, answered=10, completed=True,
+                         completed_at="2026-09-27T20:30:00+00:00")
+        self.weekly(*((day, "09:00", "22:00") for day in range(7)))
+        body = self.client.post(f"/api/planner/plans/{plan['plan_id']}/confirm",
+                                json={"utc_offset_minutes": 420, "local_now": MONDAY_LOCAL}).json()
+        self.assertEqual(body["sessions"][0]["scheduled_start"][:10], "2026-09-29")  # Monday 03:30 local -> due Tue
+        self.assertEqual(body["utc_offset_minutes"], 420)
+
+    def test_confirm_and_sessions_are_owner_scoped(self):
+        plan = self.golden_plan()
+        bob = self.login("bob")
+        self.assertEqual(self.confirm(plan["plan_id"], client=bob).status_code, 404)
+        self.assertEqual(bob.get(f"/api/planner/plans/{plan['plan_id']}/sessions").status_code, 404)
+        self.assertEqual(self.saved(plan["plan_id"]), ([], []))
+        self.assertEqual(self.confirm(plan["plan_id"]).status_code, 201)
+        self.assertEqual(bob.get(f"/api/planner/plans/{plan['plan_id']}/sessions").status_code, 404)
+
+    # -- archived plans ------------------------------------------------------------
+
+    def replan(self, title="Next plan"):
+        """A second plan over the same documents, deadlines and (shared) availability."""
+        plan = self.create_plan(title=title)
+        self.add(plan["plan_id"], "mkt", deadline="2026-10-01")
+        self.add(plan["plan_id"], "stats", deadline="2026-10-05")
+        return plan
+
+    def slots(self, body):
+        return [(s["document_id"], s["activity_type"], s["scheduled_start"], s["scheduled_end"]) for s in body["sessions"]]
+
+    def test_archived_plan_no_longer_blocks_the_next_plan(self):
+        old = self.golden_plan()
+        fresh = self.preview(old["plan_id"]).json()               # what an unblocked plan looks like
+        self.assertEqual(self.confirm(old["plan_id"]).status_code, 201)
+        old_sessions = study_planner_store.list_sessions(self.alice, plan_id=old["plan_id"])
+
+        # While the old plan is active its future sessions are real commitments.
+        new = self.replan()
+        blocked = self.preview(new["plan_id"]).json()
+        self.assertLess(blocked["capacity"]["schedulable_minutes"], fresh["capacity"]["schedulable_minutes"])
+        self.assertFalse(set(self.slots(blocked)) & set(self.slots(fresh)))
+
+        # "Start a new plan" archives it: the same availability is fully usable again.
+        self.assertEqual(self.client.patch(f"/api/planner/plans/{old['plan_id']}", json={"status": "archived"}).status_code, 200)
+        unblocked = self.preview(new["plan_id"]).json()
+        self.assertEqual(self.slots(unblocked), self.slots(fresh))
+        self.assertEqual(unblocked["capacity"], fresh["capacity"])
+        self.assertEqual(self.confirm(new["plan_id"]).status_code, 201)
+        # Nothing of the archived plan was deleted or rewritten.
+        self.assertEqual(study_planner_store.list_sessions(self.alice, plan_id=old["plan_id"]), old_sessions)
+
+    def test_archiving_keeps_completed_history_and_in_progress_work(self):
+        old = self.golden_plan()
+        saved = self.confirm(old["plan_id"]).json()["sessions"]
+        done, active = saved[0], saved[1]
+        study_planner_store.update_session(self.alice, done["session_id"], {"status": "completed"})
+        study_planner_store.update_session(self.alice, active["session_id"], {"status": "in_progress"})
+        self.client.patch(f"/api/planner/plans/{old['plan_id']}", json={"status": "archived"})
+
+        statuses = {s["session_id"]: s["status"] for s in study_planner_store.list_sessions(self.alice, plan_id=old["plan_id"])}
+        self.assertEqual(len(statuses), len(saved))                       # nothing deleted
+        self.assertEqual((statuses[done["session_id"]], statuses[active["session_id"]]), ("completed", "in_progress"))
+        busy = {s["session_id"] for s in study_planner_store.list_busy_sessions(self.alice)}
+        self.assertEqual(busy, {done["session_id"], active["session_id"]})  # scheduled ones stopped blocking
+
+        new = self.replan()
+        body = self.preview(new["plan_id"]).json()
+        for kept in (done, active):  # completed/in-progress time is never double-booked
+            for session in body["sessions"]:
+                self.assertFalse(session["scheduled_start"] < kept["scheduled_end"]
+                                 and kept["scheduled_start"] < session["scheduled_end"], (session, kept))
+
+    def test_archived_plans_only_release_their_own_owners_time(self):
+        self.weekly((0, "18:00", "22:00"), (1, "20:00", "21:00"), (3, "19:00", "22:00"), (5, "09:00", "12:00"))
+        bob = self.login("bob")
+        self.weekly((0, "18:00", "22:00"), client=bob)
+        bobs = self.create_plan(bob, title="Bob")
+        self.add(bobs["plan_id"], "bob-doc", client=bob)
+        bob_confirmed = self.confirm(bobs["plan_id"], client=bob).json()["sessions"]
+
+        old = self.replan(title="Alice old")
+        alice_fresh = self.preview(old["plan_id"]).json()   # Bob's sessions never block Alice
+        self.confirm(old["plan_id"])
+        self.client.patch(f"/api/planner/plans/{old['plan_id']}", json={"status": "archived"})
+        self.assertEqual(self.slots(self.preview(self.replan()["plan_id"]).json()), self.slots(alice_fresh))
+
+        # Bob's active plan still blocks Bob, and his sessions are untouched by Alice's archive.
+        self.assertEqual([s["session_id"] for s in study_planner_store.list_busy_sessions(self.bob)],
+                         [s["session_id"] for s in bob_confirmed])
+        self.assertTrue(all(s["status"] == "scheduled" for s in study_planner_store.list_sessions(self.bob)))
+        bob_next = self.create_plan(bob, title="Bob next")
+        self.add(bob_next["plan_id"], "bob-doc", client=bob)
+        bob_preview = self.preview(bob_next["plan_id"], client=bob).json()
+        taken = {(s["scheduled_start"], s["scheduled_end"]) for s in bob_confirmed}
+        self.assertFalse(taken & {(s["scheduled_start"], s["scheduled_end"]) for s in bob_preview["sessions"]})
+
     # -- legacy ------------------------------------------------------------------
 
     def test_legacy_planner_routes_still_work_alongside_v2(self):

@@ -27,6 +27,17 @@ REASON_FINAL_REVIEW = "final_review"
 REASON_QUIZ_IN_PROGRESS = "quiz_in_progress"
 REASON_RESCHEDULED = "rescheduled"
 SCHEDULING_REASON_CODES = SESSION_REASONS
+# Short human-readable label per code, for persisted sessions (which store only the code).
+REASON_LABELS = {
+    REASON_NEW_MATERIAL: "New material to learn",
+    REASON_DEADLINE_APPROACHING: "Deadline is coming up",
+    REASON_REVIEW_DUE: "Spaced review is due",
+    REASON_LOW_QUIZ_SCORE: "Low quiz score, so practice again",
+    REASON_FLASHCARD_REVIEW_DUE: "Flashcard review is due",
+    REASON_FINAL_REVIEW: "Final review before the deadline",
+    REASON_QUIZ_IN_PROGRESS: "Finish the quiz you started",
+    REASON_RESCHEDULED: "Rescheduled",
+}
 
 
 @dataclass(frozen=True)

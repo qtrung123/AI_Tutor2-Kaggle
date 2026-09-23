@@ -1491,3 +1491,23 @@ def planner_v2_preview(plan_id: str, request: PlanPreviewRequest, current_user: 
         )
     except _PLAN_V2_ERRORS as error:
         raise _plan_v2_error(error) from error
+
+
+@app.post("/api/planner/plans/{plan_id}/confirm", status_code=201)
+def planner_v2_confirm(plan_id: str, request: PlanPreviewRequest, current_user: dict = Depends(require_current_user)) -> dict:
+    """Recompute the schedule server-side and save it (sessions + schedule run, atomically). Same body
+    as preview -- client-sent sessions are never accepted (extra fields are rejected)."""
+    try:
+        return study_plan_api_service.confirm_plan(
+            current_user["id"], plan_id, request.utc_offset_minutes, local_now=request.local_now,
+        )
+    except _PLAN_V2_ERRORS as error:
+        raise _plan_v2_error(error) from error
+
+
+@app.get("/api/planner/plans/{plan_id}/sessions")
+def planner_v2_list_sessions(plan_id: str, current_user: dict = Depends(require_current_user)) -> list[dict]:
+    try:
+        return study_plan_api_service.list_plan_sessions(current_user["id"], plan_id)
+    except _PLAN_V2_ERRORS as error:
+        raise _plan_v2_error(error) from error

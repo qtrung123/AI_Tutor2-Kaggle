@@ -938,10 +938,16 @@ def delete_document_plan_data(owner_id: str, document_id: str) -> None:
 
 # -- Study sessions ----------------------------------------------------------
 
-def create_sessions(owner_id: str, plan_id: str, sessions: list[dict]) -> list[dict]:
-    """Persist a batch of sessions for one plan atomically (all or nothing). Each session's
-    document must already be a material of this plan. Returned in input order."""
-    initialize_study_planner_store()
+ACTIVE_SESSION_STATUSES = ("scheduled", "in_progress")
+
+
+class PlanAlreadyConfirmedError(ValueError):
+    """The plan already has active (scheduled/in_progress) sessions."""
+
+
+def _session_rows(owner_id: str, plan_id: str, sessions: list[dict]) -> list[tuple]:
+    """Validate every session (activity/status/reason/window, and that its document is a material
+    of this plan) and build the insert rows -- before anything is written."""
     if not get_plan(owner_id, plan_id):
         raise ValueError("Study plan not found.")
     material_documents = {material["document_id"] for material in list_materials(owner_id, plan_id)}
@@ -958,14 +964,95 @@ def create_sessions(owner_id: str, plan_id: str, sessions: list[dict]) -> list[d
             session["duration_minutes"], session["status"], session.get("reason"),
             session.get("priority_snapshot"), now, now,
         ))
+    return rows
+
+
+_INSERT_SESSION_SQL = """INSERT INTO study_sessions (session_id, owner_id, plan_id, document_id, activity_type,
+    artifact_id, scheduled_start, scheduled_end, duration_minutes, status, reason, priority_snapshot,
+    created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+
+
+def create_sessions(owner_id: str, plan_id: str, sessions: list[dict]) -> list[dict]:
+    """Persist a batch of sessions for one plan atomically (all or nothing). Each session's
+    document must already be a material of this plan. Returned in input order."""
+    initialize_study_planner_store()
+    rows = _session_rows(owner_id, plan_id, sessions)
     with _connect() as connection:
-        connection.executemany(
-            """INSERT INTO study_sessions (session_id, owner_id, plan_id, document_id, activity_type, artifact_id,
-               scheduled_start, scheduled_end, duration_minutes, status, reason, priority_snapshot,
-               created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            rows,
-        )
+        connection.executemany(_INSERT_SESSION_SQL, rows)
     return [get_session(owner_id, row[0]) for row in rows]
+
+
+def list_busy_sessions(owner_id: str, start_from: str | None = None) -> list[dict]:
+    """The owner's sessions that occupy time for scheduling, across all plans:
+    - scheduled   -> busy only while its plan is ACTIVE (an archived/paused plan's future plan is
+                     not a commitment any more; the rows are kept, never deleted);
+    - in_progress -> always busy (never silently drop work that is under way);
+    - completed   -> always busy (history).
+    skipped/missed/rescheduled never block."""
+    initialize_study_planner_store()
+    clauses, params = ["s.owner_id=?"], [owner_id]
+    if start_from:
+        clauses.append("s.scheduled_start >= ?")
+        params.append(start_from)
+    with _connect() as connection:
+        rows = connection.execute(
+            f"""SELECT s.* FROM study_sessions s
+                JOIN study_plans p ON p.plan_id = s.plan_id AND p.owner_id = s.owner_id
+                WHERE {' AND '.join(clauses)}
+                  AND (s.status IN ('in_progress', 'completed') OR (s.status = 'scheduled' AND p.status = 'active'))
+                ORDER BY s.scheduled_start, s.session_id""",
+            params,
+        ).fetchall()
+    return [_session(row) for row in rows]
+
+
+def count_active_plan_sessions(owner_id: str, plan_id: str) -> int:
+    initialize_study_planner_store()
+    with _connect() as connection:
+        return connection.execute(
+            f"SELECT COUNT(*) FROM study_sessions WHERE owner_id=? AND plan_id=? "
+            f"AND status IN ({','.join('?' * len(ACTIVE_SESSION_STATUSES))})",
+            (owner_id, plan_id, *ACTIVE_SESSION_STATUSES),
+        ).fetchone()[0]
+
+
+def _insert_schedule_run(connection: sqlite3.Connection, owner_id: str, plan_id: str, reason: str) -> dict:
+    schedule_run_id, created_at = str(uuid4()), utc_now_iso()
+    connection.execute(
+        "INSERT INTO schedule_runs (schedule_run_id, owner_id, plan_id, reason, created_at) VALUES (?, ?, ?, ?, ?)",
+        (schedule_run_id, owner_id, plan_id, reason, created_at),
+    )
+    return {"schedule_run_id": schedule_run_id, "owner_id": owner_id, "plan_id": plan_id,
+            "reason": reason, "created_at": created_at}
+
+
+def confirm_plan_sessions(owner_id: str, plan_id: str, sessions: list[dict], reason: str = "confirm") -> dict:
+    """Confirm a plan: save all its sessions plus one schedule_run in ONE transaction, or nothing.
+    BEGIN IMMEDIATE takes the write lock before re-checking that the plan has no active sessions,
+    so two concurrent confirmations can never both succeed (the loser gets PlanAlreadyConfirmedError)."""
+    initialize_study_planner_store()
+    if not sessions:
+        raise ValueError("No sessions to confirm.")
+    rows = _session_rows(owner_id, plan_id, sessions)
+    connection = _connect()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        active = connection.execute(
+            f"SELECT COUNT(*) FROM study_sessions WHERE owner_id=? AND plan_id=? "
+            f"AND status IN ({','.join('?' * len(ACTIVE_SESSION_STATUSES))})",
+            (owner_id, plan_id, *ACTIVE_SESSION_STATUSES),
+        ).fetchone()[0]
+        if active:
+            raise PlanAlreadyConfirmedError("This plan already has scheduled sessions.")
+        connection.executemany(_INSERT_SESSION_SQL, rows)
+        run = _insert_schedule_run(connection, owner_id, plan_id, reason)
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    return {"sessions": [get_session(owner_id, row[0]) for row in rows], "schedule_run": run}
 
 
 def create_session(owner_id: str, plan_id: str, session: dict) -> dict:
@@ -1060,14 +1147,8 @@ def record_plan_schedule_run(owner_id: str, plan_id: str, reason: str = "initial
     initialize_study_planner_store()
     if not get_plan(owner_id, plan_id):
         raise ValueError("Study plan not found.")
-    schedule_run_id, created_at = str(uuid4()), utc_now_iso()
     with _connect() as connection:
-        connection.execute(
-            "INSERT INTO schedule_runs (schedule_run_id, owner_id, plan_id, reason, created_at) VALUES (?, ?, ?, ?, ?)",
-            (schedule_run_id, owner_id, plan_id, reason, created_at),
-        )
-    return {"schedule_run_id": schedule_run_id, "owner_id": owner_id, "plan_id": plan_id,
-            "reason": reason, "created_at": created_at}
+        return _insert_schedule_run(connection, owner_id, plan_id, reason)
 
 
 def list_plan_schedule_runs(owner_id: str, plan_id: str) -> list[dict]:

@@ -2,7 +2,7 @@
 validation the HTTP layer needs, and a read-only schedule preview.
 
 The preview builds a SchedulingContext, runs the deterministic scheduler and serializes the
-result -- it never persists study sessions (confirmation is a separate, later step).
+result without persisting anything; confirm recomputes the same schedule server-side and saves it.
 """
 
 from datetime import date, datetime, timedelta, timezone
@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from backend import study_planner_service, study_planner_store
 from backend.indexed_document_store import list_indexed_documents
 from backend.study_scheduler import plan_schedule
+from backend.study_scheduler_contracts import REASON_LABELS
 
 # Real civil UTC offsets: UTC-12:00 .. UTC+14:00, always a whole number of quarter hours
 # (e.g. +05:30, +05:45, +12:45).
@@ -160,16 +161,9 @@ def _parse_local_now(local_now: str | None, offset: timedelta) -> datetime:
     return parsed
 
 
-def preview_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None = None) -> dict:
-    """Run the deterministic scheduler for one plan WITHOUT saving anything.
-
-    The learner's timezone comes only from `utc_offset_minutes` (required, a real civil offset).
-    `local_now` is an optional naive local wall-clock override (deterministic/tests); when omitted,
-    planner-local now is the current UTC instant shifted by that offset -- never the server's
-    timezone. Insufficient capacity is a normal result (status "at_risk"); a deadline already past
-    on the learner's local date is a validation error (PlanValidationError "deadline_passed").
-    """
-    _require_plan(owner_id, plan_id)
+def _schedule_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None):
+    """Shared by preview and confirm: validate the learner time context and the plan, then run the
+    deterministic scheduler. Returns (local_now, offset, result, warnings, titles)."""
     offset = _validate_utc_offset(utc_offset_minutes)
     local_now = _parse_local_now(local_now, offset)
     materials = study_planner_store.list_materials(owner_id, plan_id)
@@ -198,8 +192,52 @@ def preview_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now
     for material in materials:
         if material["document_id"] not in titles:
             warnings.append({"code": "document_missing", "document_id": material["document_id"]})
+    return local_now, offset, result, warnings, titles
 
-    capacity = result.capacity
+
+def _capacity(capacity, titles: dict) -> dict:
+    return {
+        "status": capacity.status,
+        "required_minutes": capacity.required_minutes,
+        "scheduled_minutes": capacity.scheduled_minutes,
+        "schedulable_minutes": capacity.schedulable_minutes,
+        "available_minutes": capacity.available_minutes,
+        "shortfall_minutes": capacity.shortfall_minutes,
+        "unscheduled": [
+            {
+                "document_id": c.document_id, "document_title": titles.get(c.document_id),
+                "activity_type": c.activity_type, "estimated_minutes": c.estimated_minutes,
+                "deadline": c.deadline, "reason": _reason(c.reason), "artifact_id": c.artifact_id,
+            }
+            for c in capacity.unscheduled
+        ],
+    }
+
+
+def _saved_session(session: dict, titles: dict) -> dict:
+    """A persisted study session for the UI (reason code + its label; never the priority score)."""
+    code = session["reason"]
+    return {
+        "session_id": session["session_id"], "document_id": session["document_id"],
+        "document_title": titles.get(session["document_id"]), "activity_type": session["activity_type"],
+        "scheduled_start": session["scheduled_start"], "scheduled_end": session["scheduled_end"],
+        "duration_minutes": session["duration_minutes"], "status": session["status"],
+        "reason": {"code": code, "message": REASON_LABELS.get(code, "")} if code else None,
+        "artifact_id": session["artifact_id"],
+    }
+
+
+def preview_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None = None) -> dict:
+    """Run the deterministic scheduler for one plan WITHOUT saving anything.
+
+    The learner's timezone comes only from `utc_offset_minutes` (required, a real civil offset).
+    `local_now` is an optional naive local wall-clock override (deterministic/tests); when omitted,
+    planner-local now is the current UTC instant shifted by that offset -- never the server's
+    timezone. Insufficient capacity is a normal result (status "at_risk"); a deadline already past
+    on the learner's local date is a validation error (PlanValidationError "deadline_passed").
+    """
+    _require_plan(owner_id, plan_id)
+    local_now, offset, result, warnings, titles = _schedule_plan(owner_id, plan_id, utc_offset_minutes, local_now)
     return {
         "plan_id": plan_id,
         "persisted": False,
@@ -214,21 +252,45 @@ def preview_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now
             }
             for p in result.proposals
         ],
-        "capacity": {
-            "status": capacity.status,
-            "required_minutes": capacity.required_minutes,
-            "scheduled_minutes": capacity.scheduled_minutes,
-            "schedulable_minutes": capacity.schedulable_minutes,
-            "available_minutes": capacity.available_minutes,
-            "shortfall_minutes": capacity.shortfall_minutes,
-            "unscheduled": [
-                {
-                    "document_id": c.document_id, "document_title": titles.get(c.document_id),
-                    "activity_type": c.activity_type, "estimated_minutes": c.estimated_minutes,
-                    "deadline": c.deadline, "reason": _reason(c.reason), "artifact_id": c.artifact_id,
-                }
-                for c in capacity.unscheduled
-            ],
-        },
+        "capacity": _capacity(result.capacity, titles),
         "warnings": warnings,
     }
+
+
+def confirm_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None = None) -> dict:
+    """Recompute the schedule server-side (the client never sends sessions) and save it: every
+    proposed session plus one schedule_run, atomically. A partial (at_risk) plan may be confirmed
+    as long as something can be scheduled; a plan that already has active sessions is a conflict."""
+    _require_plan(owner_id, plan_id)
+    if study_planner_store.count_active_plan_sessions(owner_id, plan_id):
+        raise PlanConflictError("This plan is already confirmed.")
+    local_now, offset, result, warnings, titles = _schedule_plan(owner_id, plan_id, utc_offset_minutes, local_now)
+    if not result.proposals:
+        raise PlanValidationError(
+            "nothing_to_schedule",
+            "Nothing can be scheduled with the current availability and deadlines.",
+            capacity=_capacity(result.capacity, titles),
+        )
+    try:
+        saved = study_planner_store.confirm_plan_sessions(
+            owner_id, plan_id, [p.to_session_record() for p in result.proposals], reason="confirm",
+        )
+    except study_planner_store.PlanAlreadyConfirmedError as error:
+        raise PlanConflictError("This plan is already confirmed.") from error
+    return {
+        "plan_id": plan_id,
+        "persisted": True,
+        "schedule_run_id": saved["schedule_run"]["schedule_run_id"],
+        "local_now": local_now.isoformat(),
+        "utc_offset_minutes": int(offset.total_seconds() // 60),
+        "sessions": [_saved_session(session, titles) for session in saved["sessions"]],
+        "capacity": _capacity(result.capacity, titles),
+        "warnings": warnings,
+    }
+
+
+def list_plan_sessions(owner_id: str, plan_id: str) -> list[dict]:
+    """The plan's persisted sessions (the confirmed weekly plan), in time order."""
+    _require_plan(owner_id, plan_id)
+    titles = _document_titles(owner_id)
+    return [_saved_session(s, titles) for s in study_planner_store.list_sessions(owner_id, plan_id=plan_id)]
