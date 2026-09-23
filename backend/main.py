@@ -7,7 +7,7 @@ from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Respo
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.ingest import delete_indexed_file, index_files
 from backend.quiz_service import (
@@ -45,7 +45,8 @@ from backend.summary_service import generate_document_summary
 from backend.summary_store import delete_document_summaries
 from backend.flashcard_service import FlashcardGenerationError, authoritative_card_fields, generate_flashcards
 from backend.flashcard_store import add_flashcard, delete_document_flashcards, delete_flashcard, update_flashcard
-from backend import study_planner_service, study_planner_store
+from backend import study_plan_api_service, study_planner_service, study_planner_store
+from backend.study_plan_api_service import PlanConflictError, PlanNotFoundError, PlanValidationError
 from backend.subject_grouping import group_documents_into_subjects
 from backend.model_comparison_service import get_quiz_model_comparison
 from config import AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE, AUTH_SESSION_DAYS, CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL, QUIZ_DEFAULT_GENERATION_MODEL
@@ -209,6 +210,41 @@ class StudyPlanGenerateRequest(BaseModel):
     # Naive local datetime (no timezone/UTC suffix) from the browser's own clock -- the planner
     # never assumes the server's timezone is the user's. Falls back to the server's local clock
     # only when the caller has none (e.g. a direct API call).
+    local_now: Optional[str] = None
+
+
+# Study Planner v2 (document-centric). extra="forbid": unknown fields such as topic_id are rejected.
+class StudyPlanV2CreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=200)
+
+
+class StudyPlanV2UpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    status: Optional[str] = None
+
+
+class PlanMaterialCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    document_id: str = Field(min_length=1)
+    deadline: Optional[str] = None      # ISO date; omitted/null = no deadline
+    familiarity: Optional[str] = None   # new_to_me | somewhat_familiar | reviewing
+
+
+class PlanMaterialUpdateRequest(BaseModel):
+    """Only fields present in the body change; an explicit null clears deadline/familiarity."""
+    model_config = ConfigDict(extra="forbid")
+    deadline: Optional[str] = None
+    familiarity: Optional[str] = None
+
+
+class PlanPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # The learner's offset from UTC in minutes (e.g. 420 for UTC+7, 330 for UTC+5:30) -- required:
+    # the server never infers the learner's timezone. Must be a real civil offset (validated).
+    utc_offset_minutes: int
+    # Optional naive local datetime override; defaults to the current UTC instant + utc_offset_minutes.
     local_now: Optional[str] = None
 
 
@@ -1346,3 +1382,112 @@ def planner_reset(current_user: dict = Depends(require_current_user)) -> dict:
     or chat history."""
     study_planner_store.reset_planner_data(current_user["id"])
     return {"reset": True}
+
+
+# ---------------------------------------------------------------------------
+# Study Planner v2 -- document-centric plans, plan materials, and a read-only schedule preview.
+# Availability is shared with the planner above (/api/planner/availability). Legacy task/topic
+# routes are unchanged.
+# ---------------------------------------------------------------------------
+
+def _plan_v2_error(error: Exception) -> HTTPException:
+    if isinstance(error, PlanNotFoundError):
+        return HTTPException(status_code=404, detail=str(error))
+    if isinstance(error, PlanConflictError):
+        return HTTPException(status_code=409, detail=str(error))
+    if isinstance(error, PlanValidationError):
+        return HTTPException(status_code=400, detail=error.payload)
+    return HTTPException(status_code=400, detail=str(error))
+
+
+_PLAN_V2_ERRORS = (PlanNotFoundError, PlanConflictError, ValueError)
+
+
+@app.get("/api/planner/plans")
+def planner_v2_list_plans(current_user: dict = Depends(require_current_user)) -> list[dict]:
+    return study_planner_store.list_plans(current_user["id"])
+
+
+@app.post("/api/planner/plans", status_code=201)
+def planner_v2_create_plan(request: StudyPlanV2CreateRequest, current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        return study_planner_store.create_plan(current_user["id"], request.title)
+    except _PLAN_V2_ERRORS as error:
+        raise _plan_v2_error(error) from error
+
+
+@app.get("/api/planner/plans/{plan_id}")
+def planner_v2_get_plan(plan_id: str, current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        return study_plan_api_service.get_plan_detail(current_user["id"], plan_id)
+    except _PLAN_V2_ERRORS as error:
+        raise _plan_v2_error(error) from error
+
+
+@app.patch("/api/planner/plans/{plan_id}")
+def planner_v2_update_plan(plan_id: str, request: StudyPlanV2UpdateRequest,
+                           current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        return study_plan_api_service.update_plan(current_user["id"], plan_id, request.model_dump(exclude_none=True))
+    except _PLAN_V2_ERRORS as error:
+        raise _plan_v2_error(error) from error
+
+
+@app.delete("/api/planner/plans/{plan_id}")
+def planner_v2_delete_plan(plan_id: str, current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        study_plan_api_service.delete_plan(current_user["id"], plan_id)
+        return {"deleted": plan_id}
+    except _PLAN_V2_ERRORS as error:
+        raise _plan_v2_error(error) from error
+
+
+@app.get("/api/planner/plans/{plan_id}/materials")
+def planner_v2_list_materials(plan_id: str, current_user: dict = Depends(require_current_user)) -> list[dict]:
+    try:
+        return study_plan_api_service.list_plan_materials(current_user["id"], plan_id)
+    except _PLAN_V2_ERRORS as error:
+        raise _plan_v2_error(error) from error
+
+
+@app.post("/api/planner/plans/{plan_id}/materials", status_code=201)
+def planner_v2_add_material(plan_id: str, request: PlanMaterialCreateRequest,
+                            current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        return study_plan_api_service.add_plan_material(
+            current_user["id"], plan_id, request.document_id, deadline=request.deadline,
+            familiarity=request.familiarity,
+        )
+    except _PLAN_V2_ERRORS as error:
+        raise _plan_v2_error(error) from error
+
+
+@app.patch("/api/planner/plans/{plan_id}/materials/{material_id}")
+def planner_v2_update_material(plan_id: str, material_id: str, request: PlanMaterialUpdateRequest,
+                               current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        return study_plan_api_service.update_plan_material(
+            current_user["id"], plan_id, material_id, request.model_dump(exclude_unset=True),
+        )
+    except _PLAN_V2_ERRORS as error:
+        raise _plan_v2_error(error) from error
+
+
+@app.delete("/api/planner/plans/{plan_id}/materials/{material_id}")
+def planner_v2_remove_material(plan_id: str, material_id: str, current_user: dict = Depends(require_current_user)) -> dict:
+    try:
+        study_plan_api_service.remove_plan_material(current_user["id"], plan_id, material_id)
+        return {"deleted": material_id}
+    except _PLAN_V2_ERRORS as error:
+        raise _plan_v2_error(error) from error
+
+
+@app.post("/api/planner/plans/{plan_id}/preview")
+def planner_v2_preview(plan_id: str, request: PlanPreviewRequest, current_user: dict = Depends(require_current_user)) -> dict:
+    """Deterministic schedule preview. Read-only: never saves study sessions."""
+    try:
+        return study_plan_api_service.preview_plan(
+            current_user["id"], plan_id, request.utc_offset_minutes, local_now=request.local_now,
+        )
+    except _PLAN_V2_ERRORS as error:
+        raise _plan_v2_error(error) from error
