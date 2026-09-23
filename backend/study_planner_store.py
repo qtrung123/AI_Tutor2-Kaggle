@@ -6,7 +6,7 @@ _ClosingConnection pattern, same additive-migration style.
 """
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date as date_type, datetime, timezone
 from uuid import uuid4
 
 from backend.auth_store import initialize_auth_store
@@ -132,6 +132,87 @@ def initialize_study_planner_store() -> None:
         existing_task_columns = {row["name"] for row in connection.execute("PRAGMA table_info(study_tasks)")}
         if "topic_id" not in existing_task_columns:
             _add_column_if_missing(connection, "study_tasks", "topic_id", "TEXT")
+
+        # Document-centric planner (Study Planner v2). The legacy task/topic tables above stay
+        # untouched but are no longer used by new code. No topic_id anywhere below: a plan is a
+        # set of documents (study packs), and sessions are scheduled per document + activity.
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS study_plans (
+                plan_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                FOREIGN KEY (owner_id) REFERENCES users(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_study_plans_owner ON study_plans(owner_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS study_plan_materials (
+                material_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+                document_id TEXT NOT NULL, deadline TEXT, familiarity TEXT,
+                learning_state TEXT NOT NULL DEFAULT 'new',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE (plan_id, document_id),
+                FOREIGN KEY (owner_id) REFERENCES users(id),
+                FOREIGN KEY (plan_id) REFERENCES study_plans(plan_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_study_plan_materials_owner_document
+                ON study_plan_materials(owner_id, document_id);
+
+            CREATE TABLE IF NOT EXISTS study_sessions (
+                session_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, plan_id TEXT NOT NULL,
+                document_id TEXT NOT NULL, activity_type TEXT NOT NULL, artifact_id TEXT,
+                scheduled_start TEXT NOT NULL, scheduled_end TEXT NOT NULL,
+                duration_minutes INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'scheduled',
+                reason TEXT, priority_snapshot REAL,
+                started_at TEXT, completed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                FOREIGN KEY (owner_id) REFERENCES users(id),
+                FOREIGN KEY (plan_id) REFERENCES study_plans(plan_id) ON DELETE CASCADE,
+                FOREIGN KEY (plan_id, document_id)
+                    REFERENCES study_plan_materials(plan_id, document_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_study_sessions_owner_start ON study_sessions(owner_id, scheduled_start);
+            CREATE INDEX IF NOT EXISTS idx_study_sessions_plan ON study_sessions(plan_id, document_id, scheduled_start);
+            """
+        )
+        _migrate_schedule_runs_for_plans(connection)
+
+
+def _migrate_schedule_runs_for_plans(connection: sqlite3.Connection) -> None:
+    """Let schedule_runs log runs for a study plan as well as a legacy task: rebuild it once with
+    a nullable task_id plus a plan_id (SQLite cannot drop NOT NULL in place). Existing rows are
+    copied verbatim. BEGIN IMMEDIATE + a re-check inside the transaction makes two requests racing
+    on a fresh database safe -- the loser sees the already-rebuilt table and does nothing."""
+    def needs_rebuild() -> bool:
+        return "plan_id" not in {row["name"] for row in connection.execute("PRAGMA table_info(schedule_runs)")}
+
+    if not needs_rebuild():
+        return
+    connection.commit()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        if needs_rebuild():
+            connection.execute(
+                """CREATE TABLE schedule_runs_v2 (
+                       schedule_run_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, task_id TEXT,
+                       plan_id TEXT, reason TEXT NOT NULL, created_at TEXT NOT NULL,
+                       CHECK (task_id IS NOT NULL OR plan_id IS NOT NULL),
+                       FOREIGN KEY (owner_id) REFERENCES users(id),
+                       FOREIGN KEY (task_id) REFERENCES study_tasks(task_id) ON DELETE CASCADE,
+                       FOREIGN KEY (plan_id) REFERENCES study_plans(plan_id) ON DELETE CASCADE
+                   )"""
+            )
+            connection.execute(
+                """INSERT INTO schedule_runs_v2 (schedule_run_id, owner_id, task_id, plan_id, reason, created_at)
+                   SELECT schedule_run_id, owner_id, task_id, NULL, reason, created_at FROM schedule_runs"""
+            )
+            connection.execute("DROP TABLE schedule_runs")
+            connection.execute("ALTER TABLE schedule_runs_v2 RENAME TO schedule_runs")
+            connection.execute("CREATE INDEX idx_schedule_runs_task ON schedule_runs(task_id, created_at DESC)")
+            connection.execute("CREATE INDEX idx_schedule_runs_plan ON schedule_runs(plan_id, created_at DESC)")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -618,6 +699,381 @@ def upsert_topic_progress(owner_id: str, document_id: str, topic_id: str, planne
 
 
 # ---------------------------------------------------------------------------
+# Document-centric planner: study plans, plan materials, study sessions
+# ---------------------------------------------------------------------------
+
+PLAN_STATUSES = ("active", "paused", "completed", "archived")
+FAMILIARITY_LEVELS = ("new_to_me", "somewhat_familiar", "reviewing")
+LEARNING_STATES = ("new", "learning", "needs_review", "on_track", "completed")
+ACTIVITY_TYPES = ("summary", "flashcards", "quiz", "review", "quiz_retry")
+SESSION_STATUSES = ("scheduled", "in_progress", "completed", "skipped", "missed", "rescheduled")
+
+
+def _require_choice(value, allowed: tuple[str, ...], field: str, optional: bool = False) -> None:
+    if value is None and optional:
+        return
+    if value not in allowed:
+        raise ValueError(f"{field} must be one of: {', '.join(allowed)}.")
+
+
+def _require_iso_date(value: str | None, field: str) -> None:
+    if value is None:
+        return
+    try:
+        date_type.fromisoformat(str(value))
+    except ValueError as error:
+        raise ValueError(f"{field} must be an ISO date (YYYY-MM-DD).") from error
+
+
+def _session_span_minutes(scheduled_start: str, scheduled_end: str) -> int:
+    """Validate a session's naive-local ISO datetimes (the planner's wall-clock convention, see
+    study_planner_service.compute_schedule) and return the span in minutes."""
+    try:
+        start, end = datetime.fromisoformat(scheduled_start), datetime.fromisoformat(scheduled_end)
+    except (TypeError, ValueError) as error:
+        raise ValueError("scheduled_start/scheduled_end must be ISO datetimes.") from error
+    if end <= start:
+        raise ValueError("scheduled_end must be after scheduled_start.")
+    return int((end - start).total_seconds() // 60)
+
+
+def _validate_session(session: dict) -> None:
+    _require_choice(session.get("activity_type"), ACTIVITY_TYPES, "activity_type")
+    _require_choice(session.get("status"), SESSION_STATUSES, "status")
+    span = _session_span_minutes(session["scheduled_start"], session["scheduled_end"])
+    duration = session.get("duration_minutes")
+    if isinstance(duration, bool) or not isinstance(duration, int) or not 0 < duration <= span:
+        raise ValueError("duration_minutes must be a positive whole number that fits the scheduled window.")
+
+
+def _plan(row: sqlite3.Row) -> dict:
+    return {key: row[key] for key in ("plan_id", "owner_id", "title", "status", "created_at", "updated_at")}
+
+
+def _material(row: sqlite3.Row) -> dict:
+    return {
+        key: row[key]
+        for key in ("material_id", "plan_id", "owner_id", "document_id", "deadline", "familiarity",
+                    "learning_state", "created_at", "updated_at")
+    }
+
+
+def _session(row: sqlite3.Row) -> dict:
+    return {
+        key: row[key]
+        for key in ("session_id", "owner_id", "plan_id", "document_id", "activity_type", "artifact_id",
+                    "scheduled_start", "scheduled_end", "duration_minutes", "status", "reason",
+                    "priority_snapshot", "started_at", "completed_at", "created_at", "updated_at")
+    }
+
+
+def _update_row(table: str, key_column: str, key: str, owner_id: str, fields: dict, not_found: str) -> None:
+    fields = {**fields, "updated_at": utc_now_iso()}
+    with _connect() as connection:
+        cursor = connection.execute(
+            f"UPDATE {table} SET {', '.join(f'{column}=?' for column in fields)} WHERE {key_column}=? AND owner_id=?",
+            (*fields.values(), key, owner_id),
+        )
+        if not cursor.rowcount:
+            raise ValueError(not_found)
+
+
+# -- Study plans -------------------------------------------------------------
+
+def create_plan(owner_id: str, title: str, status: str = "active") -> dict:
+    initialize_study_planner_store()
+    title = str(title or "").strip()
+    if not title:
+        raise ValueError("Plan title is required.")
+    _require_choice(status, PLAN_STATUSES, "status")
+    plan_id, now = str(uuid4()), utc_now_iso()
+    with _connect() as connection:
+        connection.execute(
+            "INSERT INTO study_plans (plan_id, owner_id, title, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (plan_id, owner_id, title, status, now, now),
+        )
+    return get_plan(owner_id, plan_id)
+
+
+def get_plan(owner_id: str, plan_id: str) -> dict | None:
+    initialize_study_planner_store()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM study_plans WHERE plan_id=? AND owner_id=?", (plan_id, owner_id),
+        ).fetchone()
+    return _plan(row) if row else None
+
+
+def list_plans(owner_id: str) -> list[dict]:
+    initialize_study_planner_store()
+    with _connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM study_plans WHERE owner_id=? ORDER BY created_at, plan_id", (owner_id,),
+        ).fetchall()
+    return [_plan(row) for row in rows]
+
+
+def update_plan(owner_id: str, plan_id: str, changes: dict) -> dict:
+    initialize_study_planner_store()
+    fields = {key: changes[key] for key in ("title", "status") if key in changes}
+    if not fields:
+        raise ValueError("No plan changes supplied.")
+    if "title" in fields:
+        fields["title"] = str(fields["title"] or "").strip()
+        if not fields["title"]:
+            raise ValueError("Plan title is required.")
+    if "status" in fields:
+        _require_choice(fields["status"], PLAN_STATUSES, "status")
+    _update_row("study_plans", "plan_id", plan_id, owner_id, fields, "Study plan not found.")
+    return get_plan(owner_id, plan_id)
+
+
+def delete_plan(owner_id: str, plan_id: str) -> None:
+    """Deletes the plan and (via ON DELETE CASCADE) its materials, sessions, and schedule runs."""
+    initialize_study_planner_store()
+    with _connect() as connection:
+        cursor = connection.execute("DELETE FROM study_plans WHERE plan_id=? AND owner_id=?", (plan_id, owner_id))
+        if not cursor.rowcount:
+            raise ValueError("Study plan not found.")
+
+
+# -- Plan materials (one row per document in a plan) -------------------------
+
+def add_material(owner_id: str, plan_id: str, document_id: str, deadline: str | None = None,
+                 familiarity: str | None = None, learning_state: str = "new") -> dict:
+    """Add one document to a plan. Does not check that the document exists -- callers go through
+    study_planner_service.add_plan_material, which validates document ownership."""
+    initialize_study_planner_store()
+    if not get_plan(owner_id, plan_id):
+        raise ValueError("Study plan not found.")
+    if not document_id:
+        raise ValueError("document_id is required.")
+    _require_iso_date(deadline, "deadline")
+    _require_choice(familiarity, FAMILIARITY_LEVELS, "familiarity", optional=True)
+    _require_choice(learning_state, LEARNING_STATES, "learning_state")
+    material_id, now = str(uuid4()), utc_now_iso()
+    try:
+        with _connect() as connection:
+            connection.execute(
+                """INSERT INTO study_plan_materials (material_id, plan_id, owner_id, document_id, deadline,
+                   familiarity, learning_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (material_id, plan_id, owner_id, document_id, deadline, familiarity, learning_state, now, now),
+            )
+    except sqlite3.IntegrityError as error:
+        raise ValueError("This document is already part of the study plan.") from error
+    return get_material(owner_id, material_id)
+
+
+def get_material(owner_id: str, material_id: str) -> dict | None:
+    initialize_study_planner_store()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM study_plan_materials WHERE material_id=? AND owner_id=?", (material_id, owner_id),
+        ).fetchone()
+    return _material(row) if row else None
+
+
+def get_plan_material(owner_id: str, plan_id: str, document_id: str) -> dict | None:
+    initialize_study_planner_store()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM study_plan_materials WHERE plan_id=? AND document_id=? AND owner_id=?",
+            (plan_id, document_id, owner_id),
+        ).fetchone()
+    return _material(row) if row else None
+
+
+def list_materials(owner_id: str, plan_id: str) -> list[dict]:
+    initialize_study_planner_store()
+    with _connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM study_plan_materials WHERE owner_id=? AND plan_id=? ORDER BY created_at, material_id",
+            (owner_id, plan_id),
+        ).fetchall()
+    return [_material(row) for row in rows]
+
+
+def update_material(owner_id: str, material_id: str, changes: dict) -> dict:
+    """`deadline` and `familiarity` may be set to None to clear them."""
+    initialize_study_planner_store()
+    fields = {key: changes[key] for key in ("deadline", "familiarity", "learning_state") if key in changes}
+    if not fields:
+        raise ValueError("No material changes supplied.")
+    if "deadline" in fields:
+        _require_iso_date(fields["deadline"], "deadline")
+    if "familiarity" in fields:
+        _require_choice(fields["familiarity"], FAMILIARITY_LEVELS, "familiarity", optional=True)
+    if "learning_state" in fields:
+        _require_choice(fields["learning_state"], LEARNING_STATES, "learning_state")
+    _update_row("study_plan_materials", "material_id", material_id, owner_id, fields, "Plan material not found.")
+    return get_material(owner_id, material_id)
+
+
+def remove_material(owner_id: str, material_id: str) -> None:
+    """Removes the document from its plan, and (via ON DELETE CASCADE) its sessions in that plan."""
+    initialize_study_planner_store()
+    with _connect() as connection:
+        cursor = connection.execute(
+            "DELETE FROM study_plan_materials WHERE material_id=? AND owner_id=?", (material_id, owner_id),
+        )
+        if not cursor.rowcount:
+            raise ValueError("Plan material not found.")
+
+
+def delete_document_plan_data(owner_id: str, document_id: str) -> None:
+    """Called when a document is deleted: drops it from every plan of this owner (sessions cascade)."""
+    initialize_study_planner_store()
+    with _connect() as connection:
+        connection.execute(
+            "DELETE FROM study_plan_materials WHERE owner_id=? AND document_id=?", (owner_id, document_id),
+        )
+
+
+# -- Study sessions ----------------------------------------------------------
+
+def create_sessions(owner_id: str, plan_id: str, sessions: list[dict]) -> list[dict]:
+    """Persist a batch of sessions for one plan atomically (all or nothing). Each session's
+    document must already be a material of this plan. Returned in input order."""
+    initialize_study_planner_store()
+    if not get_plan(owner_id, plan_id):
+        raise ValueError("Study plan not found.")
+    material_documents = {material["document_id"] for material in list_materials(owner_id, plan_id)}
+    now = utc_now_iso()
+    rows = []
+    for session in sessions:
+        session = {"status": "scheduled", **session}
+        _validate_session(session)
+        if session.get("document_id") not in material_documents:
+            raise ValueError("Session document is not part of this study plan.")
+        rows.append((
+            str(uuid4()), owner_id, plan_id, session["document_id"], session["activity_type"],
+            session.get("artifact_id"), session["scheduled_start"], session["scheduled_end"],
+            session["duration_minutes"], session["status"], session.get("reason"),
+            session.get("priority_snapshot"), now, now,
+        ))
+    with _connect() as connection:
+        connection.executemany(
+            """INSERT INTO study_sessions (session_id, owner_id, plan_id, document_id, activity_type, artifact_id,
+               scheduled_start, scheduled_end, duration_minutes, status, reason, priority_snapshot,
+               created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+    return [get_session(owner_id, row[0]) for row in rows]
+
+
+def create_session(owner_id: str, plan_id: str, session: dict) -> dict:
+    return create_sessions(owner_id, plan_id, [session])[0]
+
+
+def get_session(owner_id: str, session_id: str) -> dict | None:
+    initialize_study_planner_store()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM study_sessions WHERE session_id=? AND owner_id=?", (session_id, owner_id),
+        ).fetchone()
+    return _session(row) if row else None
+
+
+def list_sessions(owner_id: str, plan_id: str | None = None, document_id: str | None = None,
+                  statuses: list[str] | tuple[str, ...] | None = None,
+                  start_from: str | None = None, start_before: str | None = None) -> list[dict]:
+    """Owner's sessions ordered by scheduled_start, optionally narrowed to one plan, one document,
+    a set of statuses, and/or a [start_from, start_before) window on scheduled_start (ISO strings
+    in the same naive-local format, so string comparison is chronological)."""
+    initialize_study_planner_store()
+    clauses, params = ["owner_id=?"], [owner_id]
+    for column, value in (("plan_id", plan_id), ("document_id", document_id)):
+        if value:
+            clauses.append(f"{column}=?")
+            params.append(value)
+    if statuses:
+        clauses.append(f"status IN ({','.join('?' * len(statuses))})")
+        params.extend(statuses)
+    if start_from:
+        clauses.append("scheduled_start >= ?")
+        params.append(start_from)
+    if start_before:
+        clauses.append("scheduled_start < ?")
+        params.append(start_before)
+    with _connect() as connection:
+        rows = connection.execute(
+            f"SELECT * FROM study_sessions WHERE {' AND '.join(clauses)} ORDER BY scheduled_start, session_id",
+            params,
+        ).fetchall()
+    return [_session(row) for row in rows]
+
+
+def update_session(owner_id: str, session_id: str, changes: dict) -> dict:
+    """Update schedule/status fields. The merged record is re-validated as a whole. Moving to
+    in_progress stamps started_at (once); moving to completed stamps completed_at."""
+    initialize_study_planner_store()
+    allowed = ("scheduled_start", "scheduled_end", "duration_minutes", "status", "reason",
+               "priority_snapshot", "artifact_id")
+    fields = {key: changes[key] for key in allowed if key in changes}
+    if not fields:
+        raise ValueError("No session changes supplied.")
+    current = get_session(owner_id, session_id)
+    if not current:
+        raise ValueError("Study session not found.")
+    _validate_session({**current, **fields})
+    status = fields.get("status")
+    if status == "in_progress" and not current["started_at"]:
+        fields["started_at"] = utc_now_iso()
+    if status == "completed":
+        fields["completed_at"] = utc_now_iso()
+    _update_row("study_sessions", "session_id", session_id, owner_id, fields, "Study session not found.")
+    return get_session(owner_id, session_id)
+
+
+def delete_session(owner_id: str, session_id: str) -> None:
+    initialize_study_planner_store()
+    with _connect() as connection:
+        cursor = connection.execute(
+            "DELETE FROM study_sessions WHERE session_id=? AND owner_id=?", (session_id, owner_id),
+        )
+        if not cursor.rowcount:
+            raise ValueError("Study session not found.")
+
+
+def delete_plan_sessions(owner_id: str, plan_id: str, statuses: tuple[str, ...] = ("scheduled",)) -> int:
+    """Bulk-clear a plan's sessions in the given statuses (default: only still-scheduled ones, so
+    completed/in-progress history is never touched) -- the hook a later regenerate uses."""
+    initialize_study_planner_store()
+    for status in statuses:
+        _require_choice(status, SESSION_STATUSES, "status")
+    with _connect() as connection:
+        cursor = connection.execute(
+            f"DELETE FROM study_sessions WHERE owner_id=? AND plan_id=? AND status IN ({','.join('?' * len(statuses))})",
+            (owner_id, plan_id, *statuses),
+        )
+    return cursor.rowcount
+
+
+def record_plan_schedule_run(owner_id: str, plan_id: str, reason: str = "initial") -> dict:
+    initialize_study_planner_store()
+    if not get_plan(owner_id, plan_id):
+        raise ValueError("Study plan not found.")
+    schedule_run_id, created_at = str(uuid4()), utc_now_iso()
+    with _connect() as connection:
+        connection.execute(
+            "INSERT INTO schedule_runs (schedule_run_id, owner_id, plan_id, reason, created_at) VALUES (?, ?, ?, ?, ?)",
+            (schedule_run_id, owner_id, plan_id, reason, created_at),
+        )
+    return {"schedule_run_id": schedule_run_id, "owner_id": owner_id, "plan_id": plan_id,
+            "reason": reason, "created_at": created_at}
+
+
+def list_plan_schedule_runs(owner_id: str, plan_id: str) -> list[dict]:
+    initialize_study_planner_store()
+    with _connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM schedule_runs WHERE owner_id=? AND plan_id=? ORDER BY created_at DESC",
+            (owner_id, plan_id),
+        ).fetchall()
+    return [{key: row[key] for key in ("schedule_run_id", "owner_id", "plan_id", "reason", "created_at")} for row in rows]
+
+
+# ---------------------------------------------------------------------------
 # Development reset -- current user's planner data only
 # ---------------------------------------------------------------------------
 
@@ -627,6 +1083,9 @@ def reset_planner_data(owner_id: str) -> None:
     flashcards, and chat history all live in separate stores this function never opens."""
     initialize_study_planner_store()
     with _connect() as connection:
+        connection.execute("DELETE FROM study_sessions WHERE owner_id=?", (owner_id,))
+        connection.execute("DELETE FROM study_plan_materials WHERE owner_id=?", (owner_id,))
+        connection.execute("DELETE FROM study_plans WHERE owner_id=?", (owner_id,))
         connection.execute("DELETE FROM study_blocks WHERE owner_id=?", (owner_id,))
         connection.execute("DELETE FROM schedule_runs WHERE owner_id=?", (owner_id,))
         connection.execute("DELETE FROM study_plan_items WHERE owner_id=?", (owner_id,))

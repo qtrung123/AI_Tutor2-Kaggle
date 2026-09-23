@@ -497,6 +497,17 @@ def edit_block(owner_id: str, block_id: str, start_at: str | None = None,
     return study_planner_store.update_block(owner_id, block_id, changes)
 
 
+def add_plan_material(owner_id: str, plan_id: str, document_id: str, deadline: str | None = None,
+                      familiarity: str | None = None) -> dict:
+    """Document-centric planner: add one of the owner's indexed documents (a study pack) to a
+    plan. Validates document ownership here; field validation lives in the store."""
+    if not document_id or not get_indexed_document(owner_id, document_id):
+        raise ValueError("Document not found.")
+    return study_planner_store.add_material(
+        owner_id, plan_id, document_id, deadline=deadline or None, familiarity=familiarity or None,
+    )
+
+
 def study_buffer_status(study_buffer: int) -> str:
     return "on_track" if study_buffer >= 0 else "schedule_risk"
 

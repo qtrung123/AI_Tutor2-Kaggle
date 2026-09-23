@@ -618,6 +618,7 @@ def delete_source(document_id: str, current_user: dict = Depends(require_current
         delete_document_quiz_data(result["deleted"], current_user["id"])
         delete_document_summaries(current_user["id"], result["deleted"])
         delete_document_flashcards(current_user["id"], result["deleted"])
+        study_planner_store.delete_document_plan_data(current_user["id"], result["deleted"])
         remove_source_from_conversations(current_user["id"], result["deleted"])
         sources_result = [SourceSummary(**source) for source in list_uploaded_sources(current_user["id"])]
 
