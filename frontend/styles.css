@@ -3105,3 +3105,40 @@ body[data-page="session"] [data-session-pane="quiz"].quiz-player-open #quiz-play
 @media (prefers-reduced-motion: reduce) {
   .session-shell .sidebar, body.sidebar-open .session-shell .sidebar { transition: none; }
 }
+
+/* Final visual polish. :where() keeps these at base-button specificity, so they only replace the
+   old navy/mint theme defaults and every more specific existing rule still wins. */
+:where(body[data-page="session"]) .secondary-button {
+  width: auto; padding: 11px 18px; border: 1px solid var(--session-line); border-radius: 12px;
+  background: #fff; color: #27314e; font-weight: 700;
+}
+:where(body[data-page="session"]) .secondary-button:hover:not(:disabled) { background: #f6f7fc; border-color: #c9cee6; }
+:where(body[data-page="session"]) #apply-conversation-sources-button { width: 100%; }
+:where(body[data-page="session"]) .text-button { color: var(--session-accent); font-size: 14px; font-weight: 700; }
+:where(body[data-page="session"]) .danger-button { color: var(--danger); }
+:where(body[data-page="session"]) :is(.primary-button, .secondary-button, .text-button):focus-visible {
+  outline: 2px solid var(--session-accent); outline-offset: 2px;
+}
+body[data-page="session"] .session-header h2, body[data-page="session"] .breadcrumb { overflow-wrap: anywhere; }
+.session-tabs { scrollbar-width: none; }
+.session-tabs::-webkit-scrollbar { display: none; }
+
+/* Tablet/phone: the session already has a breadcrumb + header, so the generic topbar (page title +
+   legacy Reset) is hidden there too, as on desktop. */
+@media (max-width: 1050px) {
+  body[data-page="session"] .topbar { display: none; }
+}
+@media (max-width: 720px) {
+  body[data-page="session"] .breadcrumb { padding: 12px 0 2px; font-size: 14px; text-align: left; }
+  body[data-page="session"] .session-header { padding: 0 0 10px; gap: 6px; }
+  body[data-page="session"] .session-header .eyebrow { display: none; }
+  body[data-page="session"] .session-header h2 { font-size: 20px; }
+  body[data-page="session"] .session-header .muted { font-size: 12px; }
+  body[data-page="session"] .generation-model-control { margin-left: 0; }
+  .session-shell .learning-overview .stats-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: visible; }
+  .session-shell .learning-overview .stat-card { min-width: 0; border-bottom: 1px solid var(--session-line); }
+  .session-shell .learning-overview .stat-card:nth-child(2n) { border-right: 0; }
+  .session-shell .learning-overview .stat-card:nth-last-child(-n + 2) { border-bottom: 0; }
+  body[data-page="session"] .quiz-history-panel .panel-heading { flex-direction: row; align-items: center; }
+  body[data-page="session"] [data-session-pane="quiz"] .quiz-history-list { padding-left: 0; padding-right: 0; }
+}
