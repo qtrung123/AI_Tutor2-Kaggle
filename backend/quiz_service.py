@@ -4828,96 +4828,84 @@ def update_quiz_progress(
     document_id: str,
     difficulty: str,
     topic_id: str,
-    question_id: int,
-    selected_answer: str | list[str],
     student_id: str = LEGACY_USER_ID,
+    quiz_id: str | None = None,
+    question_id: int | None = None,
+    selected_answer: str | list[str] | None = None,
+    current_question_index: int | None = None,
+    answers: dict | None = None,
 ) -> dict:
-    """Check one answer and persist the learner's current progress immediately."""
+    """Autosave the learner's in-progress answers and current position for one exact quiz.
+
+    `answers`, when given, is the Quiz Player's full local answer snapshot and REPLACES the saved
+    answers (so a cleared multi-select is cleared server-side too, and a debounced save can never
+    drop an answer made just before navigating). `question_id`/`selected_answer` still merge one
+    answer into the saved set for older callers.
+
+    With `quiz_id`, resolves exactly that quiz artifact via get_quiz_by_id -- never a different one
+    from the same (document, topic, difficulty) slot, and never falls back to "the newest quiz in
+    this slot" (see load_quiz_with_attempt for the same rule applied to reads). Without a quiz_id,
+    keeps the older slot lookup for callers that have no specific artifact to save against.
+
+    This never grades or completes the attempt -- it only mirrors the Quiz Player's local answer/
+    position state so Resume can restore it. Grading and completion happen once, explicitly, in
+    submit_quiz_attempt.
+    """
     difficulty = difficulty.lower().strip()
-    quiz = get_quiz(document_id, difficulty, topic_id, student_id)
+    quiz = get_quiz_by_id(quiz_id, student_id) if quiz_id else get_quiz(document_id, difficulty, topic_id, student_id)
     if not quiz:
         raise ValueError("Quiz has not been generated for this document and difficulty.")
-    selected_answers = _selected_answers(selected_answer)
+    if quiz.get("document_id") != document_id or quiz.get("difficulty") != difficulty or quiz.get("topic_id") != topic_id:
+        raise ValueError("The submitted quiz identity does not match its persisted questions.")
 
     questions = quiz.get("questions", [])
-    target_question = next(
-        (question for question in questions if int(question.get("id")) == question_id),
-        None,
-    )
-    if not target_question:
-        raise ValueError("question_id was not found in this quiz.")
+    previous = get_latest_attempt(
+        document_id, difficulty, topic_id, student_id, quiz_id=quiz.get("quiz_id"), live_only=True,
+    ) or {}
+    if previous.get("completed"):
+        raise ValueError("This quiz attempt is already completed. Retake it to answer again.")
+    questions_by_id = {str(question.get("id")): question for question in questions}
+    if answers is not None:
+        snapshot = {}
+        for key, value in answers.items():
+            question = questions_by_id.get(str(key))
+            if not question:
+                raise ValueError("question_id was not found in this quiz.")
+            if value in (None, "", []):
+                continue
+            selected = _selected_answers(value)
+            snapshot[str(key)] = selected if _question_type(question) == "multi_select" else selected[0]
+        answers = snapshot
+    else:
+        answers = {str(key): value for key, value in (previous.get("answers") or {}).items()}
 
-    previous = get_latest_attempt(document_id, difficulty, topic_id, student_id) or {}
-    answers = {str(key): value for key, value in (previous.get("answers") or {}).items()}
-    answers[str(question_id)] = selected_answers if _question_type(target_question) == "multi_select" else selected_answers[0]
-    results = []
-    score = 0
-    for question in questions:
-        current_id = str(question.get("id"))
-        if current_id not in answers:
-            continue
-        correct_answers = sorted(_correct_answers(question))
-        current_answers = _selected_answers(answers[current_id])
-        is_correct = current_answers == correct_answers
-        score += int(is_correct)
-        results.append(
-            {
-                "question_id": int(question.get("id")),
-                "question": question.get("question", ""),
-                "options": list(question.get("options", [])),
-                "selected_answer": current_answers[0],
-                "selected_answers": current_answers,
-                "correct_answer": correct_answers[0],
-                "correct_answers": correct_answers,
-                "question_type": _question_type(question),
-                "is_correct": is_correct,
-                "question_difficulty": question.get("difficulty", difficulty),
-                "validation_outcome": question.get("validation_outcome", "accepted"),
-                "topic_id": question.get("topic_id", topic_id),
-                "topic_name": question.get("topic_name", ""),
-                "concept_id": question.get("concept_id", ""),
-                "source_subtopic_ids": list(question.get("source_subtopic_ids") or []),
-                "concept_origin": question.get("concept_origin", ""),
-                "concept_plan_id": question.get("concept_plan_id", ""),
-                "assessment_capacity": int(question.get("assessment_capacity") or 0),
-                "evidence_requirement_version": "concept_coverage_v1",
-                "explanation": question.get("explanation", ""),
-                "source_chunk_ids": list(question.get("source_chunk_ids") or []),
-            }
+    if question_id is not None:
+        target_question = next(
+            (question for question in questions if int(question.get("id")) == question_id),
+            None,
+        )
+        if not target_question:
+            raise ValueError("question_id was not found in this quiz.")
+        selected_answers = _selected_answers(selected_answer)
+        answers[str(question_id)] = (
+            selected_answers if _question_type(target_question) == "multi_select" else selected_answers[0]
         )
 
     total = len(questions)
     now = utc_now_iso()
-    quiz_id = quiz.get("quiz_id") or (
-        f"{quiz_cache_key(document_id, difficulty, topic_id, student_id)}::{quiz.get('created_at', 'legacy')}"
-    )
+    position = int(previous.get("current_question_index") or 0) if current_question_index is None else int(current_question_index)
+    position = max(0, min(position, max(total - 1, 0)))
     progress = {
-        "quiz_id": quiz_id,
-        "document_id": document_id,
-        "difficulty": difficulty,
-        "topic_id": topic_id,
-        "student_id": student_id,
+        "quiz_id": quiz["quiz_id"],
         "started_at": previous.get("started_at") or now,
-        "completed_at": now if len(results) == total else None,
-        "score": score,
-        "answered": len(results),
+        "completed_at": None,
+        "completed": False,
+        "answered": len(answers),
         "total": total,
-        "completed": len(results) == total,
+        "current_question_index": position,
         "answers": answers,
-        "question_results": results,
     }
-    saved = save_quiz_progress(document_id, difficulty, progress, topic_id, student_id)
-    if saved["completed"]:
-        represented_topics = sorted({
-            str(result.get("topic_id")) for result in results if result.get("topic_id")
-        })
-        saved["mastery_by_topic"] = {
-            represented_topic: recompute_topic_mastery(student_id, document_id, represented_topic)
-            for represented_topic in represented_topics
-        }
-        if len(represented_topics) == 1:
-            saved["mastery"] = saved["mastery_by_topic"][represented_topics[0]]
-    return saved
+    return save_quiz_progress(document_id, difficulty, progress, topic_id, student_id)
 
 
 def submit_quiz_attempt(
@@ -5126,12 +5114,19 @@ def load_completed_quiz_attempt(attempt_id: str, student_id: str = LEGACY_USER_I
 
 
 def clear_quiz_progress(
-    document_id: str, difficulty: str, topic_id: str, student_id: str = LEGACY_USER_ID
+    document_id: str, difficulty: str, topic_id: str, student_id: str = LEGACY_USER_ID,
+    quiz_id: str | None = None,
 ) -> dict:
-    """Reset current answers for one saved quiz."""
-    if not get_quiz(document_id, difficulty, topic_id, student_id):
+    """Reset current answers for one saved quiz.
+
+    With `quiz_id`, resolves and resets exactly that quiz artifact -- a sibling quiz sharing the
+    same (document, topic, difficulty) slot keeps its own progress untouched. Without it, keeps the
+    older slot-wide behavior for callers that have no quiz_id to give.
+    """
+    quiz = get_quiz_by_id(quiz_id, student_id) if quiz_id else get_quiz(document_id, difficulty, topic_id, student_id)
+    if not quiz:
         raise ValueError("Quiz has not been generated for this document and difficulty.")
-    reset_quiz_progress(document_id, difficulty, topic_id, student_id)
+    reset_quiz_progress(document_id, difficulty, topic_id, student_id, quiz_id=quiz.get("quiz_id") if quiz_id else None)
     return {"student_id": student_id, "document_id": document_id, "topic_id": topic_id, "difficulty": difficulty, "reset": True}
 
 

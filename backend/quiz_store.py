@@ -248,6 +248,7 @@ def initialize_quiz_store() -> None:
                 "student_id": "TEXT NOT NULL DEFAULT 'local_student'",
                 "attempt_number": "INTEGER NOT NULL DEFAULT 0",
                 "percentage": "REAL NOT NULL DEFAULT 0",
+                "current_question_index": "INTEGER NOT NULL DEFAULT 0",
             },
             "quiz_attempt_answers": {
                 "question_type": "TEXT NOT NULL DEFAULT 'single_choice'",
@@ -695,6 +696,7 @@ def _row_to_attempt(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
         "completed": bool(row["completed"]),
         "attempt_number": int(row["attempt_number"]),
         "percentage": float(row["percentage"]),
+        "current_question_index": int(row["current_question_index"] or 0),
         "answers": answers,
         "question_results": question_results,
     }
@@ -705,9 +707,13 @@ def _row_to_attempt(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
 
 def get_latest_attempt(
     document_id: str, difficulty: str, topic_id: str = LEGACY_TOPIC_ID,
-    student_id: str = "local_student", quiz_id: str | None = None,
+    student_id: str = "local_student", quiz_id: str | None = None, live_only: bool = False,
 ) -> dict | None:
     """The learner's latest attempt (completed or still in progress).
+
+    `live_only=True` (with `quiz_id`) only considers the attempt that is still is_latest -- the one
+    save_quiz_progress would continue -- so an attempt demoted by reset_quiz_progress (a Retake)
+    is never mistaken for the live one.
 
     When `quiz_id` is given, it is scoped to exactly that quiz -- required once multiple quizzes
     can share one (document, topic, difficulty) slot, so an in-progress attempt on one quiz is
@@ -718,7 +724,9 @@ def get_latest_attempt(
     with _connect() as connection:
         if quiz_id:
             row = connection.execute(
-                "SELECT * FROM quiz_attempts WHERE student_id = ? AND quiz_id = ? ORDER BY updated_at DESC LIMIT 1",
+                "SELECT * FROM quiz_attempts WHERE student_id = ? AND quiz_id = ?"
+                + (" AND is_latest = 1" if live_only else "")
+                + " ORDER BY updated_at DESC LIMIT 1",
                 (student_id, quiz_id),
             ).fetchone()
         else:
@@ -761,13 +769,17 @@ def _save_attempt_row(
             }
             for question_id, selected_answer in answers.items()
         ]
+    position = progress.get("current_question_index")
+    if position is None:
+        position = (previous or {}).get("current_question_index", 0)
     connection.execute(
         """
         INSERT INTO quiz_attempts (
             attempt_id, quiz_id, document_id, difficulty, started_at,
             completed_at, submitted_at, updated_at, score, answered,
-            total, completed, is_latest, topic_id, student_id, attempt_number, percentage
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            total, completed, is_latest, topic_id, student_id, attempt_number, percentage,
+            current_question_index
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(attempt_id) DO UPDATE SET
             quiz_id = excluded.quiz_id,
             completed_at = excluded.completed_at,
@@ -779,7 +791,8 @@ def _save_attempt_row(
             completed = excluded.completed,
             is_latest = excluded.is_latest,
             attempt_number = excluded.attempt_number,
-            percentage = excluded.percentage
+            percentage = excluded.percentage,
+            current_question_index = excluded.current_question_index
         """,
         (
             attempt_id,
@@ -799,6 +812,7 @@ def _save_attempt_row(
             student_id,
             int(progress.get("attempt_number", 0)),
             float(progress.get("percentage", 0)),
+            int(position or 0),
         ),
     )
     connection.execute("DELETE FROM quiz_attempt_answers WHERE attempt_id = ?", (attempt_id,))
@@ -900,14 +914,26 @@ def save_quiz_progress(
 
 def reset_quiz_progress(
     document_id: str, difficulty: str, topic_id: str = LEGACY_TOPIC_ID,
-    student_id: str = "local_student",
+    student_id: str = "local_student", quiz_id: str | None = None,
 ) -> None:
+    """Clear the in-progress attempt so the next save starts a fresh one.
+
+    With `quiz_id`, only that exact quiz's latest attempt is demoted -- a sibling quiz sharing the
+    same (document, topic, difficulty) slot keeps its own in-progress attempt untouched. Without it,
+    keeps the older slot-wide reset for callers that have no quiz_id to give.
+    """
     initialize_quiz_store()
     with _connect() as connection:
-        connection.execute(
-            "UPDATE quiz_attempts SET is_latest = 0 WHERE student_id = ? AND document_id = ? AND topic_id = ? AND difficulty = ?",
-            (student_id, document_id, topic_id, difficulty),
-        )
+        if quiz_id:
+            connection.execute(
+                "UPDATE quiz_attempts SET is_latest = 0 WHERE student_id = ? AND quiz_id = ?",
+                (student_id, quiz_id),
+            )
+        else:
+            connection.execute(
+                "UPDATE quiz_attempts SET is_latest = 0 WHERE student_id = ? AND document_id = ? AND topic_id = ? AND difficulty = ?",
+                (student_id, document_id, topic_id, difficulty),
+            )
 
 
 def get_quiz_explanation(cache_key: str, owner_id: str = LEGACY_USER_ID) -> dict | None:

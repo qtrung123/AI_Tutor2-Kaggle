@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from backend import quiz_store
 from backend.mastery_service import calculate_mastery, recompute_topic_mastery
-from backend.quiz_service import update_quiz_progress
+from backend.quiz_service import submit_quiz_attempt
 
 
 def answer(correct: bool, difficulty: str = "easy", outcome: str = "accepted", question_id: int = 1):
@@ -127,6 +127,9 @@ class MasteryTests(unittest.TestCase):
         self.assertIn("student_id, document_id, topic_id, difficulty", latest_index)
 
     def test_editing_completed_attempt_recomputes_cached_mastery(self):
+        """Grading/completion happens once, explicitly, via submit_quiz_attempt. A completed attempt
+        is never edited in place -- a Retake (same quiz_id, a fresh attempt_id) simply submits again,
+        which is what should recompute mastery (see task H's Retake model)."""
         quiz_store.save_quiz("mastery.pdf", "easy", {
             "quiz_id": "editable-quiz",
             "document_id": "mastery.pdf",
@@ -146,11 +149,12 @@ class MasteryTests(unittest.TestCase):
                 "validation_outcome": "accepted",
             }],
         }, "student-edit")
-        first = update_quiz_progress(
-            "mastery.pdf", "easy", "topic-edit", 1, "A", "student-edit"
+        first = submit_quiz_attempt(
+            "mastery.pdf", "easy", "topic-edit", {"1": "A"}, "student-edit", quiz_id="editable-quiz",
         )
-        edited = update_quiz_progress(
-            "mastery.pdf", "easy", "topic-edit", 1, "B", "student-edit"
+        quiz_store.reset_quiz_progress("mastery.pdf", "easy", "topic-edit", "student-edit", quiz_id="editable-quiz")
+        edited = submit_quiz_attempt(
+            "mastery.pdf", "easy", "topic-edit", {"1": "B"}, "student-edit", quiz_id="editable-quiz",
         )
         cached = quiz_store.get_topic_mastery("student-edit", "mastery.pdf", "topic-edit")
 

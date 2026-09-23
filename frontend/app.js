@@ -63,6 +63,17 @@ let pendingQuizSequence = 0;
 let quizHistoryDifficultyFilter = "all";
 let quizQuestionIndex = 0;
 let quizExplanationPending = false;
+// True only while the focused Quiz Player (Start/Resume from the Library) is open -- gates the
+// renderAssessmentQuiz() dispatcher and hides the Library/Create UI (see CSS .quiz-player-open).
+let quizPlayerOpen = false;
+let quizAutosaveTimer = null;
+let quizAutosaveSeq = 0;
+let quizAutosaveDirty = false;
+let quizAutosaveInFlight = null;
+let quizDetachedSave = null;   // the latest detached (session-switch) save, for tests/diagnostics
+// True only between a Finish Quiz click and its outcome: blocks a duplicate submission, matching
+// the quizGenerationInFlight guard used by the Create Quiz sheet.
+let quizSubmitInFlight = false;
 let conversations = [];
 let dashboardData = null;
 let knowledgeGaps = [];
@@ -132,6 +143,74 @@ const uploadStatus = document.getElementById("upload-status");
     <div class="quiz-sheet-error" id="quiz-sheet-error" hidden><p id="quiz-sheet-error-message"></p><button class="secondary-button" id="quiz-sheet-retry-button" type="button">Retry</button><details class="quiz-sheet-error-details"><summary>Technical details</summary><p id="quiz-sheet-error-technical"></p></details></div>
     <button class="primary-button" id="generate-quiz-button" type="button">Generate Quiz</button>
   </div>`;
+})();
+
+// Quiz Player: a focused, iOS-inspired overlay for taking a quiz, entirely separate from the
+// Quiz Library/Create Quiz sheet markup above. It is injected once here and toggled purely via the
+// .quiz-player-open class on the Quiz tab's session-pane (see CSS): when open, that class hides
+// .assessment-shell (Library, history, the old inline quiz UI) and shows only this element.
+(() => {
+  const pane = document.querySelector('[data-session-pane="quiz"]');
+  if (!pane || document.getElementById("quiz-player")) return;
+  pane.insertAdjacentHTML("beforeend", `
+    <div class="quiz-player" id="quiz-player" hidden>
+      <div class="quiz-player-question-view" id="quiz-player-question-view">
+        <header class="quiz-player-header">
+          <button class="quiz-player-exit" id="quiz-player-exit" type="button">← Exit Quiz</button>
+          <div class="quiz-player-heading">
+            <h2 id="quiz-player-title"></h2>
+            <div class="quiz-player-meta">
+              <span class="quiz-player-badge" id="quiz-player-difficulty"></span>
+              <span class="quiz-player-model" id="quiz-player-model" hidden></span>
+            </div>
+          </div>
+        </header>
+        <div class="quiz-player-progress">
+          <div class="quiz-player-progress-row">
+            <span id="quiz-player-position"></span>
+            <span id="quiz-player-answered-count"></span>
+          </div>
+          <div class="quiz-player-progress-track"><span id="quiz-player-progress-bar"></span></div>
+          <span class="quiz-player-save-status" id="quiz-player-save-status" hidden></span>
+        </div>
+        <article class="quiz-player-card" id="quiz-player-card">
+          <p class="quiz-player-question" id="quiz-player-question"></p>
+          <div class="quiz-player-answers" id="quiz-player-answers"></div>
+        </article>
+        <footer class="quiz-player-footer">
+          <button class="secondary-button quiz-player-prev" id="quiz-player-previous" type="button">Previous</button>
+          <button class="primary-button quiz-player-next" id="quiz-player-next" type="button">Next</button>
+        </footer>
+      </div>
+      <div class="quiz-player-completion-view" id="quiz-player-completion-view" hidden>
+        <div class="quiz-player-completion-card">
+          <h2>Quiz completed</h2>
+          <p id="quiz-player-completion-score"></p>
+          <button class="primary-button" id="quiz-player-completion-back" type="button">Back to Quizzes</button>
+        </div>
+      </div>
+    </div>
+    <div class="quiz-player-modal-backdrop" id="quiz-exit-confirm" hidden>
+      <div class="quiz-player-modal">
+        <h3 id="quiz-exit-confirm-title">Your progress is saved</h3>
+        <p id="quiz-exit-confirm-detail"></p>
+        <div class="quiz-player-modal-actions">
+          <button class="text-button" id="quiz-exit-confirm-continue" type="button">Continue Quiz</button>
+          <button class="primary-button" id="quiz-exit-confirm-exit" type="button">Exit</button>
+        </div>
+      </div>
+    </div>
+    <div class="quiz-player-modal-backdrop" id="quiz-finish-confirm" hidden>
+      <div class="quiz-player-modal">
+        <h3 id="quiz-finish-confirm-title"></h3>
+        <p>You can review them before submitting.</p>
+        <div class="quiz-player-modal-actions">
+          <button class="text-button" id="quiz-finish-review" type="button">Review Unanswered</button>
+          <button class="primary-button" id="quiz-finish-submit-anyway" type="button">Submit Anyway</button>
+        </div>
+      </div>
+    </div>
+  `);
 })();
 
 const quizNameInput = document.getElementById("quiz-name-input");
@@ -945,6 +1024,12 @@ async function openStudySession(documentId, tab = "material", topicId = "") {
   const documentItem = indexedDocuments.find((item) => item.id === documentId);
   if (!documentItem) return;
   activeDocumentId = documentId;
+  if (quizPlayerOpen || quizAutosaveDirty || quizAutosaveInFlight) {
+    // Leaving the session mid-quiz: persist the newest snapshot to the old quiz (captured before
+    // the reset below) and dismiss the player.
+    detachQuizAutosave();
+    setQuizPlayerVisible(false);
+  }
   currentQuiz = null;
   currentAttempt = null;
   quizAttemptSummary = null;
@@ -2313,17 +2398,21 @@ async function requestQuizRegeneration(documentId, request) {
   return response.json();
 }
 
-async function requestQuizProgress(questionId, selectedAnswer) {
-  const response = await fetch(`${QUIZ_API_BASE_URL}/${encodeURIComponent(currentQuiz.document_id)}/progress`, {
+// `payload` carries quiz_id explicitly (never omitted for a live caller -- see
+// backend/quiz_service.update_quiz_progress, which never falls back to "the newest quiz in this
+// slot" once quiz_id is given) plus whichever of question_id/selected_answer/current_question_index
+// changed.
+async function requestQuizProgress(payload, quiz = currentQuiz) {
+  const response = await fetch(`${QUIZ_API_BASE_URL}/${encodeURIComponent(quiz.document_id)}/progress`, {
     method: "PATCH",
     headers: {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      difficulty: currentQuiz.difficulty,
-      topic_id: currentQuiz.topic_id,
-      question_id: questionId,
-      selected_answer: selectedAnswer
+      difficulty: quiz.difficulty,
+      topic_id: quiz.topic_id,
+      quiz_id: quiz.quiz_id,
+      ...payload
     })
   });
 
@@ -2361,6 +2450,7 @@ async function requestQuizSubmission() {
 
 async function requestQuizProgressReset() {
   const query = new URLSearchParams({ difficulty: currentQuiz.difficulty, topic_id: currentQuiz.topic_id });
+  if (currentQuiz.quiz_id) query.set("quiz_id", currentQuiz.quiz_id);
   const response = await fetch(
     `${QUIZ_API_BASE_URL}/${encodeURIComponent(currentQuiz.document_id)}/progress?${query}`,
     { method: "DELETE" }
@@ -2369,6 +2459,114 @@ async function requestQuizProgressReset() {
     throw new Error(`Reset progress API returned ${response.status}`);
   }
   return response.json();
+}
+
+// ---- Quiz Player autosave -------------------------------------------------------------------
+// Local state (quizAnswers/quizQuestionIndex) is always the source of truth for the UI -- autosave
+// only mirrors it to the backend so Resume can restore it later. A failed or superseded autosave
+// therefore never touches quizAnswers/quizQuestionIndex, only the subtle Saving/Saved/error status.
+
+function setQuizPlayerSaveStatus(status) {
+  const el = document.getElementById("quiz-player-save-status");
+  if (!el) return;
+  if (status === "saving") { el.hidden = false; el.textContent = "Saving…"; el.className = "quiz-player-save-status"; }
+  else if (status === "saved") { el.hidden = false; el.textContent = "Saved"; el.className = "quiz-player-save-status is-saved"; }
+  else if (status === "error") { el.hidden = false; el.textContent = "Could not save — will retry"; el.className = "quiz-player-save-status is-error"; }
+  else { el.hidden = true; }
+}
+
+// Debounced (~500ms) so rapid answer changes or navigation do not fire one request per click.
+// Every save sends the FULL local snapshot (all answers + position), so a later navigation save
+// can never drop an answer made just before it, and only one request is in flight at a time, so
+// an older snapshot can never land on the server after a newer one.
+function scheduleQuizAutosave() {
+  if (!currentQuiz?.quiz_id) return;
+  quizAutosaveDirty = true;
+  setQuizPlayerSaveStatus("saving");
+  if (quizAutosaveTimer) clearTimeout(quizAutosaveTimer);
+  quizAutosaveTimer = setTimeout(() => { flushQuizAutosave().catch(() => {}); }, 500);
+}
+
+// Resolves once everything changed so far is saved; rejects if the latest save failed (the local
+// state is kept and a retry is scheduled). Exit and Finish await this before leaving/submitting.
+async function flushQuizAutosave() {
+  if (quizAutosaveTimer) { clearTimeout(quizAutosaveTimer); quizAutosaveTimer = null; }
+  while (quizAutosaveInFlight) {
+    try { await quizAutosaveInFlight; } catch (error) { /* retried below while still dirty */ }
+  }
+  if (!quizAutosaveDirty || !currentQuiz?.quiz_id) return;
+  const quizId = currentQuiz.quiz_id;
+  const seq = ++quizAutosaveSeq;
+  quizAutosaveDirty = false;
+  const request = requestQuizProgress({ answers: { ...quizAnswers }, current_question_index: quizQuestionIndex });
+  quizAutosaveInFlight = request;
+  let saved;
+  try {
+    saved = await request;
+  } catch (error) {
+    if (quizAutosaveInFlight === request) quizAutosaveInFlight = null;
+    if (currentQuiz?.quiz_id === quizId && seq === quizAutosaveSeq) {
+      quizAutosaveDirty = true;
+      setQuizPlayerSaveStatus("error");
+      if (quizPlayerOpen && !quizAutosaveTimer) {
+        quizAutosaveTimer = setTimeout(() => { flushQuizAutosave().catch(() => {}); }, 4000);
+      }
+    }
+    throw error;
+  }
+  if (quizAutosaveInFlight === request) quizAutosaveInFlight = null;
+  if (currentQuiz?.quiz_id !== quizId || seq !== quizAutosaveSeq) return;   // exited/reset meanwhile
+  // Local answers/position stay the source of truth -- only attempt metadata comes from the server.
+  currentAttempt = saved;
+  if (quizAutosaveDirty) return flushQuizAutosave();
+  setQuizPlayerSaveStatus("saved");
+}
+
+// Leaving the Quiz Player without awaiting (document/session switch, or Exit after a failed save):
+// captures the newest local snapshot BEFORE the player state is reset, then persists it to that
+// snapshot's own quiz. It queues behind any in-flight save (so the newest snapshot lands last),
+// retries a few times since the learner has already moved on, and never touches the new
+// session's state. resetQuizAutosave() makes any older in-flight response stale.
+function detachQuizAutosave() {
+  const pending = quizAutosaveDirty || Boolean(quizAutosaveInFlight);
+  const snapshot = pending && currentQuiz?.quiz_id && !currentAttempt?.completed ? {
+    quiz: {
+      document_id: currentQuiz.document_id, difficulty: currentQuiz.difficulty,
+      topic_id: currentQuiz.topic_id, quiz_id: currentQuiz.quiz_id,
+    },
+    payload: { answers: { ...quizAnswers }, current_question_index: quizQuestionIndex },
+  } : null;
+  resetQuizAutosave();
+  if (!snapshot) return Promise.resolve();
+  quizDetachedSave = persistDetachedQuizSnapshot(snapshot).catch(() => {});
+  return quizDetachedSave;
+}
+
+async function persistDetachedQuizSnapshot(snapshot, maxAttempts = 3) {
+  for (let attempt = 1; ; attempt += 1) {
+    while (quizAutosaveInFlight) {
+      try { await quizAutosaveInFlight; } catch (error) { /* this snapshot supersedes it */ }
+    }
+    const request = requestQuizProgress(snapshot.payload, snapshot.quiz);
+    quizAutosaveInFlight = request;
+    try {
+      await request;
+      return;
+    } catch (error) {
+      if (attempt >= maxAttempts) throw error;
+    } finally {
+      if (quizAutosaveInFlight === request) quizAutosaveInFlight = null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+  }
+}
+
+function resetQuizAutosave() {
+  if (quizAutosaveTimer) clearTimeout(quizAutosaveTimer);
+  quizAutosaveTimer = null;
+  quizAutosaveDirty = false;
+  quizAutosaveSeq += 1;
+  setQuizPlayerSaveStatus(null);
 }
 
 async function requestQuizExplanation(questionId) {
@@ -2667,7 +2865,7 @@ function createSavedQuizCard(variant) {
   start.type = "button";
   start.textContent = inProgress ? "Resume" : "Start";
   start.addEventListener("click", async () => {
-    try { await selectHistoryQuizVariant({ document_id: activeDocumentId, topic_id: variant.topic_id, difficulty: variant.difficulty, quiz_id: variant.quiz_id }); }
+    try { await openQuizPlayer({ document_id: activeDocumentId, topic_id: variant.topic_id, difficulty: variant.difficulty, quiz_id: variant.quiz_id }); }
     catch (error) { showToast(error.message || "Could not open this quiz"); }
   });
   actions.appendChild(start);
@@ -2797,11 +2995,19 @@ async function loadSelectedQuiz(quizId) {
     currentAttempt = detail.latest_attempt || null;
     quizAttemptSummary = detail.attempt_summary || null;
     quizExplanations = {};
-    quizAnswers = currentAttempt?.completed && currentAttempt.answers ? { ...currentAttempt.answers } : {};
-    const firstUnansweredIndex = currentQuiz?.questions?.findIndex(
-      (question) => !quizAnswers[String(question.id)]
-    );
-    quizQuestionIndex = firstUnansweredIndex >= 0 ? firstUnansweredIndex : 0;
+    // The Quiz Player resumes an in-progress attempt exactly where it was left: its saved answers
+    // and saved current_question_index. The older inline view keeps its completed-only restore.
+    const resumeInProgress = quizPlayerOpen && currentAttempt && !currentAttempt.completed;
+    quizAnswers = (currentAttempt?.completed || resumeInProgress) && currentAttempt.answers ? { ...currentAttempt.answers } : {};
+    if (resumeInProgress) {
+      const lastIndex = Math.max((currentQuiz?.questions?.length || 1) - 1, 0);
+      quizQuestionIndex = Math.max(0, Math.min(Number(currentAttempt.current_question_index) || 0, lastIndex));
+    } else {
+      const firstUnansweredIndex = currentQuiz?.questions?.findIndex(
+        (question) => !quizAnswers[String(question.id)]
+      );
+      quizQuestionIndex = firstUnansweredIndex >= 0 ? firstUnansweredIndex : 0;
+    }
     renderAssessmentQuiz();
   } catch (error) {
     currentQuiz = null;
@@ -3114,46 +3320,6 @@ function moveQuizQuestion(direction) {
   renderAssessmentQuiz();
 }
 
-async function selectAssessmentAnswer(question, option, card) {
-  if (currentAttempt?.question_results?.some((result) => result.question_id === question.id)) {
-    return;
-  }
-
-  const selectedLetter = option.trim().charAt(0).toUpperCase();
-  quizAnswers[String(question.id)] = selectedLetter;
-
-  const buttons = card.querySelectorAll(".answer-option");
-  buttons.forEach((button) => {
-    const buttonLetter = button.textContent.trim().charAt(0).toUpperCase();
-    button.disabled = true;
-    button.classList.toggle("correct", buttonLetter === question.correct_answer);
-    button.classList.toggle("incorrect", buttonLetter === selectedLetter && selectedLetter !== question.correct_answer);
-    button.classList.toggle("selected", buttonLetter === selectedLetter);
-  });
-
-  const feedback = card.querySelector(".feedback");
-  const isCorrect = selectedLetter === question.correct_answer;
-  feedback.className = `feedback ${isCorrect ? "good" : "bad"}`;
-  feedback.textContent = isCorrect ? "Correct." : "Incorrect.";
-  card.querySelector(".explain-button").hidden = false;
-  updateAssessmentSummary();
-
-  try {
-    currentAttempt = await requestQuizProgress(question.id, selectedLetter);
-    quizAnswers = { ...currentAttempt.answers };
-    renderAssessmentQuiz();
-    if (currentAttempt.completed) {
-      await loadQuizHistory();
-      await loadDashboard();
-      showToast(`Quiz completed: ${currentAttempt.score}/${currentAttempt.total}`);
-    }
-  } catch (error) {
-    delete quizAnswers[String(question.id)];
-    renderAssessmentQuiz();
-    showToast(error.message || "Could not save answer");
-  }
-}
-
 async function resetAssessmentQuiz() {
   if (!currentQuiz?.questions?.length) {
     return;
@@ -3435,7 +3601,234 @@ function assessmentTitleText(quiz) {
   return `${quizName} · ${quiz.questions.length} ${quiz.difficulty} questions from ${quiz.document_id}` + partialSuffix;
 }
 
+// ---- Quiz Player: open/close -------------------------------------------------------------------
+
+// Opens the focused Quiz Player for the exact quiz_id behind a Start/Resume click -- reuses
+// selectHistoryQuizVariant (document/difficulty/scope selection + loadSelectedQuiz(quiz_id), which
+// never falls back to a different quiz) so Start/Resume keep the same "exact artifact" guarantee
+// the Library already relies on elsewhere.
+function setQuizPlayerVisible(open) {
+  quizPlayerOpen = open;
+  document.querySelector('[data-session-pane="quiz"]')?.classList.toggle("quiz-player-open", open);
+  document.getElementById("quiz-player").hidden = !open;
+  document.getElementById("quiz-player-completion-view").hidden = true;
+  document.getElementById("quiz-player-question-view").hidden = false;
+  document.getElementById("quiz-exit-confirm").hidden = true;
+  document.getElementById("quiz-finish-confirm").hidden = true;
+}
+
+async function openQuizPlayer(target) {
+  resetQuizAutosave();
+  setQuizPlayerVisible(true);
+  try {
+    await selectHistoryQuizVariant(target);
+  } catch (error) {
+    closeQuizPlayerToLibrary();
+    throw error;
+  }
+}
+
+async function closeQuizPlayerToLibrary() {
+  detachQuizAutosave();   // Exit after a failed save still keeps retrying the newest snapshot
+  setQuizPlayerVisible(false);
+  backToQuizzes();
+  await loadQuizStatuses();
+  updateDifficultyOptions();
+  renderQuizHistory();
+}
+
+// ---- Quiz Player: rendering ---------------------------------------------------------------------
+
+function renderQuizPlayer() {
+  if (!currentQuiz?.questions?.length) {
+    // loadSelectedQuiz resets state and renders once before its fetch resolves -- show a light
+    // loading state rather than a blank/broken player in that brief window.
+    document.getElementById("quiz-player-completion-view").hidden = true;
+    document.getElementById("quiz-player-question-view").hidden = false;
+    document.getElementById("quiz-player-title").textContent = "Loading…";
+    document.getElementById("quiz-player-question").textContent = "";
+    document.getElementById("quiz-player-answers").innerHTML = "";
+    document.getElementById("quiz-player-position").textContent = "";
+    document.getElementById("quiz-player-answered-count").textContent = "";
+    document.getElementById("quiz-player-difficulty").textContent = "";
+    document.getElementById("quiz-player-model").hidden = true;
+    return;
+  }
+  // Reached both right after a successful Finish and when Start opens an already-completed quiz --
+  // either way, only the minimal completion state is shown (full Result/Review is Task Quiz 4).
+  if (currentAttempt?.completed) {
+    renderQuizPlayerCompletion();
+    return;
+  }
+  renderQuizPlayerQuestion();
+}
+
+function renderQuizPlayerQuestion() {
+  document.getElementById("quiz-player-completion-view").hidden = true;
+  document.getElementById("quiz-player-question-view").hidden = false;
+
+  const total = currentQuiz.questions.length;
+  quizQuestionIndex = Math.max(0, Math.min(quizQuestionIndex, total - 1));
+  const question = currentQuiz.questions[quizQuestionIndex];
+  const answeredCount = Object.keys(quizAnswers).length;
+
+  document.getElementById("quiz-player-title").textContent = (currentQuiz.title || "").trim() || "Untitled Quiz";
+  document.getElementById("quiz-player-difficulty").textContent = currentQuiz.difficulty || "";
+  const modelInfo = quizModelInfo(currentQuiz);
+  const modelEl = document.getElementById("quiz-player-model");
+  modelEl.textContent = modelInfo ? `Generated by ${modelLabel(modelInfo.model_id, modelInfo.name)}` : "";
+  modelEl.hidden = !modelInfo;
+  document.getElementById("quiz-player-position").textContent = `Question ${quizQuestionIndex + 1} of ${total}`;
+  document.getElementById("quiz-player-answered-count").textContent = `${answeredCount} answered`;
+  document.getElementById("quiz-player-progress-bar").style.width = `${Math.round(((quizQuestionIndex + 1) / total) * 100)}%`;
+  document.getElementById("quiz-player-question").textContent = question.question;
+
+  const isMultiSelect = question.question_type === "multi_select";
+  const selected = quizAnswers[String(question.id)];
+  const answersEl = document.getElementById("quiz-player-answers");
+  answersEl.innerHTML = "";
+  (question.options || []).forEach((option) => {
+    const letter = option.trim().charAt(0).toUpperCase();
+    const isSelected = Array.isArray(selected) ? selected.includes(letter) : selected === letter;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `quiz-player-answer-card${isSelected ? " selected" : ""}`;
+    button.setAttribute("role", isMultiSelect ? "checkbox" : "radio");
+    button.setAttribute("aria-checked", String(isSelected));
+    const indicator = document.createElement("span");
+    indicator.className = "quiz-player-answer-indicator";
+    indicator.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.className = "quiz-player-answer-label";
+    label.textContent = option;
+    button.append(indicator, label);
+    button.addEventListener("click", () => selectQuizPlayerAnswer(question, letter, isMultiSelect));
+    answersEl.appendChild(button);
+  });
+
+  // Previous/Next never require an answer -- only Finish Quiz (the last question's Next) checks
+  // for unanswered questions, and only as a dismissable confirmation (see handleQuizPlayerFinish).
+  document.getElementById("quiz-player-previous").disabled = quizQuestionIndex === 0;
+  const nextButton = document.getElementById("quiz-player-next");
+  const isLast = quizQuestionIndex === total - 1;
+  nextButton.textContent = isLast ? (quizSubmitInFlight ? "Submitting…" : "Finish Quiz") : "Next";
+  nextButton.disabled = isLast && quizSubmitInFlight;
+  nextButton.onclick = isLast ? handleQuizPlayerFinish : () => moveQuizPlayerQuestion(1);
+}
+
+function renderQuizPlayerCompletion() {
+  document.getElementById("quiz-player-question-view").hidden = true;
+  document.getElementById("quiz-player-completion-view").hidden = false;
+  const total = currentAttempt.total ?? currentQuiz.questions.length;
+  document.getElementById("quiz-player-completion-score").textContent = `Score ${currentAttempt.score} / ${total}`;
+}
+
+// ---- Quiz Player: answering and navigation -------------------------------------------------------
+
+function selectQuizPlayerAnswer(question, letter, isMultiSelect) {
+  const key = String(question.id);
+  if (isMultiSelect) {
+    const selected = new Set(Array.isArray(quizAnswers[key]) ? quizAnswers[key] : []);
+    selected.has(letter) ? selected.delete(letter) : selected.add(letter);
+    if (selected.size) quizAnswers[key] = [...selected].sort();
+    else delete quizAnswers[key];
+  } else {
+    quizAnswers[key] = letter;
+  }
+  renderQuizPlayerQuestion();
+  scheduleQuizAutosave();
+}
+
+function moveQuizPlayerQuestion(direction) {
+  if (!currentQuiz?.questions?.length) return;
+  const total = currentQuiz.questions.length;
+  quizQuestionIndex = Math.max(0, Math.min(total - 1, quizQuestionIndex + direction));
+  renderQuizPlayerQuestion();
+  scheduleQuizAutosave();
+}
+
+// ---- Quiz Player: exit ---------------------------------------------------------------------------
+
+// Flushes any pending autosave first so "Your progress is saved" is actually true; if that save
+// fails the dialog says so, and Continue Quiz keeps the unsaved local answers intact.
+async function handleQuizPlayerExit() {
+  if (!currentQuiz?.questions?.length || currentAttempt?.completed) {
+    closeQuizPlayerToLibrary();
+    return;
+  }
+  let saveFailed = false;
+  try { await flushQuizAutosave(); } catch (error) { saveFailed = true; }
+  const answeredCount = Object.keys(quizAnswers).length;
+  if (answeredCount === 0 && !saveFailed) {
+    closeQuizPlayerToLibrary();
+    return;
+  }
+  document.getElementById("quiz-exit-confirm-title").textContent =
+    saveFailed ? "Your latest answers are not saved yet" : "Your progress is saved";
+  document.getElementById("quiz-exit-confirm-detail").textContent =
+    `${answeredCount} of ${currentQuiz.questions.length} answered`;
+  document.getElementById("quiz-exit-confirm").hidden = false;
+}
+
+// ---- Quiz Player: finish ---------------------------------------------------------------------------
+
+function handleQuizPlayerFinish() {
+  if (quizSubmitInFlight) return;
+  const total = currentQuiz.questions.length;
+  const unanswered = total - Object.keys(quizAnswers).length;
+  if (unanswered <= 0) {
+    submitQuizPlayer();
+    return;
+  }
+  document.getElementById("quiz-finish-confirm-title").textContent =
+    `${unanswered} question${unanswered === 1 ? "" : "s"} unanswered`;
+  document.getElementById("quiz-finish-confirm").hidden = false;
+}
+
+async function submitQuizPlayer() {
+  if (quizSubmitInFlight) return;   // no duplicate submissions
+  quizSubmitInFlight = true;
+  setQuizPlayerFinishBusy(true);
+  try {
+    // The submission itself carries every local answer, so a pending autosave is dropped and an
+    // in-flight one is waited out -- it must not land on the attempt after it is completed.
+    if (quizAutosaveTimer) { clearTimeout(quizAutosaveTimer); quizAutosaveTimer = null; }
+    quizAutosaveDirty = false;
+    if (quizAutosaveInFlight) { try { await quizAutosaveInFlight; } catch (error) { /* submit covers it */ } }
+    currentAttempt = await requestQuizSubmission();
+    resetQuizAutosave();
+    quizQuestionIndex = 0;
+    quizAttemptSummary = currentAttempt.attempt_summary;
+    await loadQuizStatuses();
+    updateDifficultyOptions();
+    await loadQuizHistory();
+    await loadDashboard();
+    renderQuizHistory();
+    renderAssessmentQuiz();   // dispatches to renderQuizPlayer -> the minimal completion state
+  } catch (error) {
+    // Local answers are untouched -- the learner can simply press Finish Quiz again.
+    showToast(error.message || "Could not submit quiz");
+  } finally {
+    quizSubmitInFlight = false;
+    setQuizPlayerFinishBusy(false);
+  }
+}
+
+function setQuizPlayerFinishBusy(busy) {
+  const submitAnyway = document.getElementById("quiz-finish-submit-anyway");
+  if (submitAnyway) submitAnyway.disabled = busy;
+  const nextButton = document.getElementById("quiz-player-next");
+  if (!nextButton || !currentQuiz?.questions?.length || currentAttempt?.completed) return;
+  if (quizQuestionIndex !== currentQuiz.questions.length - 1) return;
+  nextButton.disabled = busy;
+  nextButton.textContent = busy ? "Submitting…" : "Finish Quiz";
+}
+
 function renderAssessmentQuiz() {
+  if (quizPlayerOpen) {
+    renderQuizPlayer();
+    return;
+  }
   const quizPane = document.querySelector('[data-session-pane="quiz"]');
   const hasQuiz = Boolean(currentQuiz?.questions?.length);
   quizPane?.classList.toggle("quiz-active", hasQuiz);
@@ -3703,6 +4096,28 @@ reviewQuizButton.addEventListener("click", () => {
 backToQuizzesButton.addEventListener("click", backToQuizzes);
 quizDocumentSelect.addEventListener("change", handleQuizDocumentChange);
 quizScopeSelect.addEventListener("change", loadSelectedQuiz);
+
+document.getElementById("quiz-player-exit")?.addEventListener("click", handleQuizPlayerExit);
+document.getElementById("quiz-player-previous")?.addEventListener("click", () => moveQuizPlayerQuestion(-1));
+document.getElementById("quiz-exit-confirm-continue")?.addEventListener("click", () => {
+  document.getElementById("quiz-exit-confirm").hidden = true;
+});
+document.getElementById("quiz-exit-confirm-exit")?.addEventListener("click", () => {
+  document.getElementById("quiz-exit-confirm").hidden = true;
+  closeQuizPlayerToLibrary();
+});
+document.getElementById("quiz-finish-review")?.addEventListener("click", () => {
+  document.getElementById("quiz-finish-confirm").hidden = true;
+  const firstUnanswered = currentQuiz.questions.findIndex((question) => !quizAnswers[String(question.id)]);
+  quizQuestionIndex = firstUnanswered >= 0 ? firstUnanswered : 0;
+  renderQuizPlayerQuestion();
+  scheduleQuizAutosave();
+});
+document.getElementById("quiz-finish-submit-anyway")?.addEventListener("click", () => {
+  document.getElementById("quiz-finish-confirm").hidden = true;
+  submitQuizPlayer();
+});
+document.getElementById("quiz-player-completion-back")?.addEventListener("click", closeQuizPlayerToLibrary);
 
 authForm.addEventListener("submit", handleAuthentication);
 authSwitch.addEventListener("click", () => setAuthMode(authMode === "login" ? "signup" : "login"));

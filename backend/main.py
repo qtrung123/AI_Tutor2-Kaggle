@@ -241,10 +241,20 @@ class QuizRegenerateRequest(BaseModel):
 
 
 class QuizProgressRequest(BaseModel):
+    """Autosave payload for the Quiz Player: an answer, a position, or both.
+
+    `quiz_id` is optional in the schema only for backward compatibility with any non-live caller --
+    the live Quiz Player always sends it (see backend/quiz_service.update_quiz_progress, which never
+    falls back to "the newest quiz in this slot" once quiz_id is given).
+    """
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
-    question_id: int = Field(ge=1)
-    selected_answer: str | list[str]
     topic_id: str
+    quiz_id: Optional[str] = None
+    question_id: Optional[int] = Field(default=None, ge=1)
+    selected_answer: Optional[str | list[str]] = None
+    current_question_index: Optional[int] = Field(default=None, ge=0)
+    # The Quiz Player's full local answer snapshot; replaces the saved answers when given.
+    answers: Optional[dict[str, str | list[str]]] = None
 
 
 class MasteryRecomputeRequest(BaseModel):
@@ -891,14 +901,17 @@ def quiz_generate(request: QuizGenerateRequest, current_user: dict = Depends(req
 
 @app.patch("/api/quiz/{document_id}/progress")
 def quiz_progress(document_id: str, request: QuizProgressRequest, current_user: dict = Depends(require_current_user)) -> dict:
-    """Check one selected answer and autosave current quiz progress."""
+    """Autosave the Quiz Player's current answers and/or position for one exact quiz_id."""
     try:
         return update_quiz_progress(
             document_id=document_id,
             difficulty=request.difficulty,
             topic_id=request.topic_id,
+            quiz_id=request.quiz_id,
             question_id=request.question_id,
             selected_answer=request.selected_answer,
+            current_question_index=request.current_question_index,
+            answers=request.answers,
             student_id=current_user["id"],
         )
     except ValueError as error:
@@ -927,12 +940,12 @@ def quiz_submit(document_id: str, request: QuizSubmitRequest, current_user: dict
 
 @app.delete("/api/quiz/{document_id}/progress")
 def quiz_progress_reset(
-    document_id: str, topic_id: str, difficulty: str,
+    document_id: str, topic_id: str, difficulty: str, quiz_id: Optional[str] = None,
     current_user: dict = Depends(require_current_user),
 ) -> dict:
     """Clear current quiz progress while preserving completed history."""
     try:
-        return clear_quiz_progress(document_id, difficulty, topic_id, current_user["id"])
+        return clear_quiz_progress(document_id, difficulty, topic_id, current_user["id"], quiz_id=quiz_id)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 

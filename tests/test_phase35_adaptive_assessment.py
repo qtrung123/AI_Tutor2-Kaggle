@@ -11,7 +11,6 @@ from backend import quiz_store, quiz_units
 from backend.assessment_planner import allocate_document_topics, validate_and_deduplicate_concepts
 from backend.main import QuizGenerateRequest, QuizRegenerateRequest
 from backend.mastery_service import calculate_mastery, recompute_topic_mastery
-from backend.quiz_service import update_quiz_progress
 from backend import quiz_service
 
 
@@ -145,6 +144,9 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         self.assertEqual(loaded["questions"][0]["concept_id"], "concept_001")
 
     def test_document_attempt_recomputes_each_represented_topic(self):
+        """Grading/completion happens once, explicitly, via submit_quiz_attempt -- autosaving
+        answers through update_quiz_progress (the Quiz Player's Previous/Next/answer autosave) never
+        grades or completes an attempt on its own (see update_quiz_progress's docstring)."""
         questions = []
         for index, topic_id in enumerate(("topic_a", "topic_b"), start=1):
             questions.append({
@@ -161,8 +163,9 @@ class AdaptiveAssessmentTests(unittest.TestCase):
             "assessment_scope": "document", "assessment_plan": {"planner_version": "assessment_capacity_v1"},
             "questions": questions,
         }, "student")
-        update_quiz_progress("doc.pdf", "easy", "document", 1, "A", "student")
-        completed = update_quiz_progress("doc.pdf", "easy", "document", 2, "A", "student")
+        completed = quiz_service.submit_quiz_attempt(
+            "doc.pdf", "easy", "document", {"1": "A", "2": "A"}, student_id="student", quiz_id="document-quiz",
+        )
         self.assertEqual(set(completed["mastery_by_topic"]), {"topic_a", "topic_b"})
         self.assertTrue(completed["mastery_by_topic"]["topic_a"]["has_sufficient_evidence"])
         self.assertTrue(completed["mastery_by_topic"]["topic_b"]["has_sufficient_evidence"])

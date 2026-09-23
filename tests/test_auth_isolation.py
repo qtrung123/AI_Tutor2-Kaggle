@@ -18,7 +18,7 @@ from backend.auth_store import LEGACY_USER_ID
 from backend.ingest import migrate_legacy_vector_ownership
 from backend.main import QuizProgressRequest, app
 from backend.rag_service import _chroma_filter
-from backend.quiz_service import update_quiz_progress
+from backend.quiz_service import submit_quiz_attempt
 from backend.mastery_service import recompute_topic_mastery
 
 
@@ -126,8 +126,10 @@ class AuthenticationIsolationTests(unittest.TestCase):
         quiz_store.save_quiz("shared.pdf", "easy", sample_quiz(second["id"], "quiz-second"), second["id"])
         self.assertEqual(quiz_store.get_quiz("shared.pdf", "easy", "topic_001", first["id"])["quiz_id"], "quiz-first")
         self.assertEqual(quiz_store.get_quiz("shared.pdf", "easy", "topic_001", second["id"])["quiz_id"], "quiz-second")
-        update_quiz_progress("shared.pdf", "easy", "topic_001", 1, "A", first["id"])
-        update_quiz_progress("shared.pdf", "easy", "topic_001", 1, "B", second["id"])
+        # Grading/completion (and the mastery it feeds) only ever happens through an explicit
+        # submit -- autosaving answers via update_quiz_progress never completes an attempt.
+        submit_quiz_attempt("shared.pdf", "easy", "topic_001", {"1": "A"}, first["id"], quiz_id="quiz-first")
+        submit_quiz_attempt("shared.pdf", "easy", "topic_001", {"1": "B"}, second["id"], quiz_id="quiz-second")
         self.assertEqual(recompute_topic_mastery(first["id"], "shared.pdf", "topic_001")["mastery_score"], 100.0)
         self.assertEqual(recompute_topic_mastery(second["id"], "shared.pdf", "topic_001")["mastery_score"], 0.0)
         self.assertEqual(len(quiz_store.list_quiz_history(student_id=first["id"])), 1)
