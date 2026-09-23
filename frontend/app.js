@@ -75,7 +75,10 @@ let quizDetachedSave = null;
 // takes precedence over question-taking in renderQuizPlayer, so an unrelated re-render never
 // swaps Results for the Loading/question view.
 let quizResultState = null;   // { loading } | { result, view: "results" | "review", reviewIndex }
-let quizResultRequestSeq = 0;   // the latest detached (session-switch) save, for tests/diagnostics
+let quizResultRequestSeq = 0;
+// Study Session Overview: read-only statuses of this session's saved artifacts for the selected
+// model (never generates anything -- cache_only reads, same as the Summary/Flashcards tabs).
+let sessionOverviewStatus = { key: "", summary: "loading", flashcards: "loading", flashcardCount: 0 };   // the latest detached (session-switch) save, for tests/diagnostics
 // True only between a Finish Quiz click and its outcome: blocks a duplicate submission, matching
 // the quizGenerationInFlight guard used by the Create Quiz sheet.
 let quizSubmitInFlight = false;
@@ -590,6 +593,7 @@ function renderModelReadyState() {
     if (modelReadyState === "error") badge.title = modelReadyMessage || "Could not prepare model";
   }
   renderQuizSheetModelSummary();
+  if (document.body?.dataset?.sessionTab === "overview") renderSessionOverview();
   [generateQuizButton, generateSummaryButton, regenerateSummaryButton, generateFlashcardsButton, regenerateFlashcardsButton]
     .filter(Boolean)
     .forEach((button) => { button.disabled = modelReadyState === "preparing"; });
@@ -637,6 +641,7 @@ async function setSelectedModel(modelId) {
   const tab = document.body.dataset.sessionTab;
   if (tab === "summary") showSummaryState();
   if (tab === "flashcards") showFlashcardsState();
+  if (tab === "overview") loadSessionOverview();
   try { await ensureSelectedModelReadyWithStatus(); showToast("Model ready"); }
   catch (error) { showToast(error.message || "Model could not be prepared."); }
 }
@@ -753,6 +758,167 @@ function setSessionTab(tab) {
   if (tab === "summary") showSummaryState();
   if (tab === "flashcards") showFlashcardsState();
   if (tab === "quiz") renderQuizHistory();
+  if (tab === "overview") loadSessionOverview();
+}
+
+// ---- Study Session Overview ---------------------------------------------------------------------
+
+function sessionOverviewKey() {
+  return `${activeDocumentId}:${selectedModelId}:${flashcardLanguage}`;
+}
+
+async function loadSessionOverview() {
+  if (!activeDocumentId) return;
+  const key = sessionOverviewKey();
+  if (sessionOverviewStatus.key !== key) sessionOverviewStatus = { key, summary: "loading", flashcards: "loading", flashcardCount: 0 };
+  renderSessionOverview();
+  const documentId = activeDocumentId;
+  const [summary, cards] = await Promise.allSettled([
+    fetchJson(`${SUMMARY_API_BASE_URL}/${encodeURIComponent(documentId)}?model_id=${encodeURIComponent(selectedModelId)}&cache_only=true`),
+    fetchJson(flashcardsUrl("&cache_only=true")),
+  ]);
+  if (sessionOverviewKey() !== key) return;   // switched document/model meanwhile
+  sessionOverviewStatus.summary = summary.status === "rejected" ? "error"
+    : (summary.value?.status !== "not_generated" && summary.value?.final_summary ? "generated" : "not_generated");
+  const cardCount = cards.status === "fulfilled" && cards.value?.status !== "not_generated" ? (cards.value?.cards || []).length : 0;
+  sessionOverviewStatus.flashcards = cards.status === "rejected" ? "error" : (cardCount ? "generated" : "not_generated");
+  sessionOverviewStatus.flashcardCount = cardCount;
+  renderSessionOverview();
+}
+
+function sessionOverviewQuizState(documentId) {
+  const variants = (quizStatuses.find((item) => item.document_id === documentId)?.variants || [])
+    .filter((variant) => variant.quiz_id);
+  const byRecent = (left, right) => new Date(right.updated_at || right.created_at || 0) - new Date(left.updated_at || left.created_at || 0);
+  const inProgress = variants.filter((variant) => variant.progress_status === "in_progress").sort(byRecent);
+  const attempts = quizHistory.filter((attempt) => attempt.document_id === documentId)
+    .sort((left, right) => new Date(right.completed_at || 0) - new Date(left.completed_at || 0));
+  const completedQuizIds = new Set(attempts.map((attempt) => attempt.quiz_id).filter(Boolean));
+  return { variants, inProgress, latest: attempts[0] || null, completedCount: completedQuizIds.size };
+}
+
+function renderSessionOverview() {
+  const root = document.getElementById("session-overview");
+  const documentItem = indexedDocuments.find((item) => item.id === activeDocumentId);
+  if (!root || !documentItem) return;
+  const status = sessionOverviewStatus;
+  const quiz = sessionOverviewQuizState(activeDocumentId);
+  const readiness = { preparing: "Preparing…", ready: "Ready", error: "Unavailable" }[modelReadyState] || "";
+  const topicCount = documentItem.topics?.length || 0;
+  root.innerHTML = `
+    <header class="overview-header">
+      <p class="eyebrow">Overview</p>
+      <h2 class="overview-title"></h2>
+      <p class="overview-context">
+        <span class="overview-model"></span>
+        <span class="overview-model-state overview-model-state--${modelReadyState}"${readiness ? "" : " hidden"}>${readiness}</span>
+        <span class="overview-topics">${topicCount} topic${topicCount === 1 ? "" : "s"}</span>
+      </p>
+    </header>
+    <section class="overview-section overview-continue" hidden>
+      <h3>Continue studying</h3>
+      <div class="overview-continue-card">
+        <div class="overview-continue-copy">
+          <span class="overview-continue-label">Quiz in progress</span>
+          <strong class="overview-continue-title"></strong>
+          <small class="overview-continue-detail"></small>
+          <div class="overview-continue-track"><span></span></div>
+        </div>
+        <button class="primary-button overview-resume-button" type="button">Resume Quiz</button>
+      </div>
+    </section>
+    <section class="overview-section">
+      <h3>Study tools</h3>
+      <div class="overview-tools"></div>
+    </section>
+    <section class="overview-section">
+      <h3>Progress snapshot</h3>
+      <div class="overview-stats"></div>
+    </section>`;
+  root.querySelector(".overview-title").textContent = documentItem.title;
+  root.querySelector(".overview-model").textContent = `Model: ${modelLabel(selectedModelId) || "—"}`;
+
+  const resume = quiz.inProgress[0];
+  if (resume) {
+    const answered = Number(resume.answered) || 0;
+    const total = Number(resume.total || resume.question_count) || 0;
+    root.querySelector(".overview-continue").hidden = false;
+    root.querySelector(".overview-continue-title").textContent = (resume.title || "").trim() || "Untitled Quiz";
+    root.querySelector(".overview-continue-detail").textContent = `${answered} / ${total} answered`
+      + (quiz.inProgress.length > 1 ? ` · ${quiz.inProgress.length - 1} more in progress` : "");
+    root.querySelector(".overview-continue-track span").style.width = `${total ? Math.round((answered / total) * 100) : 0}%`;
+    root.querySelector(".overview-resume-button").addEventListener("click", () => resumeQuizFromOverview(resume));
+  }
+
+  const summaryText = { loading: "Checking…", generated: "Generated", not_generated: "Not generated", error: "Couldn't check" }[status.summary];
+  const flashcardText = status.flashcards === "generated" ? `${status.flashcardCount} card${status.flashcardCount === 1 ? "" : "s"}`
+    : { loading: "Checking…", not_generated: "Not generated", error: "Couldn't check" }[status.flashcards];
+  const quizParts = [
+    quiz.variants.length ? `${quiz.variants.length} quiz${quiz.variants.length === 1 ? "" : "zes"}` : "No quizzes yet",
+    quiz.inProgress.length ? `${quiz.inProgress.length} in progress` : "",
+    quiz.completedCount ? `${quiz.completedCount} completed` : "",
+  ].filter(Boolean);
+  const tools = [
+    { tab: "tutor", icon: "💬", name: "AI Tutor", detail: "Ask about this document", state: "neutral" },
+    { tab: "summary", icon: "📄", name: "Summary", detail: summaryText, state: status.summary },
+    { tab: "flashcards", icon: "🗂", name: "Flashcards", detail: flashcardText, state: status.flashcards },
+    { tab: "quiz", icon: "✓", name: "Quiz", detail: quizParts.join(" · "), state: quiz.variants.length ? "generated" : "not_generated" },
+  ];
+  const toolList = root.querySelector(".overview-tools");
+  tools.forEach((tool) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `overview-tool overview-tool--${tool.state}`;
+    button.dataset.overviewTool = tool.tab;
+    const icon = document.createElement("span"); icon.className = "overview-tool-icon"; icon.setAttribute("aria-hidden", "true"); icon.textContent = tool.icon;
+    const copy = document.createElement("span"); copy.className = "overview-tool-copy";
+    const name = document.createElement("strong"); name.textContent = tool.name;
+    const detail = document.createElement("small"); detail.className = "overview-tool-status"; detail.textContent = tool.detail;
+    copy.append(name, detail);
+    const chevron = document.createElement("span"); chevron.className = "overview-tool-chevron"; chevron.setAttribute("aria-hidden", "true"); chevron.textContent = "›";
+    button.append(icon, copy, chevron);
+    button.addEventListener("click", () => openOverviewTool(tool.tab));
+    toolList.appendChild(button);
+  });
+
+  const latest = quiz.latest;
+  const stats = [
+    ["Quizzes completed", String(quiz.completedCount)],
+    ["In progress", String(quiz.inProgress.length)],
+    ["Latest score", latest ? `${latest.score} / ${latest.total}` : "—", latest ? ((latest.title || "").trim() || "Untitled Quiz") : "No completed quiz yet"],
+    ["Flashcards", status.flashcards === "generated" ? String(status.flashcardCount) : "—", status.flashcards === "loading" ? "Checking…" : ""],
+    ["Summary", { generated: "Available", not_generated: "Not yet", error: "—", loading: "…" }[status.summary]],
+  ];
+  const statList = root.querySelector(".overview-stats");
+  stats.forEach(([label, value, note]) => {
+    const tile = document.createElement("div");
+    tile.className = "overview-stat";
+    const strong = document.createElement("strong"); strong.textContent = value;
+    const span = document.createElement("span"); span.textContent = label;
+    tile.append(strong, span);
+    if (note) { const small = document.createElement("small"); small.textContent = note; tile.appendChild(small); }
+    statList.appendChild(tile);
+  });
+}
+
+function openOverviewTool(tab) {
+  if (tab === "tutor") {
+    // The AI Tutor lives in the persistent side panel next to every tab: land on the material
+    // with the chat focused (same as the Library's AI Tutor quick action).
+    setSessionTab("material");
+    chatInput?.focus();
+    return;
+  }
+  setSessionTab(tab);
+}
+
+async function resumeQuizFromOverview(variant) {
+  setSessionTab("quiz");
+  try {
+    await openQuizPlayer({ document_id: activeDocumentId, topic_id: variant.topic_id, difficulty: variant.difficulty, quiz_id: variant.quiz_id });
+  } catch (error) {
+    showToast(error.message || "Could not open this quiz");
+  }
 }
 
 function visibleFlashcards() {
@@ -1075,7 +1241,7 @@ async function loadDocumentSummary(regenerate = false) {
   }
 }
 
-async function openStudySession(documentId, tab = "material", topicId = "") {
+async function openStudySession(documentId, tab = "overview", topicId = "") {
   const documentItem = indexedDocuments.find((item) => item.id === documentId);
   if (!documentItem) return;
   activeDocumentId = documentId;
