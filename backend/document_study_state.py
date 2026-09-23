@@ -85,6 +85,7 @@ class QuizState:
     quiz_count: int = 0
     latest_quiz_id: str | None = None
     latest_quiz_title: str | None = None
+    latest_quiz_question_count: int | None = None
     latest_quiz_status: str | None = None  # not_started | in_progress | completed (that quiz's own attempt)
     in_progress_count: int = 0
     completed_attempt_count: int = 0
@@ -155,6 +156,7 @@ def _quiz_state(owner_id: str, document_id: str) -> QuizState:
         quiz_count=len(quizzes),
         latest_quiz_id=latest["quiz_id"] if latest else None,
         latest_quiz_title=(latest["title"] or None) if latest else None,
+        latest_quiz_question_count=int(latest["question_count"] or 0) if latest else None,
         latest_quiz_status=status(latest) if latest else None,
         in_progress_count=sum(1 for quiz in quizzes if status(quiz) == "in_progress"),
         completed_attempt_count=len(completed),

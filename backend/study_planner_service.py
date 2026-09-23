@@ -8,7 +8,7 @@ reuses the Phase 1 scheduler (compute_schedule) completely unchanged, once per s
 instead of modifying its algorithm.
 """
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from backend import quiz_store, study_planner_store
 from backend.document_study_state import get_document_study_state
@@ -513,10 +513,24 @@ def add_plan_material(owner_id: str, plan_id: str, document_id: str, deadline: s
 SCHEDULING_BUSY_STATUSES = ("scheduled", "in_progress", "completed")
 
 
-def build_scheduling_context(owner_id: str, plan_id: str, now: datetime | None = None) -> SchedulingContext:
-    """Assemble the read-only SchedulingContext the future scheduler consumes for one plan: each
+def utc_offset_for_local_now(local_now: datetime, utc_now: datetime | None = None) -> timedelta:
+    """The learner's UTC offset, derived from their browser's naive local clock (local_now) versus
+    the real UTC clock, rounded to the nearest 15 minutes -- no timezone is assumed."""
+    utc_now = (utc_now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(tzinfo=None)
+    quarter_hours = round((local_now - utc_now).total_seconds() / 900)
+    return timedelta(minutes=15 * quarter_hours)
+
+
+def build_scheduling_context(owner_id: str, plan_id: str, now: datetime | None = None,
+                             utc_offset: timedelta | None = None) -> SchedulingContext:
+    """Assemble the read-only SchedulingContext the scheduler consumes for one plan: each
     material with its DocumentStudyState, the owner's availability, and sessions (any plan) that
     already occupy time from today on. No scheduling decisions are made here.
+
+    `now` is the learner's local time (from the browser); pass their `utc_offset` alongside a naive
+    `now` (see utc_offset_for_local_now). No offset is ever inferred from the server's timezone:
+    without one the context carries utc_offset=None (unknown). A missing `now` still falls back to
+    the server's clock, as the rest of the planner does.
 
     A material whose document no longer exists is skipped (it has no state to plan from)."""
     if not study_planner_store.get_plan(owner_id, plan_id):
@@ -528,7 +542,7 @@ def build_scheduling_context(owner_id: str, plan_id: str, now: datetime | None =
         if state is not None:
             materials.append(MaterialContext(material=material, state=state))
     return SchedulingContext(
-        owner_id=owner_id, plan_id=plan_id, now=now, materials=tuple(materials),
+        owner_id=owner_id, plan_id=plan_id, now=now, utc_offset=utc_offset, materials=tuple(materials),
         availability=tuple(study_planner_store.list_availability(owner_id)),
         busy_sessions=tuple(study_planner_store.list_sessions(
             owner_id, statuses=SCHEDULING_BUSY_STATUSES, start_from=now.date().isoformat(),

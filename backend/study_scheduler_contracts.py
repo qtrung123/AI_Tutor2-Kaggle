@@ -6,7 +6,7 @@ explain themselves with a SchedulingReason (a stable machine code plus a human-r
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 from backend.study_planner_store import ACTIVITY_TYPES, SESSION_REASONS, validate_session
@@ -81,13 +81,20 @@ class MaterialContext:
 class SchedulingContext:
     """Everything a scheduler run may read. `now` is a NAIVE LOCAL datetime (the planner's
     wall-clock convention). `availability` are availability_slots rows; `busy_sessions` are
-    existing study_sessions rows (any plan) that already occupy time."""
+    existing study_sessions rows (any plan) that already occupy time.
+
+    `utc_offset` is the learner's offset from UTC, used to put artifact timestamps (stored as aware
+    UTC, e.g. quiz completed_at) onto the planner's local calendar. Resolution: an explicit
+    `utc_offset` wins; else a timezone-aware `now` supplies its own; else it is unknown (None) and
+    the scheduler uses the neutral UTC calendar -- it never infers the learner's timezone from the
+    server clock/timezone (see study_scheduler.resolve_clock / local_date)."""
     owner_id: str
     plan_id: str
     now: datetime
     materials: tuple[MaterialContext, ...]
     availability: tuple[dict, ...]
     busy_sessions: tuple[dict, ...]
+    utc_offset: timedelta | None = None
 
 
 @dataclass(frozen=True)
@@ -115,7 +122,30 @@ class ProposedSession:
         }
 
 
+@dataclass(frozen=True)
+class CapacityReport:
+    """How well the plan fits the learner's time -- reported instead of over-packing the calendar.
+    `required_minutes` covers every activity the plan still needs in the horizon; `scheduled_minutes`
+    what was placed; `shortfall_minutes` what did not fit (listed in `unscheduled`) -- risk is judged
+    by actual placement, i.e. AFTER daily caps, spacing and busy time, never by raw window minutes.
+    `schedulable_minutes` is that comfortable capacity (free time per day capped at the daily
+    target); `available_minutes` is the raw free availability, kept for reference only."""
+    required_minutes: int
+    scheduled_minutes: int
+    shortfall_minutes: int
+    schedulable_minutes: int
+    available_minutes: int
+    status: str  # on_track | at_risk
+    unscheduled: tuple[CandidateActivity, ...] = ()
+
+
+@dataclass(frozen=True)
+class ScheduleResult:
+    proposals: tuple[ProposedSession, ...]
+    capacity: CapacityReport
+
+
 class Scheduler(Protocol):
-    """What the future deterministic scheduler implements."""
+    """What a deterministic scheduler implements (see study_scheduler.DeterministicScheduler)."""
 
     def propose(self, context: SchedulingContext) -> list[ProposedSession]: ...
