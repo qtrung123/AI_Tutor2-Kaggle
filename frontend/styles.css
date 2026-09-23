@@ -3172,3 +3172,20 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .planner-session-status{font-size:12px;font-weight:700;color:var(--muted);white-space:nowrap}
 .planner-session-status--completed{color:var(--navy-2)}
 @media(max-width:480px){.planner-session--actionable,.planner-session--done{grid-template-columns:1fr}.planner-session-actions{flex-wrap:wrap;justify-content:flex-start;margin-top:4px}}
+
+/* Adaptive replanning: review panel for larger plan changes */
+.adapt-backdrop{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(16,32,29,.35)}
+.adapt-panel{width:min(520px,100%);max-height:85vh;overflow:auto;display:grid;gap:14px;padding:22px;border-radius:20px;background:var(--card);box-shadow:var(--shadow);min-width:0}
+.adapt-panel h2{margin:0;font-size:20px;letter-spacing:-.02em}
+.adapt-intro{margin:0;color:var(--muted);font-size:14px}
+.adapt-group h3{margin:0 0 6px;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.adapt-group ul{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.adapt-item{display:grid;gap:2px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;min-width:0}
+.adapt-item strong{font-size:14px;overflow-wrap:anywhere}
+.adapt-when{font-size:13px;font-weight:600}
+.adapt-item small{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.adapt-note{margin:0;font-size:13px;color:var(--muted)}
+.adapt-error{margin:0;font-size:13px;color:var(--danger)}
+.adapt-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}
+.adapt-actions button{width:auto}
+@media(max-width:480px){.adapt-panel{padding:18px}.adapt-actions button{flex:1 1 auto}}

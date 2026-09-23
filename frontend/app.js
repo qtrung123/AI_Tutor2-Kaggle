@@ -4294,6 +4294,7 @@ async function submitQuizPlayer() {
     await loadDashboard();
     renderQuizHistory();
     showQuizResults(buildQuizResult(currentAttempt, currentQuiz));
+    plannerAdaptAfterQuiz(currentQuiz.document_id);
   } catch (error) {
     // Local answers are untouched -- the learner can simply press Finish Quiz again.
     showToast(error.message || "Could not submit quiz");
@@ -4478,6 +4479,7 @@ async function submitAssessmentQuiz(event) {
     await loadDashboard();
     renderAssessmentQuiz();
     showToast(`Attempt ${currentAttempt.attempt_number}: ${currentAttempt.score}/${currentAttempt.total}`);
+    plannerAdaptAfterQuiz(currentQuiz.document_id);
   } catch (error) {
     renderAssessmentQuiz();
     showToast(error.message || "Could not submit quiz");
@@ -4957,7 +4959,8 @@ async function loadPlannerData({ keepWeek = false } = {}) {
     plannerHistorySessions = [];
     if (!keepWeek) plannerPlanWeekStart = null;
     if (plannerPlan) {
-      const [detail, sessions] = await Promise.all([plannerRequest(plannerPlanUrl()), plannerRequest(plannerPlanUrl("/sessions"))]);
+      const [detail, saved] = await Promise.all([plannerRequest(plannerPlanUrl()), plannerRequest(plannerPlanUrl("/sessions"))]);
+      const sessions = saved.map((session) => ({ ...session, plan_id: plannerPlan.plan_id }));
       plannerMaterials = detail.materials;
       plannerSessions = sessions.filter(plannerIsActiveSession);
       plannerHistorySessions = sessions.filter((session) => PLANNER_HISTORY_SESSION_STATUSES.includes(session.status));
@@ -5298,7 +5301,12 @@ async function plannerSessionAction(session, kind, button, group) {
   buttons.forEach((item) => { item.disabled = true; });
   button.textContent = kind === "start" ? "Opening…" : "Saving…";
   let refresh = kind !== "start";
+  let skipped = null;   // after a Skip: whether it changed anything (then the plan may adapt)
   try {
+    if (kind === "reschedule" && await plannerRescheduleThroughAdaptation(session)) {
+      refresh = false;   // the adaptation already refreshed Home + week (or is waiting for the learner's review)
+      return;
+    }
     const url = `${PLANNER_SESSIONS_API_URL}/${encodeURIComponent(session.session_id)}/${kind}`;
     const body = kind === "reschedule" ? { utc_offset_minutes: plannerUtcOffsetMinutes() } : undefined;
     const result = await plannerRequest(url, { method: "POST", body });
@@ -5312,7 +5320,7 @@ async function plannerSessionAction(session, kind, button, group) {
       // A missing artifact is fine: the tool's own empty state offers to generate/create it.
       await openStudySession(session.document_id, result.tool);
     } else if (kind === "complete") showToast("Session completed. Nice work!");
-    else if (kind === "skip") showToast("Session skipped");
+    else if (kind === "skip") skipped = { changed: Boolean(result.changed) };
     else {
       const moved = result.session;
       showToast(`Moved to ${plannerDayLabel(moved.scheduled_start.slice(0, 10))}, ${moved.scheduled_start.slice(11, 16)}`
@@ -5329,6 +5337,220 @@ async function plannerSessionAction(session, kind, button, group) {
     }
   }
   if (refresh) await plannerRefreshSchedules();
+  if (skipped?.changed) {
+    await plannerAdapt(session.plan_id, { kind: "session_skipped", session_id: session.session_id }, { prefix: "Session skipped" });
+  } else if (skipped) showToast("Session skipped");
+}
+
+// ---- Adaptive replanning (Phase 5B2) ------------------------------------------
+// The server recomputes every proposal from the trigger; the page never sends session changes.
+// Small proposals are applied right away with a short note; large ones wait for the learner.
+
+const plannerAdaptingPlans = new Set();   // plan ids with an adaptation request in flight
+
+function plannerDocumentTitle(documentId) {
+  return indexedDocuments.find((item) => item.id === documentId)?.title || documentId;
+}
+
+function plannerActivityWord(activity) {
+  return (PLANNER_ACTIVITY_LABELS[activity] || activity).toLowerCase();
+}
+
+function plannerShortWhen(iso) {
+  const [year, month, day] = iso.slice(0, 10).split("-").map(Number);
+  return `${new Date(year, month - 1, day).toLocaleDateString(undefined, { weekday: "short" })} ${iso.slice(11, 16)}`;
+}
+
+function plannerLongWhen(iso) {
+  return `${plannerDayLabel(iso.slice(0, 10))}, ${iso.slice(11, 16)}`;
+}
+
+function plannerAdaptationSummary(result) {
+  const parts = [
+    ...result.moved.map((item) => `${plannerActivityWord(item.activity_type)} moved to ${plannerShortWhen(item.to_start)}`),
+    ...result.added.map((item) => `${plannerActivityWord(item.activity_type)} added ${plannerShortWhen(item.scheduled_start)}`),
+    ...result.cancelled.map((item) => `${plannerActivityWord(item.activity_type)} no longer needed`),
+  ];
+  const shown = parts.slice(0, 3).join(", ") + (parts.length > 3 ? `, +${parts.length - 3} more` : "");
+  return `Plan adjusted: ${shown}.`;
+}
+
+function plannerAdaptationReason(message) {
+  // Engine messages restate the action ("Move the review session for "X" to <date>: <why>."); the
+  // panel already shows what and when, so keep only the why.
+  const why = (message || "").replace(/^(Move|Cancel) the .*? session for ".*?"( to \d{4}-\d{2}-\d{2} \d{2}:\d{2})?: /, "");
+  return why.charAt(0).toUpperCase() + why.slice(1);
+}
+
+async function plannerAdapt(planId, trigger, { prefix = "", quietErrors = true } = {}) {
+  if (!planId) return null;
+  if (plannerAdaptingPlans.has(planId)) return null;   // one adaptation per plan at a time
+  plannerAdaptingPlans.add(planId);
+  let result = null;
+  try {
+    result = await plannerRequest(`${PLANNER_PLANS_API_URL}/${encodeURIComponent(planId)}/adaptation/apply`, {
+      method: "POST", body: { trigger, utc_offset_minutes: plannerUtcOffsetMinutes() },
+    });
+  } catch (error) {
+    if (!quietErrors) throw error;
+    if (prefix) showToast(prefix);
+    return null;
+  } finally {
+    plannerAdaptingPlans.delete(planId);
+  }
+  if (result?.applied) {
+    showToast(prefix ? `${prefix}. ${plannerAdaptationSummary(result)}` : plannerAdaptationSummary(result));
+    await plannerRefreshSchedules();
+  } else if (result?.requires_confirmation) {
+    if (prefix) showToast(prefix);
+    plannerShowAdaptationReview(planId, trigger, result);
+  } else if (prefix) showToast(prefix);
+  return result;
+}
+
+async function plannerRescheduleThroughAdaptation(session) {
+  // A session whose time has passed is a "missed" trigger: the planner finds its replacement and
+  // shifts what depends on it. When it has nothing to change, the plain reschedule runs instead.
+  if (!plannerIsOverdue(session)) return false;
+  let result = null;
+  try {
+    result = await plannerAdapt(session.plan_id, { kind: "session_missed", session_id: session.session_id }, { quietErrors: false });
+  } catch (error) {
+    return false;
+  }
+  return Boolean(result && (result.applied || result.requires_confirmation));
+}
+
+async function plannerAdaptAfterQuiz(documentId) {
+  // A completed quiz can re-shape that document's upcoming practice in any active plan holding it.
+  try {
+    const plans = (await plannerRequest(PLANNER_PLANS_API_URL)).filter((plan) => plan.status === "active");
+    for (const plan of plans) {
+      const detail = await plannerRequest(`${PLANNER_PLANS_API_URL}/${encodeURIComponent(plan.plan_id)}`);
+      if ((detail.materials || []).some((material) => material.document_id === documentId)) {
+        await plannerAdapt(plan.plan_id, { kind: "quiz_completed", document_id: documentId });
+      }
+    }
+  } catch (error) {
+    // Adaptation is a bonus on top of the quiz result; the result itself is already saved.
+  }
+}
+
+function plannerCloseAdaptationReview() {
+  document.getElementById("adapt-review")?.remove();
+  document.removeEventListener("keydown", plannerAdaptationReviewKeys);
+}
+
+function plannerAdaptationReviewKeys(event) {
+  if (event.key === "Escape") document.getElementById("adapt-keep")?.click();
+}
+
+function plannerShowAdaptationReview(planId, trigger, proposal) {
+  plannerCloseAdaptationReview();
+  const backdrop = document.createElement("div");
+  backdrop.className = "adapt-backdrop";
+  backdrop.id = "adapt-review";
+  const panel = document.createElement("section");
+  panel.className = "adapt-panel";
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-labelledby", "adapt-title");
+  const title = document.createElement("h2");
+  title.id = "adapt-title";
+  title.textContent = "Review plan changes";
+  const intro = document.createElement("p");
+  intro.className = "adapt-intro";
+  intro.textContent = "Based on your recent study, we suggest a few changes. Nothing changes unless you accept.";
+  panel.append(title, intro);
+
+  const group = (label, items, describe) => {
+    if (!items.length) return;
+    const section = document.createElement("section");
+    section.className = "adapt-group";
+    const heading = document.createElement("h3");
+    heading.textContent = label;
+    const list = document.createElement("ul");
+    items.forEach((item) => {
+      const { when, reason } = describe(item);
+      const row = document.createElement("li");
+      row.className = "adapt-item";
+      const name = document.createElement("strong");
+      name.textContent = `${PLANNER_ACTIVITY_LABELS[item.activity_type] || item.activity_type} · ${plannerDocumentTitle(item.document_id)}`;
+      const time = document.createElement("span");
+      time.className = "adapt-when";
+      time.textContent = when;
+      const why = document.createElement("small");
+      why.textContent = reason;
+      row.append(name, time, why);
+      list.appendChild(row);
+    });
+    section.append(heading, list);
+    panel.appendChild(section);
+  };
+  group("New sessions", proposal.added, (item) => ({
+    when: plannerLongWhen(item.scheduled_start), reason: plannerAdaptationReason(item.message) }));
+  group("Moved", proposal.moved, (item) => ({
+    when: `${plannerLongWhen(item.from_start)} → ${plannerLongWhen(item.to_start)}`, reason: plannerAdaptationReason(item.message) }));
+  group("No longer needed", proposal.cancelled, (item) => ({
+    when: `Removed from plan · was ${plannerLongWhen(item.scheduled_start)}`, reason: plannerAdaptationReason(item.message) }));
+  if (proposal.warnings?.length) {
+    const note = document.createElement("p");
+    note.className = "adapt-note";
+    note.textContent = "Some study time no longer fits before a deadline. Adding availability can help.";
+    panel.appendChild(note);
+  }
+  const error = document.createElement("p");
+  error.className = "adapt-error";
+  error.setAttribute("role", "alert");
+  error.hidden = true;
+  const actions = document.createElement("div");
+  actions.className = "adapt-actions";
+  const keep = document.createElement("button");
+  keep.type = "button";
+  keep.id = "adapt-keep";
+  keep.className = "secondary-button";
+  keep.textContent = "Keep current plan";
+  const accept = document.createElement("button");
+  accept.type = "button";
+  accept.id = "adapt-accept";
+  accept.className = "primary-button";
+  accept.textContent = "Accept changes";
+  actions.append(keep, accept);
+  panel.append(error, actions);
+  backdrop.appendChild(panel);
+  document.body.appendChild(backdrop);
+  document.addEventListener("keydown", plannerAdaptationReviewKeys);
+
+  let busy = false;
+  keep.addEventListener("click", () => {
+    if (busy) return;
+    plannerCloseAdaptationReview();   // nothing is written
+    showToast("Kept your current plan");
+  });
+  accept.addEventListener("click", async () => {
+    if (busy) return;   // one apply per click burst
+    busy = true;
+    keep.disabled = accept.disabled = true;
+    accept.textContent = "Applying…";
+    error.hidden = true;
+    try {
+      const result = await plannerRequest(`${PLANNER_PLANS_API_URL}/${encodeURIComponent(planId)}/adaptation/apply`, {
+        method: "POST", body: { trigger, utc_offset_minutes: plannerUtcOffsetMinutes(), confirm: true },
+      });
+      plannerCloseAdaptationReview();
+      showToast(result.applied ? plannerAdaptationSummary(result) : "Your plan is already up to date");
+      await plannerRefreshSchedules();
+    } catch (failure) {
+      error.textContent = failure.status === 409
+        ? "Your plan changed in the meantime. Try again to use the latest version."
+        : "Could not update your plan right now. Please try again.";
+      error.hidden = false;
+      busy = false;
+      keep.disabled = accept.disabled = false;
+      accept.textContent = "Accept changes";
+    }
+  });
+  accept.focus();
 }
 
 async function plannerRefreshSchedules() {
@@ -5543,7 +5765,8 @@ async function loadTodayPlan() {
   try {
     // Only active plans are current work: an archived plan's leftover scheduled sessions are not shown.
     const plans = (await plannerRequest(PLANNER_PLANS_API_URL)).filter((plan) => plan.status === "active");
-    const lists = await Promise.all(plans.map((plan) => plannerRequest(`${PLANNER_PLANS_API_URL}/${encodeURIComponent(plan.plan_id)}/sessions`)));
+    const lists = await Promise.all(plans.map((plan) => plannerRequest(`${PLANNER_PLANS_API_URL}/${encodeURIComponent(plan.plan_id)}/sessions`)
+      .then((sessions) => sessions.map((session) => ({ ...session, plan_id: plan.plan_id })))));
     renderTodayPlan(lists.flat().filter(plannerIsActiveSession));
   } catch (error) {
     renderTodayPlan(null);
