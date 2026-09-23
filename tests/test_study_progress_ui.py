@@ -86,6 +86,9 @@ const noOverflow = () => document.documentElement.scrollWidth <= window.innerWid
   setPage("planner"); await sleep(700);
   out.planProgress = document.getElementById("planner-plan-progress").hidden ? null : document.getElementById("planner-plan-progress").textContent;
   out.overflow.planner = noOverflow();
+  setPage("overview"); await sleep(500);
+  out.todayProgress = document.querySelector("#today-plan .today-plan-progress")?.textContent || null;
+  out.overflow.home = noOverflow();
   publish();
 })().catch((error) => { out.fatal = String(error && error.stack || error); publish(); });
 }
@@ -108,12 +111,14 @@ class ProgressUiAssertions:
 
     def test_home_shows_current_quiz_performance_not_overall_accuracy(self):
         labels = {card[0]: card[1:] for card in self.out["kpis"]}
-        self.assertNotIn("Overall accuracy", labels)
+        self.assertEqual(list(labels), ["Learning materials", "Quiz performance", "Topics mastered"])
         self.assertEqual(labels["Quiz performance"], ["73%", "Latest quiz across 2 documents"])
+        self.assertEqual(labels["Topics mastered"], ["0 / 2", "1 of 2 assessed so far"])
 
     def test_progress_panels_show_real_values(self):
         mkt = self.out["mkt"]
-        self.assertEqual(mkt["headings"][:3], ["Learning state", "Latest score", "Sessions"])
+        self.assertEqual(mkt["headings"], ["Where you are", "Quiz results", "This document in your plan", "Topic mastery",
+                                           "Quiz coverage", "Needs attention", "Suggested next steps"])
         self.assertEqual(mkt["state"], ["Learning", "Latest quiz score 7/10 (70%); keep practicing.", "12 flashcards ready"])
         self.assertEqual(mkt["quiz"][0], "70%")
         self.assertRegex(mkt["quiz"][1], r"^7/10 correct · ")
@@ -137,8 +142,8 @@ class ProgressUiAssertions:
     def test_empty_states_without_quiz_or_plan(self):
         stats = self.out["stats"]
         self.assertEqual(stats["state"], ["Not started", "Not studied yet."])
-        self.assertEqual(stats["quiz"], ["No completed quiz yet. Your results will appear here after your first quiz."])
-        self.assertEqual(stats["plan"], ["This document isn't part of an active study plan."])
+        self.assertEqual(stats["quiz"], ["No quiz results yet. Take a quiz to see your score here."])
+        self.assertEqual(stats["plan"], ["Not in an active study plan. Add it in Study Planner to schedule sessions."])
 
     def test_one_attempt_is_not_interpreted_as_a_trend(self):
         quiz = self.out["pbi"]["quiz"]
@@ -149,6 +154,9 @@ class ProgressUiAssertions:
     def test_planner_shows_plan_progress(self):
         self.assertEqual(self.out["planProgress"],
                          "3 of 8 sessions done · 1h 30m studied, 2h 30m still planned · quiz performance 73% across 2 of 3 documents")
+
+    def test_today_shows_one_plan_progress_line(self):
+        self.assertEqual(self.out["todayProgress"], "3 of 8 sessions done · 1h 30m studied · 2h 30m to go")
 
     def test_no_horizontal_overflow(self):
         self.assertTrue(all(self.out["overflow"].values()), self.out["overflow"])

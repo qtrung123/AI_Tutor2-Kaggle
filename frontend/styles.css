@@ -3169,8 +3169,8 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .planner-session-note{font-size:12px;font-weight:700;color:var(--muted)}
 .planner-session--overdue{border-style:dashed}
 .planner-session--done{opacity:.75}
-.planner-session-status{font-size:12px;font-weight:700;color:var(--muted);white-space:nowrap}
-.planner-session-status--completed{color:var(--navy-2)}
+.planner-session-status{justify-self:end;padding:3px 10px;border-radius:999px;background:var(--bg);font-size:12px;font-weight:700;color:var(--muted);white-space:nowrap}
+.planner-session-status--completed{background:#e8f7ec;color:#1f6b3a}
 @media(max-width:480px){.planner-session--actionable,.planner-session--done{grid-template-columns:1fr}.planner-session-actions{flex-wrap:wrap;justify-content:flex-start;margin-top:4px}}
 
 /* Adaptive replanning: review panel for larger plan changes */
@@ -3206,3 +3206,10 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .progress-attempts{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
 .progress-attempts li{padding:3px 10px;border:1px solid var(--line);border-radius:999px;font-size:12px}
 .planner-plan-progress{font-weight:600}
+
+/* Phase 6B polish: Home stats, Today's plan line, Progress hierarchy */
+.today-plan-progress{margin:-4px 0 0;font-size:13px;font-weight:600;color:var(--muted)}
+.progress-panel h2{margin:0 0 10px;font-size:17px;letter-spacing:-.01em}
+.progress-panel--wide{grid-column:1 / -1}
+.progress-panel .empty-state{margin:0;padding:12px 14px;font-size:13px}
+@media(max-width:720px){.progress-panel--wide{grid-column:auto}.session-shell .learning-overview .stat-card:last-child:nth-child(odd){grid-column:1 / -1;border-right:0}}

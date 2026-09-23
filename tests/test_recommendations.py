@@ -129,11 +129,12 @@ class RecommendationTests(unittest.TestCase):
         self.assertEqual(generate_recommendations(LEGACY_USER_ID), [])
         markup = Path("frontend/index.html").read_text(encoding="utf-8")
         script = Path("frontend/app.js").read_text(encoding="utf-8")
-        self.assertIn('id="overview-recommendations-list"', markup)
+        # Recommendations live in the Study Session Progress tab; the hidden Overview list is gone (Phase 6B).
+        self.assertNotIn('id="overview-recommendations-list"', markup)
+        self.assertIn('id="session-recommendations-list"', markup)
         self.assertIn("/api/recommendations", script)
-        self.assertIn("No priority learning actions right now.", script)
-        self.assertIn("Add learning material", script)
-        self.assertIn("openPracticeContext(recommendation.document_id, recommendation.topic_id)", script)
+        self.assertIn("Suggestions appear after a few quiz answers.", script)
+        self.assertIn('openStudySession(documentId, "quiz", recommendation.topic_id)', script)
 
 
 if __name__ == "__main__":

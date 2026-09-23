@@ -128,7 +128,8 @@ class KnowledgeGapTests(unittest.TestCase):
             self.assertEqual(client.get("/api/knowledge-gaps/doc.pdf").status_code, 200)
         markup = Path("frontend/index.html").read_text(encoding="utf-8")
         script = Path("frontend/app.js").read_text(encoding="utf-8")
-        self.assertIn('id="overview-knowledge-gaps-list"', markup)
+        self.assertNotIn('id="overview-knowledge-gaps-list"', markup)   # hidden legacy container removed (Phase 6B)
+        self.assertIn('id="session-knowledge-gaps-list"', markup)
         self.assertIn('/api/knowledge-gaps', script)
         # Knowledge gaps are now presented per Study Session Progress view, not
         # as a standalone Overview panel; API wiring remains the contract here.

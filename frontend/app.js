@@ -36,7 +36,6 @@ const PLANNER_AVAILABILITY_API_URL = apiUrl("/api/planner/availability");
 const PLANNER_PLANS_API_URL = apiUrl("/api/planner/plans");
 const PLANNER_SESSIONS_API_URL = apiUrl("/api/planner/sessions");
 const ADMIN_QUIZ_MODEL_COMPARISON_API_URL = apiUrl("/api/admin/quiz-model-comparison");
-const RECOMMENDATIONS_OVERVIEW_LIMIT = Number(window.APP_CONFIG?.RECOMMENDATIONS_OVERVIEW_LIMIT || 4);
 
 const initialState = {
   page: "overview",
@@ -320,21 +319,9 @@ const conversationSourcesPanel = document.getElementById("conversation-sources-p
 tutorLayout.insertBefore(toggleConversationSourcesButton, conversationSourcesPanel);
 setSourcesDrawerOpen(false);
 const overviewKpis = document.getElementById("overview-kpis");
-const overviewMasteryList = document.getElementById("overview-mastery-list");
-const continueLearningList = document.getElementById("continue-learning-list");
 const overviewMaterialsList = document.getElementById("overview-materials-list");
-const overviewKnowledgeGapsList = document.getElementById("overview-knowledge-gaps-list");
-const overviewRecommendationsList = document.getElementById("overview-recommendations-list");
-const learningStatusTitle = document.getElementById("learning-status-title");
-const learningStatusCopy = document.getElementById("learning-status-copy");
-const learningStatusAction = document.getElementById("learning-status-action");
-const sidebarDocumentCount = document.getElementById("sidebar-document-count");
-const sidebarTopicProgress = document.getElementById("sidebar-topic-progress");
-const sidebarTopicStatus = document.getElementById("sidebar-topic-status");
 const sessionDocumentName = document.getElementById("session-document-name");
 const sessionDocumentStatus = document.getElementById("session-document-status");
-const sessionMaterialDetails = document.getElementById("session-material-details");
-const sessionTopicList = document.getElementById("session-topic-list");
 const sessionMasteryList = document.getElementById("session-mastery-list");
 const sessionCoverageList = document.getElementById("session-coverage-list");
 const sessionProgressState = document.getElementById("session-progress-state");
@@ -1324,10 +1311,6 @@ async function openStudySession(documentId, tab = "overview", topicId = "") {
   originalContentFrame.src = `${contentUrl}#view=FitH`;
   originalContentFrame.hidden = false;
   originalContentEmpty.hidden = true;
-  sessionMaterialDetails.innerHTML = `<dl><div><dt>Document</dt><dd>${documentItem.title}</dd></div><div><dt>Indexed content</dt><dd>${documentItem.chunks || 0} chunks available for AI Tutor and quizzes</dd></div></dl>`;
-  sessionTopicList.innerHTML = "";
-  (documentItem.topics || []).forEach((topic) => { const item = document.createElement("div"); item.className = "mastery-card"; item.innerHTML = `<strong>${topic.name}</strong><span>Ready for assessment</span>`; sessionTopicList.appendChild(item); });
-  if (!documentItem.topics?.length) sessionTopicList.innerHTML = '<div class="empty-state">No extracted topics are available yet.</div>';
   if (quizDocumentSelect) quizDocumentSelect.value = documentId;
   quizScopeSelect.value = "document";   // a quiz always covers the whole document
   flashcardTopicFilter = topicId && topicId !== "document" ? topicId : "all";
@@ -1339,9 +1322,9 @@ async function openStudySession(documentId, tab = "overview", topicId = "") {
 
 function renderSessionProgress(documentId) {
   const assessed = (dashboardData?.mastery || []).filter((item) => item.document_id === documentId && item.mastery_level !== "Not assessed");
-  renderMasteryList(sessionMasteryList, assessed, { emptyText: "No assessed topics yet. Use Quiz to begin building mastery." });
+  renderMasteryList(sessionMasteryList, assessed, { emptyText: "Complete a quiz to see how each topic is going." });
   sessionCoverageList.innerHTML = "";
-  if (!assessed.length) sessionCoverageList.innerHTML = '<div class="empty-state">Concept coverage appears after an assessment.</div>';
+  if (!assessed.length) sessionCoverageList.innerHTML = '<div class="empty-state">Shows how much of each topic your quizzes have covered.</div>';
   assessed.forEach((item) => {
     const card = document.createElement("div");
     card.className = "mastery-card";
@@ -1354,11 +1337,11 @@ function renderSessionProgress(documentId) {
   });
   const gaps = knowledgeGaps.filter((item) => item.document_id === documentId);
   sessionKnowledgeGapsList.innerHTML = "";
-  if (!gaps.length) sessionKnowledgeGapsList.innerHTML = '<div class="empty-state">No reliable knowledge gaps detected.</div>';
+  if (!gaps.length) sessionKnowledgeGapsList.innerHTML = '<div class="empty-state">Nothing needs extra attention right now.</div>';
   gaps.forEach((gap) => { const item = document.createElement("div"); item.className = "knowledge-gap-row"; item.textContent = `${gap.topic_name || gap.topic_id} · ${gap.reason || "Needs more practice"}`; sessionKnowledgeGapsList.appendChild(item); });
   const next = recommendations.filter((item) => item.document_id === documentId);
   sessionRecommendationsList.innerHTML = "";
-  if (!next.length) sessionRecommendationsList.innerHTML = '<div class="empty-state">Recommendations will appear as learning evidence grows.</div>';
+  if (!next.length) sessionRecommendationsList.innerHTML = '<div class="empty-state">Suggestions appear after a few quiz answers.</div>';
   next.forEach((recommendation) => { const button = document.createElement("button"); button.className = "continue-item"; button.type = "button"; button.textContent = recommendation.action || recommendation.topic_name; button.addEventListener("click", () => openStudySession(documentId, "quiz", recommendation.topic_id)); sessionRecommendationsList.appendChild(button); });
   loadDocumentProgress(documentId);
 }
@@ -1418,7 +1401,7 @@ function renderDocumentProgress(progress) {
   sessionProgressQuiz.innerHTML = "";
   const quiz = progress.quiz;
   if (!quiz.latest) {
-    progressLine(sessionProgressQuiz, "No completed quiz yet. Your results will appear here after your first quiz.", "empty-state");
+    progressLine(sessionProgressQuiz, "No quiz results yet. Take a quiz to see your score here.", "empty-state");
   } else {
     progressLine(sessionProgressQuiz, `${Math.round(quiz.latest.percentage)}%`, "progress-figure");
     progressLine(sessionProgressQuiz, `${quiz.latest.score}/${quiz.latest.total} correct · ${progressDate(quiz.latest.completed_at)}`, "progress-note");
@@ -1448,7 +1431,7 @@ function renderDocumentProgress(progress) {
   sessionProgressPlan.innerHTML = "";
   const plan = progress.plan;
   if (!plan) {
-    progressLine(sessionProgressPlan, "This document isn't part of an active study plan.", "empty-state");
+    progressLine(sessionProgressPlan, "Not in an active study plan. Add it in Study Planner to schedule sessions.", "empty-state");
     return;
   }
   progressLine(sessionProgressPlan, `${plan.completed_sessions} of ${plan.planned_sessions} session${plan.planned_sessions === 1 ? "" : "s"} done`, "progress-figure progress-figure--small");
@@ -2228,22 +2211,6 @@ function renderMasteryList(container, masteries, options = {}) {
   masteries.forEach((mastery) => container.appendChild(createMasteryCard(mastery, options)));
 }
 
-async function openPracticeContext(documentId) {
-  setPage("practice");
-  if (documentId && quizDocumentSelect) quizDocumentSelect.value = documentId;
-  quizScopeSelect.value = "document";
-  await loadSelectedQuiz();
-}
-
-function dashboardAction(label, page, className = "continue-item", onClick = null) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = className;
-  button.textContent = label;
-  button.addEventListener("click", onClick || (() => setPage(page)));
-  return button;
-}
-
 function applySessionLibraryFilters() {
   const query = (sessionSearchInput?.value || "").trim().toLowerCase();
   const rows = [...overviewMaterialsList.querySelectorAll(".subject-card")];
@@ -2311,11 +2278,10 @@ function renderDashboard() {
   const performance = metrics.current_quiz_performance || {};
   const assessedDocuments = Number(performance.assessed_documents || 0);
   const kpis = [
-    ["Learning materials", String(documentCount), `${documentCount} active learning material${documentCount === 1 ? "" : "s"}`],
-    ["Topics assessed", `${assessedTopics} / ${totalTopics}`, totalTopics ? "Across all learning materials" : "No extracted topics yet"],
+    ["Learning materials", String(documentCount), documentCount ? "Ready to study" : "Upload a PDF or TXT file"],
     ["Quiz performance", performance.average_percentage == null ? "—" : `${Math.round(performance.average_percentage)}%`,
       assessedDocuments ? `Latest quiz across ${assessedDocuments} document${assessedDocuments === 1 ? "" : "s"}` : "No quiz results yet"],
-    ["Topics mastered", `${masteredTopics} / ${totalTopics}`, totalTopics ? "Across all learning materials" : "No extracted topics yet"],
+    ["Topics mastered", `${masteredTopics} / ${totalTopics}`, totalTopics ? `${assessedTopics} of ${totalTopics} assessed so far` : "No topics yet"],
   ];
   overviewKpis.innerHTML = "";
   kpis.forEach(([label, value, note]) => {
@@ -2328,57 +2294,10 @@ function renderDashboard() {
     overviewKpis.appendChild(card);
   });
 
-  sidebarDocumentCount.textContent = metrics.documents ? `${metrics.documents} indexed document${metrics.documents === 1 ? "" : "s"}` : "No materials";
-  const topicPercent = metrics.total_topics ? Math.round(100 * metrics.topics_assessed / metrics.total_topics) : 0;
-  sidebarTopicProgress.style.width = `${topicPercent}%`;
-  sidebarTopicStatus.textContent = metrics.total_topics ? `${metrics.topics_assessed} of ${metrics.total_topics} topics assessed` : "Add a document to begin";
-  const overviewMasteries = (dashboardData.mastery || [])
-    .filter((mastery) => mastery.mastery_level !== "Not assessed")
-    .slice(0, 8);
-  renderMasteryList(overviewMasteryList, overviewMasteries, {
-    showDocument: true,
-    emptyText: "No assessed topics yet. Complete a quiz to see mastery progress.",
-  });
-
-  const latest = dashboardData.latest_attempt;
-  if (latest) {
-    learningStatusTitle.textContent = `Continue with ${latest.document_id}`;
-    learningStatusCopy.textContent = `Latest completed quiz: ${latest.score}/${latest.total} at ${latest.difficulty} difficulty.`;
-    learningStatusAction.textContent = "Continue practice";
-    learningStatusAction.onclick = () => openPracticeContext(latest.document_id, latest.topic_id);
-  } else if (metrics.documents) {
-    learningStatusTitle.textContent = "Your materials are ready";
-    learningStatusCopy.textContent = "Generate a grounded assessment to begin collecting mastery evidence.";
-    learningStatusAction.textContent = "Start practicing";
-    learningStatusAction.onclick = () => setPage("practice");
-  } else {
-    learningStatusTitle.textContent = "Add learning material to begin";
-    learningStatusCopy.textContent = "Upload and index a PDF or TXT document before using quizzes and mastery.";
-    learningStatusAction.textContent = "Open materials";
-    learningStatusAction.onclick = () => setPage("materials");
-  }
-
-  continueLearningList.innerHTML = "";
-  if (latest) {
-    const practice = dashboardAction(
-      `Practice · ${latest.document_id}`,
-      "practice",
-      "continue-item",
-      () => openPracticeContext(latest.document_id, latest.topic_id)
-    );
-    continueLearningList.appendChild(practice);
-  }
-  const recentConversation = conversations[0];
-  if (recentConversation) continueLearningList.appendChild(dashboardAction(`AI Tutor · ${recentConversation.title || "Recent conversation"}`, "tutor"));
-  if (!continueLearningList.children.length) {
-    continueLearningList.appendChild(dashboardAction(metrics.documents ? "Start a grounded quiz" : "Add your first material", metrics.documents ? "practice" : "materials"));
-  }
-
   const materials = dashboardData.materials || [];
   renderSubjectCards(dashboardData.subjects || []);
   renderSidebarRecentDocuments(materials);
   applySessionLibraryFilters();
-  renderRecommendations();
 }
 
 function subjectQuickActionButton(label, onClick, title) {
@@ -2483,37 +2402,8 @@ async function loadDashboard() {
     renderDashboard();
   } catch (error) {
     dashboardData = null;
-    learningStatusTitle.textContent = "Dashboard unavailable";
-    learningStatusCopy.textContent = "The current learning state could not be loaded.";
     overviewKpis.innerHTML = '<div class="empty-state">Dashboard data is unavailable.</div>';
   }
-}
-
-function renderKnowledgeGaps() {
-  overviewKnowledgeGapsList.innerHTML = "";
-  if (!knowledgeGaps.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.textContent = "No reliable knowledge gaps detected. Unassessed topics are not classified as gaps.";
-    overviewKnowledgeGapsList.appendChild(empty);
-    return;
-  }
-  knowledgeGaps.forEach((gap) => {
-    const row = document.createElement("article");
-    row.className = `knowledge-gap-row severity-${gap.severity}`;
-    const copy = document.createElement("div");
-    const title = document.createElement("strong"); title.textContent = gap.topic_name || gap.topic_id;
-    const detail = document.createElement("span");
-    detail.textContent = `${gap.document_id} · ${Math.round(gap.mastery_score)}% mastery · ${Math.round(100 * gap.concept_coverage_ratio)}% concept coverage`;
-    const evidence = document.createElement("small");
-    evidence.textContent = `${gap.distinct_concepts_assessed}/${gap.assessment_capacity} concepts · ${gap.answered_questions} answers · sufficient evidence`;
-    copy.append(title, detail, evidence);
-    const severity = document.createElement("span");
-    severity.className = "gap-severity";
-    severity.textContent = gap.severity === "high" ? "High priority" : "Moderate";
-    row.append(copy, severity);
-    overviewKnowledgeGapsList.appendChild(row);
-  });
 }
 
 async function loadKnowledgeGaps() {
@@ -2522,45 +2412,12 @@ async function loadKnowledgeGaps() {
   } catch (error) {
     knowledgeGaps = [];
   }
-  renderKnowledgeGaps();
-  renderDashboard();
   if (activeDocumentId) renderSessionProgress(activeDocumentId);
-}
-
-function renderRecommendations() {
-  overviewRecommendationsList.innerHTML = "";
-  if (!recommendations.length) {
-    const empty = document.createElement("div"); empty.className = "empty-state";
-    if (dashboardData && !(dashboardData.metrics?.documents || 0)) {
-      empty.textContent = "Add learning material to receive grounded next actions.";
-      const action = document.createElement("button"); action.type = "button"; action.className = "text-button"; action.textContent = "Open materials";
-      action.addEventListener("click", () => setPage("materials"));
-      overviewRecommendationsList.append(empty, action);
-    } else {
-      empty.textContent = "No priority learning actions right now.";
-      overviewRecommendationsList.appendChild(empty);
-    }
-    return;
-  }
-  recommendations.slice(0, RECOMMENDATIONS_OVERVIEW_LIMIT).forEach((recommendation) => {
-    const row = document.createElement("article"); row.className = `recommendation-row priority-${recommendation.priority}`;
-    const copy = document.createElement("div");
-    const badge = document.createElement("span"); badge.className = "recommendation-priority";
-    badge.textContent = recommendation.priority === "high" ? "High" : recommendation.priority === "moderate" ? "Moderate" : recommendation.priority === "needs_more_evidence" ? "Needs more evidence" : "Not assessed";
-    const title = document.createElement("strong"); title.textContent = recommendation.topic_name;
-    const metrics = document.createElement("span"); metrics.textContent = `${recommendation.document_name} · Mastery ${Math.round(recommendation.mastery_score)}% · Coverage ${recommendation.distinct_concepts_assessed}/${recommendation.assessment_capacity}`;
-    const reason = document.createElement("small"); reason.textContent = recommendation.reason_text;
-    copy.append(badge, title, metrics, reason);
-    const action = document.createElement("button"); action.type = "button"; action.className = "secondary-button"; action.textContent = recommendation.primary_action.label;
-    action.addEventListener("click", () => openPracticeContext(recommendation.document_id, recommendation.topic_id));
-    row.append(copy, action); overviewRecommendationsList.appendChild(row);
-  });
 }
 
 async function loadRecommendations() {
   try { recommendations = await fetchJson(RECOMMENDATIONS_API_URL); }
   catch (error) { recommendations = []; }
-  renderRecommendations();
   if (activeDocumentId) renderSessionProgress(activeDocumentId);
 }
 
@@ -4747,8 +4604,6 @@ authSwitch.addEventListener("click", () => setAuthMode(authMode === "login" ? "s
 logoutButton.addEventListener("click", signOut);
 quizDifficultySelect.addEventListener("change", handleQuizDifficultyChange);
 refreshQuizHistoryButton.addEventListener("click", loadQuizHistory);
-document.getElementById("overview-practice-action")?.addEventListener("click", () => setPage("practice"));
-document.getElementById("overview-materials-action")?.addEventListener("click", () => setPage("materials"));
 quizPopoverPanels.forEach((panel) => {
   panel.addEventListener("toggle", () => {
     if (!panel.open) {
@@ -5898,7 +5753,11 @@ async function loadTodayPlan() {
     const plans = (await plannerRequest(PLANNER_PLANS_API_URL)).filter((plan) => plan.status === "active");
     const lists = await Promise.all(plans.map((plan) => plannerRequest(`${PLANNER_PLANS_API_URL}/${encodeURIComponent(plan.plan_id)}/sessions`)
       .then((sessions) => sessions.map((session) => ({ ...session, plan_id: plan.plan_id })))));
-    renderTodayPlan(lists.flat().filter(plannerIsActiveSession));
+    const latestPlan = plans[plans.length - 1];
+    const progress = latestPlan
+      ? await plannerRequest(`${PLANNER_PLANS_API_URL}/${encodeURIComponent(latestPlan.plan_id)}/progress?utc_offset_minutes=${plannerUtcOffsetMinutes()}`).catch(() => null)
+      : null;
+    renderTodayPlan(lists.flat().filter(plannerIsActiveSession), progress);
   } catch (error) {
     renderTodayPlan(null);
   }
@@ -5919,7 +5778,7 @@ function plannerTodayAgenda(sessions, now = plannerNow()) {
   return { today, upcoming, overdue };
 }
 
-function renderTodayPlan(sessions) {
+function renderTodayPlan(sessions, progress = null) {
   if (!todayPlanPanel) return;
   todayPlanPanel.hidden = false;
   todayPlanPanel.innerHTML = "";
@@ -5941,6 +5800,13 @@ function renderTodayPlan(sessions) {
   viewAll.addEventListener("click", () => setPage("planner"));
   heading.append(titles, viewAll);
   todayPlanPanel.appendChild(heading);
+  if (progress?.planned_sessions) {
+    const line = document.createElement("p");
+    line.className = "today-plan-progress";
+    line.textContent = `${progress.completed_sessions} of ${progress.planned_sessions} sessions done · `
+      + `${plannerFormatDuration(progress.completed_minutes)} studied · ${plannerFormatDuration(progress.remaining_minutes)} to go`;
+    todayPlanPanel.appendChild(line);
+  }
 
   const section = (label, className) => {
     const wrapper = document.createElement("section");

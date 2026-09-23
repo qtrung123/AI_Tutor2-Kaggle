@@ -279,16 +279,16 @@ class AdaptiveAssessmentTests(unittest.TestCase):
             "Study streak", "Next deadline", "Progress Monitor Alert", "This week",
         ):
             self.assertNotIn(demo_text, markup)
-        self.assertIn('id="overview-mastery-list"', markup)
-        self.assertNotIn('id="practice-mastery-list"', markup)   # the old Progress & Mastery panel was removed
-        self.assertIn('id="continue-learning-list"', markup)
+        # Phase 6B: the hidden, invisibly-populated legacy dashboard containers are gone.
+        for removed in ("overview-mastery-list", "continue-learning-list", "learning-status-title", "practice-mastery-list"):
+            self.assertNotIn(f'id="{removed}"', markup)
         self.assertIn('id="overview-materials-list"', markup)
         self.assertIn('/api/dashboard', script)
         self.assertIn('"Learning materials"', script)
         self.assertIn('"Quiz performance"', script)   # replaced the all-time "Overall accuracy" (Phase 6A)
-        self.assertIn("Across all learning materials", script)
-        self.assertIn('.filter((mastery) => mastery.mastery_level !== "Not assessed")', script)
-        self.assertIn("No assessed topics yet. Complete a quiz to see mastery progress.", script)
+        self.assertIn('"Topics mastered"', script)
+        self.assertNotIn('"Topics assessed"', script)   # folded into the Topics mastered note
+        self.assertIn('item.mastery_level !== "Not assessed"', script)   # Progress tab lists assessed topics only
 
 
 if __name__ == "__main__":
