@@ -7,7 +7,7 @@ result without persisting anything; confirm recomputes the same schedule server-
 
 from datetime import date, datetime, timedelta, timezone
 
-from backend import study_adaptation, study_planner_service, study_planner_store
+from backend import study_adaptation, study_planner_service, study_planner_store, study_progress
 from backend.document_study_state import get_document_study_state
 from backend.indexed_document_store import list_indexed_documents
 from backend.study_scheduler import DEFAULT_CONFIG, find_next_slot, plan_schedule
@@ -470,6 +470,24 @@ def apply_adaptation(owner_id: str, plan_id: str, trigger: dict, utc_offset_minu
                        key=lambda s: (s["scheduled_start"], s["session_id"]))
     return {**base, **proposal, "applied": True, "requires_confirmation": False,
             "sessions": [_saved_session(s, titles) for s in refreshed]}
+
+
+def document_progress(owner_id: str, document_id: str, utc_offset_minutes: int, local_now: str | None = None) -> dict:
+    """Read-only learner progress for one owned document (Phase 6A)."""
+    now = _parse_local_now(local_now, _validate_utc_offset(utc_offset_minutes))
+    progress = study_progress.document_progress(owner_id, document_id, now)
+    if progress is None:
+        raise PlanNotFoundError("Document not found.")
+    return progress
+
+
+def plan_progress(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None = None) -> dict:
+    """Read-only aggregate progress for one owned plan (Phase 6A)."""
+    now = _parse_local_now(local_now, _validate_utc_offset(utc_offset_minutes))
+    progress = study_progress.plan_progress(owner_id, plan_id, now)
+    if progress is None:
+        raise PlanNotFoundError("Study plan not found.")
+    return progress
 
 
 def list_plan_sessions(owner_id: str, plan_id: str) -> list[dict]:

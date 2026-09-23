@@ -337,6 +337,10 @@ const sessionMaterialDetails = document.getElementById("session-material-details
 const sessionTopicList = document.getElementById("session-topic-list");
 const sessionMasteryList = document.getElementById("session-mastery-list");
 const sessionCoverageList = document.getElementById("session-coverage-list");
+const sessionProgressState = document.getElementById("session-progress-state");
+const sessionProgressQuiz = document.getElementById("session-progress-quiz");
+const sessionProgressPlan = document.getElementById("session-progress-plan");
+const PROGRESS_API_BASE_URL = apiUrl("/api/progress/documents");
 const sessionKnowledgeGapsList = document.getElementById("session-knowledge-gaps-list");
 const sessionRecommendationsList = document.getElementById("session-recommendations-list");
 const assessmentControl = document.querySelector('[data-session-pane="quiz"] .assessment-control');
@@ -416,7 +420,7 @@ if (plannerView) {
     <div class="planner-step-actions"><button class="text-button" data-planner-go="materials" type="button">Adjust deadlines</button><button class="secondary-button" data-planner-go="availability" type="button">Adjust availability</button><button class="primary-button" id="planner-confirm-button" type="button">Looks good, confirm</button></div>
   </section>
   <section class="panel planner-step" data-planner-step="plan" hidden>
-    <div class="planner-step-heading"><p class="eyebrow">Your plan</p><h3>Saved study sessions</h3><p class="planner-hint" id="planner-plan-summary"></p></div>
+    <div class="planner-step-heading"><p class="eyebrow">Your plan</p><h3>Saved study sessions</h3><p class="planner-hint" id="planner-plan-summary"></p><p class="planner-hint planner-plan-progress" id="planner-plan-progress" hidden></p></div>
     <div class="planner-calendar-toolbar"><div class="planner-week-nav"><button class="secondary-button" id="planner-plan-prev-week" type="button" aria-label="Previous week">‹</button><strong id="planner-plan-week-label">This week</strong><button class="secondary-button" id="planner-plan-next-week" type="button" aria-label="Next week">›</button></div></div>
     <div id="planner-plan-sessions" class="planner-day-list"></div>
     <div class="planner-step-actions"><button class="secondary-button" id="planner-new-plan" type="button">Start a new plan</button></div>
@@ -439,6 +443,7 @@ const plannerPreviewCapacity = document.getElementById("planner-preview-capacity
 const plannerPreviewSessions = document.getElementById("planner-preview-sessions");
 const plannerConfirmButton = document.getElementById("planner-confirm-button");
 const plannerPlanSummary = document.getElementById("planner-plan-summary");
+const plannerPlanProgress = document.getElementById("planner-plan-progress");
 const plannerPlanSessions = document.getElementById("planner-plan-sessions");
 const plannerNewPlanButton = document.getElementById("planner-new-plan");
 const plannerPlanWeekLabel = document.getElementById("planner-plan-week-label");
@@ -1337,7 +1342,16 @@ function renderSessionProgress(documentId) {
   renderMasteryList(sessionMasteryList, assessed, { emptyText: "No assessed topics yet. Use Quiz to begin building mastery." });
   sessionCoverageList.innerHTML = "";
   if (!assessed.length) sessionCoverageList.innerHTML = '<div class="empty-state">Concept coverage appears after an assessment.</div>';
-  assessed.forEach((item) => { const card = document.createElement("div"); card.className = "mastery-card"; card.innerHTML = `<strong>${item.topic_name || item.topic_id}</strong><span>${item.concept_coverage || "Coverage is pending"}</span>`; sessionCoverageList.appendChild(card); });
+  assessed.forEach((item) => {
+    const card = document.createElement("div");
+    card.className = "mastery-card";
+    const name = document.createElement("strong");
+    name.textContent = item.topic_name || item.topic_id;
+    const coverage = document.createElement("span");
+    coverage.textContent = quizCoverageText(item);
+    card.append(name, coverage);
+    sessionCoverageList.appendChild(card);
+  });
   const gaps = knowledgeGaps.filter((item) => item.document_id === documentId);
   sessionKnowledgeGapsList.innerHTML = "";
   if (!gaps.length) sessionKnowledgeGapsList.innerHTML = '<div class="empty-state">No reliable knowledge gaps detected.</div>';
@@ -1346,6 +1360,103 @@ function renderSessionProgress(documentId) {
   sessionRecommendationsList.innerHTML = "";
   if (!next.length) sessionRecommendationsList.innerHTML = '<div class="empty-state">Recommendations will appear as learning evidence grows.</div>';
   next.forEach((recommendation) => { const button = document.createElement("button"); button.className = "continue-item"; button.type = "button"; button.textContent = recommendation.action || recommendation.topic_name; button.addEventListener("click", () => openStudySession(documentId, "quiz", recommendation.topic_id)); sessionRecommendationsList.appendChild(button); });
+  loadDocumentProgress(documentId);
+}
+
+function quizCoverageText(mastery) {
+  // concept_coverage_ratio = distinct concepts your quizzes have assessed / concepts the topic can be assessed on.
+  const ratio = Number(mastery.concept_coverage_ratio);
+  if (!Number.isFinite(ratio)) return "Coverage appears after an assessment.";
+  const text = `${Math.round(ratio * 100)}% of this topic's key concepts covered by your quizzes`;
+  return mastery.has_sufficient_evidence === false ? `${text} · a few more questions give a reliable picture` : text;
+}
+
+// ---- Document progress (Phase 6A): learning state, quiz results, study plan -------------------
+
+let documentProgressRequest = 0;
+
+async function loadDocumentProgress(documentId) {
+  if (!sessionProgressState) return;
+  const request = ++documentProgressRequest;
+  [sessionProgressState, sessionProgressQuiz, sessionProgressPlan].forEach((element) => {
+    element.innerHTML = '<p class="empty-state">Loading…</p>';
+  });
+  try {
+    const progress = await plannerRequest(`${PROGRESS_API_BASE_URL}/${encodeURIComponent(documentId)}?utc_offset_minutes=${plannerUtcOffsetMinutes()}`);
+    if (request !== documentProgressRequest || activeDocumentId !== documentId) return;   // switched document meanwhile
+    renderDocumentProgress(progress);
+  } catch (error) {
+    if (request !== documentProgressRequest) return;
+    [sessionProgressState, sessionProgressQuiz, sessionProgressPlan].forEach((element) => {
+      element.innerHTML = '<p class="empty-state">Progress could not be loaded right now.</p>';
+    });
+  }
+}
+
+function progressLine(parent, text, className = "") {
+  const line = document.createElement("p");
+  if (className) line.className = className;
+  line.textContent = text;
+  parent.appendChild(line);
+  return line;
+}
+
+function progressDate(iso) {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function renderDocumentProgress(progress) {
+  sessionProgressState.innerHTML = "";
+  const badge = progressLine(sessionProgressState, progress.learning.label, `progress-state progress-state--${progress.learning.state}`);
+  badge.setAttribute("data-state", progress.learning.state);
+  progressLine(sessionProgressState, progress.learning.explanation, "progress-note");
+  if (progress.flashcards.card_count) {
+    progressLine(sessionProgressState, `${progress.flashcards.card_count} flashcard${progress.flashcards.card_count === 1 ? "" : "s"} ready`, "progress-note");
+  }
+
+  sessionProgressQuiz.innerHTML = "";
+  const quiz = progress.quiz;
+  if (!quiz.latest) {
+    progressLine(sessionProgressQuiz, "No completed quiz yet. Your results will appear here after your first quiz.", "empty-state");
+  } else {
+    progressLine(sessionProgressQuiz, `${Math.round(quiz.latest.percentage)}%`, "progress-figure");
+    progressLine(sessionProgressQuiz, `${quiz.latest.score}/${quiz.latest.total} correct · ${progressDate(quiz.latest.completed_at)}`, "progress-note");
+    const previous = quiz.attempts.slice(0, -1);
+    if (quiz.trend) {
+      const change = Math.round(quiz.attempts[quiz.attempts.length - 1].percentage - previous[previous.length - 1].percentage);
+      const trendText = {
+        improving: `Up ${change} points from your previous attempt`,
+        declining: `Down ${Math.abs(change)} points from your previous attempt`,
+        steady: "About the same as your previous attempt",
+      }[quiz.trend];
+      progressLine(sessionProgressQuiz, trendText, `progress-trend progress-trend--${quiz.trend}`);
+      const list = document.createElement("ul");
+      list.className = "progress-attempts";
+      previous.slice(-4).reverse().forEach((attempt) => {
+        const item = document.createElement("li");
+        item.textContent = `${Math.round(attempt.percentage)}% · ${progressDate(attempt.completed_at)}`;
+        list.appendChild(item);
+      });
+      const label = progressLine(sessionProgressQuiz, "Earlier attempts", "progress-subhead");
+      label.after(list);
+    } else {
+      progressLine(sessionProgressQuiz, "One completed attempt so far. A later attempt will show how your score changes.", "progress-note");
+    }
+  }
+
+  sessionProgressPlan.innerHTML = "";
+  const plan = progress.plan;
+  if (!plan) {
+    progressLine(sessionProgressPlan, "This document isn't part of an active study plan.", "empty-state");
+    return;
+  }
+  progressLine(sessionProgressPlan, `${plan.completed_sessions} of ${plan.planned_sessions} session${plan.planned_sessions === 1 ? "" : "s"} done`, "progress-figure progress-figure--small");
+  progressLine(sessionProgressPlan, `${plannerFormatDuration(plan.completed_minutes)} studied · ${plannerFormatDuration(plan.remaining_minutes)} still planned`, "progress-note");
+  progressLine(sessionProgressPlan, plan.next_session
+    ? `Next: ${PLANNER_ACTIVITY_LABELS[plan.next_session.activity_type] || plan.next_session.activity_type} · ${plannerDayLabel(plan.next_session.scheduled_start.slice(0, 10))}, ${plan.next_session.scheduled_start.slice(11, 16)}${plan.next_session.status === "in_progress" ? " (in progress)" : ""}`
+    : "No upcoming session for this document.", "progress-note");
+  if (plan.deadline) progressLine(sessionProgressPlan, `Deadline: ${plannerDayLabel(plan.deadline)}`, "progress-note");
 }
 
 function setSourcesDrawerOpen(isOpen) {
@@ -2197,11 +2308,13 @@ function renderDashboard() {
   const totalTopics = Number(metrics.total_topics || 0);
   const assessedTopics = Number(metrics.topics_assessed || 0);
   const masteredTopics = Number(metrics.topics_mastered || 0);
-  const completedAnswers = Number(metrics.answered_questions || 0);
+  const performance = metrics.current_quiz_performance || {};
+  const assessedDocuments = Number(performance.assessed_documents || 0);
   const kpis = [
     ["Learning materials", String(documentCount), `${documentCount} active learning material${documentCount === 1 ? "" : "s"}`],
     ["Topics assessed", `${assessedTopics} / ${totalTopics}`, totalTopics ? "Across all learning materials" : "No extracted topics yet"],
-    ["Overall accuracy", metrics.quiz_accuracy == null ? "—" : `${Math.round(metrics.quiz_accuracy)}%`, `${completedAnswers} completed answer${completedAnswers === 1 ? "" : "s"}`],
+    ["Quiz performance", performance.average_percentage == null ? "—" : `${Math.round(performance.average_percentage)}%`,
+      assessedDocuments ? `Latest quiz across ${assessedDocuments} document${assessedDocuments === 1 ? "" : "s"}` : "No quiz results yet"],
     ["Topics mastered", `${masteredTopics} / ${totalTopics}`, totalTopics ? "Across all learning materials" : "No extracted topics yet"],
   ];
   overviewKpis.innerHTML = "";
@@ -4966,6 +5079,7 @@ async function loadPlannerData({ keepWeek = false } = {}) {
       plannerHistorySessions = sessions.filter((session) => PLANNER_HISTORY_SESSION_STATUSES.includes(session.status));
     }
     if (plannerSessions.length || plannerHistorySessions.length) plannerStep = "plan";
+    if (plannerPlan && plannerStep === "plan") loadPlannerPlanProgress(plannerPlan.plan_id);
     else if (plannerStep === "plan") plannerStep = "materials";
     renderPlanner();
   } catch (error) {
@@ -5740,6 +5854,23 @@ function renderPlannerPlan() {
     .sort((left, right) => left.scheduled_start.localeCompare(right.scheduled_start));
   const anySaved = plannerSessions.length || plannerHistorySessions.length;
   renderPlannerSessionList(plannerPlanSessions, weekSessions, anySaved ? emptyText : "No sessions saved yet.", { action: true });
+}
+
+async function loadPlannerPlanProgress(planId) {
+  if (!plannerPlanProgress) return;
+  try {
+    const progress = await plannerRequest(plannerPlanUrl(`/progress?utc_offset_minutes=${plannerUtcOffsetMinutes()}`));
+    if (plannerPlan?.plan_id !== planId) return;
+    const performance = progress.current_quiz_performance;
+    const quizText = performance.average_percentage == null
+      ? "no quiz results yet"
+      : `quiz performance ${Math.round(performance.average_percentage)}% across ${performance.assessed_documents} of ${performance.documents} document${performance.documents === 1 ? "" : "s"}`;
+    plannerPlanProgress.textContent = `${progress.completed_sessions} of ${progress.planned_sessions} sessions done · `
+      + `${plannerFormatDuration(progress.completed_minutes)} studied, ${plannerFormatDuration(progress.remaining_minutes)} still planned · ${quizText}`;
+    plannerPlanProgress.hidden = false;
+  } catch (error) {
+    plannerPlanProgress.hidden = true;
+  }
 }
 
 function plannerDefaultPlanWeek(sessions) {

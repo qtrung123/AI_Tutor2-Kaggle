@@ -239,7 +239,7 @@ class AdaptiveAssessmentTests(unittest.TestCase):
             dashboard = quiz_service.build_learning_dashboard("new-student")
         self.assertEqual(dashboard["metrics"]["documents"], 0)
         self.assertEqual(dashboard["metrics"]["total_topics"], 0)
-        self.assertIsNone(dashboard["metrics"]["quiz_accuracy"])
+        self.assertNotIn("quiz_accuracy", dashboard["metrics"])   # removed: all-time answer accuracy mixed in every retake
         self.assertEqual(dashboard["mastery"], [])
         self.assertIsNone(dashboard["latest_attempt"])
 
@@ -265,7 +265,6 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         self.assertEqual(dashboard["metrics"]["documents"], 2)
         self.assertEqual(dashboard["metrics"]["total_topics"], 3)
         self.assertEqual(dashboard["metrics"]["topics_assessed"], 2)
-        self.assertEqual(dashboard["metrics"]["quiz_accuracy"], 50.0)
         self.assertEqual(dashboard["metrics"]["answered_questions"], 2)
         self.assertEqual(dashboard["metrics"]["topics_mastered"], 1)
         self.assertEqual({row["topic_name"] for row in dashboard["mastery"]}, {"Topic A", "Topic B", "Topic C"})
@@ -286,7 +285,7 @@ class AdaptiveAssessmentTests(unittest.TestCase):
         self.assertIn('id="overview-materials-list"', markup)
         self.assertIn('/api/dashboard', script)
         self.assertIn('"Learning materials"', script)
-        self.assertIn('"Overall accuracy"', script)
+        self.assertIn('"Quiz performance"', script)   # replaced the all-time "Overall accuracy" (Phase 6A)
         self.assertIn("Across all learning materials", script)
         self.assertIn('.filter((mastery) => mastery.mastery_level !== "Not assessed")', script)
         self.assertIn("No assessed topics yet. Complete a quiz to see mastery progress.", script)

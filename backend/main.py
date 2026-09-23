@@ -45,7 +45,7 @@ from backend.summary_service import generate_document_summary
 from backend.summary_store import delete_document_summaries
 from backend.flashcard_service import FlashcardGenerationError, authoritative_card_fields, generate_flashcards
 from backend.flashcard_store import add_flashcard, delete_document_flashcards, delete_flashcard, update_flashcard
-from backend import study_plan_api_service, study_planner_service, study_planner_store
+from backend import study_plan_api_service, study_planner_service, study_planner_store, study_progress
 from backend.study_plan_api_service import (PlanConflictError, PlanNotFoundError, PlanValidationError,
                                             SessionConflictError)
 from backend.subject_grouping import group_documents_into_subjects
@@ -1082,6 +1082,11 @@ def learning_dashboard(current_user: dict = Depends(require_current_user)) -> di
     try:
         dashboard = build_learning_dashboard(current_user["id"])
         dashboard["subjects"] = group_documents_into_subjects(dashboard.get("materials") or [])
+        # Current quiz performance: latest completed quiz per assessed document (unassessed ones left out).
+        dashboard["metrics"]["current_quiz_performance"] = study_progress.current_quiz_performance({
+            row["document_id"]: study_progress.latest_quiz_percentage(current_user["id"], row["document_id"])
+            for row in dashboard.get("materials") or []
+        })
         return dashboard
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Could not load dashboard: {error}") from error
@@ -1577,6 +1582,26 @@ def planner_v2_reschedule_session(session_id: str, request: PlanPreviewRequest,
                                   current_user: dict = Depends(require_current_user)) -> dict:
     return _session_action(study_plan_api_service.reschedule_session, current_user["id"], session_id,
                            request.utc_offset_minutes, request.local_now)
+
+
+@app.get("/api/progress/documents/{document_id}")
+def progress_document(document_id: str, utc_offset_minutes: int, local_now: Optional[str] = None,
+                      current_user: dict = Depends(require_current_user)) -> dict:
+    """Learner progress for one document: learning state, quiz results, study-plan figures."""
+    try:
+        return study_plan_api_service.document_progress(current_user["id"], document_id, utc_offset_minutes, local_now)
+    except _PLAN_V2_ERRORS as error:
+        raise _plan_v2_error(error) from error
+
+
+@app.get("/api/planner/plans/{plan_id}/progress")
+def planner_v2_plan_progress(plan_id: str, utc_offset_minutes: int, local_now: Optional[str] = None,
+                             current_user: dict = Depends(require_current_user)) -> dict:
+    """Aggregate plan progress: sessions and minutes done vs planned, current quiz performance."""
+    try:
+        return study_plan_api_service.plan_progress(current_user["id"], plan_id, utc_offset_minutes, local_now)
+    except _PLAN_V2_ERRORS as error:
+        raise _plan_v2_error(error) from error
 
 
 @app.get("/api/planner/plans/{plan_id}/sessions")

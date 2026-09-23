@@ -3189,3 +3189,20 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .adapt-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}
 .adapt-actions button{width:auto}
 @media(max-width:480px){.adapt-panel{padding:18px}.adapt-actions button{flex:1 1 auto}}
+
+/* Document progress (Phase 6A) */
+.progress-block{display:grid;gap:6px;min-width:0}
+.progress-block p{margin:0}
+.progress-state{justify-self:start;padding:4px 12px;border-radius:999px;background:var(--session-wash);color:var(--session-accent);font-weight:700;font-size:14px}
+.progress-state--needs_review{background:#fff3ec;color:#a4471f}
+.progress-state--on_track,.progress-state--completed{background:#e8f7ec;color:#1f6b3a}
+.progress-figure{font-size:28px;font-weight:800;letter-spacing:-.02em}
+.progress-figure--small{font-size:20px}
+.progress-note{font-size:13px;color:var(--muted);overflow-wrap:anywhere}
+.progress-trend{font-size:13px;font-weight:700}
+.progress-trend--improving{color:#1f6b3a}
+.progress-trend--declining{color:#a4471f}
+.progress-subhead{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-top:4px!important}
+.progress-attempts{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
+.progress-attempts li{padding:3px 10px;border:1px solid var(--line);border-radius:999px;font-size:12px}
+.planner-plan-progress{font-weight:600}

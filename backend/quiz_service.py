@@ -5065,7 +5065,6 @@ def build_learning_dashboard(student_id: str = LEGACY_USER_ID) -> dict:
 
     attempts = load_quiz_history(student_id=student_id)
     answer_rows = [result for attempt in attempts for result in attempt.get("question_results", [])]
-    correct_answers = sum(int(bool(result.get("is_correct"))) for result in answer_rows)
     answered_questions = len(answer_rows)
     assessed = [mastery for mastery in mastery_rows if mastery.get("has_evidence")]
     latest_attempt = attempts[0] if attempts else None
@@ -5106,7 +5105,6 @@ def build_learning_dashboard(student_id: str = LEGACY_USER_ID) -> dict:
             "documents": len(documents),
             "topics_assessed": len(assessed),
             "total_topics": len(mastery_rows),
-            "quiz_accuracy": round(100 * correct_answers / answered_questions, 2) if answered_questions else None,
             "answered_questions": answered_questions,
             "topics_mastered": sum(row.get("mastery_level") == "Mastered" for row in mastery_rows),
         },
