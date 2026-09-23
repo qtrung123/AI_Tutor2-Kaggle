@@ -527,6 +527,11 @@ function setPage(page) {
   state.page = page;
   document.body.dataset.page = page;
   navItems.forEach((item, index) => item.classList.toggle("active", item.dataset.page === page && (page !== "overview" || index === 0)));
+  navItems.forEach((item) => {
+    if (item.classList.contains("active")) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  });
+  syncSidebarRecentActive();
   views.forEach((view) => view.classList.toggle("active", view.id === `${page}-view`));
   pageTitle.textContent = pageTitles[page];
   if (pageTitles[page]) showToast(`Opened ${pageTitles[page]}`);
@@ -2119,10 +2124,39 @@ function renderSidebarRecentDocuments(materials) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "sidebar-recent-item";
+    button.dataset.documentId = material.document_id;
     button.textContent = material.document_name;
+    button.title = material.document_name;
     button.addEventListener("click", () => openStudySession(material.document_id));
     sidebarRecentDocuments.appendChild(button);
   });
+  syncSidebarRecentActive();
+}
+
+// The open study session's entry in Recent is highlighted (only while a session is shown).
+function syncSidebarRecentActive() {
+  sidebarRecentDocuments?.querySelectorAll(".sidebar-recent-item").forEach((button) => {
+    const active = document.body?.dataset?.page === "session" && button.dataset.documentId === activeDocumentId;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+}
+
+// ---- Mobile navigation drawer ------------------------------------------------------------------
+// At phone width the sidebar becomes an off-canvas drawer (see .sidebar-open in styles.css). It
+// closes via the backdrop, the close button, Escape, or selecting any navigation inside it.
+const sidebarMenuButton = document.getElementById("sidebar-menu-button");
+const sidebarBackdrop = document.getElementById("sidebar-backdrop");
+
+function setSidebarOpen(open) {
+  if (!sidebarMenuButton) return;
+  const wasOpen = document.body.classList.contains("sidebar-open");
+  document.body.classList.toggle("sidebar-open", open);
+  sidebarMenuButton.setAttribute("aria-expanded", String(open));
+  if (sidebarBackdrop) sidebarBackdrop.hidden = !open;
+  if (open) document.getElementById("sidebar-close-button")?.focus();
+  else if (wasOpen && document.getElementById("app-sidebar")?.contains(document.activeElement)) sidebarMenuButton.focus();
 }
 
 function renderDashboard() {
@@ -4453,6 +4487,17 @@ navItems.forEach((item) => {
     if (item.dataset.page) setPage(item.dataset.page);
   });
 });
+
+sidebarMenuButton?.addEventListener("click", () => setSidebarOpen(!document.body.classList.contains("sidebar-open")));
+sidebarBackdrop?.addEventListener("click", () => setSidebarOpen(false));
+document.getElementById("sidebar-close-button")?.addEventListener("click", () => setSidebarOpen(false));
+document.getElementById("app-sidebar")?.addEventListener("click", (event) => {
+  if (event.target.closest("button.nav-item, .sidebar-recent-item, #upload-source-button, #logout-button")) setSidebarOpen(false);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && document.body.classList.contains("sidebar-open")) setSidebarOpen(false);
+});
+window.matchMedia?.("(min-width: 721px)").addEventListener?.("change", (event) => { if (event.matches) setSidebarOpen(false); });
 
 document.getElementById("session-home-button")?.addEventListener("click", () => setPage("overview"));
 regenerateSummaryButton?.addEventListener("click", () => loadDocumentSummary(true));

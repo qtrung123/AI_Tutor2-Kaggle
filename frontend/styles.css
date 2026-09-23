@@ -3037,3 +3037,71 @@ body[data-page="session"] [data-session-pane="quiz"].quiz-player-open #quiz-play
   .overview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .overview-continue-card { flex-direction: column; align-items: stretch; }
 }
+
+/* Sidebar + navigation polish. The session sidebar is white, so it must not inherit the old navy
+   theme's light text. At phone width it becomes an off-canvas drawer opened from .mobile-nav-bar. */
+.session-shell .sidebar { color: #27314e; padding: 16px 12px; gap: 0; }
+.session-shell .sidebar .brand { margin: 2px 6px 20px; gap: 10px; font-size: 18px; font-weight: 800; color: #1f2940; }
+.session-shell .brand-mark { width: 34px; height: 34px; border-radius: 10px; font-size: 16px; }
+.session-shell .new-session-button { width: 100%; margin: 0; min-height: 44px; border-radius: 12px; font-size: 14px; }
+.session-shell .sidebar-upload-status { margin: 6px 6px 18px; min-height: 16px; }
+.session-shell .sidebar-section-label { margin: 0 8px 6px; font-size: 11px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: #8a91a6; }
+.session-shell .nav-menu { margin: 0 0 20px; display: grid; gap: 2px; }
+.session-shell .nav-item { padding: 10px 12px; border-radius: 10px; font-size: 14px; color: #333d59; transition: background .15s ease, color .15s ease; }
+.session-shell .nav-item:hover { background: #f4f5fb; color: #1f2940; }
+.session-shell .nav-item.active { background: var(--session-wash); color: var(--session-accent); font-weight: 700; }
+.session-shell .nav-menu .library-item { display: none; }   /* non-interactive duplicate of Home */
+.session-shell .recent-documents { min-height: 0; flex: 1 1 auto; overflow-y: auto; }
+.sidebar-recent-list { gap: 2px; }
+.sidebar-recent-item { padding: 8px 12px; border-radius: 10px; }
+.sidebar-recent-item::before {
+  content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 9px; vertical-align: middle;
+  border-radius: 50%; background: #c3c8dc;
+}
+.sidebar-recent-item.active { background: var(--session-wash); color: var(--session-accent); font-weight: 650; }
+.sidebar-recent-item.active::before { background: var(--session-accent); }
+.session-shell .nav-item:focus-visible, .sidebar-recent-item:focus-visible, .sidebar-menu-button:focus-visible,
+.sidebar-close-button:focus-visible, .session-shell .sidebar-logout:focus-visible { outline: 2px solid var(--session-accent); outline-offset: 2px; }
+.session-shell .profile { margin-top: 12px; padding: 12px 6px 0; gap: 10px; align-items: center; grid-template-columns: 34px minmax(0, 1fr) auto; display: grid; }
+.session-shell .avatar { width: 34px; height: 34px; font-size: 14px; }
+.session-shell .profile strong { color: #1f2940; font-size: 13px; }
+.session-shell .profile span { color: #7a8298; font-size: 12px; }
+.session-shell .sidebar-logout {
+  grid-column: auto; width: auto; margin: 0; padding: 6px 10px; border-radius: 8px;
+  color: #5b647c; font-size: 12px; font-weight: 650;
+}
+.session-shell .sidebar-logout:hover { background: #f4f5fb; color: var(--danger, #c0472a); }
+.mobile-nav-bar, .sidebar-close-button, .sidebar-backdrop { display: none; }
+
+@media (max-width: 720px) {
+  .mobile-nav-bar {
+    position: sticky; top: 0; z-index: 40; display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px; background: rgba(255, 255, 255, .94); border-bottom: 1px solid var(--session-line);
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  }
+  .mobile-nav-brand { margin: 0; gap: 8px; font-size: 16px; font-weight: 800; color: #1f2940; }
+  .mobile-nav-brand .brand-mark { width: 30px; height: 30px; border-radius: 9px; font-size: 14px; }
+  .sidebar-menu-button {
+    display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px;
+    border: 1px solid var(--session-line); border-radius: 12px; background: #fff; color: #27314e; font-size: 18px; cursor: pointer;
+  }
+  .session-shell .sidebar {
+    position: fixed; top: 0; left: 0; bottom: 0; z-index: 60; width: min(300px, 86vw); height: 100vh; height: 100dvh;
+    border-right: 1px solid var(--session-line); box-shadow: 0 20px 60px rgba(15, 20, 35, .18);
+    transform: translateX(-100%); visibility: hidden; transition: transform .22s ease, visibility 0s linear .22s;
+    overflow-y: auto;
+  }
+  body.sidebar-open .session-shell .sidebar { transform: none; visibility: visible; transition: transform .22s ease; }
+  .session-shell .sidebar .brand { margin-bottom: 16px; }
+  .sidebar-close-button {
+    display: inline-flex; align-items: center; justify-content: center; margin-left: auto; width: 34px; height: 34px;
+    border: 0; border-radius: 10px; background: #f4f5fb; color: #4f5870; font-size: 20px; cursor: pointer;
+  }
+  .sidebar-backdrop { display: block; position: fixed; inset: 0; z-index: 55; background: rgba(15, 20, 35, .35); }
+  .sidebar-backdrop[hidden] { display: none; }
+  .session-shell .profile { margin-top: auto; }
+  body.sidebar-open { overflow: hidden; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-shell .sidebar, body.sidebar-open .session-shell .sidebar { transition: none; }
+}
