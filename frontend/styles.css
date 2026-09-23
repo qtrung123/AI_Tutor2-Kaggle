@@ -3162,7 +3162,13 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .today-plan-empty{margin:0}
 @media(max-width:480px){.today-plan{padding:16px}.today-plan-heading{flex-wrap:wrap}}
 
-/* Start / Resume on a saved study session */
-.planner-session--actionable{grid-template-columns:96px minmax(0,1fr) auto;align-items:center}
-.planner-session-start{padding:7px 14px;font-size:13px;white-space:nowrap}
-@media(max-width:480px){.planner-session--actionable{grid-template-columns:1fr}.planner-session-start{justify-self:start;margin-top:4px}}
+/* Session lifecycle actions: Start / Resume / Complete / Reschedule / Skip */
+.planner-session--actionable,.planner-session--done{grid-template-columns:96px minmax(0,1fr) auto;align-items:center}
+.planner-session-actions{display:flex;flex-wrap:nowrap;justify-content:flex-end;gap:6px}
+.planner-session-action{flex:0 0 auto;width:auto;padding:7px 14px;font-size:13px;white-space:nowrap}
+.planner-session-note{font-size:12px;font-weight:700;color:var(--muted)}
+.planner-session--overdue{border-style:dashed}
+.planner-session--done{opacity:.75}
+.planner-session-status{font-size:12px;font-weight:700;color:var(--muted);white-space:nowrap}
+.planner-session-status--completed{color:var(--navy-2)}
+@media(max-width:480px){.planner-session--actionable,.planner-session--done{grid-template-columns:1fr}.planner-session-actions{flex-wrap:wrap;justify-content:flex-start;margin-top:4px}}

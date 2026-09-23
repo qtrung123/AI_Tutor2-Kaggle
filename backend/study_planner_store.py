@@ -174,6 +174,8 @@ def initialize_study_planner_store() -> None:
             CREATE INDEX IF NOT EXISTS idx_study_sessions_plan ON study_sessions(plan_id, document_id, scheduled_start);
             """
         )
+        # Additive migration: a rescheduled session points at the session it replaces.
+        _add_column_if_missing(connection, "study_sessions", "rescheduled_from", "TEXT")
         _migrate_schedule_runs_for_plans(connection)
 
 
@@ -770,7 +772,8 @@ def _session(row: sqlite3.Row) -> dict:
         key: row[key]
         for key in ("session_id", "owner_id", "plan_id", "document_id", "activity_type", "artifact_id",
                     "scheduled_start", "scheduled_end", "duration_minutes", "status", "reason",
-                    "priority_snapshot", "started_at", "completed_at", "created_at", "updated_at")
+                    "priority_snapshot", "started_at", "completed_at", "rescheduled_from", "created_at",
+                    "updated_at")
     }
 
 
@@ -1055,55 +1058,137 @@ def confirm_plan_sessions(owner_id: str, plan_id: str, sessions: list[dict], rea
     return {"sessions": [get_session(owner_id, row[0]) for row in rows], "schedule_run": run}
 
 
-class SessionStartError(ValueError):
-    """A session that cannot be started: code is session_not_startable (terminal status) or
-    plan_not_active (a still-scheduled session of an archived/paused plan)."""
+class SessionTransitionError(ValueError):
+    """A lifecycle action the session's current state does not allow. code is machine-readable:
+    session_not_<action>able (wrong status), session_not_started (complete before start),
+    plan_not_active (a still-scheduled session of an archived/paused plan) or slot_taken."""
 
     def __init__(self, code: str, message: str, status: str):
         super().__init__(message)
         self.code, self.status = code, status
 
 
-def start_session(owner_id: str, session_id: str) -> tuple[dict, bool]:
-    """Start exactly one of the owner's sessions: scheduled -> in_progress, stamping started_at
-    only if it was never set. Returns (session, started); an already in_progress session is
-    returned unchanged with started=False (resume), whatever its plan's status. A scheduled session
-    is only startable while its plan is active. The status re-check and the write share one
-    BEGIN IMMEDIATE transaction, so concurrent starts cannot both write."""
+# action -> (target status, statuses it may move from). Reaching the target again is a no-op.
+_TRANSITIONS = {
+    "start": ("in_progress", ("scheduled",)),
+    "complete": ("completed", ("in_progress",)),
+    "skip": ("skipped", ("scheduled", "in_progress")),
+}
+
+
+_REFUSALS = {"start": ("session_not_startable", "started"), "complete": ("session_not_completable", "completed"),
+             "skip": ("session_not_skippable", "skipped")}
+
+
+def _locked_session(connection: sqlite3.Connection, owner_id: str, session_id: str) -> sqlite3.Row:
+    row = connection.execute(
+        """SELECT s.*, p.status AS plan_status FROM study_sessions s
+           JOIN study_plans p ON p.plan_id = s.plan_id
+           WHERE s.session_id=? AND s.owner_id=?""",
+        (session_id, owner_id),
+    ).fetchone()
+    if not row:
+        raise ValueError("Study session not found.")
+    return row
+
+
+def transition_session(owner_id: str, session_id: str, action: str) -> tuple[dict, bool]:
+    """Apply one lifecycle action to exactly one of the owner's sessions. Returns (session, changed):
+    a session already in the action's target status is returned unchanged (changed=False), so
+    repeated Start/Complete/Skip are safe. started_at and completed_at are stamped once, never
+    overwritten. A *scheduled* session can only be acted on while its plan is active; work already
+    under way (in_progress) can always be resumed, completed or skipped. Re-check and write share
+    one BEGIN IMMEDIATE transaction, so concurrent requests cannot both write."""
+    target, sources = _TRANSITIONS[action]
     initialize_study_planner_store()
     connection = _connect()
     try:
         connection.execute("BEGIN IMMEDIATE")
-        row = connection.execute(
-            """SELECT s.status, p.status AS plan_status FROM study_sessions s
-               JOIN study_plans p ON p.plan_id = s.plan_id
-               WHERE s.session_id=? AND s.owner_id=?""",
-            (session_id, owner_id),
-        ).fetchone()
-        if not row:
-            raise ValueError("Study session not found.")
-        started = False
-        if row["status"] == "scheduled":
-            if row["plan_status"] != "active":
-                raise SessionStartError("plan_not_active", "This session belongs to a plan that is no longer active.",
-                                        row["status"])
+        row = _locked_session(connection, owner_id, session_id)
+        status, changed = row["status"], False
+        if status != target:
+            if status not in sources:
+                if action == "complete" and status == "scheduled":
+                    raise SessionTransitionError("session_not_started", "Start this session before completing it.", status)
+                code, verb = _REFUSALS[action]
+                raise SessionTransitionError(code, f"A {status} session cannot be {verb}.", status)
+            if status == "scheduled" and row["plan_status"] != "active":
+                raise SessionTransitionError("plan_not_active", "This session belongs to a plan that is no longer active.", status)
             now = utc_now_iso()
+            stamps = {"in_progress": ", started_at=COALESCE(started_at, :now)",
+                      "completed": ", completed_at=COALESCE(completed_at, :now)"}.get(target, "")
             connection.execute(
-                """UPDATE study_sessions SET status='in_progress', started_at=COALESCE(started_at, ?), updated_at=?
-                   WHERE session_id=? AND owner_id=? AND status='scheduled'""",
-                (now, now, session_id, owner_id),
+                f"UPDATE study_sessions SET status=:target, updated_at=:now{stamps} "
+                "WHERE session_id=:id AND owner_id=:owner AND status=:status",
+                {"target": target, "now": now, "id": session_id, "owner": owner_id, "status": status},
             )
-            started = True
-        elif row["status"] != "in_progress":
-            raise SessionStartError("session_not_startable", f"A {row['status']} session cannot be started.",
-                                    row["status"])
+            changed = True
         connection.commit()
     except BaseException:
         connection.rollback()
         raise
     finally:
         connection.close()
-    return get_session(owner_id, session_id), started
+    return get_session(owner_id, session_id), changed
+
+
+def start_session(owner_id: str, session_id: str) -> tuple[dict, bool]:
+    """scheduled -> in_progress (see transition_session); an in_progress session is a resume."""
+    return transition_session(owner_id, session_id, "start")
+
+
+RESCHEDULABLE_STATUSES = ("scheduled", "missed")
+
+
+def reschedule_session(owner_id: str, session_id: str, scheduled_start: str, scheduled_end: str) -> tuple[dict, dict]:
+    """Move one session to a new window. The original row is kept as history (status
+    'rescheduled', which never blocks time) and a new 'scheduled' session carries the same
+    plan/document/activity/artifact/reason/priority plus rescheduled_from=<original id>. Refuses a
+    window that overlaps time already occupied (see list_busy_sessions). One transaction."""
+    initialize_study_planner_store()
+    connection = _connect()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        row = _locked_session(connection, owner_id, session_id)
+        if row["status"] not in RESCHEDULABLE_STATUSES:
+            raise SessionTransitionError("session_not_reschedulable", f"A {row['status']} session cannot be rescheduled.",
+                                         row["status"])
+        if row["plan_status"] != "active":
+            raise SessionTransitionError("plan_not_active", "This session belongs to a plan that is no longer active.",
+                                         row["status"])
+        duration = row["duration_minutes"]
+        validate_session({"activity_type": row["activity_type"], "status": "scheduled", "reason": row["reason"],
+                          "scheduled_start": scheduled_start, "scheduled_end": scheduled_end,
+                          "duration_minutes": duration})
+        overlap = connection.execute(
+            """SELECT 1 FROM study_sessions s JOIN study_plans p ON p.plan_id = s.plan_id
+               WHERE s.owner_id=? AND s.session_id<>? AND s.scheduled_start < ? AND s.scheduled_end > ?
+                 AND (s.status IN ('in_progress', 'completed') OR (s.status = 'scheduled' AND p.status = 'active'))
+               LIMIT 1""",
+            (owner_id, session_id, scheduled_end, scheduled_start),
+        ).fetchone()
+        if overlap:
+            raise SessionTransitionError("slot_taken", "That time is already taken by another session.", row["status"])
+        now, new_id = utc_now_iso(), str(uuid4())
+        connection.execute(
+            "UPDATE study_sessions SET status='rescheduled', updated_at=? WHERE session_id=? AND owner_id=?",
+            (now, session_id, owner_id),
+        )
+        connection.execute(
+            """INSERT INTO study_sessions (session_id, owner_id, plan_id, document_id, activity_type, artifact_id,
+                   scheduled_start, scheduled_end, duration_minutes, status, reason, priority_snapshot,
+                   rescheduled_from, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?)""",
+            (new_id, owner_id, row["plan_id"], row["document_id"], row["activity_type"], row["artifact_id"],
+             scheduled_start, scheduled_end, duration, row["reason"], row["priority_snapshot"], session_id, now, now),
+        )
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    return get_session(owner_id, session_id), get_session(owner_id, new_id)
 
 
 def create_session(owner_id: str, plan_id: str, session: dict) -> dict:

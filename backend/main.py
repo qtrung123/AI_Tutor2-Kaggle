@@ -47,7 +47,7 @@ from backend.flashcard_service import FlashcardGenerationError, authoritative_ca
 from backend.flashcard_store import add_flashcard, delete_document_flashcards, delete_flashcard, update_flashcard
 from backend import study_plan_api_service, study_planner_service, study_planner_store
 from backend.study_plan_api_service import (PlanConflictError, PlanNotFoundError, PlanValidationError,
-                                            SessionStartConflictError)
+                                            SessionConflictError)
 from backend.subject_grouping import group_documents_into_subjects
 from backend.model_comparison_service import get_quiz_model_comparison
 from config import AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE, AUTH_SESSION_DAYS, CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL, QUIZ_DEFAULT_GENERATION_MODEL
@@ -1506,14 +1506,35 @@ def planner_v2_confirm(plan_id: str, request: PlanPreviewRequest, current_user: 
         raise _plan_v2_error(error) from error
 
 
-@app.post("/api/planner/sessions/{session_id}/start")
-def planner_v2_start_session(session_id: str, current_user: dict = Depends(require_current_user)) -> dict:
+def _session_action(action, *args) -> dict:
     try:
-        return study_plan_api_service.start_session(current_user["id"], session_id)
-    except SessionStartConflictError as error:
+        return action(*args)
+    except SessionConflictError as error:
         raise HTTPException(status_code=409, detail=error.payload) from error
     except _PLAN_V2_ERRORS as error:
         raise _plan_v2_error(error) from error
+
+
+@app.post("/api/planner/sessions/{session_id}/start")
+def planner_v2_start_session(session_id: str, current_user: dict = Depends(require_current_user)) -> dict:
+    return _session_action(study_plan_api_service.start_session, current_user["id"], session_id)
+
+
+@app.post("/api/planner/sessions/{session_id}/complete")
+def planner_v2_complete_session(session_id: str, current_user: dict = Depends(require_current_user)) -> dict:
+    return _session_action(study_plan_api_service.complete_session, current_user["id"], session_id)
+
+
+@app.post("/api/planner/sessions/{session_id}/skip")
+def planner_v2_skip_session(session_id: str, current_user: dict = Depends(require_current_user)) -> dict:
+    return _session_action(study_plan_api_service.skip_session, current_user["id"], session_id)
+
+
+@app.post("/api/planner/sessions/{session_id}/reschedule")
+def planner_v2_reschedule_session(session_id: str, request: PlanPreviewRequest,
+                                  current_user: dict = Depends(require_current_user)) -> dict:
+    return _session_action(study_plan_api_service.reschedule_session, current_user["id"], session_id,
+                           request.utc_offset_minutes, request.local_now)
 
 
 @app.get("/api/planner/plans/{plan_id}/sessions")

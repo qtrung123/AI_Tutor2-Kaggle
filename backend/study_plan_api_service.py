@@ -10,8 +10,8 @@ from datetime import date, datetime, timedelta, timezone
 from backend import study_planner_service, study_planner_store
 from backend.document_study_state import get_document_study_state
 from backend.indexed_document_store import list_indexed_documents
-from backend.study_scheduler import plan_schedule
-from backend.study_scheduler_contracts import REASON_LABELS
+from backend.study_scheduler import DEFAULT_CONFIG, find_next_slot, plan_schedule
+from backend.study_scheduler_contracts import REASON_LABELS, SchedulingContext
 
 # Real civil UTC offsets: UTC-12:00 .. UTC+14:00, always a whole number of quarter hours
 # (e.g. +05:30, +05:45, +12:45).
@@ -225,6 +225,7 @@ def _saved_session(session: dict, titles: dict) -> dict:
         "duration_minutes": session["duration_minutes"], "status": session["status"],
         "reason": {"code": code, "message": REASON_LABELS.get(code, "")} if code else None,
         "artifact_id": session["artifact_id"], "started_at": session["started_at"],
+        "completed_at": session["completed_at"], "rescheduled_from": session["rescheduled_from"],
     }
 
 
@@ -290,8 +291,8 @@ def confirm_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now
     }
 
 
-class SessionStartConflictError(Exception):
-    """The session cannot be started in its current state (HTTP 409 with a machine-readable payload)."""
+class SessionConflictError(Exception):
+    """A lifecycle action the session cannot take in its current state (HTTP 409, machine-readable payload)."""
 
     def __init__(self, code: str, message: str, **details):
         super().__init__(message)
@@ -323,17 +324,75 @@ def _session_tool(owner_id: str, session: dict) -> tuple[str, bool]:
     return tool, {"summary": has_summary, "flashcards": has_cards, "quiz": has_quiz}[tool]
 
 
-def start_session(owner_id: str, session_id: str) -> dict:
-    """Start (or resume) one session and say which tool to open for it."""
+def _transition(owner_id: str, session_id: str, action: str) -> tuple[dict, bool]:
     try:
-        session, started = study_planner_store.start_session(owner_id, session_id)
-    except study_planner_store.SessionStartError as error:
-        raise SessionStartConflictError(error.code, str(error), status=error.status) from error
+        return study_planner_store.transition_session(owner_id, session_id, action)
+    except study_planner_store.SessionTransitionError as error:
+        raise SessionConflictError(error.code, str(error), status=error.status) from error
     except ValueError as error:
         raise PlanNotFoundError(str(error)) from error
+
+
+def start_session(owner_id: str, session_id: str) -> dict:
+    """Start (or resume) one session and say which tool to open for it."""
+    session, started = _transition(owner_id, session_id, "start")
     tool, artifact_available = _session_tool(owner_id, session)
     return {"session": _saved_session(session, _document_titles(owner_id)), "started": started,
             "tool": tool, "artifact_available": artifact_available}
+
+
+def complete_session(owner_id: str, session_id: str) -> dict:
+    """in_progress -> completed (completed_at stamped once); completing again is a no-op."""
+    session, changed = _transition(owner_id, session_id, "complete")
+    return {"session": _saved_session(session, _document_titles(owner_id)), "changed": changed}
+
+
+def skip_session(owner_id: str, session_id: str) -> dict:
+    """scheduled/in_progress -> skipped. The row is kept as history; skipping again is a no-op."""
+    session, changed = _transition(owner_id, session_id, "skip")
+    return {"session": _saved_session(session, _document_titles(owner_id)), "changed": changed}
+
+
+def reschedule_session(owner_id: str, session_id: str, utc_offset_minutes: int, local_now: str | None = None) -> dict:
+    """Move one session to the first usable slot: inside the learner's availability, clear of busy
+    sessions, from now (or, for a session still ahead, after its current end) up to the material's
+    deadline. Only when nothing fits by the deadline -- or the deadline has already passed -- is a
+    slot after it used (after_deadline=true), within the default planning horizon. Nothing else in
+    the plan moves."""
+    session = study_planner_store.get_session(owner_id, session_id)
+    if not session:
+        raise PlanNotFoundError("Study session not found.")
+    offset = _validate_utc_offset(utc_offset_minutes)
+    now = _parse_local_now(local_now, offset)
+    material = study_planner_store.get_plan_material(owner_id, session["plan_id"], session["document_id"])
+    deadline = date.fromisoformat(material["deadline"]) if material and material["deadline"] else None
+    context = SchedulingContext(
+        owner_id=owner_id, plan_id=session["plan_id"], now=now, utc_offset=offset, materials=(),
+        availability=tuple(study_planner_store.list_availability(owner_id)),
+        busy_sessions=tuple(s for s in study_planner_store.list_busy_sessions(owner_id, start_from=now.date().isoformat())
+                            if s["session_id"] != session_id),
+    )
+    scheduled_end = datetime.fromisoformat(session["scheduled_end"])
+    earliest = scheduled_end if scheduled_end > now else None
+    horizon = now.date() + timedelta(days=DEFAULT_CONFIG.default_horizon_days)
+    slot, after_deadline = None, False
+    if deadline is None or deadline >= now.date():
+        slot = find_next_slot(context, session["duration_minutes"], deadline or horizon, earliest)
+    if slot is None and deadline is not None:
+        slot = find_next_slot(context, session["duration_minutes"], max(horizon, deadline), earliest)
+        after_deadline = slot is not None
+    if slot is None:
+        raise SessionConflictError(
+            "no_available_slot",
+            "No free study time is left" + (" before the deadline" if deadline else "")
+            + ". Add availability, then try again.", status=session["status"])
+    try:
+        previous, moved = study_planner_store.reschedule_session(owner_id, session_id, *slot)
+    except study_planner_store.SessionTransitionError as error:
+        raise SessionConflictError(error.code, str(error), status=error.status) from error
+    titles = _document_titles(owner_id)
+    return {"session": _saved_session(moved, titles), "previous": _saved_session(previous, titles),
+            "after_deadline": after_deadline}
 
 
 def list_plan_sessions(owner_id: str, plan_id: str) -> list[dict]:

@@ -115,6 +115,7 @@ let plannerPlan = null;          // the plan being built, or already confirmed
 let plannerMaterials = [];       // its documents (with optional deadlines)
 let plannerSessions = [];        // its saved sessions (the confirmed plan)
 let plannerPlanWeekStart = null; // week shown on the saved plan; null = pick a sensible default
+let plannerHistorySessions = []; // its completed/skipped sessions (shown on the week, never re-planned)
 let plannerPreview = null;       // the latest read-only preview result
 let plannerStep = "materials";   // materials | availability | preview | plan
 let plannerBusy = false;         // a preview/confirm request is in flight (no double submit)
@@ -4943,7 +4944,7 @@ function plannerPlanUrl(suffix = "") {
   return `${PLANNER_PLANS_API_URL}/${encodeURIComponent(plannerPlan.plan_id)}${suffix}`;
 }
 
-async function loadPlannerData() {
+async function loadPlannerData({ keepWeek = false } = {}) {
   try {
     const [plans, availability] = await Promise.all([
       plannerRequest(PLANNER_PLANS_API_URL), plannerRequest(PLANNER_AVAILABILITY_API_URL),
@@ -4953,13 +4954,15 @@ async function loadPlannerData() {
     plannerPlan = active[active.length - 1] || null;
     plannerMaterials = [];
     plannerSessions = [];
-    plannerPlanWeekStart = null;
+    plannerHistorySessions = [];
+    if (!keepWeek) plannerPlanWeekStart = null;
     if (plannerPlan) {
       const [detail, sessions] = await Promise.all([plannerRequest(plannerPlanUrl()), plannerRequest(plannerPlanUrl("/sessions"))]);
       plannerMaterials = detail.materials;
       plannerSessions = sessions.filter(plannerIsActiveSession);
+      plannerHistorySessions = sessions.filter((session) => PLANNER_HISTORY_SESSION_STATUSES.includes(session.status));
     }
-    if (plannerSessions.length) plannerStep = "plan";
+    if (plannerSessions.length || plannerHistorySessions.length) plannerStep = "plan";
     else if (plannerStep === "plan") plannerStep = "materials";
     renderPlanner();
   } catch (error) {
@@ -5235,49 +5238,102 @@ function plannerSessionItem(session, tag = "li", { action = false } = {}) {
   reason.textContent = session.reason?.message || "";
   content.append(title, meta, reason);
   item.append(time, content);
-  if (action && session.session_id && plannerIsActiveSession(session)) {
-    item.classList.add("planner-session--actionable");
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "primary-button planner-session-start";
-    button.dataset.sessionId = session.session_id;
-    button.textContent = session.status === "in_progress" ? "Resume" : "Start";
-    button.setAttribute("aria-label", `${button.textContent} ${title.textContent} (${chip.textContent})`);
-    button.addEventListener("click", () => plannerStartSession(session, button));
-    item.appendChild(button);
-  }
+  if (action && session.session_id) plannerAddSessionActions(item, content, session, `${title.textContent} (${chip.textContent})`);
   return item;
 }
 
-const plannerStartingSessions = new Set();   // session ids with a start request in flight
+const PLANNER_HISTORY_SESSION_STATUSES = ["completed", "skipped"];
+const PLANNER_STATUS_LABELS = { completed: "Completed", skipped: "Skipped" };
 
-async function plannerStartSession(session, button) {
-  // One request per session at a time: a double click (or Start in two lists) cannot start twice.
-  if (plannerStartingSessions.has(session.session_id)) return;
-  plannerStartingSessions.add(session.session_id);
+function plannerIsOverdue(session, now = plannerNow()) {
+  // A scheduled session whose end has passed on the browser's local clock (both are naive local times).
+  return session.status === "scheduled" && session.scheduled_end <= plannerLocalIso(now);
+}
+
+function plannerAddSessionActions(item, content, session, name) {
+  if (PLANNER_STATUS_LABELS[session.status]) {
+    const badge = document.createElement("span");
+    badge.className = `planner-session-status planner-session-status--${session.status}`;
+    badge.textContent = PLANNER_STATUS_LABELS[session.status];
+    item.classList.add("planner-session--done");
+    item.appendChild(badge);
+    return;
+  }
+  let actions = [];
+  if (session.status === "in_progress") actions = [["complete", "Complete", true], ["start", "Resume", false]];
+  else if (plannerIsOverdue(session)) {
+    const note = document.createElement("small");
+    note.className = "planner-session-note";
+    note.textContent = "Session not completed";
+    content.appendChild(note);
+    item.classList.add("planner-session--overdue");
+    actions = [["reschedule", "Reschedule", true], ["skip", "Skip", false]];
+  } else if (session.status === "scheduled") actions = [["start", "Start", true]];
+  if (!actions.length) return;
+  item.classList.add("planner-session--actionable");
+  const group = document.createElement("div");
+  group.className = "planner-session-actions";
+  actions.forEach(([kind, label, primary]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `${primary ? "primary-button" : "secondary-button"} planner-session-action planner-session-${kind}`;
+    button.dataset.sessionAction = kind;
+    button.dataset.sessionId = session.session_id;
+    button.textContent = label;
+    button.setAttribute("aria-label", `${label} ${name}`);
+    button.addEventListener("click", () => plannerSessionAction(session, kind, button, group));
+    group.appendChild(button);
+  });
+  item.appendChild(group);
+}
+
+const plannerBusySessions = new Set();   // session ids with a lifecycle request in flight
+
+async function plannerSessionAction(session, kind, button, group) {
+  // One request per session at a time: a double click (or the same session in two lists) acts once.
+  if (plannerBusySessions.has(session.session_id)) return;
+  plannerBusySessions.add(session.session_id);
+  const buttons = [...group.querySelectorAll("button")];
   const label = button.textContent;
-  button.disabled = true;
-  button.textContent = "Opening…";
+  buttons.forEach((item) => { item.disabled = true; });
+  button.textContent = kind === "start" ? "Opening…" : "Saving…";
+  let refresh = kind !== "start";
   try {
-    const result = await plannerRequest(`${PLANNER_SESSIONS_API_URL}/${encodeURIComponent(session.session_id)}/start`, { method: "POST" });
-    Object.assign(session, result.session);
-    plannerSessions.forEach((item) => { if (item.session_id === session.session_id) Object.assign(item, result.session); });
-    if (!indexedDocuments.some((item) => item.id === session.document_id)) {
-      showToast("This document is no longer available");
-      return;
+    const url = `${PLANNER_SESSIONS_API_URL}/${encodeURIComponent(session.session_id)}/${kind}`;
+    const body = kind === "reschedule" ? { utc_offset_minutes: plannerUtcOffsetMinutes() } : undefined;
+    const result = await plannerRequest(url, { method: "POST", body });
+    if (kind === "start") {
+      Object.assign(session, result.session);
+      plannerSessions.forEach((item) => { if (item.session_id === session.session_id) Object.assign(item, result.session); });
+      if (!indexedDocuments.some((item) => item.id === session.document_id)) {
+        showToast("This document is no longer available");
+        return;
+      }
+      // A missing artifact is fine: the tool's own empty state offers to generate/create it.
+      await openStudySession(session.document_id, result.tool);
+    } else if (kind === "complete") showToast("Session completed. Nice work!");
+    else if (kind === "skip") showToast("Session skipped");
+    else {
+      const moved = result.session;
+      showToast(`Moved to ${plannerDayLabel(moved.scheduled_start.slice(0, 10))}, ${moved.scheduled_start.slice(11, 16)}`
+        + (result.after_deadline ? " (after the deadline)" : ""));
     }
-    // A missing artifact is fine: the tool's own empty state offers to generate/create it.
-    await openStudySession(session.document_id, result.tool);
   } catch (error) {
-    showToast(error.message || "Could not start this session");
-    if (error.status === 409 || error.status === 404) loadTodayPlan();
+    showToast(error.message || "Could not update this session");
+    refresh = refresh || error.status === 409 || error.status === 404;
   } finally {
-    plannerStartingSessions.delete(session.session_id);
+    plannerBusySessions.delete(session.session_id);
     if (button.isConnected) {
-      button.disabled = false;
-      button.textContent = session.status === "in_progress" ? "Resume" : label;
+      buttons.forEach((item) => { item.disabled = false; });
+      button.textContent = kind === "start" && session.status === "in_progress" ? "Resume" : label;
     }
   }
+  if (refresh) await plannerRefreshSchedules();
+}
+
+async function plannerRefreshSchedules() {
+  // Home and the saved week both reflect the change; the week being viewed is kept.
+  await Promise.all([loadTodayPlan(), plannerPlan ? loadPlannerData({ keepWeek: true }) : null]);
 }
 
 function renderPlannerSessionList(container, sessions, emptyText, options = {}) {
@@ -5458,7 +5514,10 @@ function renderPlannerPlan() {
   let emptyText = "No study sessions this week.";
   const next = plannerSessions.find((session) => session.scheduled_start.slice(0, 10) > untilKey);
   if (next) emptyText += ` Next session: ${plannerDayLabel(next.scheduled_start.slice(0, 10))}.`;
-  renderPlannerSessionList(plannerPlanSessions, plannerSessions.filter(inWeek), plannerSessions.length ? emptyText : "No sessions saved yet.", { action: true });
+  const weekSessions = [...plannerSessions, ...plannerHistorySessions].filter(inWeek)
+    .sort((left, right) => left.scheduled_start.localeCompare(right.scheduled_start));
+  const anySaved = plannerSessions.length || plannerHistorySessions.length;
+  renderPlannerSessionList(plannerPlanSessions, weekSessions, anySaved ? emptyText : "No sessions saved yet.", { action: true });
 }
 
 function plannerDefaultPlanWeek(sessions) {
@@ -5500,7 +5559,10 @@ function plannerTodayAgenda(sessions, now = plannerNow()) {
     .sort((left, right) => left.scheduled_start.localeCompare(right.scheduled_start));
   const today = remaining.filter((session) => session.scheduled_start.slice(0, 10) === todayKey);
   const upcoming = today.length ? null : remaining.find((session) => session.scheduled_start.slice(0, 10) > todayKey) || null;
-  return { today, upcoming };
+  // Scheduled sessions whose time has passed: offered Reschedule / Skip, never silently dropped.
+  const overdue = sessions.filter((session) => plannerIsOverdue(session, now))
+    .sort((left, right) => left.scheduled_start.localeCompare(right.scheduled_start));
+  return { today, upcoming, overdue };
 }
 
 function renderTodayPlan(sessions) {
@@ -5543,24 +5605,24 @@ function renderTodayPlan(sessions) {
   };
 
   if (sessions === null) { empty("Your study plan could not be loaded right now."); return; }
-  const { today, upcoming } = plannerTodayAgenda(sessions, now);
+  const { today, upcoming, overdue } = plannerTodayAgenda(sessions, now);
+  const list = (items) => {
+    const element = document.createElement("ol");
+    element.className = "planner-session-list";
+    items.forEach((session) => element.appendChild(plannerSessionItem(session, "li", { action: true })));
+    return element;
+  };
   if (today.length) {
     section("Next up", "today-plan-next").appendChild(plannerSessionItem(today[0], "div", { action: true }));
-    if (today.length > 1) {
-      const list = document.createElement("ol");
-      list.className = "planner-session-list";
-      today.slice(1).forEach((session) => list.appendChild(plannerSessionItem(session, "li", { action: true })));
-      section("Later today", "today-plan-later").appendChild(list);
-    }
-    return;
-  }
-  if (upcoming) {
+    if (today.length > 1) section("Later today", "today-plan-later").appendChild(list(today.slice(1)));
+  } else if (upcoming) {
     empty("Nothing left for today.");
     section(`Next session · ${plannerDayLabel(upcoming.scheduled_start.slice(0, 10))}`, "today-plan-upcoming")
       .appendChild(plannerSessionItem(upcoming, "div", { action: true }));
-    return;
+  } else if (!overdue.length) {
+    empty("No upcoming study sessions. Create a plan to see what to study next.");
   }
-  empty("No upcoming study sessions. Create a plan to see what to study next.");
+  if (overdue.length) section("Not completed", "today-plan-overdue").appendChild(list(overdue));
 }
 
 plannerView?.querySelectorAll("[data-planner-go]").forEach((button) => {

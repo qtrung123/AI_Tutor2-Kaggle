@@ -385,6 +385,23 @@ def _at(day: date, minute: int) -> str:
     return datetime(day.year, day.month, day.day, minute // 60, minute % 60).isoformat()
 
 
+def find_next_slot(context: SchedulingContext, duration: int, latest: date, earliest: datetime | None = None,
+                   config: SchedulerConfig = DEFAULT_CONFIG) -> tuple[str, str] | None:
+    """The first window of `duration` minutes, from max(now, earliest) through `latest` (inclusive),
+    inside the learner's availability and clear of busy sessions (padded by the session gap, as
+    in plan_schedule). Returns naive-local (start, end) ISO strings, or None."""
+    now, _ = resolve_clock(context.now, context.utc_offset)
+    start_at = max(now, earliest) if earliest else now
+    if latest < start_at.date():
+        return None
+    free = _free_by_date(context, start_at, latest, config)
+    for day in sorted(free):
+        minute = _find_slot(free[day], 0, duration, config.slot_alignment_minutes)
+        if minute is not None:
+            return _at(day, minute), _at(day, minute + duration)
+    return None
+
+
 def plan_schedule(context: SchedulingContext, config: SchedulerConfig = DEFAULT_CONFIG) -> ScheduleResult:
     now, utc_offset = resolve_clock(context.now, context.utc_offset)
     today = now.date()

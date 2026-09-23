@@ -1,7 +1,8 @@
 """Real-browser tests for the read-only Study Planner daily experience (headless Chrome, mocked
 v2 API): Home "Today's Study Plan" (Next up / Later today / next upcoming / empty), the
-confirmed plan's week view with previous/next navigation, and Start/Resume (Phase 4B): one start
-request per click burst, then the session's document opens on the mapped tool. "Now" is pinned to Thu 2026-09-24 12:00
+confirmed plan's week view with previous/next navigation, Start/Resume (Phase 4B): one start
+request per click burst, then the session's document opens on the mapped tool, and Complete /
+"Session not completed" -> Reschedule / Skip (Phase 4C) with Home + week refreshed afterwards. "Now" is pinned to Thu 2026-09-24 12:00
 in the browser's local time. Runs at desktop (1280px) and phone (390px). Skipped without Chrome.
 """
 
@@ -16,6 +17,7 @@ import tests.test_sidebar_navigation_ui as sidebar_harness
 MOCK = PLANNER_MOCK + r"""
 window.__planner.sessionsByPlan = {};
 window.__planner.startCalls = [];
+window.__planner.actionCalls = [];
 const plannerV2Fetch = window.fetch;
 window.fetch = async (input, init = {}) => {
   const P = window.__planner;
@@ -35,6 +37,34 @@ window.fetch = async (input, init = {}) => {
     session.status = "in_progress";
     const tool = {summary: "summary", flashcards: "flashcards", quiz: "quiz", quiz_retry: "quiz", review: "flashcards"}[session.activity_type];
     return json({session: {...session}, started, tool, artifact_available: false});
+  }
+  const action = p.match(/^\/api\/planner\/sessions\/([^/]+)\/(complete|skip|reschedule)$/);
+  if (action) {
+    const body = init.body ? JSON.parse(init.body) : null;
+    P.actionCalls.push([action[2], action[1], body]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const lists = Object.values(P.sessionsByPlan);
+    const session = lists.flat().find((s) => s.session_id === action[1]);
+    if (!session) return json({detail: "Study session not found."}, 404);
+    const conflict = (code, message) => json({detail: {code, message, status: session.status}}, 409);
+    if (action[2] === "complete") {
+      if (session.status === "completed") return json({session: {...session}, changed: false});
+      if (session.status !== "in_progress") return conflict("session_not_started", "Start this session before completing it.");
+      Object.assign(session, {status: "completed", completed_at: "2026-09-24T12:00:00+00:00"});
+      return json({session: {...session}, changed: true});
+    }
+    if (action[2] === "skip") {
+      if (!["scheduled", "in_progress", "skipped"].includes(session.status)) return conflict("session_not_skippable", "Cannot skip.");
+      const changed = session.status !== "skipped";
+      session.status = "skipped";
+      return json({session: {...session}, changed});
+    }
+    if (P.noSlot) return conflict("no_available_slot", "No free study time is left before the deadline. Add availability, then try again.");
+    session.status = "rescheduled";
+    const moved = {...session, session_id: session.session_id + "-moved", status: "scheduled", rescheduled_from: session.session_id,
+      scheduled_start: "2026-09-25T18:00:00", scheduled_end: "2026-09-25T18:" + String(session.duration_minutes).padStart(2, "0") + ":00"};
+    lists.find((list) => list.includes(session)).push(moved);
+    return json({session: moved, previous: {...session}, after_deadline: false});
   }
   return plannerV2Fetch(input, init);
 };
@@ -118,7 +148,7 @@ const startButton = (title, activity) => [...document.querySelectorAll(".planner
   out.upcoming = today();
 
   // No future sessions at all (the archived plan's leftovers do not count).
-  P.sessionsByPlan["plan-1"] = [session("mkt.pdf", "summary", "2026-09-22T18:00:00", "2026-09-22T18:45:00", 45)];
+  P.sessionsByPlan["plan-1"] = [session("mkt.pdf", "summary", "2026-09-22T18:00:00", "2026-09-22T18:45:00", 45, "completed")];
   P.sessionsByPlan["plan-old"].push(session("pbi.pdf", "quiz", "2026-09-30T18:00:00", "2026-09-30T18:30:00", 30));
   await loadTodayPlan(); await sleep(100);
   out.none = today();
@@ -183,6 +213,63 @@ const startButton = (title, activity) => [...document.querySelectorAll(".planner
   doneButton.click(); await sleep(1200);
   out.rejected = {page: document.body.dataset.page, buttons: today().buttons, status: done.status};
   out.overflow.homeWithActions = noOverflow();
+
+  // Phase 4C: overdue scheduled -> "Session not completed" + Reschedule / Skip; in_progress -> Complete.
+  const item = (title, activity) => [...document.querySelectorAll(".planner-session")]
+    .find((el) => el.offsetParent !== null && el.querySelector("strong").textContent === title
+      && el.querySelector(".planner-activity-chip").textContent === activity);
+  const describe = (el) => el && ({note: el.querySelector(".planner-session-note")?.textContent || null,
+    status: el.querySelector(".planner-session-status")?.textContent || null,
+    buttons: [...el.querySelectorAll("button")].map((b) => b.textContent)});
+  const press = (title, activity, label) => [...item(title, activity).querySelectorAll("button")].find((b) => b.textContent === label);
+  const overdue = session("mkt.pdf", "summary", "2026-09-24T09:00:00", "2026-09-24T09:30:00", 30);
+  const running = session("stats.pdf", "quiz", "2026-09-24T11:30:00", "2026-09-24T12:15:00", 45, "in_progress");
+  const later = session("pbi.pdf", "flashcards", "2026-09-24T15:00:00", "2026-09-24T15:20:00", 20);
+  const lastWeek = session("stats.pdf", "review", "2026-09-22T19:00:00", "2026-09-22T19:15:00", 15);
+  P.sessionsByPlan["plan-1"] = [overdue, running, later, lastWeek];
+  // The border between "still ahead" and "not completed" is the browser-local clock.
+  plannerNow = () => new Date(2026, 8, 24, 9, 29, 0);
+  out.overdueBoundary = {before: plannerIsOverdue(overdue), at: (plannerNow = () => new Date(2026, 8, 24, 9, 30, 0), plannerIsOverdue(overdue))};
+  plannerNow = () => new Date(2026, 8, 24, 12, 0, 0);
+  setPage("overview"); await sleep(400);
+  out.lifecycleHome = {sections: today().sections, overdue: describe(item("Marketing", "Summary")),
+    running: describe(item("Statistics", "Quiz")), later: describe(item("PowerBI", "Flashcards")),
+    lastWeek: describe(item("Statistics", "Review"))};
+  out.overflow.homeLifecycle = noOverflow();
+
+  // Week view shows the same states.
+  setPage("planner"); await sleep(500);
+  out.lifecycleWeek = {overdue: describe(item("Marketing", "Summary")), running: describe(item("Statistics", "Quiz")),
+    later: describe(item("PowerBI", "Flashcards"))};
+  out.overflow.weekLifecycle = noOverflow();
+
+  // Complete (double click -> one request), from Home.
+  setPage("overview"); await sleep(400);
+  P.actionCalls = [];
+  const complete = press("Statistics", "Quiz", "Complete");
+  complete.click(); complete.click(); await sleep(50);
+  out.completing = {text: complete.textContent, disabled: [...complete.parentNode.querySelectorAll("button")].map((b) => b.disabled)};
+  await sleep(1200);
+  out.completed = {calls: P.actionCalls.map((c) => c[0]), toast: toast.textContent, status: running.status,
+    stillListed: !!item("Statistics", "Quiz")};
+
+  // Reschedule the overdue session: the learner's offset is sent; Home refreshes.
+  press("Marketing", "Summary", "Reschedule").click(); await sleep(1300);
+  out.rescheduled = {call: P.actionCalls[P.actionCalls.length - 1], toast: toast.textContent, oldStatus: overdue.status,
+    sections: today().sections, overdueListed: !!item("Marketing", "Summary")};
+
+  // No slot -> clear message, nothing changes; then Skip it.
+  P.noSlot = true;
+  press("Statistics", "Review", "Reschedule").click(); await sleep(1300);
+  out.noSlot = {toast: toast.textContent, status: lastWeek.status, listed: !!item("Statistics", "Review")};
+  press("Statistics", "Review", "Skip").click(); await sleep(1300);
+  out.skipped = {toast: toast.textContent, status: lastWeek.status, sections: today().sections};
+
+  // The week keeps history (Completed / Skipped) and shows the moved session as current work.
+  setPage("planner"); await sleep(500);
+  out.weekAfter = {running: describe(item("Statistics", "Quiz")), skipped: describe(item("Statistics", "Review")),
+    moved: describe(item("Marketing", "Summary")), days: week().days.length};
+  out.overflow.weekHistory = noOverflow();
   out.calls = P.calls;
   publish();
 })().catch((error) => { out.fatal = String(error && error.stack || error); publish(); });
@@ -208,7 +295,7 @@ class TodayAndWeekAssertions:
         multiple = self.out["multiple"]
         self.assertFalse(multiple["hidden"])
         self.assertEqual(multiple["title"], "Today’s Study Plan")
-        self.assertEqual(multiple["sections"], ["Next up", "Later today"])
+        self.assertEqual(multiple["sections"], ["Next up", "Later today", "Not completed"])
         # Earliest remaining: the in-progress session (the 09:00 one is over, the skipped one is not work).
         self.assertEqual(multiple["next"], {"time": "11:30–12:15", "title": "Statistics", "activity": "Summary",
                                             "duration": "45m", "reason": "New material to learn"})
@@ -225,8 +312,9 @@ class TodayAndWeekAssertions:
         upcoming = self.out["upcoming"]
         self.assertIsNone(upcoming["next"])
         self.assertEqual(upcoming["empty"], "Nothing left for today.")
-        self.assertEqual(len(upcoming["sections"]), 1)
+        self.assertEqual(len(upcoming["sections"]), 2)
         self.assertRegex(upcoming["sections"][0], r"^Next session · .*28")
+        self.assertEqual(upcoming["sections"][1], "Not completed")   # this morning's 09:00 session
         self.assertEqual((upcoming["upcoming"]["time"], upcoming["upcoming"]["title"], upcoming["upcoming"]["activity"]),
                          ("18:00–18:30", "Statistics", "Quiz"))
 
@@ -236,8 +324,9 @@ class TodayAndWeekAssertions:
         self.assertEqual(none["empty"], "No upcoming study sessions. Create a plan to see what to study next.")
 
     def test_actions_are_start_or_resume_only(self):
-        self.assertEqual(self.out["multiple"]["buttons"], ["View full schedule", "Resume", "Start", "Start"])
-        self.assertEqual(self.out["upcoming"]["buttons"], ["View full schedule", "Start"])
+        self.assertEqual(self.out["multiple"]["buttons"],
+                         ["View full schedule", "Complete", "Resume", "Start", "Start", "Reschedule", "Skip"])
+        self.assertEqual(self.out["upcoming"]["buttons"], ["View full schedule", "Start", "Reschedule", "Skip"])
         self.assertEqual(self.out["none"]["buttons"], ["View full schedule"])
         self.assertEqual((self.out["weekThis"]["inputs"], self.out["weekThis"]["actions"]), (0, ["Start"]))
 
@@ -270,7 +359,54 @@ class TodayAndWeekAssertions:
         rejected = self.out["rejected"]
         self.assertEqual(rejected["page"], "overview")
         self.assertEqual(rejected["status"], "completed")
-        self.assertEqual(rejected["buttons"], ["View full schedule", "Resume", "Resume"])
+        self.assertEqual(rejected["buttons"], ["View full schedule", "Complete", "Resume", "Complete", "Resume"])
+
+    # -- Phase 4C -------------------------------------------------------------------
+
+    def test_overdue_detection_uses_the_browser_local_clock(self):
+        self.assertEqual(self.out["overdueBoundary"], {"before": False, "at": True})
+
+    def test_lifecycle_states_on_home_and_week(self):
+        not_completed = {"note": "Session not completed", "status": None, "buttons": ["Reschedule", "Skip"]}
+        running = {"note": None, "status": None, "buttons": ["Complete", "Resume"]}
+        ahead = {"note": None, "status": None, "buttons": ["Start"]}
+        home = self.out["lifecycleHome"]
+        self.assertEqual(home["sections"], ["Next up", "Later today", "Not completed"])
+        self.assertEqual((home["overdue"], home["running"], home["later"], home["lastWeek"]),
+                         (not_completed, running, ahead, not_completed))
+        week = self.out["lifecycleWeek"]
+        self.assertEqual((week["overdue"], week["running"], week["later"]), (not_completed, running, ahead))
+        for state in list(home.values()) + list(week.values()):
+            if isinstance(state, dict):
+                self.assertNotRegex(str(state).lower(), r"fail")
+
+    def test_complete_is_double_click_safe_with_short_feedback(self):
+        self.assertEqual(self.out["completing"], {"text": "Saving…", "disabled": [True, True]})
+        completed = self.out["completed"]
+        self.assertEqual(completed["calls"], ["complete"])
+        self.assertEqual((completed["toast"], completed["status"]), ("Session completed. Nice work!", "completed"))
+        self.assertFalse(completed["stillListed"])   # Home refreshed: done work leaves Today
+
+    def test_reschedule_sends_the_offset_and_refreshes(self):
+        rescheduled = self.out["rescheduled"]
+        self.assertEqual(rescheduled["call"][0], "reschedule")
+        self.assertEqual(set(rescheduled["call"][2]), {"utc_offset_minutes"})
+        self.assertRegex(rescheduled["toast"], r"^Moved to .*25.*, 18:00$")
+        self.assertEqual(rescheduled["oldStatus"], "rescheduled")
+        self.assertFalse(rescheduled["overdueListed"])
+
+    def test_no_slot_message_then_skip(self):
+        self.assertEqual(self.out["noSlot"], {"toast": "No free study time is left before the deadline. Add availability, then try again.",
+                                              "status": "scheduled", "listed": True})
+        skipped = self.out["skipped"]
+        self.assertEqual((skipped["toast"], skipped["status"]), ("Session skipped", "skipped"))
+        self.assertNotIn("Not completed", skipped["sections"])
+
+    def test_week_keeps_history_and_shows_moved_session(self):
+        after = self.out["weekAfter"]
+        self.assertEqual(after["running"], {"note": None, "status": "Completed", "buttons": []})
+        self.assertEqual(after["skipped"], {"note": None, "status": "Skipped", "buttons": []})
+        self.assertEqual(after["moved"], {"note": None, "status": None, "buttons": ["Start"]})
 
     def test_week_view_and_navigation(self):
         self.assertEqual(self.out["page"], "planner")
