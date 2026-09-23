@@ -7,7 +7,7 @@ result without persisting anything; confirm recomputes the same schedule server-
 
 from datetime import date, datetime, timedelta, timezone
 
-from backend import study_planner_service, study_planner_store
+from backend import study_adaptation, study_planner_service, study_planner_store
 from backend.document_study_state import get_document_study_state
 from backend.indexed_document_store import list_indexed_documents
 from backend.study_scheduler import DEFAULT_CONFIG, find_next_slot, plan_schedule
@@ -393,6 +393,37 @@ def reschedule_session(owner_id: str, session_id: str, utc_offset_minutes: int, 
     titles = _document_titles(owner_id)
     return {"session": _saved_session(moved, titles), "previous": _saved_session(previous, titles),
             "after_deadline": after_deadline}
+
+
+def propose_adaptation(owner_id: str, plan_id: str, trigger: dict, utc_offset_minutes: int,
+                       local_now: str | None = None) -> dict:
+    """Read-only adaptive replanning proposal for one active plan (Phase 5A): what should change in
+    its future sessions after `trigger`. Reads persisted state only and never writes."""
+    plan = _require_plan(owner_id, plan_id)
+    if plan["status"] != "active":
+        raise PlanValidationError("plan_not_active", "Only an active plan can be adapted.")
+    offset = _validate_utc_offset(utc_offset_minutes)
+    now = _parse_local_now(local_now, offset)
+    try:
+        parsed = study_adaptation.AdaptationTrigger(**trigger)
+    except (TypeError, ValueError) as error:
+        raise PlanValidationError("invalid_trigger", str(error)) from error
+    context = study_planner_service.build_scheduling_context(owner_id, plan_id, now=now, utc_offset=offset)
+    plan_sessions = study_planner_store.list_sessions(owner_id, plan_id=plan_id)
+    # Exact plan isolation: a trigger may only name this plan's own documents and sessions.
+    if parsed.document_id and parsed.document_id not in {m.document_id for m in context.materials}:
+        raise PlanNotFoundError("That document is not part of this study plan.")
+    if parsed.session_id and parsed.session_id not in {s["session_id"] for s in plan_sessions}:
+        raise PlanNotFoundError("That session is not part of this study plan.")
+    try:
+        result = study_adaptation.propose_adaptation(study_adaptation.AdaptationContext(
+            trigger=parsed, now=now, utc_offset=offset, materials=context.materials,
+            plan_sessions=tuple(plan_sessions), availability=context.availability,
+            busy_sessions=context.busy_sessions,
+        ))
+    except ValueError as error:
+        raise PlanValidationError("invalid_trigger", str(error)) from error
+    return {"plan_id": plan_id, "persisted": False, "local_now": now.isoformat(), **result.to_dict()}
 
 
 def list_plan_sessions(owner_id: str, plan_id: str) -> list[dict]:

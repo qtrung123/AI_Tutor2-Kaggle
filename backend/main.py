@@ -240,6 +240,20 @@ class PlanMaterialUpdateRequest(BaseModel):
     familiarity: Optional[str] = None
 
 
+class AdaptationTriggerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: str
+    document_id: Optional[str] = None
+    session_id: Optional[str] = None
+
+
+class PlanAdaptationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    trigger: AdaptationTriggerRequest
+    utc_offset_minutes: int
+    local_now: Optional[str] = None
+
+
 class PlanPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # The learner's offset from UTC in minutes (e.g. 420 for UTC+7, 330 for UTC+5:30) -- required:
@@ -1479,6 +1493,19 @@ def planner_v2_remove_material(plan_id: str, material_id: str, current_user: dic
     try:
         study_plan_api_service.remove_plan_material(current_user["id"], plan_id, material_id)
         return {"deleted": material_id}
+    except _PLAN_V2_ERRORS as error:
+        raise _plan_v2_error(error) from error
+
+
+@app.post("/api/planner/plans/{plan_id}/adaptation/preview")
+def planner_v2_adaptation_preview(plan_id: str, request: PlanAdaptationRequest,
+                                  current_user: dict = Depends(require_current_user)) -> dict:
+    """Adaptive replanning proposal. Read-only: never changes study sessions."""
+    try:
+        return study_plan_api_service.propose_adaptation(
+            current_user["id"], plan_id, request.trigger.model_dump(), request.utc_offset_minutes,
+            local_now=request.local_now,
+        )
     except _PLAN_V2_ERRORS as error:
         raise _plan_v2_error(error) from error
 
