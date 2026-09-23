@@ -708,7 +708,11 @@ PLAN_STATUSES = ("active", "paused", "completed", "archived")
 FAMILIARITY_LEVELS = ("new_to_me", "somewhat_familiar", "reviewing")
 LEARNING_STATES = ("new", "learning", "needs_review", "on_track", "completed")
 ACTIVITY_TYPES = ("summary", "flashcards", "quiz", "review", "quiz_retry")
-SESSION_STATUSES = ("scheduled", "in_progress", "completed", "skipped", "missed", "rescheduled")
+# skipped = the learner chose to skip it; missed = its time passed; rescheduled = moved, with a
+# replacement row pointing back via rescheduled_from; cancelled = the adaptive planner withdrew a
+# future recommendation that is no longer needed/valid. All four are terminal history: never
+# deleted, never busy time, never active work.
+SESSION_STATUSES = ("scheduled", "in_progress", "completed", "skipped", "missed", "rescheduled", "cancelled")
 # Why a session was scheduled -- stable codes persisted in study_sessions.reason (the UI renders and
 # translates them). Scheduling semantics only; learning/performance state lives in DocumentStudyState.
 SESSION_REASONS = (
@@ -991,7 +995,7 @@ def list_busy_sessions(owner_id: str, start_from: str | None = None) -> list[dic
                      not a commitment any more; the rows are kept, never deleted);
     - in_progress -> always busy (never silently drop work that is under way);
     - completed   -> always busy (history).
-    skipped/missed/rescheduled never block."""
+    skipped/missed/rescheduled/cancelled never block."""
     initialize_study_planner_store()
     clauses, params = ["s.owner_id=?"], [owner_id]
     if start_from:
@@ -1189,6 +1193,121 @@ def reschedule_session(owner_id: str, session_id: str, scheduled_start: str, sch
     finally:
         connection.close()
     return get_session(owner_id, session_id), get_session(owner_id, new_id)
+
+
+def plan_sessions_fingerprint(sessions: list[dict]) -> tuple:
+    """What an adaptation proposal was computed from: every session of the plan, with its
+    state. Any difference at apply time means the proposal is stale."""
+    return tuple(sorted((s["session_id"], s["status"], s["scheduled_start"], s["scheduled_end"], s["updated_at"])
+                        for s in sessions))
+
+
+def apply_adaptation_changes(owner_id: str, plan_id: str, fingerprint: tuple, now_local: str, *,
+                             added: list[dict], moved: list[tuple[str, str, str]], cancelled: list[str],
+                             replaced: list[str]) -> dict:
+    """Apply one server-computed adaptation proposal atomically (all or nothing):
+    - added:     new 'scheduled' rows (a replacement carries rescheduled_from);
+    - moved:     (session_id, new_start, new_end) -> original becomes 'rescheduled' + a replacement
+                 row with rescheduled_from=<original>;
+    - cancelled: session ids -> 'cancelled' (kept as history);
+    - replaced:  missed originals an added replacement stands in for -> 'rescheduled'.
+    Inside one BEGIN IMMEDIATE transaction it re-checks that the plan is still active, that its
+    sessions are exactly what the proposal saw (`fingerprint`), that every moved/cancelled row is a
+    future 'scheduled' session and that no new window overlaps busy time. Any failure raises
+    SessionTransitionError and nothing is written."""
+    initialize_study_planner_store()
+    if not (added or moved or cancelled):
+        raise ValueError("No adaptation changes to apply.")
+    material_documents = {m["document_id"] for m in list_materials(owner_id, plan_id)}
+    for record in added:
+        validate_session({**record, "status": "scheduled"})
+        if record["document_id"] not in material_documents:
+            raise ValueError("Session document is not part of this study plan.")
+    connection = _connect()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        plan = connection.execute("SELECT status FROM study_plans WHERE plan_id=? AND owner_id=?",
+                                  (plan_id, owner_id)).fetchone()
+        if not plan:
+            raise ValueError("Study plan not found.")
+        if plan["status"] != "active":
+            raise SessionTransitionError("plan_not_active", "Only an active plan can be adapted.", plan["status"])
+        rows = {row["session_id"]: row for row in connection.execute(
+            "SELECT * FROM study_sessions WHERE owner_id=? AND plan_id=?", (owner_id, plan_id)).fetchall()}
+        if plan_sessions_fingerprint([dict(row) for row in rows.values()]) != fingerprint:
+            raise SessionTransitionError("stale_plan", "The plan changed since this proposal was made. Try again.", "")
+        touched = [session_id for session_id, _, _ in moved] + list(cancelled)
+        for session_id in touched:
+            row = rows.get(session_id)
+            if not row or row["status"] != "scheduled" or row["scheduled_start"] < now_local:
+                raise SessionTransitionError("session_not_changeable", "Only future scheduled sessions can change.",
+                                             row["status"] if row else "")
+        for session_id in replaced:
+            row = rows.get(session_id)
+            if not row or row["status"] not in ("scheduled", "missed") or row["scheduled_end"] > now_local:
+                raise SessionTransitionError("session_not_changeable", "Only a missed session can be replaced.",
+                                             row["status"] if row else "")
+        windows = [(r["scheduled_start"], r["scheduled_end"]) for r in added] + [(a, b) for _, a, b in moved]
+        for index, (start, end) in enumerate(windows):
+            if any(s < end and e > start for s, e in windows[:index]):
+                raise SessionTransitionError("slot_taken", "Two proposed sessions overlap.", "")
+            placeholders = ",".join("?" * len(touched)) or "''"
+            overlap = connection.execute(
+                f"""SELECT 1 FROM study_sessions s JOIN study_plans p ON p.plan_id = s.plan_id
+                    WHERE s.owner_id=? AND s.session_id NOT IN ({placeholders})
+                      AND s.scheduled_start < ? AND s.scheduled_end > ?
+                      AND (s.status IN ('in_progress', 'completed') OR (s.status = 'scheduled' AND p.status = 'active'))
+                    LIMIT 1""",
+                (owner_id, *touched, end, start),
+            ).fetchone()
+            if overlap:
+                raise SessionTransitionError("slot_taken", "A proposed time is already taken by another session.", "")
+
+        now = utc_now_iso()
+
+        def insert(record: dict) -> str:
+            new_id = str(uuid4())
+            connection.execute(
+                """INSERT INTO study_sessions (session_id, owner_id, plan_id, document_id, activity_type, artifact_id,
+                       scheduled_start, scheduled_end, duration_minutes, status, reason, priority_snapshot,
+                       rescheduled_from, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?)""",
+                (new_id, owner_id, plan_id, record["document_id"], record["activity_type"], record.get("artifact_id"),
+                 record["scheduled_start"], record["scheduled_end"], record["duration_minutes"], record.get("reason"),
+                 record.get("priority_snapshot"), record.get("rescheduled_from"), now, now),
+            )
+            return new_id
+
+        def set_status(session_id: str, status: str, expected: tuple) -> None:
+            cursor = connection.execute(
+                f"UPDATE study_sessions SET status=?, updated_at=? WHERE session_id=? AND owner_id=? "
+                f"AND status IN ({','.join('?' * len(expected))})",
+                (status, now, session_id, owner_id, *expected),
+            )
+            if cursor.rowcount != 1:
+                raise SessionTransitionError("stale_plan", "The plan changed since this proposal was made. Try again.", "")
+
+        added_ids = [insert(record) for record in added]
+        moved_ids = {}
+        for session_id, start, end in moved:
+            row = rows[session_id]
+            set_status(session_id, "rescheduled", ("scheduled",))
+            moved_ids[session_id] = insert({
+                "document_id": row["document_id"], "activity_type": row["activity_type"], "artifact_id": row["artifact_id"],
+                "scheduled_start": start, "scheduled_end": end, "duration_minutes": row["duration_minutes"],
+                "reason": row["reason"], "priority_snapshot": row["priority_snapshot"], "rescheduled_from": session_id,
+            })
+        for session_id in cancelled:
+            set_status(session_id, "cancelled", ("scheduled",))
+        for session_id in replaced:
+            set_status(session_id, "rescheduled", ("scheduled", "missed"))
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    return {"added": added_ids, "moved": moved_ids}
 
 
 def create_session(owner_id: str, plan_id: str, session: dict) -> dict:

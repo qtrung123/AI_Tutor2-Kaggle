@@ -395,10 +395,9 @@ def reschedule_session(owner_id: str, session_id: str, utc_offset_minutes: int, 
             "after_deadline": after_deadline}
 
 
-def propose_adaptation(owner_id: str, plan_id: str, trigger: dict, utc_offset_minutes: int,
-                       local_now: str | None = None) -> dict:
-    """Read-only adaptive replanning proposal for one active plan (Phase 5A): what should change in
-    its future sessions after `trigger`. Reads persisted state only and never writes."""
+def _compute_adaptation(owner_id: str, plan_id: str, trigger: dict, utc_offset_minutes: int,
+                        local_now: str | None):
+    """(result, local now, the plan sessions it was computed from) -- persisted state only."""
     plan = _require_plan(owner_id, plan_id)
     if plan["status"] != "active":
         raise PlanValidationError("plan_not_active", "Only an active plan can be adapted.")
@@ -423,7 +422,54 @@ def propose_adaptation(owner_id: str, plan_id: str, trigger: dict, utc_offset_mi
         ))
     except ValueError as error:
         raise PlanValidationError("invalid_trigger", str(error)) from error
+    return result, now, plan_sessions
+
+
+def propose_adaptation(owner_id: str, plan_id: str, trigger: dict, utc_offset_minutes: int,
+                       local_now: str | None = None) -> dict:
+    """Read-only adaptive replanning proposal for one active plan (Phase 5A): what should change in
+    its future sessions after `trigger`. Reads persisted state only and never writes."""
+    result, now, _ = _compute_adaptation(owner_id, plan_id, trigger, utc_offset_minutes, local_now)
     return {"plan_id": plan_id, "persisted": False, "local_now": now.isoformat(), **result.to_dict()}
+
+
+def apply_adaptation(owner_id: str, plan_id: str, trigger: dict, utc_offset_minutes: int,
+                     local_now: str | None = None, confirm: bool = False) -> dict:
+    """Recompute the proposal for `trigger` server-side (the client never sends changes) and apply
+    it atomically. A large proposal is only applied with confirm=true; otherwise -- and when there
+    is nothing to change -- it is returned with applied=false and nothing is written."""
+    result, now, plan_sessions = _compute_adaptation(owner_id, plan_id, trigger, utc_offset_minutes, local_now)
+    proposal = result.to_dict()
+    base = {"plan_id": plan_id, "local_now": now.isoformat(), **proposal}
+    if not result.change_count:
+        return {**base, "applied": False, "requires_confirmation": False, "sessions": []}
+    if result.significance == "large" and not confirm:
+        return {**base, "applied": False, "requires_confirmation": True, "sessions": []}
+    by_id = {s["session_id"]: s for s in plan_sessions}
+    added = [{"document_id": a.document_id, "activity_type": a.activity_type, "scheduled_start": a.scheduled_start,
+              "scheduled_end": a.scheduled_end, "duration_minutes": a.duration_minutes, "reason": a.reason_code,
+              "artifact_id": a.artifact_id, "rescheduled_from": a.replaces_session_id} for a in result.added]
+    replaced = sorted({a.replaces_session_id for a in result.added if a.replaces_session_id
+                       and by_id[a.replaces_session_id]["status"] in ("scheduled", "missed")})
+    try:
+        written = study_planner_store.apply_adaptation_changes(
+            owner_id, plan_id, study_planner_store.plan_sessions_fingerprint(plan_sessions), now.isoformat(),
+            added=added, moved=[(m.session_id, m.to_start, m.to_end) for m in result.moved],
+            cancelled=[c.session_id for c in result.cancelled], replaced=replaced,
+        )
+    except study_planner_store.SessionTransitionError as error:
+        raise SessionConflictError(error.code, str(error), status=error.status) from error
+    for row, new_id in zip(proposal["added"], written["added"]):
+        row["session_id"] = new_id
+    for row in proposal["moved"]:
+        row["new_session_id"] = written["moved"][row["session_id"]]
+    affected = (written["added"] + [m.session_id for m in result.moved] + list(written["moved"].values())
+                + [c.session_id for c in result.cancelled] + replaced)
+    titles = _document_titles(owner_id)
+    refreshed = sorted((study_planner_store.get_session(owner_id, session_id) for session_id in affected),
+                       key=lambda s: (s["scheduled_start"], s["session_id"]))
+    return {**base, **proposal, "applied": True, "requires_confirmation": False,
+            "sessions": [_saved_session(s, titles) for s in refreshed]}
 
 
 def list_plan_sessions(owner_id: str, plan_id: str) -> list[dict]:

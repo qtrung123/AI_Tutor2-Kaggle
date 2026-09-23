@@ -254,6 +254,12 @@ class PlanAdaptationRequest(BaseModel):
     local_now: Optional[str] = None
 
 
+class PlanAdaptationApplyRequest(PlanAdaptationRequest):
+    # Only the trigger/context and an explicit confirmation for large proposals: the server
+    # recomputes the changes itself and never accepts client-supplied session edits.
+    confirm: bool = False
+
+
 class PlanPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # The learner's offset from UTC in minutes (e.g. 420 for UTC+7, 330 for UTC+5:30) -- required:
@@ -1508,6 +1514,15 @@ def planner_v2_adaptation_preview(plan_id: str, request: PlanAdaptationRequest,
         )
     except _PLAN_V2_ERRORS as error:
         raise _plan_v2_error(error) from error
+
+
+@app.post("/api/planner/plans/{plan_id}/adaptation/apply")
+def planner_v2_adaptation_apply(plan_id: str, request: PlanAdaptationApplyRequest,
+                                current_user: dict = Depends(require_current_user)) -> dict:
+    """Recompute the adaptation proposal and apply it atomically (large ones need confirm=true)."""
+    return _session_action(study_plan_api_service.apply_adaptation, current_user["id"], plan_id,
+                           request.trigger.model_dump(), request.utc_offset_minutes, request.local_now,
+                           request.confirm)
 
 
 @app.post("/api/planner/plans/{plan_id}/preview")

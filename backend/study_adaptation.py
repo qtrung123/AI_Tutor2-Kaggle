@@ -401,13 +401,17 @@ def propose_adaptation(context: AdaptationContext, config: AdaptationConfig = DE
             raise ValueError("That session is not part of this study plan.")
         if trigger.kind == "session_skipped" and session["status"] != "skipped":
             raise ValueError("That session has not been skipped.")
-        if trigger.kind == "session_missed" and not (
+        already_replaced = trigger.kind == "session_missed" and session["status"] == "rescheduled"
+        if trigger.kind == "session_missed" and not already_replaced and not (
                 session["status"] == "missed" or (session["status"] == "scheduled" and session["scheduled_end"] <= nowiso)):
             raise ValueError("That session is not missed: it is not a scheduled session whose time has passed.")
         material = document_of(session["document_id"])
-        steps = steps_for(material)
+        steps = [] if already_replaced else steps_for(material)
         label = "skipped" if trigger.kind == "session_skipped" else "missed"
-        if not any(step.activity_type == session["activity_type"] for step in steps):
+        if already_replaced:
+            outcome.reasons.append(f'The missed {_label(session["activity_type"])} session of "{material.state.title}" '
+                                   "was already rescheduled.")
+        elif not any(step.activity_type == session["activity_type"] for step in steps):
             outcome.reasons.append(f'No replacement for the {label} {_label(session["activity_type"])} session of '
                                    f'"{material.state.title}": it is no longer needed.')
         else:
