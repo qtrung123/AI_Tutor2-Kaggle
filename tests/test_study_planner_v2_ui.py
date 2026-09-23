@@ -133,6 +133,7 @@ const previewState = () => ({
 (async () => {
   await sleep(1500);
   const noMotion = document.createElement("style"); noMotion.textContent = "*,*::before,*::after{transition:none!important}"; document.head.appendChild(noMotion);
+  plannerNow = () => new Date(2026, 8, 24, 12, 0, 0);   // pin "today" before the mocked Sep 28/29 sessions
   setPage("planner"); await sleep(400);
   const P = window.__planner;
   out.start = {step: visibleStep(), rows: view().querySelectorAll(".planner-material-row").length,

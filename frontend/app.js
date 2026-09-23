@@ -113,6 +113,7 @@ let plannerDrag = null;
 let plannerPlan = null;          // the plan being built, or already confirmed
 let plannerMaterials = [];       // its documents (with optional deadlines)
 let plannerSessions = [];        // its saved sessions (the confirmed plan)
+let plannerPlanWeekStart = null; // week shown on the saved plan; null = pick a sensible default
 let plannerPreview = null;       // the latest read-only preview result
 let plannerStep = "materials";   // materials | availability | preview | plan
 let plannerBusy = false;         // a preview/confirm request is in flight (no double submit)
@@ -414,6 +415,7 @@ if (plannerView) {
   </section>
   <section class="panel planner-step" data-planner-step="plan" hidden>
     <div class="planner-step-heading"><p class="eyebrow">Your plan</p><h3>Saved study sessions</h3><p class="planner-hint" id="planner-plan-summary"></p></div>
+    <div class="planner-calendar-toolbar"><div class="planner-week-nav"><button class="secondary-button" id="planner-plan-prev-week" type="button" aria-label="Previous week">‹</button><strong id="planner-plan-week-label">This week</strong><button class="secondary-button" id="planner-plan-next-week" type="button" aria-label="Next week">›</button></div></div>
     <div id="planner-plan-sessions" class="planner-day-list"></div>
     <div class="planner-step-actions"><button class="secondary-button" id="planner-new-plan" type="button">Start a new plan</button></div>
   </section>
@@ -437,6 +439,10 @@ const plannerConfirmButton = document.getElementById("planner-confirm-button");
 const plannerPlanSummary = document.getElementById("planner-plan-summary");
 const plannerPlanSessions = document.getElementById("planner-plan-sessions");
 const plannerNewPlanButton = document.getElementById("planner-new-plan");
+const plannerPlanWeekLabel = document.getElementById("planner-plan-week-label");
+const plannerPlanPrevWeekButton = document.getElementById("planner-plan-prev-week");
+const plannerPlanNextWeekButton = document.getElementById("planner-plan-next-week");
+const todayPlanPanel = document.getElementById("today-plan");
 
 const authScreen = document.getElementById("auth-screen");
 const appShell = document.getElementById("app-shell");
@@ -558,6 +564,7 @@ function setPage(page) {
   pageTitle.textContent = pageTitles[page];
   if (pageTitles[page]) showToast(`Opened ${pageTitles[page]}`);
   if (page === "planner") loadPlannerData();
+  if (page === "overview") loadTodayPlan();
   if (page === "model-comparison") loadQuizModelComparison();
 }
 
@@ -4870,12 +4877,28 @@ function plannerDayLabel(dateKey) {
   return new Date(year, month - 1, day).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 
-function plannerWeekDates() {
+function plannerWeekDates(weekStart = plannerWeekStart) {
   return Array.from({ length: 7 }, (_, index) => {
-    const date = new Date(plannerWeekStart);
+    const date = new Date(weekStart);
     date.setDate(date.getDate() + index);
     return date;
   });
+}
+
+function plannerNow() {
+  // The browser's local clock drives "today" and "this week" (sessions are stored as naive
+  // learner-local times). A single seam so tests can pin the date.
+  return new Date();
+}
+
+function plannerLocalIso(date) {
+  // Naive local "YYYY-MM-DDTHH:MM:SS", directly comparable with a session's scheduled_start/end.
+  const time = [date.getHours(), date.getMinutes(), date.getSeconds()].map((part) => String(part).padStart(2, "0")).join(":");
+  return `${plannerDateKey(date)}T${time}`;
+}
+
+function plannerIsActiveSession(session) {
+  return PLANNER_ACTIVE_SESSION_STATUSES.includes(session.status);
 }
 
 function plannerUtcOffsetMinutes() {
@@ -4929,10 +4952,11 @@ async function loadPlannerData() {
     plannerPlan = active[active.length - 1] || null;
     plannerMaterials = [];
     plannerSessions = [];
+    plannerPlanWeekStart = null;
     if (plannerPlan) {
       const [detail, sessions] = await Promise.all([plannerRequest(plannerPlanUrl()), plannerRequest(plannerPlanUrl("/sessions"))]);
       plannerMaterials = detail.materials;
-      plannerSessions = sessions.filter((session) => PLANNER_ACTIVE_SESSION_STATUSES.includes(session.status));
+      plannerSessions = sessions.filter(plannerIsActiveSession);
     }
     if (plannerSessions.length) plannerStep = "plan";
     else if (plannerStep === "plan") plannerStep = "materials";
@@ -5187,6 +5211,32 @@ function plannerGroupByDay(sessions) {
   return [...groups.entries()];
 }
 
+function plannerSessionItem(session, tag = "li") {
+  const item = document.createElement(tag);
+  item.className = `planner-session planner-session--${session.activity_type}`;
+  const time = document.createElement("span");
+  time.className = "planner-session-time";
+  time.textContent = `${session.scheduled_start.slice(11, 16)}–${session.scheduled_end.slice(11, 16)}`;
+  const content = document.createElement("div");
+  content.className = "planner-session-body";
+  const title = document.createElement("strong");
+  title.textContent = session.document_title || session.document_id;
+  const meta = document.createElement("span");
+  meta.className = "planner-session-meta";
+  const chip = document.createElement("span");
+  chip.className = "planner-activity-chip";
+  chip.textContent = PLANNER_ACTIVITY_LABELS[session.activity_type] || session.activity_type;
+  const duration = document.createElement("span");
+  duration.textContent = plannerFormatDuration(session.duration_minutes);
+  meta.append(chip, duration);
+  const reason = document.createElement("small");
+  reason.className = "planner-session-reason";
+  reason.textContent = session.reason?.message || "";
+  content.append(title, meta, reason);
+  item.append(time, content);
+  return item;
+}
+
 function renderPlannerSessionList(container, sessions, emptyText) {
   container.innerHTML = "";
   if (!sessions.length) {
@@ -5207,31 +5257,7 @@ function renderPlannerSessionList(container, sessions, emptyText) {
     day.appendChild(heading);
     const list = document.createElement("ol");
     list.className = "planner-session-list";
-    daySessions.forEach((session) => {
-      const item = document.createElement("li");
-      item.className = `planner-session planner-session--${session.activity_type}`;
-      const time = document.createElement("span");
-      time.className = "planner-session-time";
-      time.textContent = `${session.scheduled_start.slice(11, 16)}–${session.scheduled_end.slice(11, 16)}`;
-      const content = document.createElement("div");
-      content.className = "planner-session-body";
-      const title = document.createElement("strong");
-      title.textContent = session.document_title || session.document_id;
-      const meta = document.createElement("span");
-      meta.className = "planner-session-meta";
-      const chip = document.createElement("span");
-      chip.className = "planner-activity-chip";
-      chip.textContent = PLANNER_ACTIVITY_LABELS[session.activity_type] || session.activity_type;
-      const duration = document.createElement("span");
-      duration.textContent = plannerFormatDuration(session.duration_minutes);
-      meta.append(chip, duration);
-      const reason = document.createElement("small");
-      reason.className = "planner-session-reason";
-      reason.textContent = session.reason?.message || "";
-      content.append(title, meta, reason);
-      item.append(time, content);
-      list.appendChild(item);
-    });
+    daySessions.forEach((session) => list.appendChild(plannerSessionItem(session)));
     day.appendChild(list);
     container.appendChild(day);
   });
@@ -5351,6 +5377,7 @@ async function plannerConfirm() {
       method: "POST", body: { utc_offset_minutes: plannerUtcOffsetMinutes() },
     });
     plannerSessions = result.sessions;
+    plannerPlanWeekStart = null;
     plannerPreview = null;
     plannerStep = "plan";
     showToast("Study plan saved");
@@ -5374,7 +5401,123 @@ function renderPlannerPlan() {
   plannerPlanSummary.textContent = plannerSessions.length
     ? `${plannerSessions.length} session${plannerSessions.length === 1 ? "" : "s"} · ${plannerFormatDuration(total)} across ${days} day${days === 1 ? "" : "s"}`
     : "No sessions saved yet.";
-  renderPlannerSessionList(plannerPlanSessions, plannerSessions, "No sessions saved yet.");
+  if (!plannerPlanWeekStart) plannerPlanWeekStart = plannerDefaultPlanWeek(plannerSessions);
+  const weekDates = plannerWeekDates(plannerPlanWeekStart);
+  const fromKey = plannerDateKey(weekDates[0]);
+  const untilKey = plannerDateKey(weekDates[6]);
+  if (plannerPlanWeekLabel) {
+    plannerPlanWeekLabel.textContent = `${plannerFormatDateLabel(weekDates[0])} – ${plannerFormatDateLabel(weekDates[6])}`;
+  }
+  const inWeek = (session) => {
+    const key = session.scheduled_start.slice(0, 10);
+    return key >= fromKey && key <= untilKey;
+  };
+  let emptyText = "No study sessions this week.";
+  const next = plannerSessions.find((session) => session.scheduled_start.slice(0, 10) > untilKey);
+  if (next) emptyText += ` Next session: ${plannerDayLabel(next.scheduled_start.slice(0, 10))}.`;
+  renderPlannerSessionList(plannerPlanSessions, plannerSessions.filter(inWeek), plannerSessions.length ? emptyText : "No sessions saved yet.");
+}
+
+function plannerDefaultPlanWeek(sessions) {
+  // This week if it holds any saved session; otherwise the week of the next upcoming one.
+  const thisWeek = plannerMondayOf(plannerNow());
+  const thisWeekKey = plannerDateKey(thisWeek);
+  const upcoming = sessions.filter((session) => session.scheduled_start.slice(0, 10) >= thisWeekKey)
+    .sort((left, right) => left.scheduled_start.localeCompare(right.scheduled_start))[0];
+  return upcoming ? plannerMondayOf(new Date(upcoming.scheduled_start)) : thisWeek;
+}
+
+function plannerShiftPlanWeek(days) {
+  const next = new Date(plannerPlanWeekStart || plannerMondayOf(plannerNow()));
+  next.setDate(next.getDate() + days);
+  plannerPlanWeekStart = next;
+  renderPlannerPlan();
+}
+
+// ---- Home: Today's Study Plan (read-only) ------------------------------------
+
+async function loadTodayPlan() {
+  if (!todayPlanPanel) return;
+  try {
+    // Only active plans are current work: an archived plan's leftover scheduled sessions are not shown.
+    const plans = (await plannerRequest(PLANNER_PLANS_API_URL)).filter((plan) => plan.status === "active");
+    const lists = await Promise.all(plans.map((plan) => plannerRequest(`${PLANNER_PLANS_API_URL}/${encodeURIComponent(plan.plan_id)}/sessions`)));
+    renderTodayPlan(lists.flat().filter(plannerIsActiveSession));
+  } catch (error) {
+    renderTodayPlan(null);
+  }
+}
+
+function plannerTodayAgenda(sessions, now = plannerNow()) {
+  // Remaining = in progress, or not yet over by the browser's local clock.
+  const nowIso = plannerLocalIso(now);
+  const todayKey = plannerDateKey(now);
+  const remaining = sessions
+    .filter((session) => session.status === "in_progress" || session.scheduled_end > nowIso)
+    .sort((left, right) => left.scheduled_start.localeCompare(right.scheduled_start));
+  const today = remaining.filter((session) => session.scheduled_start.slice(0, 10) === todayKey);
+  const upcoming = today.length ? null : remaining.find((session) => session.scheduled_start.slice(0, 10) > todayKey) || null;
+  return { today, upcoming };
+}
+
+function renderTodayPlan(sessions) {
+  if (!todayPlanPanel) return;
+  todayPlanPanel.hidden = false;
+  todayPlanPanel.innerHTML = "";
+  const now = plannerNow();
+  const heading = document.createElement("div");
+  heading.className = "today-plan-heading";
+  const titles = document.createElement("div");
+  const eyebrow = document.createElement("p");
+  eyebrow.className = "eyebrow";
+  eyebrow.textContent = now.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+  const title = document.createElement("h2");
+  title.id = "today-plan-title";
+  title.textContent = "Today’s Study Plan";
+  titles.append(eyebrow, title);
+  const viewAll = document.createElement("button");
+  viewAll.type = "button";
+  viewAll.className = "text-button today-plan-view-all";
+  viewAll.textContent = "View full schedule";
+  viewAll.addEventListener("click", () => setPage("planner"));
+  heading.append(titles, viewAll);
+  todayPlanPanel.appendChild(heading);
+
+  const section = (label, className) => {
+    const wrapper = document.createElement("section");
+    wrapper.className = `today-plan-section ${className}`;
+    const caption = document.createElement("h3");
+    caption.textContent = label;
+    wrapper.appendChild(caption);
+    todayPlanPanel.appendChild(wrapper);
+    return wrapper;
+  };
+  const empty = (text) => {
+    const message = document.createElement("p");
+    message.className = "empty-state today-plan-empty";
+    message.textContent = text;
+    todayPlanPanel.appendChild(message);
+  };
+
+  if (sessions === null) { empty("Your study plan could not be loaded right now."); return; }
+  const { today, upcoming } = plannerTodayAgenda(sessions, now);
+  if (today.length) {
+    section("Next up", "today-plan-next").appendChild(plannerSessionItem(today[0], "div"));
+    if (today.length > 1) {
+      const list = document.createElement("ol");
+      list.className = "planner-session-list";
+      today.slice(1).forEach((session) => list.appendChild(plannerSessionItem(session)));
+      section("Later today", "today-plan-later").appendChild(list);
+    }
+    return;
+  }
+  if (upcoming) {
+    empty("Nothing left for today.");
+    section(`Next session · ${plannerDayLabel(upcoming.scheduled_start.slice(0, 10))}`, "today-plan-upcoming")
+      .appendChild(plannerSessionItem(upcoming, "div"));
+    return;
+  }
+  empty("No upcoming study sessions. Create a plan to see what to study next.");
 }
 
 plannerView?.querySelectorAll("[data-planner-go]").forEach((button) => {
@@ -5397,6 +5540,8 @@ plannerNewPlanButton?.addEventListener("click", async () => {
     showToast(error.message || "Could not start a new plan");
   }
 });
+plannerPlanPrevWeekButton?.addEventListener("click", () => plannerShiftPlanWeek(-7));
+plannerPlanNextWeekButton?.addEventListener("click", () => plannerShiftPlanWeek(7));
 plannerPrevWeekButton?.addEventListener("click", () => {
   plannerWeekStart.setDate(plannerWeekStart.getDate() - 7);
   renderPlannerCalendar();
@@ -5430,7 +5575,7 @@ document.addEventListener("pointercancel", () => {
 
 async function initializeApplication() {
   await initializeChatWorkspace();
-  await Promise.all([loadIndexedDocuments(), loadQuizHistory(), loadDashboard(), loadKnowledgeGaps(), loadRecommendations(), loadGenerationModels()]);
+  await Promise.all([loadIndexedDocuments(), loadQuizHistory(), loadDashboard(), loadKnowledgeGaps(), loadRecommendations(), loadGenerationModels(), loadTodayPlan()]);
 }
 
 async function bootstrapAuthentication() {

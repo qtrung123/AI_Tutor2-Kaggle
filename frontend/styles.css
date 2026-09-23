@@ -3148,3 +3148,16 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
   body[data-page="session"] .quiz-history-panel .panel-heading { flex-direction: row; align-items: center; }
   body[data-page="session"] [data-session-pane="quiz"] .quiz-history-list { padding-left: 0; padding-right: 0; }
 }
+
+/* Home: Today's Study Plan (read-only; the session lifecycle lands in Phase 4B) */
+.today-plan{display:grid;gap:12px;margin:0 4px 25px;padding:18px 20px;min-width:0}
+.today-plan[hidden]{display:none}
+.today-plan-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0}
+.today-plan-heading .eyebrow{margin:0 0 2px}
+.today-plan-heading h2{margin:0;font-size:20px;letter-spacing:-.02em}
+.today-plan-view-all{flex:none;white-space:nowrap}
+.today-plan-section{display:grid;gap:6px;min-width:0}
+.today-plan-section h3{margin:0;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.today-plan-next .planner-session{border-color:var(--navy-2);box-shadow:0 6px 18px rgba(18,63,53,.08)}
+.today-plan-empty{margin:0}
+@media(max-width:480px){.today-plan{padding:16px}.today-plan-heading{flex-wrap:wrap}}
