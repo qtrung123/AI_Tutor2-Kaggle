@@ -8,6 +8,7 @@ result without persisting anything; confirm recomputes the same schedule server-
 from datetime import date, datetime, timedelta, timezone
 
 from backend import study_planner_service, study_planner_store
+from backend.document_study_state import get_document_study_state
 from backend.indexed_document_store import list_indexed_documents
 from backend.study_scheduler import plan_schedule
 from backend.study_scheduler_contracts import REASON_LABELS
@@ -223,7 +224,7 @@ def _saved_session(session: dict, titles: dict) -> dict:
         "scheduled_start": session["scheduled_start"], "scheduled_end": session["scheduled_end"],
         "duration_minutes": session["duration_minutes"], "status": session["status"],
         "reason": {"code": code, "message": REASON_LABELS.get(code, "")} if code else None,
-        "artifact_id": session["artifact_id"],
+        "artifact_id": session["artifact_id"], "started_at": session["started_at"],
     }
 
 
@@ -287,6 +288,52 @@ def confirm_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now
         "capacity": _capacity(result.capacity, titles),
         "warnings": warnings,
     }
+
+
+class SessionStartConflictError(Exception):
+    """The session cannot be started in its current state (HTTP 409 with a machine-readable payload)."""
+
+    def __init__(self, code: str, message: str, **details):
+        super().__init__(message)
+        self.payload = {"code": code, "message": message, **details}
+
+
+# Which study tool each activity opens. review is resolved from the document's state.
+ACTIVITY_TOOLS = {"summary": "summary", "flashcards": "flashcards", "quiz": "quiz", "quiz_retry": "quiz"}
+
+
+def _session_tool(owner_id: str, session: dict) -> tuple[str, bool]:
+    """(tool, artifact_available) for a session. review prefers the flashcards (spaced review of
+    the key points), then the summary, then a quiz the learner already has; with none of them it
+    opens Flashcards, whose empty state offers to create the set."""
+    state = get_document_study_state(owner_id, session["document_id"])
+    has_summary = bool(state and state.summary.available)
+    has_cards = bool(state and state.flashcards.available and state.flashcards.card_count)
+    has_quiz = bool(state and state.quiz.quiz_count)
+    activity = session["activity_type"]
+    if activity == "review":
+        if has_cards:
+            return "flashcards", True
+        if has_summary:
+            return "summary", True
+        if has_quiz:
+            return "quiz", True
+        return "flashcards", False
+    tool = ACTIVITY_TOOLS[activity]
+    return tool, {"summary": has_summary, "flashcards": has_cards, "quiz": has_quiz}[tool]
+
+
+def start_session(owner_id: str, session_id: str) -> dict:
+    """Start (or resume) one session and say which tool to open for it."""
+    try:
+        session, started = study_planner_store.start_session(owner_id, session_id)
+    except study_planner_store.SessionStartError as error:
+        raise SessionStartConflictError(error.code, str(error), status=error.status) from error
+    except ValueError as error:
+        raise PlanNotFoundError(str(error)) from error
+    tool, artifact_available = _session_tool(owner_id, session)
+    return {"session": _saved_session(session, _document_titles(owner_id)), "started": started,
+            "tool": tool, "artifact_available": artifact_available}
 
 
 def list_plan_sessions(owner_id: str, plan_id: str) -> list[dict]:

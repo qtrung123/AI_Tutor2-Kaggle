@@ -1,6 +1,7 @@
 """Real-browser tests for the read-only Study Planner daily experience (headless Chrome, mocked
-v2 API): Home "Today's Study Plan" (Next up / Later today / next upcoming / empty) and the
-confirmed plan's week view with previous/next navigation. "Now" is pinned to Thu 2026-09-24 12:00
+v2 API): Home "Today's Study Plan" (Next up / Later today / next upcoming / empty), the
+confirmed plan's week view with previous/next navigation, and Start/Resume (Phase 4B): one start
+request per click burst, then the session's document opens on the mapped tool. "Now" is pinned to Thu 2026-09-24 12:00
 in the browser's local time. Runs at desktop (1280px) and phone (390px). Skipped without Chrome.
 """
 
@@ -10,14 +11,31 @@ from tests.test_quiz_player_ui import find_chrome
 from tests.test_study_planner_v2_ui import MOCK as PLANNER_MOCK
 import tests.test_sidebar_navigation_ui as sidebar_harness
 
-# Sessions are served per plan so an archived plan's leftovers can be told apart.
+# Sessions are served per plan so an archived plan's leftovers can be told apart. Start mirrors
+# the backend: scheduled -> in_progress (resume is a no-op), terminal -> 409, tool per activity.
 MOCK = PLANNER_MOCK + r"""
 window.__planner.sessionsByPlan = {};
+window.__planner.startCalls = [];
 const plannerV2Fetch = window.fetch;
 window.fetch = async (input, init = {}) => {
+  const P = window.__planner;
   const p = new URL(typeof input === "string" ? input : input.url, "http://x").pathname;
   const m = p.match(/^\/api\/planner\/plans\/([^/]+)\/sessions$/);
-  if (m) { window.__planner.calls.push("GET " + p); return json(window.__planner.sessionsByPlan[m[1]] || []); }
+  if (m) { P.calls.push("GET " + p); return json(P.sessionsByPlan[m[1]] || []); }
+  const start = p.match(/^\/api\/planner\/sessions\/([^/]+)\/start$/);
+  if (start && (init.method || "GET").toUpperCase() === "POST") {
+    P.startCalls.push(start[1]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const session = Object.values(P.sessionsByPlan).flat().find((s) => s.session_id === start[1]);
+    if (!session) return json({detail: "Study session not found."}, 404);
+    if (!["scheduled", "in_progress"].includes(session.status)) {
+      return json({detail: {code: "session_not_startable", message: "A " + session.status + " session cannot be started.", status: session.status}}, 409);
+    }
+    const started = session.status === "scheduled";
+    session.status = "in_progress";
+    const tool = {summary: "summary", flashcards: "flashcards", quiz: "quiz", quiz_retry: "quiz", review: "flashcards"}[session.activity_type];
+    return json({session: {...session}, started, tool, artifact_available: false});
+  }
   return plannerV2Fetch(input, init);
 };
 """
@@ -61,8 +79,15 @@ const week = () => ({
   days: [...document.querySelectorAll("#planner-plan-sessions .planner-day h4")].map((h) => h.childNodes[0].textContent),
   sessions: [...document.querySelectorAll("#planner-plan-sessions .planner-session")].map((li) => li.querySelector("strong").textContent),
   empty: document.querySelector("#planner-plan-sessions .empty-state")?.textContent || null,
-  editable: view().querySelectorAll('[data-planner-step="plan"] input, [data-planner-step="plan"] .planner-session button').length,
+  inputs: view().querySelectorAll('[data-planner-step="plan"] input').length,
+  actions: [...document.querySelectorAll("#planner-plan-sessions .planner-session button")].map((b) => b.textContent),
 });
+const opened = () => ({page: document.body.dataset.page, tab: document.body.dataset.sessionTab, document: activeDocumentId,
+  summaryGenerateShown: !document.getElementById("summary-generate").hidden,
+  flashcardsGenerateShown: !document.getElementById("flashcards-generate").hidden});
+const startButton = (title, activity) => [...document.querySelectorAll(".planner-session")]
+  .find((el) => el.offsetParent !== null && el.querySelector("strong").textContent === title
+    && el.querySelector(".planner-activity-chip").textContent === activity)?.querySelector(".planner-session-start");
 (async () => {
   await sleep(1500);
   const noMotion = document.createElement("style"); noMotion.textContent = "*,*::before,*::after{transition:none!important}"; document.head.appendChild(noMotion);
@@ -117,6 +142,47 @@ const week = () => ({
   out.overflow.plannerEmptyWeek = noOverflow();
   document.getElementById("planner-plan-prev-week").click(); document.getElementById("planner-plan-prev-week").click(); await sleep(100);
   out.weekBack = week();
+
+  // Phase 4B: Start from the week view (quiz_retry -> Quiz tab).
+  const retry = session("stats.pdf", "quiz_retry", "2026-09-25T20:00:00", "2026-09-25T20:30:00", 30);
+  P.sessionsByPlan["plan-1"].push(retry);
+  await loadPlannerData(); await sleep(200);
+  startButton("Statistics", "Quiz retry").click(); await sleep(1500);
+  out.weekStart = {...opened(), calls: [...P.startCalls]};
+  out.overflow.sessionAfterWeekStart = noOverflow();
+
+  // Start from Home: double click -> ONE request, then the Summary tool (missing -> generate state).
+  const summary = session("mkt.pdf", "summary", "2026-09-24T13:00:00", "2026-09-24T13:45:00", 45);
+  const review = session("stats.pdf", "review", "2026-09-24T15:00:00", "2026-09-24T15:15:00", 15);
+  const done = session("pbi.pdf", "quiz", "2026-09-24T17:00:00", "2026-09-24T17:30:00", 30);
+  P.sessionsByPlan["plan-1"] = [summary, review, done];
+  setPage("overview"); await sleep(400);
+  out.homeButtons = today().buttons;
+  P.startCalls = [];
+  const homeStart = startButton("Marketing", "Summary");
+  homeStart.click(); homeStart.click(); await sleep(50);
+  out.starting = {disabled: homeStart.disabled, text: homeStart.textContent};
+  homeStart.click(); await sleep(1500);
+  out.homeStart = {...opened(), calls: [...P.startCalls]};
+
+  // Back home: the started session now offers Resume; resuming opens it again (no new state).
+  setPage("overview"); await sleep(400);
+  out.resumeLabel = startButton("Marketing", "Summary").textContent;
+  startButton("Marketing", "Summary").click(); await sleep(1500);
+  out.resume = {...opened(), calls: [...P.startCalls], status: summary.status};
+
+  // review -> the tool the backend picked (Flashcards here, with its create state).
+  setPage("overview"); await sleep(400);
+  startButton("Statistics", "Review").click(); await sleep(1500);
+  out.review = opened();
+
+  // A session that turned terminal meanwhile: 409 -> stay on Home, list refreshed, no crash.
+  setPage("overview"); await sleep(400);
+  const doneButton = startButton("PowerBI", "Quiz");
+  done.status = "completed";
+  doneButton.click(); await sleep(1200);
+  out.rejected = {page: document.body.dataset.page, buttons: today().buttons, status: done.status};
+  out.overflow.homeWithActions = noOverflow();
   out.calls = P.calls;
   publish();
 })().catch((error) => { out.fatal = String(error && error.stack || error); publish(); });
@@ -169,10 +235,42 @@ class TodayAndWeekAssertions:
         self.assertEqual(none["sections"], [])
         self.assertEqual(none["empty"], "No upcoming study sessions. Create a plan to see what to study next.")
 
-    def test_read_only_with_only_a_view_schedule_action(self):
-        for key in ("multiple", "upcoming", "none"):
-            self.assertEqual(self.out[key]["buttons"], ["View full schedule"])
-        self.assertEqual(self.out["weekThis"]["editable"], 0)
+    def test_actions_are_start_or_resume_only(self):
+        self.assertEqual(self.out["multiple"]["buttons"], ["View full schedule", "Resume", "Start", "Start"])
+        self.assertEqual(self.out["upcoming"]["buttons"], ["View full schedule", "Start"])
+        self.assertEqual(self.out["none"]["buttons"], ["View full schedule"])
+        self.assertEqual((self.out["weekThis"]["inputs"], self.out["weekThis"]["actions"]), (0, ["Start"]))
+
+    def test_start_from_week_opens_the_mapped_tool(self):
+        week_start = self.out["weekStart"]
+        self.assertEqual((week_start["page"], week_start["tab"], week_start["document"]), ("session", "quiz", "stats.pdf"))
+        self.assertEqual(len(week_start["calls"]), 1)
+
+    def test_start_from_home_is_double_click_safe_and_opens_summary(self):
+        self.assertEqual(self.out["homeButtons"], ["View full schedule", "Start", "Start", "Start"])
+        self.assertEqual(self.out["starting"], {"disabled": True, "text": "Opening…"})
+        home = self.out["homeStart"]
+        self.assertEqual((home["page"], home["tab"], home["document"]), ("session", "summary", "mkt.pdf"))
+        self.assertEqual(len(home["calls"]), 1)
+        self.assertTrue(home["summaryGenerateShown"])   # missing summary -> its generate state
+
+    def test_resume_reopens_the_same_session(self):
+        self.assertEqual(self.out["resumeLabel"], "Resume")
+        resume = self.out["resume"]
+        self.assertEqual((resume["page"], resume["tab"], resume["status"]), ("session", "summary", "in_progress"))
+        self.assertEqual(len(resume["calls"]), 2)
+        self.assertEqual(len(set(resume["calls"])), 1)
+
+    def test_review_opens_the_resolved_tool_not_overview(self):
+        review = self.out["review"]
+        self.assertEqual((review["page"], review["tab"], review["document"]), ("session", "flashcards", "stats.pdf"))
+        self.assertTrue(review["flashcardsGenerateShown"])
+
+    def test_rejected_start_stays_home_and_refreshes(self):
+        rejected = self.out["rejected"]
+        self.assertEqual(rejected["page"], "overview")
+        self.assertEqual(rejected["status"], "completed")
+        self.assertEqual(rejected["buttons"], ["View full schedule", "Resume", "Resume"])
 
     def test_week_view_and_navigation(self):
         self.assertEqual(self.out["page"], "planner")

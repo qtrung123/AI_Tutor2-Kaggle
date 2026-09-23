@@ -3161,3 +3161,8 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .today-plan-next .planner-session{border-color:var(--navy-2);box-shadow:0 6px 18px rgba(18,63,53,.08)}
 .today-plan-empty{margin:0}
 @media(max-width:480px){.today-plan{padding:16px}.today-plan-heading{flex-wrap:wrap}}
+
+/* Start / Resume on a saved study session */
+.planner-session--actionable{grid-template-columns:96px minmax(0,1fr) auto;align-items:center}
+.planner-session-start{padding:7px 14px;font-size:13px;white-space:nowrap}
+@media(max-width:480px){.planner-session--actionable{grid-template-columns:1fr}.planner-session-start{justify-self:start;margin-top:4px}}

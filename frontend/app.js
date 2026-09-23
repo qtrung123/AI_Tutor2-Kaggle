@@ -34,6 +34,7 @@ const SUMMARY_API_BASE_URL = apiUrl("/api/summary");
 const FLASHCARDS_API_BASE_URL = apiUrl("/api/flashcards");
 const PLANNER_AVAILABILITY_API_URL = apiUrl("/api/planner/availability");
 const PLANNER_PLANS_API_URL = apiUrl("/api/planner/plans");
+const PLANNER_SESSIONS_API_URL = apiUrl("/api/planner/sessions");
 const ADMIN_QUIZ_MODEL_COMPARISON_API_URL = apiUrl("/api/admin/quiz-model-comparison");
 const RECOMMENDATIONS_OVERVIEW_LIMIT = Number(window.APP_CONFIG?.RECOMMENDATIONS_OVERVIEW_LIMIT || 4);
 
@@ -5211,7 +5212,7 @@ function plannerGroupByDay(sessions) {
   return [...groups.entries()];
 }
 
-function plannerSessionItem(session, tag = "li") {
+function plannerSessionItem(session, tag = "li", { action = false } = {}) {
   const item = document.createElement(tag);
   item.className = `planner-session planner-session--${session.activity_type}`;
   const time = document.createElement("span");
@@ -5234,10 +5235,52 @@ function plannerSessionItem(session, tag = "li") {
   reason.textContent = session.reason?.message || "";
   content.append(title, meta, reason);
   item.append(time, content);
+  if (action && session.session_id && plannerIsActiveSession(session)) {
+    item.classList.add("planner-session--actionable");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "primary-button planner-session-start";
+    button.dataset.sessionId = session.session_id;
+    button.textContent = session.status === "in_progress" ? "Resume" : "Start";
+    button.setAttribute("aria-label", `${button.textContent} ${title.textContent} (${chip.textContent})`);
+    button.addEventListener("click", () => plannerStartSession(session, button));
+    item.appendChild(button);
+  }
   return item;
 }
 
-function renderPlannerSessionList(container, sessions, emptyText) {
+const plannerStartingSessions = new Set();   // session ids with a start request in flight
+
+async function plannerStartSession(session, button) {
+  // One request per session at a time: a double click (or Start in two lists) cannot start twice.
+  if (plannerStartingSessions.has(session.session_id)) return;
+  plannerStartingSessions.add(session.session_id);
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "Opening…";
+  try {
+    const result = await plannerRequest(`${PLANNER_SESSIONS_API_URL}/${encodeURIComponent(session.session_id)}/start`, { method: "POST" });
+    Object.assign(session, result.session);
+    plannerSessions.forEach((item) => { if (item.session_id === session.session_id) Object.assign(item, result.session); });
+    if (!indexedDocuments.some((item) => item.id === session.document_id)) {
+      showToast("This document is no longer available");
+      return;
+    }
+    // A missing artifact is fine: the tool's own empty state offers to generate/create it.
+    await openStudySession(session.document_id, result.tool);
+  } catch (error) {
+    showToast(error.message || "Could not start this session");
+    if (error.status === 409 || error.status === 404) loadTodayPlan();
+  } finally {
+    plannerStartingSessions.delete(session.session_id);
+    if (button.isConnected) {
+      button.disabled = false;
+      button.textContent = session.status === "in_progress" ? "Resume" : label;
+    }
+  }
+}
+
+function renderPlannerSessionList(container, sessions, emptyText, options = {}) {
   container.innerHTML = "";
   if (!sessions.length) {
     const empty = document.createElement("p");
@@ -5257,7 +5300,7 @@ function renderPlannerSessionList(container, sessions, emptyText) {
     day.appendChild(heading);
     const list = document.createElement("ol");
     list.className = "planner-session-list";
-    daySessions.forEach((session) => list.appendChild(plannerSessionItem(session)));
+    daySessions.forEach((session) => list.appendChild(plannerSessionItem(session, "li", options)));
     day.appendChild(list);
     container.appendChild(day);
   });
@@ -5415,7 +5458,7 @@ function renderPlannerPlan() {
   let emptyText = "No study sessions this week.";
   const next = plannerSessions.find((session) => session.scheduled_start.slice(0, 10) > untilKey);
   if (next) emptyText += ` Next session: ${plannerDayLabel(next.scheduled_start.slice(0, 10))}.`;
-  renderPlannerSessionList(plannerPlanSessions, plannerSessions.filter(inWeek), plannerSessions.length ? emptyText : "No sessions saved yet.");
+  renderPlannerSessionList(plannerPlanSessions, plannerSessions.filter(inWeek), plannerSessions.length ? emptyText : "No sessions saved yet.", { action: true });
 }
 
 function plannerDefaultPlanWeek(sessions) {
@@ -5502,11 +5545,11 @@ function renderTodayPlan(sessions) {
   if (sessions === null) { empty("Your study plan could not be loaded right now."); return; }
   const { today, upcoming } = plannerTodayAgenda(sessions, now);
   if (today.length) {
-    section("Next up", "today-plan-next").appendChild(plannerSessionItem(today[0], "div"));
+    section("Next up", "today-plan-next").appendChild(plannerSessionItem(today[0], "div", { action: true }));
     if (today.length > 1) {
       const list = document.createElement("ol");
       list.className = "planner-session-list";
-      today.slice(1).forEach((session) => list.appendChild(plannerSessionItem(session)));
+      today.slice(1).forEach((session) => list.appendChild(plannerSessionItem(session, "li", { action: true })));
       section("Later today", "today-plan-later").appendChild(list);
     }
     return;
@@ -5514,7 +5557,7 @@ function renderTodayPlan(sessions) {
   if (upcoming) {
     empty("Nothing left for today.");
     section(`Next session · ${plannerDayLabel(upcoming.scheduled_start.slice(0, 10))}`, "today-plan-upcoming")
-      .appendChild(plannerSessionItem(upcoming, "div"));
+      .appendChild(plannerSessionItem(upcoming, "div", { action: true }));
     return;
   }
   empty("No upcoming study sessions. Create a plan to see what to study next.");

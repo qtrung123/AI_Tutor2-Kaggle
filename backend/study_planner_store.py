@@ -1055,6 +1055,57 @@ def confirm_plan_sessions(owner_id: str, plan_id: str, sessions: list[dict], rea
     return {"sessions": [get_session(owner_id, row[0]) for row in rows], "schedule_run": run}
 
 
+class SessionStartError(ValueError):
+    """A session that cannot be started: code is session_not_startable (terminal status) or
+    plan_not_active (a still-scheduled session of an archived/paused plan)."""
+
+    def __init__(self, code: str, message: str, status: str):
+        super().__init__(message)
+        self.code, self.status = code, status
+
+
+def start_session(owner_id: str, session_id: str) -> tuple[dict, bool]:
+    """Start exactly one of the owner's sessions: scheduled -> in_progress, stamping started_at
+    only if it was never set. Returns (session, started); an already in_progress session is
+    returned unchanged with started=False (resume), whatever its plan's status. A scheduled session
+    is only startable while its plan is active. The status re-check and the write share one
+    BEGIN IMMEDIATE transaction, so concurrent starts cannot both write."""
+    initialize_study_planner_store()
+    connection = _connect()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            """SELECT s.status, p.status AS plan_status FROM study_sessions s
+               JOIN study_plans p ON p.plan_id = s.plan_id
+               WHERE s.session_id=? AND s.owner_id=?""",
+            (session_id, owner_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("Study session not found.")
+        started = False
+        if row["status"] == "scheduled":
+            if row["plan_status"] != "active":
+                raise SessionStartError("plan_not_active", "This session belongs to a plan that is no longer active.",
+                                        row["status"])
+            now = utc_now_iso()
+            connection.execute(
+                """UPDATE study_sessions SET status='in_progress', started_at=COALESCE(started_at, ?), updated_at=?
+                   WHERE session_id=? AND owner_id=? AND status='scheduled'""",
+                (now, now, session_id, owner_id),
+            )
+            started = True
+        elif row["status"] != "in_progress":
+            raise SessionStartError("session_not_startable", f"A {row['status']} session cannot be started.",
+                                    row["status"])
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    return get_session(owner_id, session_id), started
+
+
 def create_session(owner_id: str, plan_id: str, session: dict) -> dict:
     return create_sessions(owner_id, plan_id, [session])[0]
 
