@@ -293,6 +293,9 @@ class QuizSubmitRequest(BaseModel):
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
     topic_id: str
     answers: dict[str, str | list[str]]
+    # The Quiz Player's "Submit Anyway": unanswered questions are graded as incorrect/unanswered
+    # instead of rejecting the submission. Other callers keep the complete-answer-set rule.
+    allow_unanswered: bool = False
 
 
 class QuizGenerateResponse(BaseModel):
@@ -931,6 +934,7 @@ def quiz_submit(document_id: str, request: QuizSubmitRequest, current_user: dict
             answers=request.answers,
             student_id=current_user["id"],
             quiz_id=request.quiz_id,
+            allow_unanswered=request.allow_unanswered,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error

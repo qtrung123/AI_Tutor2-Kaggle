@@ -113,10 +113,17 @@ window.fetch = async (input, init = {}) => {
     window.__lastSubmitBody = body;
     const quiz = window.__quizzes[body.quiz_id];
     let score = 0;
-    quiz.questions.forEach((question) => { if ((body.answers[String(question.id)] || "") === question.correct_answer) score += 1; });
+    const questionResults = quiz.questions.map((question) => {
+      const selected = body.answers[String(question.id)] || "";
+      const isCorrect = selected === question.correct_answer;
+      if (isCorrect) score += 1;
+      return {question_id: question.id, question: question.question, options: question.options, selected_answer: selected,
+        selected_answers: selected ? [selected] : [], correct_answer: question.correct_answer, correct_answers: [question.correct_answer],
+        is_correct: isCorrect, explanation: question.explanation, topic_name: "", source_chunk_ids: []};
+    });
     const total = quiz.questions.length;
     const completedAttempt = {
-      attempt_id: "att-" + body.quiz_id + "-" + window.__submitCalls, quiz_id: body.quiz_id, answers: body.answers,
+      attempt_id: "att-" + body.quiz_id + "-" + window.__submitCalls, quiz_id: body.quiz_id, answers: body.answers, question_results: questionResults,
       completed: true, completed_at: "2026-01-01T00:02:00Z", score, total, percentage: Math.round((100 * score) / total),
       current_question_index: 0, updated_at: "2026-01-01T00:02:00Z", attempt_number: 1,
       attempt_summary: {attempts: 1, latest_score: Math.round((100 * score) / total), best_score: Math.round((100 * score) / total), average_score: Math.round((100 * score) / total)},
@@ -298,7 +305,7 @@ const clickAnswer = (letter) => answerCards().find((b) => b.querySelector(".quiz
   out.afterReviewUnanswered = { position: document.getElementById("quiz-player-position").textContent, submitCallsSoFar: window.__submitCalls };
 
   // 8) Answer the rest, then Finish with everything answered submits immediately (no confirmation)
-  // and shows only the minimal completion state.
+  // and opens the Results screen.
   clickAnswer("B"); await sleep(700);   // Q2
   document.getElementById("quiz-player-next").click(); await sleep(50);   // Q3
   clickAnswer("C"); await sleep(700);   // Q3
@@ -306,12 +313,12 @@ const clickAnswer = (letter) => answerCards().find((b) => b.querySelector(".quiz
   await sleep(400);
   out.completed = {
     confirmVisible: !document.getElementById("quiz-finish-confirm").hidden,
-    completionVisible: !document.getElementById("quiz-player-completion-view").hidden,
+    completionVisible: !document.getElementById("quiz-results-view").hidden,
     questionViewHidden: document.getElementById("quiz-player-question-view").hidden,
-    score: document.getElementById("quiz-player-completion-score").textContent,
+    score: document.getElementById("quiz-results-score").textContent,
     submitCalls: window.__submitCalls,
   };
-  document.getElementById("quiz-player-completion-back").click();
+  document.getElementById("quiz-results-back").click();
   await sleep(300);
   out.afterCompletionBack = { playerOpen: playerOpen(), isLanding: pane().classList.contains("quiz-landing") };
 
@@ -333,15 +340,15 @@ const clickAnswer = (letter) => answerCards().find((b) => b.querySelector(".quiz
   submitQuizPlayer(); submitQuizPlayer();
   await sleep(400);
   out.duplicateFinish = { newSubmitCalls: window.__submitCalls - submitsBefore };
-  document.getElementById("quiz-player-completion-back").click();
+  document.getElementById("quiz-results-back").click();
   await sleep(300);
 
-  // 11) Opening an already-completed quiz (Quiz A, finished in step 8) shows only the minimal
-  // completion state directly -- never the question-taking chrome.
+  // 11) Opening an already-completed quiz (Quiz A, finished in step 8) opens its Results
+  // screen directly -- never the question-taking chrome.
   startButtonFor("Quiz A").click();
   await sleep(300);
-  out.reopenCompletedQuizA = { completionVisible: !document.getElementById("quiz-player-completion-view").hidden };
-  document.getElementById("quiz-player-completion-back").click();
+  out.reopenCompletedQuizA = { completionVisible: !document.getElementById("quiz-results-view").hidden };
+  document.getElementById("quiz-results-back").click();
   await sleep(300);
 
   // 12) Session/document switch race: a save is in flight, newer local changes are pending (inside
@@ -514,12 +521,12 @@ class QuizPlayerUiTests(unittest.TestCase):
         self.assertEqual(after_review["position"], "Question 2 of 3")
         self.assertEqual(after_review["submitCallsSoFar"], 0)   # Review Unanswered never submits
 
-    def test_finishing_fully_answered_submits_immediately_and_shows_only_the_minimal_completion_state(self):
+    def test_finishing_fully_answered_submits_immediately_and_opens_results(self):
         completed = self.out["completed"]
         self.assertTrue(completed["confirmVisible"] is False)
         self.assertTrue(completed["completionVisible"])
         self.assertTrue(completed["questionViewHidden"])
-        self.assertEqual(completed["score"], "Score 3 / 3")   # Q1=A, Q2=B, Q3=C -- all three correct
+        self.assertEqual(completed["score"], "3 / 3")   # Q1=A, Q2=B, Q3=C -- all three correct
         self.assertEqual(completed["submitCalls"], 1)
 
     def test_completion_back_returns_to_the_library(self):
@@ -536,7 +543,7 @@ class QuizPlayerUiTests(unittest.TestCase):
     def test_duplicate_finish_is_blocked(self):
         self.assertEqual(self.out["duplicateFinish"]["newSubmitCalls"], 1)
 
-    def test_opening_an_already_completed_quiz_shows_only_the_completion_state(self):
+    def test_opening_an_already_completed_quiz_shows_its_results(self):
         self.assertTrue(self.out["reopenCompletedQuizA"]["completionVisible"])
 
 

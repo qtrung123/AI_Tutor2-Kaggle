@@ -654,6 +654,9 @@ def _row_to_attempt(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
         )
         for answer in answer_rows
     }
+    # A question submitted unanswered ("Submit Anyway") keeps its graded row in question_results
+    # but is not an answer.
+    answers = {key: value for key, value in answers.items() if value not in (None, "", [])}
     question_results = [
         {
             "question_id": answer["question_id"],

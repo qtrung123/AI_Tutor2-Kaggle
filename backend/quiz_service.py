@@ -4915,8 +4915,14 @@ def submit_quiz_attempt(
     answers: dict[str, str | list[str]],
     student_id: str = LEGACY_USER_ID,
     quiz_id: str | None = None,
+    allow_unanswered: bool = False,
 ) -> dict:
-    """Grade a complete answer set once and append a new attempt for the saved quiz."""
+    """Grade a complete answer set once and append a new attempt for the saved quiz.
+
+    With `allow_unanswered` (the Quiz Player's "Submit Anyway"), questions left without an answer
+    are persisted with an empty selection and graded as not correct, so Results/Review can show
+    them as unanswered. Without it, every question must be answered exactly once.
+    """
     difficulty = difficulty.lower().strip()
     quiz = get_quiz_by_id(quiz_id, student_id) if quiz_id else get_quiz(document_id, difficulty, topic_id, student_id)
     if not quiz and quiz_id:
@@ -4926,12 +4932,20 @@ def submit_quiz_attempt(
         raise ValueError("The persisted quiz questions are no longer available.")
     if quiz.get("document_id") != document_id or quiz.get("difficulty") != difficulty or quiz.get("topic_id") != topic_id:
         raise ValueError("The submitted quiz identity does not match its persisted questions.")
-    normalized_answers = {str(key): _selected_answers(value) for key, value in answers.items()}
+    normalized_answers = {
+        str(key): _selected_answers(value) for key, value in answers.items()
+        if not (allow_unanswered and value in (None, "", []))
+    }
     questions = list(quiz.get("questions") or [])
     expected_ids = {str(question.get("id")) for question in questions}
-    if set(normalized_answers) != expected_ids:
+    if allow_unanswered:
+        if not set(normalized_answers) <= expected_ids:
+            raise ValueError("A submitted answer does not belong to this quiz.")
+    elif set(normalized_answers) != expected_ids:
         raise ValueError("Every quiz question must be answered exactly once before submission.")
     for question in questions:
+        if str(question.get("id")) not in normalized_answers:
+            continue
         selected = normalized_answers[str(question.get("id"))]
         question_type = _question_type(question)
         valid_letters = set("ABCD"[:len(question.get("options") or [])])
@@ -4945,12 +4959,12 @@ def submit_quiz_attempt(
     for question in questions:
         question_id = str(question.get("id"))
         correct_answers = sorted(_correct_answers(question))
-        selected_answers = normalized_answers[question_id]
+        selected_answers = normalized_answers.get(question_id, [])
         results.append({
             "question_id": int(question_id),
             "question": question.get("question", ""),
             "options": list(question.get("options", [])),
-            "selected_answer": selected_answers[0],
+            "selected_answer": selected_answers[0] if selected_answers else "",
             "selected_answers": selected_answers,
             "correct_answer": correct_answers[0],
             "correct_answers": correct_answers,
@@ -4980,7 +4994,7 @@ def submit_quiz_attempt(
         "completed_at": now,
         "submitted_at": now,
         "score": score,
-        "answered": total,
+        "answered": len(normalized_answers),
         "total": total,
         "completed": True,
         "attempt_number": int(summary["attempts"]) + 1,
@@ -5106,10 +5120,34 @@ def build_learning_dashboard(student_id: str = LEGACY_USER_ID) -> dict:
 
 
 def load_completed_quiz_attempt(attempt_id: str, student_id: str = LEGACY_USER_ID) -> dict:
-    """Return one completed attempt with question snapshots for review."""
+    """Return one completed attempt with question snapshots for review.
+
+    Also attaches display metadata of that attempt's OWN quiz (looked up by its exact quiz_id,
+    never a sibling in the same slot) for the Results screen: title, difficulty, generating model,
+    partial-count info, and each question's concept name. The persisted grading in
+    question_results is returned unchanged.
+    """
     attempt = get_quiz_history_attempt(attempt_id, student_id)
     if not attempt:
         raise ValueError("Quiz history attempt was not found.")
+    quiz = get_quiz_by_id(attempt["quiz_id"], student_id) if attempt.get("quiz_id") else None
+    if quiz and quiz.get("quiz_id") == attempt.get("quiz_id"):
+        plan = quiz.get("assessment_plan") or {}
+        attempt["quiz"] = {
+            "quiz_id": quiz["quiz_id"],
+            "title": quiz.get("title") or "",
+            "difficulty": quiz.get("difficulty") or attempt.get("difficulty"),
+            "generation_model": quiz.get("generation_model") or plan.get("generation_model"),
+            "partial": bool(plan.get("partial")),
+            "requested_count": plan.get("requested_count") or plan.get("target_questions"),
+            "question_count": len(quiz.get("questions") or []),
+        }
+        concept_names = {
+            str(question.get("id")): question.get("concept_name") or ""
+            for question in quiz.get("questions") or []
+        }
+        for result in attempt.get("question_results") or []:
+            result.setdefault("concept_name", concept_names.get(str(result.get("question_id")), ""))
     return attempt
 
 

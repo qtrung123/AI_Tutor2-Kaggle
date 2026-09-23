@@ -70,7 +70,12 @@ let quizAutosaveTimer = null;
 let quizAutosaveSeq = 0;
 let quizAutosaveDirty = false;
 let quizAutosaveInFlight = null;
-let quizDetachedSave = null;   // the latest detached (session-switch) save, for tests/diagnostics
+let quizDetachedSave = null;
+// Results/Review inside the focused player. Non-null while a completed attempt is shown; it
+// takes precedence over question-taking in renderQuizPlayer, so an unrelated re-render never
+// swaps Results for the Loading/question view.
+let quizResultState = null;   // { loading } | { result, view: "results" | "review", reviewIndex }
+let quizResultRequestSeq = 0;   // the latest detached (session-switch) save, for tests/diagnostics
 // True only between a Finish Quiz click and its outcome: blocks a duplicate submission, matching
 // the quizGenerationInFlight guard used by the Create Quiz sheet.
 let quizSubmitInFlight = false;
@@ -182,12 +187,62 @@ const uploadStatus = document.getElementById("upload-status");
           <button class="primary-button quiz-player-next" id="quiz-player-next" type="button">Next</button>
         </footer>
       </div>
-      <div class="quiz-player-completion-view" id="quiz-player-completion-view" hidden>
-        <div class="quiz-player-completion-card">
-          <h2>Quiz completed</h2>
-          <p id="quiz-player-completion-score"></p>
-          <button class="primary-button" id="quiz-player-completion-back" type="button">Back to Quizzes</button>
+      <div class="quiz-player-loading" id="quiz-results-loading" hidden>Loading results…</div>
+      <div class="quiz-results-view" id="quiz-results-view" hidden>
+        <header class="quiz-results-header">
+          <span class="quiz-results-eyebrow">Quiz completed</span>
+          <h2 id="quiz-results-title"></h2>
+          <div class="quiz-results-meta">
+            <span class="quiz-player-badge" id="quiz-results-difficulty"></span>
+            <span class="quiz-player-model" id="quiz-results-model" hidden></span>
+          </div>
+        </header>
+        <section class="quiz-results-score-card" aria-label="Score">
+          <div class="quiz-results-score">
+            <strong id="quiz-results-score"></strong>
+            <span id="quiz-results-percentage"></span>
+          </div>
+          <div class="quiz-results-stats">
+            <div class="quiz-results-stat is-correct"><strong id="quiz-results-correct"></strong><span>Correct</span></div>
+            <div class="quiz-results-stat is-incorrect"><strong id="quiz-results-incorrect"></strong><span>Incorrect</span></div>
+            <div class="quiz-results-stat is-unanswered"><strong id="quiz-results-unanswered"></strong><span>Unanswered</span></div>
+          </div>
+          <p class="quiz-results-note" id="quiz-results-note" hidden></p>
+        </section>
+        <div class="quiz-results-actions">
+          <button class="primary-button" id="quiz-results-review" type="button">Review Answers</button>
+          <button class="secondary-button" id="quiz-results-back" type="button">Back to Quizzes</button>
         </div>
+      </div>
+      <div class="quiz-review-view" id="quiz-review-view" hidden>
+        <header class="quiz-player-header">
+          <button class="quiz-player-exit" id="quiz-review-back-results" type="button">← Back to Results</button>
+          <div class="quiz-player-heading"><h2 id="quiz-review-title"></h2></div>
+        </header>
+        <div class="quiz-player-progress">
+          <div class="quiz-player-progress-row">
+            <span id="quiz-review-position"></span>
+            <span class="quiz-review-status" id="quiz-review-status"></span>
+          </div>
+          <div class="quiz-player-progress-track"><span id="quiz-review-progress-bar"></span></div>
+        </div>
+        <article class="quiz-player-card quiz-review-card">
+          <p class="quiz-player-question" id="quiz-review-question"></p>
+          <p class="quiz-review-unanswered-note" id="quiz-review-unanswered-note" hidden>You didn't answer this question.</p>
+          <div class="quiz-review-options" id="quiz-review-options"></div>
+          <section class="quiz-review-section">
+            <h4>Explanation</h4>
+            <p id="quiz-review-explanation"></p>
+          </section>
+          <section class="quiz-review-section" id="quiz-review-source" hidden>
+            <h4>Source</h4>
+            <p id="quiz-review-source-text"></p>
+          </section>
+        </article>
+        <footer class="quiz-player-footer">
+          <button class="secondary-button" id="quiz-review-previous" type="button">Previous</button>
+          <button class="primary-button" id="quiz-review-next" type="button">Next</button>
+        </footer>
       </div>
     </div>
     <div class="quiz-player-modal-backdrop" id="quiz-exit-confirm" hidden>
@@ -2429,7 +2484,7 @@ async function requestQuizProgress(payload, quiz = currentQuiz) {
   return response.json();
 }
 
-async function requestQuizSubmission() {
+async function requestQuizSubmission({ allowUnanswered = false } = {}) {
   const response = await fetch(`${QUIZ_API_BASE_URL}/${encodeURIComponent(currentQuiz.document_id)}/submit`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2437,7 +2492,8 @@ async function requestQuizSubmission() {
       difficulty: currentQuiz.difficulty,
       topic_id: currentQuiz.topic_id,
       quiz_id: currentQuiz.quiz_id,
-      answers: quizAnswers
+      answers: quizAnswers,
+      ...(allowUnanswered ? { allow_unanswered: true } : {})
     })
   });
   if (!response.ok) {
@@ -2748,7 +2804,7 @@ function renderQuizHistory() {
     review.className = "text-button";
     review.type = "button";
     review.textContent = "Review Answers";
-    review.addEventListener("click", () => showQuizHistoryDetail(attempt.attempt_id));
+    review.addEventListener("click", () => openQuizResults(attempt));
     const regenerate = document.createElement("button");
     regenerate.className = "text-button";
     regenerate.type = "button";
@@ -2769,7 +2825,7 @@ function renderQuizHistory() {
       row.type = "button";
       const activity = pastAttempt.completed_at ? new Date(pastAttempt.completed_at).toLocaleString() : "time unavailable";
       row.textContent = `Attempt ${pastAttempt.attempt_number} · ${Math.round(pastAttempt.percentage)}% · ${activity}`;
-      row.addEventListener("click", () => showQuizHistoryDetail(pastAttempt.attempt_id));
+      row.addEventListener("click", () => openQuizResults(pastAttempt));
       history.appendChild(row);
     });
     card.append(info, score, actions, history);
@@ -3609,10 +3665,11 @@ function assessmentTitleText(quiz) {
 // the Library already relies on elsewhere.
 function setQuizPlayerVisible(open) {
   quizPlayerOpen = open;
+  quizResultState = null;
+  quizResultRequestSeq += 1;   // a still-loading Results request can no longer land
   document.querySelector('[data-session-pane="quiz"]')?.classList.toggle("quiz-player-open", open);
   document.getElementById("quiz-player").hidden = !open;
-  document.getElementById("quiz-player-completion-view").hidden = true;
-  document.getElementById("quiz-player-question-view").hidden = false;
+  showQuizPlayerView("question");
   document.getElementById("quiz-exit-confirm").hidden = true;
   document.getElementById("quiz-finish-confirm").hidden = true;
 }
@@ -3643,8 +3700,8 @@ function renderQuizPlayer() {
   if (!currentQuiz?.questions?.length) {
     // loadSelectedQuiz resets state and renders once before its fetch resolves -- show a light
     // loading state rather than a blank/broken player in that brief window.
-    document.getElementById("quiz-player-completion-view").hidden = true;
-    document.getElementById("quiz-player-question-view").hidden = false;
+    if (quizResultState) { renderQuizResultState(); return; }
+    showQuizPlayerView("question");
     document.getElementById("quiz-player-title").textContent = "Loading…";
     document.getElementById("quiz-player-question").textContent = "";
     document.getElementById("quiz-player-answers").innerHTML = "";
@@ -3654,18 +3711,18 @@ function renderQuizPlayer() {
     document.getElementById("quiz-player-model").hidden = true;
     return;
   }
-  // Reached both right after a successful Finish and when Start opens an already-completed quiz --
-  // either way, only the minimal completion state is shown (full Result/Review is Task Quiz 4).
+  if (quizResultState) { renderQuizResultState(); return; }
+  // Start on a quiz whose latest attempt is already completed opens its Results, never the
+  // question-taking view.
   if (currentAttempt?.completed) {
-    renderQuizPlayerCompletion();
+    showQuizResults(buildQuizResult(currentAttempt, currentQuiz));
     return;
   }
   renderQuizPlayerQuestion();
 }
 
 function renderQuizPlayerQuestion() {
-  document.getElementById("quiz-player-completion-view").hidden = true;
-  document.getElementById("quiz-player-question-view").hidden = false;
+  showQuizPlayerView("question");
 
   const total = currentQuiz.questions.length;
   quizQuestionIndex = Math.max(0, Math.min(quizQuestionIndex, total - 1));
@@ -3716,11 +3773,212 @@ function renderQuizPlayerQuestion() {
   nextButton.onclick = isLast ? handleQuizPlayerFinish : () => moveQuizPlayerQuestion(1);
 }
 
-function renderQuizPlayerCompletion() {
-  document.getElementById("quiz-player-question-view").hidden = true;
-  document.getElementById("quiz-player-completion-view").hidden = false;
-  const total = currentAttempt.total ?? currentQuiz.questions.length;
-  document.getElementById("quiz-player-completion-score").textContent = `Score ${currentAttempt.score} / ${total}`;
+
+// ---- Quiz Results + Review Answers ------------------------------------------------------------------
+// Built only from the persisted, server-graded attempt (question_results: is_correct, selected and
+// correct answers) -- never re-graded client-side. The quiz, when available, only contributes
+// display metadata (title, model, question order, concept names).
+
+function showQuizPlayerView(view) {
+  document.getElementById("quiz-player-question-view").hidden = view !== "question";
+  document.getElementById("quiz-results-loading").hidden = view !== "loading";
+  document.getElementById("quiz-results-view").hidden = view !== "results";
+  document.getElementById("quiz-review-view").hidden = view !== "review";
+}
+
+const QUIZ_OPTION_LETTERS = "ABCD";
+
+function quizResultLetters(values) {
+  return [...new Set((values || []).map((value) => String(value || "").trim().toUpperCase()).filter(Boolean))].sort();
+}
+
+function buildQuizResult(attempt, quiz, fallback = {}) {
+  const questions = quiz?.questions || [];
+  const questionsById = new Map(questions.map((question) => [String(question.id), question]));
+  const order = questions.map((question) => String(question.id));
+  const results = [...(attempt?.question_results || [])];
+  if (order.length) {
+    const position = (result) => { const index = order.indexOf(String(result.question_id)); return index < 0 ? order.length : index; };
+    results.sort((left, right) => position(left) - position(right));
+  }
+  const items = results.map((result) => {
+    const question = questionsById.get(String(result.question_id)) || {};
+    const selected = quizResultLetters(result.selected_answers?.length ? result.selected_answers : [result.selected_answer]);
+    const correct = quizResultLetters(result.correct_answers?.length ? result.correct_answers : [result.correct_answer]);
+    const unanswered = selected.length === 0;
+    return {
+      questionId: result.question_id,
+      question: result.question || question.question || `Question ${result.question_id}`,
+      options: result.options?.length ? result.options : (question.options || []),
+      selected,
+      correct,
+      unanswered,
+      isCorrect: !unanswered && Boolean(result.is_correct),
+      explanation: String(result.explanation || question.explanation || "").trim(),
+      topicName: result.topic_name || question.topic_name || "",
+      conceptName: result.concept_name || question.concept_name || "",
+      sourceCount: (result.source_chunk_ids?.length ? result.source_chunk_ids : (question.source_chunk_ids || [])).length,
+    };
+  });
+  const total = Number(attempt?.total) || items.length;
+  const score = Number(attempt?.score) || 0;
+  const correctCount = items.length ? items.filter((item) => item.isCorrect).length : score;
+  const unansweredCount = items.filter((item) => item.unanswered).length;
+  const plan = quiz?.assessment_plan || {};
+  const partial = Boolean(quiz?.partial ?? plan.partial);
+  const requested = quiz?.requested_count ?? plan.requested_count ?? plan.target_questions ?? null;
+  const modelInfo = quizModelInfo(quiz);
+  return {
+    attemptId: attempt?.attempt_id,
+    quizId: attempt?.quiz_id,
+    title: (quiz?.title || fallback.title || "").trim() || "Untitled Quiz",
+    difficulty: attempt?.difficulty || quiz?.difficulty || fallback.difficulty || "",
+    model: modelInfo ? modelLabel(modelInfo.model_id, modelInfo.name) : "",
+    score,
+    total,
+    percentage: Math.round(attempt?.percentage ?? (total ? (100 * score) / total : 0)),
+    correctCount,
+    unansweredCount,
+    incorrectCount: Math.max(0, total - correctCount - unansweredCount),
+    partialNote: partial && requested && requested > total ? `This quiz has ${total} of the ${requested} requested questions.` : "",
+    items,
+  };
+}
+
+function showQuizResults(result) {
+  quizResultState = { result, view: "results", reviewIndex: 0 };
+  renderQuizResultState();
+}
+
+// Library "Review Answers" (and attempt-history rows): loads that exact completed attempt by its
+// attempt_id -- whose quiz metadata the backend resolves by the attempt's own quiz_id -- and opens
+// Results in the focused player. A mismatched quiz_id is an error, never a sibling fallback.
+async function openQuizResults(summary) {
+  resetQuizAutosave();
+  setQuizPlayerVisible(true);
+  quizResultState = { loading: true };
+  const requestSeq = ++quizResultRequestSeq;
+  renderQuizResultState();
+  try {
+    const attempt = await requestQuizHistoryDetail(summary.attempt_id);
+    if (requestSeq !== quizResultRequestSeq || !quizPlayerOpen) return;
+    if (!attempt?.completed || attempt.attempt_id !== summary.attempt_id || (summary.quiz_id && attempt.quiz_id !== summary.quiz_id)) {
+      throw new Error("These results are no longer available.");
+    }
+    showQuizResults(buildQuizResult(attempt, attempt.quiz || null, summary));
+  } catch (error) {
+    if (requestSeq !== quizResultRequestSeq) return;
+    closeQuizPlayerToLibrary();
+    showToast(error.message || "Could not open these results");
+  }
+}
+
+function renderQuizResultState() {
+  if (!quizResultState) return;
+  if (quizResultState.loading) { showQuizPlayerView("loading"); return; }
+  if (quizResultState.view === "review") renderQuizReview();
+  else renderQuizResults();
+}
+
+function renderQuizResults() {
+  const { result } = quizResultState;
+  showQuizPlayerView("results");
+  document.getElementById("quiz-results-title").textContent = result.title;
+  const difficulty = document.getElementById("quiz-results-difficulty");
+  difficulty.textContent = result.difficulty;
+  difficulty.hidden = !result.difficulty;
+  const model = document.getElementById("quiz-results-model");
+  model.textContent = result.model ? `Generated by ${result.model}` : "";
+  model.hidden = !result.model;
+  document.getElementById("quiz-results-score").textContent = `${result.score} / ${result.total}`;
+  document.getElementById("quiz-results-percentage").textContent = `${result.percentage}%`;
+  document.getElementById("quiz-results-correct").textContent = String(result.correctCount);
+  document.getElementById("quiz-results-incorrect").textContent = String(result.incorrectCount);
+  document.getElementById("quiz-results-unanswered").textContent = String(result.unansweredCount);
+  const note = document.getElementById("quiz-results-note");
+  note.textContent = result.partialNote;
+  note.hidden = !result.partialNote;
+  document.getElementById("quiz-results-review").hidden = !result.items.length;
+}
+
+function openQuizReview(index = 0) {
+  if (!quizResultState?.result?.items.length) return;
+  quizResultState.view = "review";
+  quizResultState.reviewIndex = Math.max(0, Math.min(index, quizResultState.result.items.length - 1));
+  renderQuizReview();
+}
+
+function renderQuizReview() {
+  const { result } = quizResultState;
+  const total = result.items.length;
+  const index = Math.max(0, Math.min(quizResultState.reviewIndex, total - 1));
+  const item = result.items[index];
+  showQuizPlayerView("review");
+  document.getElementById("quiz-review-title").textContent = result.title;
+  document.getElementById("quiz-review-position").textContent = `Question ${index + 1} of ${total}`;
+  document.getElementById("quiz-review-progress-bar").style.width = `${Math.round(((index + 1) / total) * 100)}%`;
+  const status = document.getElementById("quiz-review-status");
+  const state = item.unanswered ? "unanswered" : (item.isCorrect ? "correct" : "incorrect");
+  status.textContent = { correct: "Correct", incorrect: "Incorrect", unanswered: "Unanswered" }[state];
+  status.className = `quiz-review-status is-${state}`;
+  document.getElementById("quiz-review-question").textContent = item.question;
+  document.getElementById("quiz-review-unanswered-note").hidden = !item.unanswered;
+
+  const options = document.getElementById("quiz-review-options");
+  options.innerHTML = "";
+  item.options.forEach((option, optionIndex) => {
+    const letter = QUIZ_OPTION_LETTERS[optionIndex];
+    const isSelected = item.selected.includes(letter);
+    const isCorrect = item.correct.includes(letter);
+    const row = document.createElement("div");
+    row.className = "quiz-review-option";
+    row.dataset.letter = letter;
+    if (isCorrect) row.classList.add("is-correct");
+    if (isSelected) row.classList.add("is-selected");
+    if (isSelected && !isCorrect) row.classList.add("is-wrong");
+    const indicator = document.createElement("span");
+    indicator.className = "quiz-review-option-indicator";
+    indicator.setAttribute("aria-hidden", "true");
+    indicator.textContent = isCorrect ? "✓" : (isSelected ? "✕" : "");
+    const label = document.createElement("span");
+    label.className = "quiz-review-option-label";
+    label.textContent = option;
+    row.append(indicator, label);
+    const tagText = isSelected && isCorrect ? "Your answer · Correct" : (isSelected ? "Your answer" : (isCorrect ? "Correct answer" : ""));
+    if (tagText) {
+      const tag = document.createElement("span");
+      tag.className = "quiz-review-option-tag";
+      tag.textContent = tagText;
+      row.appendChild(tag);
+    }
+    options.appendChild(row);
+  });
+
+  const explanation = document.getElementById("quiz-review-explanation");
+  explanation.textContent = item.explanation || "No explanation was saved for this question.";
+  explanation.classList.toggle("is-missing", !item.explanation);
+  const sourceParts = [
+    item.topicName ? `Topic: ${item.topicName}` : "",
+    item.conceptName && item.conceptName !== item.topicName ? `Concept: ${item.conceptName}` : "",
+    item.sourceCount ? `Based on ${item.sourceCount} passage${item.sourceCount === 1 ? "" : "s"} from the document` : "",
+  ].filter(Boolean);
+  document.getElementById("quiz-review-source").hidden = !sourceParts.length;
+  document.getElementById("quiz-review-source-text").textContent = sourceParts.join(" · ");
+
+  document.getElementById("quiz-review-previous").disabled = index === 0;
+  document.getElementById("quiz-review-next").textContent = index === total - 1 ? "Back to Results" : "Next";
+}
+
+function moveQuizReview(direction) {
+  if (!quizResultState?.result) return;
+  const lastIndex = quizResultState.result.items.length - 1;
+  if (direction > 0 && quizResultState.reviewIndex >= lastIndex) {
+    quizResultState.view = "results";
+    renderQuizResultState();
+    return;
+  }
+  quizResultState.reviewIndex = Math.max(0, Math.min(lastIndex, quizResultState.reviewIndex + direction));
+  renderQuizReview();
 }
 
 // ---- Quiz Player: answering and navigation -------------------------------------------------------
@@ -3795,7 +4053,7 @@ async function submitQuizPlayer() {
     if (quizAutosaveTimer) { clearTimeout(quizAutosaveTimer); quizAutosaveTimer = null; }
     quizAutosaveDirty = false;
     if (quizAutosaveInFlight) { try { await quizAutosaveInFlight; } catch (error) { /* submit covers it */ } }
-    currentAttempt = await requestQuizSubmission();
+    currentAttempt = await requestQuizSubmission({ allowUnanswered: true });
     resetQuizAutosave();
     quizQuestionIndex = 0;
     quizAttemptSummary = currentAttempt.attempt_summary;
@@ -3804,7 +4062,7 @@ async function submitQuizPlayer() {
     await loadQuizHistory();
     await loadDashboard();
     renderQuizHistory();
-    renderAssessmentQuiz();   // dispatches to renderQuizPlayer -> the minimal completion state
+    showQuizResults(buildQuizResult(currentAttempt, currentQuiz));
   } catch (error) {
     // Local answers are untouched -- the learner can simply press Finish Quiz again.
     showToast(error.message || "Could not submit quiz");
@@ -4117,7 +4375,15 @@ document.getElementById("quiz-finish-submit-anyway")?.addEventListener("click", 
   document.getElementById("quiz-finish-confirm").hidden = true;
   submitQuizPlayer();
 });
-document.getElementById("quiz-player-completion-back")?.addEventListener("click", closeQuizPlayerToLibrary);
+document.getElementById("quiz-results-back")?.addEventListener("click", closeQuizPlayerToLibrary);
+document.getElementById("quiz-results-review")?.addEventListener("click", () => openQuizReview(0));
+document.getElementById("quiz-review-back-results")?.addEventListener("click", () => {
+  if (!quizResultState?.result) return;
+  quizResultState.view = "results";
+  renderQuizResultState();
+});
+document.getElementById("quiz-review-previous")?.addEventListener("click", () => moveQuizReview(-1));
+document.getElementById("quiz-review-next")?.addEventListener("click", () => moveQuizReview(1));
 
 authForm.addEventListener("submit", handleAuthentication);
 authSwitch.addEventListener("click", () => setAuthMode(authMode === "login" ? "signup" : "login"));
