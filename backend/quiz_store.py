@@ -1476,3 +1476,40 @@ def _migrate_legacy_json(connection: sqlite3.Connection) -> None:
             "[quiz-migration] imported "
             f"quizzes={quiz_count}, attempts={attempt_count}, explanations={explanation_count}"
         )
+
+
+def get_document_quiz_activity(document_id: str, owner_id: str) -> dict:
+    """Lightweight, read-only quiz signals for one owned document (Study Planner), without loading
+    questions. `quizzes`: every active quiz artifact, newest first, each with ITS OWN latest attempt
+    (same per-quiz_id rule as the Quiz Library, so sibling quizzes never share progress).
+    `completed_attempts`: completed attempts, newest first, restricted to attempts whose quiz is
+    an active quiz of this same owner and document."""
+    initialize_quiz_store()
+    with _connect() as connection:
+        quiz_rows = connection.execute(
+            """SELECT quiz_id, title, question_count, created_at FROM quizzes
+               WHERE owner_id = ? AND document_id = ? AND is_active = 1
+               ORDER BY created_at DESC, quiz_id DESC""",
+            (owner_id, document_id),
+        ).fetchall()
+        quizzes = []
+        for quiz_row in quiz_rows:
+            attempt = connection.execute(
+                """SELECT completed, answered, total, score, percentage, updated_at,
+                          COALESCE(completed_at, submitted_at) AS completed_at
+                   FROM quiz_attempts WHERE student_id = ? AND quiz_id = ?
+                   ORDER BY updated_at DESC LIMIT 1""",
+                (owner_id, quiz_row["quiz_id"]),
+            ).fetchone()
+            quizzes.append({**dict(quiz_row), "latest_attempt": dict(attempt) if attempt else None})
+        completed_attempts = connection.execute(
+            """SELECT a.attempt_id, a.quiz_id, a.score, a.total, a.percentage,
+                      COALESCE(a.completed_at, a.submitted_at, a.updated_at) AS completed_at
+               FROM quiz_attempts a
+               JOIN quizzes q ON q.quiz_id = a.quiz_id AND q.owner_id = a.student_id
+                             AND q.document_id = a.document_id AND q.is_active = 1
+               WHERE a.student_id = ? AND a.document_id = ? AND a.completed = 1
+               ORDER BY COALESCE(a.completed_at, a.submitted_at, a.updated_at) DESC, a.attempt_id DESC""",
+            (owner_id, document_id),
+        ).fetchall()
+    return {"quizzes": quizzes, "completed_attempts": [dict(row) for row in completed_attempts]}

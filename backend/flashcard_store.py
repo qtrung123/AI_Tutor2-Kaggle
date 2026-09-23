@@ -201,3 +201,24 @@ def delete_document_flashcards(owner_id: str, document_id: str) -> None:
     with _connect() as connection:
         connection.execute("DELETE FROM flashcards WHERE owner_id=? AND document_id=?", (owner_id, document_id))
         connection.execute("DELETE FROM flashcard_sets WHERE owner_id=? AND document_id=?", (owner_id, document_id))
+
+
+def get_latest_flashcard_set_info(owner_id: str, document_id: str, document_hash: str, topic_schema_version: int,
+                                  flashcard_version: str) -> dict | None:
+    """Model/language-agnostic lookup for the Study Planner: the newest flashcard set generated
+    from the document's CURRENT content/topic schema/card format, with its current card count
+    (user-added and deleted cards included). Never loads card bodies."""
+    initialize_flashcard_store()
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT s.set_id, s.model_id, s.created_at,
+                   (SELECT COUNT(*) FROM flashcards c WHERE c.set_id = s.set_id AND c.owner_id = s.owner_id) AS card_count
+            FROM flashcard_sets s
+            WHERE s.owner_id=? AND s.document_id=? AND s.document_hash=? AND s.topic_schema_version=?
+              AND s.flashcard_version=?
+            ORDER BY s.created_at DESC, s.set_id DESC LIMIT 1
+            """,
+            (owner_id, document_id, document_hash, topic_schema_version, flashcard_version),
+        ).fetchone()
+    return dict(row) if row else None

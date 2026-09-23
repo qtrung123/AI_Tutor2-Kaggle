@@ -11,8 +11,10 @@ instead of modifying its algorithm.
 from datetime import date, datetime, timedelta
 
 from backend import quiz_store, study_planner_store
+from backend.document_study_state import get_document_study_state
 from backend.indexed_document_store import get_indexed_document
 from backend.quiz_service import get_topic_chunks
+from backend.study_scheduler_contracts import MaterialContext, SchedulingContext
 
 MIN_BLOCK_MINUTES = 30
 PREFERRED_BLOCK_MINUTES = 60
@@ -505,6 +507,32 @@ def add_plan_material(owner_id: str, plan_id: str, document_id: str, deadline: s
         raise ValueError("Document not found.")
     return study_planner_store.add_material(
         owner_id, plan_id, document_id, deadline=deadline or None, familiarity=familiarity or None,
+    )
+
+
+SCHEDULING_BUSY_STATUSES = ("scheduled", "in_progress", "completed")
+
+
+def build_scheduling_context(owner_id: str, plan_id: str, now: datetime | None = None) -> SchedulingContext:
+    """Assemble the read-only SchedulingContext the future scheduler consumes for one plan: each
+    material with its DocumentStudyState, the owner's availability, and sessions (any plan) that
+    already occupy time from today on. No scheduling decisions are made here.
+
+    A material whose document no longer exists is skipped (it has no state to plan from)."""
+    if not study_planner_store.get_plan(owner_id, plan_id):
+        raise ValueError("Study plan not found.")
+    now = now or datetime.now()
+    materials = []
+    for material in study_planner_store.list_materials(owner_id, plan_id):
+        state = get_document_study_state(owner_id, material["document_id"], plan_id=plan_id)
+        if state is not None:
+            materials.append(MaterialContext(material=material, state=state))
+    return SchedulingContext(
+        owner_id=owner_id, plan_id=plan_id, now=now, materials=tuple(materials),
+        availability=tuple(study_planner_store.list_availability(owner_id)),
+        busy_sessions=tuple(study_planner_store.list_sessions(
+            owner_id, statuses=SCHEDULING_BUSY_STATUSES, start_from=now.date().isoformat(),
+        )),
     )
 
 

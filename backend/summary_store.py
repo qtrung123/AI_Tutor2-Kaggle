@@ -120,3 +120,21 @@ def delete_document_summaries(owner_id: str, document_id: str) -> None:
     initialize_summary_store()
     with _connect() as connection:
         connection.execute("DELETE FROM document_summaries WHERE owner_id=? AND document_id=?", (owner_id, document_id))
+
+
+def get_latest_summary_info(owner_id: str, document_id: str, document_hash: str, topic_schema_version: int,
+                            summary_version: str) -> dict | None:
+    """Model-agnostic existence check for the Study Planner: metadata of the newest summary
+    generated from the document's CURRENT content/topic schema/summary format, by any model.
+    Never loads the summary body."""
+    initialize_summary_store()
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT summary_id, model_id, created_at FROM document_summaries
+            WHERE owner_id=? AND document_id=? AND document_hash=? AND topic_schema_version=? AND summary_version=?
+            ORDER BY version_number DESC LIMIT 1
+            """,
+            (owner_id, document_id, document_hash, topic_schema_version, summary_version),
+        ).fetchone()
+    return dict(row) if row else None

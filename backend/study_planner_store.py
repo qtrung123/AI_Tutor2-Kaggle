@@ -707,6 +707,12 @@ FAMILIARITY_LEVELS = ("new_to_me", "somewhat_familiar", "reviewing")
 LEARNING_STATES = ("new", "learning", "needs_review", "on_track", "completed")
 ACTIVITY_TYPES = ("summary", "flashcards", "quiz", "review", "quiz_retry")
 SESSION_STATUSES = ("scheduled", "in_progress", "completed", "skipped", "missed", "rescheduled")
+# Why a session was scheduled -- stable codes persisted in study_sessions.reason (the UI renders and
+# translates them). Scheduling semantics only; learning/performance state lives in DocumentStudyState.
+SESSION_REASONS = (
+    "new_material", "deadline_approaching", "review_due", "low_quiz_score", "flashcard_review_due",
+    "final_review", "quiz_in_progress", "rescheduled",
+)
 
 
 def _require_choice(value, allowed: tuple[str, ...], field: str, optional: bool = False) -> None:
@@ -737,9 +743,10 @@ def _session_span_minutes(scheduled_start: str, scheduled_end: str) -> int:
     return int((end - start).total_seconds() // 60)
 
 
-def _validate_session(session: dict) -> None:
+def validate_session(session: dict) -> None:
     _require_choice(session.get("activity_type"), ACTIVITY_TYPES, "activity_type")
     _require_choice(session.get("status"), SESSION_STATUSES, "status")
+    _require_choice(session.get("reason"), SESSION_REASONS, "reason", optional=True)
     span = _session_span_minutes(session["scheduled_start"], session["scheduled_end"])
     duration = session.get("duration_minutes")
     if isinstance(duration, bool) or not isinstance(duration, int) or not 0 < duration <= span:
@@ -942,7 +949,7 @@ def create_sessions(owner_id: str, plan_id: str, sessions: list[dict]) -> list[d
     rows = []
     for session in sessions:
         session = {"status": "scheduled", **session}
-        _validate_session(session)
+        validate_session(session)
         if session.get("document_id") not in material_documents:
             raise ValueError("Session document is not part of this study plan.")
         rows.append((
@@ -1015,7 +1022,7 @@ def update_session(owner_id: str, session_id: str, changes: dict) -> dict:
     current = get_session(owner_id, session_id)
     if not current:
         raise ValueError("Study session not found.")
-    _validate_session({**current, **fields})
+    validate_session({**current, **fields})
     status = fields.get("status")
     if status == "in_progress" and not current["started_at"]:
         fields["started_at"] = utc_now_iso()

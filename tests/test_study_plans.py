@@ -148,14 +148,14 @@ class StudyPlanPersistenceTests(unittest.TestCase):
         plan = self.plan_with_docs(self.alice, "doc-a", "doc-b")
         other = self.plan_with_docs(self.alice, "doc-a")
         created = store.create_sessions(self.alice, plan["plan_id"], [
-            session("doc-a", "summary", reason="Start with the summary", priority_snapshot=2.5),
+            session("doc-a", "summary", reason="new_material", priority_snapshot=2.5),
             session("doc-b", "quiz", "2026-09-25T18:00:00", "2026-09-25T18:30:00", 30, artifact_id="quiz-1"),
             session("doc-a", "flashcards", "2026-09-26T18:00:00", "2026-09-26T18:45:00", 45),
         ])
         store.create_session(self.alice, other["plan_id"], session("doc-a", "review"))
         self.assertEqual([s["activity_type"] for s in created], ["summary", "quiz", "flashcards"])
         self.assertEqual((created[0]["status"], created[0]["reason"], created[0]["priority_snapshot"]),
-                         ("scheduled", "Start with the summary", 2.5))
+                         ("scheduled", "new_material", 2.5))
         self.assertEqual(created[1]["artifact_id"], "quiz-1")
         self.assertNotIn("topic_id", created[0])
 
@@ -239,6 +239,8 @@ class StudyPlanPersistenceTests(unittest.TestCase):
             session("doc-a", duration=61),
             session("doc-a", duration=30.5),
             session("doc-a", start="tomorrow"),
+            session("doc-a", reason="strong_quiz_score"),  # a state code, not a scheduling reason
+            session("doc-a", reason="Moved by user"),
         ]
         for bad in bad_sessions:
             with self.assertRaises(ValueError, msg=bad):
@@ -253,7 +255,7 @@ class StudyPlanPersistenceTests(unittest.TestCase):
         sess = store.list_sessions(self.alice)[0]
         for status in store.SESSION_STATUSES:
             self.assertEqual(store.update_session(self.alice, sess["session_id"], {"status": status})["status"], status)
-        for changes in ({"status": "paused"}, {"duration_minutes": 90}, {"scheduled_end": "2026-09-24T17:00:00"}, {}):
+        for changes in ({"status": "paused"}, {"reason": "study_started"}, {"duration_minutes": 90}, {"scheduled_end": "2026-09-24T17:00:00"}, {}):
             with self.assertRaises(ValueError):
                 store.update_session(self.alice, sess["session_id"], changes)
 
@@ -271,7 +273,7 @@ class StudyPlanPersistenceTests(unittest.TestCase):
 
         moved = store.update_session(self.alice, second["session_id"], {
             "scheduled_start": "2026-09-27T09:00:00", "scheduled_end": "2026-09-27T09:30:00",
-            "duration_minutes": 30, "status": "rescheduled", "reason": "Moved by user",
+            "duration_minutes": 30, "status": "rescheduled", "reason": "rescheduled",
         })
         self.assertEqual((moved["scheduled_start"], moved["duration_minutes"], moved["status"]),
                          ("2026-09-27T09:00:00", 30, "rescheduled"))
