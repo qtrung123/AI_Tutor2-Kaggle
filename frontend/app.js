@@ -422,12 +422,14 @@ if (plannerView) {
   </aside>
   <section class="pcal-main" aria-label="Study calendar">
     <div class="pcal-toolbar">
-      <button class="pcal-button" id="pcal-today" type="button">Today</button>
-      <div class="pcal-nav"><button class="pcal-icon-button" id="pcal-prev" type="button" aria-label="Previous week">‹</button><button class="pcal-icon-button" id="pcal-next" type="button" aria-label="Next week">›</button></div>
-      <h2 class="pcal-range" id="pcal-range"></h2>
-      <span class="pcal-view-pill">Week</span>
+      <div class="pcal-toolbar-row">
+        <button class="pcal-button" id="pcal-today" type="button">Today</button>
+        <div class="pcal-nav"><button class="pcal-icon-button" id="pcal-prev" type="button" aria-label="Previous week">‹</button><button class="pcal-icon-button" id="pcal-next" type="button" aria-label="Next week">›</button></div>
+        <h2 class="pcal-range" id="pcal-range"></h2>
+        <span class="pcal-view-pill">Week</span>
+        <div class="pcal-actions"><button class="pcal-button pcal-secondary" id="pcal-auto-plan" type="button">Auto Plan</button><button class="primary-button pcal-accept" id="pcal-accept" type="button">Accept plan</button></div>
+      </div>
       <span class="pcal-status" id="pcal-status" aria-live="polite"></span>
-      <div class="pcal-actions"><button class="pcal-button" id="pcal-auto-plan" type="button">Auto Plan</button><button class="primary-button pcal-accept" id="pcal-accept" type="button">Accept plan</button></div>
     </div>
     <div class="pcal-notice" id="pcal-notice" role="status" hidden></div>
     <div class="pcal-scroll" id="pcal-scroll">
@@ -6138,21 +6140,44 @@ function pcalRenderMaterials() {
     const meta = pcalEl("div", "pcal-material-meta");
     const stateKey = material.learning_state || "new";
     meta.appendChild(pcalEl("span", `pcal-pill pcal-pill--${stateKey}`, PLANNER_LEARNING_STATE_LABELS[stateKey] || stateKey));
-    const deadline = pcalEl("label", "pcal-deadline");
-    deadline.classList.toggle("is-set", Boolean(material.deadline));
-    deadline.classList.toggle("is-past", Boolean(material.deadline && material.deadline < today));
-    deadline.appendChild(pcalEl("span", "pcal-deadline-caption", material.deadline ? "Due" : "Deadline"));
-    const input = document.createElement("input");
-    input.type = "date";
-    input.value = material.deadline || "";
-    input.setAttribute("aria-label", `Deadline for ${title}`);
+    const { control: deadline, input } = pcalDeadlineControl(material.deadline || "", `Deadline for ${title}`, today);
     input.addEventListener("change", () => pcalSetDeadline(material, input));
-    deadline.appendChild(input);
     meta.appendChild(deadline);
     item.append(top, meta);
     pcal.materials.appendChild(item);
   });
   pcal.newPlan.hidden = !(plannerPlan && (plannerSessions.length || plannerHistorySessions.length));
+}
+
+function pcalDeadlineControl(value, label, today) {
+  // A quiet text button ("Add deadline" / "Due Oct 2") over the native date picker.
+  const control = pcalEl("span", "pcal-deadline");
+  const button = pcalEl("button", "pcal-deadline-button");
+  button.type = "button";
+  const input = document.createElement("input");
+  input.type = "date";
+  input.value = value;
+  input.className = "pcal-deadline-input";
+  input.setAttribute("aria-label", label);
+  const refresh = () => {
+    const set = Boolean(input.value);
+    button.textContent = set
+      ? `Due ${new Date(`${input.value}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`
+      : "Add deadline";
+    control.classList.toggle("is-set", set);
+    control.classList.toggle("is-past", set && input.value < today);
+  };
+  button.setAttribute("aria-label", label);
+  button.addEventListener("click", () => {
+    try {
+      input.showPicker();
+    } catch (error) {
+      input.focus();
+    }
+  });
+  refresh();
+  control.append(button, input);
+  return { control, input, refresh };
 }
 
 function pcalWeekItems(fromKey, untilKey) {
@@ -6300,9 +6325,11 @@ function pcalRenderGrid() {
     column.classList.toggle("is-today", key === todayKey);
     column.classList.toggle("is-past", key < todayKey);
     column.setAttribute("aria-label", plannerDayLabel(key));
-    pcalAvailabilityFor(key, weekday).forEach((slot) => column.appendChild(pcalAvailabilityBlock(slot, key)));
-    items.filter((item) => item.session.scheduled_start.slice(0, 10) === key)
-      .forEach((item) => column.appendChild(pcalEventBlock(item)));
+    const dayItems = items.filter((item) => item.session.scheduled_start.slice(0, 10) === key);
+    const busy = dayItems.map((item) => [plannerToMinutes(item.session.scheduled_start.slice(11, 16)),
+      plannerToMinutes(item.session.scheduled_end.slice(11, 16))]);
+    pcalAvailabilityFor(key, weekday).forEach((slot) => column.appendChild(pcalAvailabilityBlock(slot, key, busy)));
+    dayItems.forEach((item) => column.appendChild(pcalEventBlock(item)));
     if (key === todayKey) {
       const line = pcalEl("div", "pcal-now");
       line.style.top = `${(now.getHours() * 60 + now.getMinutes()) * PCAL_MINUTE_PX}px`;
@@ -6330,7 +6357,7 @@ function pcalPlace(element, startMinute, endMinute) {
   element.style.height = `${Math.max(12, (endMinute - startMinute) * PCAL_MINUTE_PX - 2)}px`;
 }
 
-function pcalAvailabilityBlock(slot, dateKey) {
+function pcalAvailabilityBlock(slot, dateKey, busy = []) {
   const start = plannerToMinutes(slot.start_at), end = plannerToMinutes(slot.end_at);
   const block = pcalEl("div", "pcal-avail");
   block.dataset.start = slot.start_at;
@@ -6341,6 +6368,10 @@ function pcalAvailabilityBlock(slot, dateKey) {
   block.setAttribute("aria-label", `Available ${slot.start_at}–${slot.end_at}${slot.is_recurring ? ", every week" : ""}`);
   pcalPlace(block, start, end);
   block.classList.toggle("is-short", end - start < 60);
+  // The label goes where no session covers it: the bottom of the window, else the top, else none.
+  const free = (from, to) => !busy.some(([s, e]) => s < to && e > from);
+  const room = 30;
+  block.classList.add(free(end - room, end) ? "label-bottom" : free(start, start + room) ? "label-top" : "label-none");
   block.append(pcalEl("span", "pcal-avail-label", "Available"),
     pcalEl("span", "pcal-avail-time", `${slot.start_at}–${slot.end_at} · ${plannerFormatDuration(end - start)}`));
   block.addEventListener("pointerdown", (event) => {
@@ -6566,13 +6597,9 @@ function pcalRenderSheet() {
     row.dataset.documentId = doc.id;
     const name = pcalEl("strong", "pcal-sheet-title", doc.title);
     name.title = doc.title;
-    const deadline = pcalEl("label", "pcal-deadline");
-    deadline.appendChild(pcalEl("span", "pcal-deadline-caption", "Deadline"));
-    const input = document.createElement("input");
-    input.type = "date";
+    const { control: deadline, input, refresh } = pcalDeadlineControl("", `Deadline for ${doc.title} (optional)`, today);
     input.min = today;
-    input.setAttribute("aria-label", `Deadline for ${doc.title} (optional)`);
-    deadline.appendChild(input);
+    input.addEventListener("change", refresh);
     const add = pcalEl("button", "pcal-button pcal-sheet-add", "Add");
     add.type = "button";
     add.setAttribute("aria-label", `Add ${doc.title}`);
@@ -6643,7 +6670,7 @@ function pcalRenderQueue() {
   if (!entries.length) {
     const empty = !plannerMaterials.length ? "Your study sessions will appear here."
       : !plannerAvailability.length ? "Mark some free time to see suggested sessions."
-        : plannerPreviewing ? "Finding the best times…" : "Nothing to study right now.";
+        : plannerPreviewing ? "Finding the best times…" : "Nothing waiting. You’re all set.";
     pcal.queue.appendChild(pcalEl("li", "pcal-queue-empty", empty));
   }
 }
@@ -7071,6 +7098,9 @@ document.addEventListener("pointercancel", () => {
   if (plannerDrag) plannerFinishDrag();
 });
 // Desktop calendar workspace.
+pcal.scroll?.addEventListener("scroll", () => {
+  pcal.head.classList.toggle("is-scrolled", pcal.scroll.scrollTop > 2);
+}, { passive: true });
 pcal.today?.addEventListener("click", () => {
   plannerCalWeekStart = plannerMondayOf(plannerNow());
   renderPlannerWorkspace();
