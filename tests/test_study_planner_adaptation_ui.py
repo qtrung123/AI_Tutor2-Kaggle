@@ -1,7 +1,8 @@
 """Real-browser tests for adaptive replanning UX (Phase 5B2; headless Chrome, mocked API):
 small proposals are applied automatically with a short note; large ones open a review panel
 (Accept -> apply with confirm=true, Keep current plan -> nothing written). "Now" is pinned to
-Thu 2026-09-24 12:00 browser-local. Runs at desktop (1280px) and phone (390px)."""
+Thu 2026-09-24 12:00 browser-local. Runs at phone width (390px): desktop (>=1024px) reviews large
+proposals on the calendar instead (tests/test_study_planner_adaptation_calendar_ui.py)."""
 
 import unittest
 
@@ -33,6 +34,7 @@ window.fetch = async (input, init = {}) => {
                 reason_code: "rescheduled", message: "Replace the skipped quiz session for \"Statistics\".", artifact_id: null,
                 replaces_session_id: trigger.session_id || null}],
        moved: [], cancelled: [], significance: "small"}
+    : P.largeProposal ? JSON.parse(JSON.stringify(P.largeProposal))
     : {added: [{document_id: "mkt.pdf", activity_type: "summary", scheduled_start: "2026-09-24T18:00:00",
                 scheduled_end: "2026-09-24T18:45:00", duration_minutes: 45, reason_code: "rescheduled",
                 message: "Replace the missed summary session for \"Marketing\".", artifact_id: null, replaces_session_id: trigger.session_id}],
@@ -247,13 +249,6 @@ class AdaptationUiAssertions:
 
     def test_no_horizontal_overflow(self):
         self.assertTrue(all(self.out["overflow"].values()), self.out["overflow"])
-
-
-@unittest.skipUnless(find_chrome(), "Chrome is not installed")
-class AdaptationUiDesktopTests(AdaptationUiAssertions, unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.out = run_at_width(1280, 900)
 
 
 @unittest.skipUnless(find_chrome(), "Chrome is not installed")

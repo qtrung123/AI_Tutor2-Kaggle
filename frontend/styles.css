@@ -3343,6 +3343,24 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-event--completed .pcal-event-title::before{content:"\2713  "}
 .pcal-event--skipped{background:#fff;border:1px dashed #d4d8de;color:#8b939c}
 .pcal-event--skipped .pcal-event-title{text-decoration:line-through;text-decoration-color:rgba(139,147,156,.6)}
+/* adaptation review on the calendar: proposals are ghosts; sessions they move or drop stay, muted */
+.pcal-review{display:flex;align-items:center;gap:10px;min-width:0;margin-top:4px;padding:4px 5px 4px 12px;border-radius:8px;background:var(--pcal-ghost);border:1px dashed var(--pcal-ghost-edge);color:var(--pcal-ghost-ink);font-size:12.5px}
+.pcal-review[hidden],.pcal-status-line[hidden]{display:none}
+.pcal-review-text{display:flex;align-items:baseline;gap:6px;min-width:0;overflow:hidden;white-space:nowrap}
+.pcal-review-count{font-weight:700;flex:none}
+.pcal-review-elsewhere{color:var(--pcal-ink-2);overflow:hidden;text-overflow:ellipsis}
+.pcal-review-actions{display:flex;gap:6px;flex:none;margin-left:auto}
+.pcal-review-actions button{white-space:nowrap}
+.pcal-review-actions .primary-button{width:auto;padding:5px 12px;font-size:12.5px;border-radius:8px}
+.pcal-event--proposed{background:var(--pcal-ghost);border:1.5px dashed var(--pcal-ghost-edge);color:var(--pcal-ghost-ink);z-index:4}
+.pcal-event--proposed:hover{background:#eef0ff;border-color:var(--session-accent)}
+.pcal-event-tag{align-self:flex-start;flex:none;padding:0 5px;border-radius:4px;background:#e4e7ff;color:var(--pcal-ghost-ink);font-size:9.5px;font-weight:700;letter-spacing:.04em;line-height:14px;text-transform:uppercase;white-space:nowrap}
+.pcal-event.is-compact .pcal-event-tag{align-self:center}
+.pcal-event.pcal-change--moving,.pcal-event.pcal-change--cancelled{background:#f3f4f8;border:1px solid #dfe2ea;color:#6b737d;box-shadow:none}
+.pcal-event.pcal-change--moving:hover,.pcal-event.pcal-change--cancelled:hover{border-color:#c9cdd8}
+.pcal-change--moving .pcal-event-tag,.pcal-change--cancelled .pcal-event-tag{background:#e6e8ee;color:#5b6478}
+.pcal-change--cancelled .pcal-event-title,.pcal-change--cancelled .pcal-event-meta{text-decoration:line-through;text-decoration-color:rgba(107,115,125,.55)}
+.pcal-kind--change-moving,.pcal-kind--change-cancelled{background:var(--pcal-line-soft);color:var(--pcal-ink-2)}
 .pcal-now{position:absolute;left:-1px;right:0;height:2px;margin-top:-1px;background:#e5484d;z-index:5;pointer-events:none}
 .pcal-now::before{content:"";position:absolute;left:-5px;top:-4px;width:10px;height:10px;border-radius:50%;background:#e5484d}
 .pcal-drag{position:absolute;left:2px;right:2px;z-index:4;box-sizing:border-box;border:1px dashed var(--pcal-avail-ink);background:rgba(181,220,194,.35);border-radius:4px;color:var(--pcal-avail-ink);font-size:11px;font-weight:600;padding:2px 6px;pointer-events:none}

@@ -430,6 +430,7 @@ if (plannerView) {
         <div class="pcal-actions"><button class="pcal-button pcal-secondary" id="pcal-auto-plan" type="button">Auto Plan</button><button class="primary-button pcal-accept" id="pcal-accept" type="button">Accept plan</button></div>
       </div>
       <div class="pcal-status-line"><span class="pcal-status" id="pcal-status" aria-live="polite"></span><button class="pcal-explain" id="pcal-explain" type="button" aria-haspopup="dialog" hidden>How this plan was built</button></div>
+      <div class="pcal-review" id="pcal-review" role="region" aria-label="Suggested schedule changes" hidden></div>
     </div>
     <div class="pcal-notice" id="pcal-notice" role="status" hidden></div>
     <div class="pcal-scroll" id="pcal-scroll">
@@ -482,6 +483,7 @@ const pcal = {
   range: document.getElementById("pcal-range"),
   status: document.getElementById("pcal-status"),
   explain: document.getElementById("pcal-explain"),
+  review: document.getElementById("pcal-review"),
   autoPlan: document.getElementById("pcal-auto-plan"),
   accept: document.getElementById("pcal-accept"),
   notice: document.getElementById("pcal-notice"),
@@ -5421,6 +5423,8 @@ async function plannerSessionAction(session, kind, button, group) {
 // Small proposals are applied right away with a short note; large ones wait for the learner.
 
 const plannerAdaptingPlans = new Set();   // plan ids with an adaptation request in flight
+let plannerAdaptReview = null;   // desktop: a large proposal shown on the calendar {planId, trigger, proposal, busy, jump}
+let plannerAdaptStale = null;    // desktop: Accept found a newer plan {planId, trigger}; a fresh check is offered
 
 function plannerDocumentTitle(documentId) {
   return indexedDocuments.find((item) => item.id === documentId)?.title || documentId;
@@ -5472,13 +5476,21 @@ async function plannerAdapt(planId, trigger, { prefix = "", quietErrors = true }
   } finally {
     plannerAdaptingPlans.delete(planId);
   }
+  // A newer answer for this plan replaces any proposal still waiting on the calendar.
+  if (result && plannerAdaptReview?.planId === planId) plannerAdaptReview = null;
+  if (result && plannerAdaptStale?.planId === planId) plannerAdaptStale = null;
   if (result?.applied) {
     showToast(prefix ? `${prefix}. ${plannerAdaptationSummary(result)}` : plannerAdaptationSummary(result));
     await plannerRefreshSchedules();
   } else if (result?.requires_confirmation) {
     if (prefix) showToast(prefix);
-    plannerShowAdaptationReview(planId, trigger, result);
-  } else if (prefix) showToast(prefix);
+    // Desktop reviews the proposal on the calendar itself; smaller screens keep the review panel.
+    if (plannerIsDesktop()) plannerStartCalendarReview(planId, trigger, result, { prefix });
+    else plannerShowAdaptationReview(planId, trigger, result);
+  } else {
+    if (prefix) showToast(prefix);
+    if (result && plannerIsDesktop()) renderPlannerWorkspace();
+  }
   return result;
 }
 
@@ -5625,6 +5637,216 @@ function plannerShowAdaptationReview(planId, trigger, proposal) {
     }
   });
   accept.focus();
+}
+
+// -- desktop: the calendar is the review surface --------------------------------
+// A large proposal is drawn onto the week (new and moved-to sessions as ghosts; moving and
+// no-longer-needed sessions muted in place). Nothing is written until Accept changes.
+
+function plannerStartCalendarReview(planId, trigger, proposal, { prefix = "" } = {}) {
+  plannerCloseAdaptationReview();
+  plannerAdaptStale = null;
+  plannerAdaptReview = { planId, trigger, proposal, busy: false, jump: true };
+  const count = plannerReviewChanges().length;
+  const text = `${count} schedule change${count === 1 ? "" : "s"} suggested`;
+  if (state.page === "planner") {
+    renderPlannerWorkspace();
+    return;
+  }
+  // A session action elsewhere (Home) opens the calendar to show where things go; a finished quiz
+  // leaves the learner where they are and the proposal waits in the Planner.
+  if (trigger.kind === "quiz_completed") {
+    showToast(`${text}. Review them in Study Planner.`);
+    return;
+  }
+  setPage("planner");
+  showToast(prefix ? `${prefix}. ${text}.` : `${text}.`);
+}
+
+function plannerReviewChanges(review = plannerAdaptReview) {
+  // Every proposed change with the calendar dates it touches (a move touches two).
+  if (!review) return [];
+  const { added = [], moved = [], cancelled = [] } = review.proposal;
+  return [
+    ...added.map((item) => ({ type: "added", item, starts: [item.scheduled_start] })),
+    ...moved.map((item) => ({ type: "moved", item, starts: [item.to_start, item.from_start] })),
+    ...cancelled.map((item) => ({ type: "cancelled", item, starts: [item.scheduled_start] })),
+  ];
+}
+
+function pcalReviewActive() {
+  return Boolean(plannerAdaptReview && plannerPlan && plannerAdaptReview.planId === plannerPlan.plan_id);
+}
+
+function pcalDateOf(iso) {
+  const [year, month, day] = iso.slice(0, 10).split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function pcalReviewJump() {
+  // First view of a proposal: when none of it is on the visible week, open the week of the first change.
+  if (!pcalReviewActive() || !plannerAdaptReview.jump || state.page !== "planner") return;
+  plannerAdaptReview.jump = false;
+  const dates = pcalWeekDates();
+  const fromKey = plannerDateKey(dates[0]), untilKey = plannerDateKey(dates[6]);
+  const starts = plannerReviewChanges().flatMap((change) => change.starts);
+  if (!starts.length || starts.some((iso) => iso.slice(0, 10) >= fromKey && iso.slice(0, 10) <= untilKey)) return;
+  plannerCalWeekStart = plannerMondayOf(pcalDateOf(starts.sort()[0]));
+}
+
+function pcalReviewElsewhereText(fromKey, untilKey) {
+  // "1 change next week": a pointer only -- the normal week controls get there.
+  const visible = (iso) => iso.slice(0, 10) >= fromKey && iso.slice(0, 10) <= untilKey;
+  const away = plannerReviewChanges().filter((change) => !change.starts.some(visible));
+  if (!away.length) return "";
+  const monday = plannerMondayOf(pcalDateOf(fromKey)).getTime();
+  const offsets = new Set(away.map((change) =>
+    Math.round((plannerMondayOf(pcalDateOf(change.starts[0])).getTime() - monday) / (7 * 86400000))));
+  const count = `${away.length} change${away.length === 1 ? "" : "s"}`;
+  if (offsets.size > 1) return `${count} in other weeks`;
+  const [offset] = offsets;
+  if (offset === 1) return `${count} next week`;
+  if (offset === -1) return `${count} last week`;
+  return offset > 0 ? `${count} in ${offset} weeks` : `${count} in an earlier week`;
+}
+
+function pcalRenderReviewBar(fromKey, untilKey) {
+  const bar = pcal.review;
+  if (!bar) return;
+  const active = pcalReviewActive();
+  bar.hidden = !active;
+  bar.innerHTML = "";
+  if (!active) return;
+  const review = plannerAdaptReview;
+  const count = plannerReviewChanges().length;
+  const text = pcalEl("span", "pcal-review-text");
+  text.appendChild(pcalEl("strong", "pcal-review-count", `${count} schedule change${count === 1 ? "" : "s"} suggested`));
+  const elsewhere = pcalReviewElsewhereText(fromKey, untilKey);
+  if (elsewhere) text.appendChild(pcalEl("span", "pcal-review-elsewhere", `· ${elsewhere}`));
+  const actions = pcalEl("div", "pcal-review-actions");
+  const keep = pcalEl("button", "pcal-button pcal-secondary", "Keep current plan");
+  keep.type = "button";
+  keep.id = "pcal-review-keep";
+  const accept = pcalEl("button", "primary-button pcal-accept", review.busy ? "Applying…" : "Accept changes");
+  accept.type = "button";
+  accept.id = "pcal-review-accept";
+  keep.disabled = accept.disabled = review.busy;
+  keep.addEventListener("click", plannerKeepCalendarReview);
+  accept.addEventListener("click", plannerAcceptCalendarReview);
+  actions.append(keep, accept);
+  bar.append(text, actions);
+}
+
+function plannerKeepCalendarReview() {
+  if (!plannerAdaptReview || plannerAdaptReview.busy) return;
+  plannerAdaptReview = null;   // nothing is written
+  renderPlannerWorkspace();
+  showToast("Kept your current plan");
+}
+
+async function plannerAcceptCalendarReview() {
+  const review = plannerAdaptReview;
+  if (!review || review.busy) return;   // one apply per click burst
+  review.busy = true;
+  pcalClosePopover();
+  pcalRenderToolbar();
+  try {
+    const result = await plannerRequest(`${PLANNER_PLANS_API_URL}/${encodeURIComponent(review.planId)}/adaptation/apply`, {
+      method: "POST", body: { trigger: review.trigger, utc_offset_minutes: plannerUtcOffsetMinutes(), confirm: true },
+    });
+    if (plannerAdaptReview === review) plannerAdaptReview = null;
+    showToast(result.applied ? plannerAdaptationSummary(result) : "Your plan is already up to date");
+    await plannerRefreshSchedules();
+  } catch (failure) {
+    if (plannerAdaptReview !== review) return;
+    if (failure.status === 409) {
+      // The plan changed since this proposal: drop it, show the saved schedule, offer a fresh look.
+      plannerAdaptReview = null;
+      plannerAdaptStale = { planId: review.planId, trigger: review.trigger };
+      renderPlannerWorkspace();
+      await plannerRefreshSchedules();
+      return;
+    }
+    review.busy = false;
+    pcalRenderToolbar();
+    showToast("Could not update your plan right now. Please try again.");
+  }
+}
+
+async function plannerRecheckAfterStale(button) {
+  const stale = plannerAdaptStale;
+  if (!stale) return;
+  button.disabled = true;
+  plannerAdaptStale = null;
+  const result = await plannerAdapt(stale.planId, stale.trigger);
+  if (result && !result.applied && !result.requires_confirmation) showToast("No changes needed. Your plan is up to date.");
+  if (!result) pcalRenderNotice();
+}
+
+// Why a proposed change -- in the learner's words, built from the engine's own reason.
+function plannerChangeWhy(type, item) {
+  const message = item.message || "";
+  if (type === "added") {
+    const replaced = message.match(/^Replace the (missed|skipped) /);
+    if (replaced) return `Replaces the ${replaced[1]} ${plannerActivityWord(item.activity_type)} session.`;
+    return PCAL_REASON_TEXT[item.reason_code] || plannerAdaptationReason(message);
+  }
+  if (/ no longer fits/.test(message)) {
+    return / before \d{4}-\d{2}-\d{2}\.$/.test(message)
+      ? "It no longer fits in your available time before the deadline."
+      : "It no longer fits in your available time.";
+  }
+  const why = (message.match(/^(?:Move|Cancel) the .*? session for ".*?"(?: to \d{4}-\d{2}-\d{2} \d{2}:\d{2})?: (.*?)(?:, it is no longer needed)?\.$/) || [])[1];
+  let text = why || "";
+  const score = text.match(/^latest quiz scored ([\d.]+)%$/);
+  const deadline = text.match(/^the deadline is now (\d{4}-\d{2}-\d{2})$/);
+  if (score) text = `Your latest quiz scored ${score[1]}%.`;
+  else if (deadline) text = `The deadline is now ${plannerDayLabel(deadline[1])}.`;
+  else if (text) text = `${text.charAt(0).toUpperCase()}${text.slice(1)}.`;
+  else text = plannerAdaptationReason(message);
+  if (type === "cancelled") return `${text.replace(/\.$/, "")} — this session is no longer needed.`;
+  return text;
+}
+
+const PCAL_CHANGE_LABELS = { added: "New", moved: "Moved here", moving: "Moving", cancelled: "No longer needed" };
+const PCAL_CHANGE_KIND_LABELS = {
+  added: "Suggested new session", moved: "Suggested new time", moving: "Suggested move", cancelled: "Suggested removal",
+};
+
+function pcalDocumentTitle(documentId) {
+  const saved = [...plannerSessionsById.values()].find((session) => session.document_id === documentId && session.document_title);
+  return saved?.document_title || plannerDocumentTitle(documentId);
+}
+
+function pcalOpenChangePopover(change, session, block) {
+  const { type, item } = change;
+  const title = session.document_title || pcalDocumentTitle(session.document_id);
+  pcalShowPopover(block, `${PCAL_CHANGE_KIND_LABELS[type]}: ${pcalActivity(session.activity_type)} · ${title}`, (popover) => {
+    const content = pcalEl("div", "pcal-popover-body");
+    content.append(pcalEl("span", `pcal-kind pcal-kind--change-${type}`, PCAL_CHANGE_KIND_LABELS[type]),
+      pcalEl("h4", "pcal-popover-title", title),
+      pcalEl("p", "pcal-popover-activity", `${pcalActivity(session.activity_type)} · ${plannerFormatDuration(session.duration_minutes)}`));
+    const line = (caption, text) => {
+      const row = pcalEl("p", "pcal-popover-when");
+      row.append(pcalEl("span", "pcal-popover-caption", caption), document.createTextNode(text));
+      content.appendChild(row);
+    };
+    const span = (start, end) => `${plannerDayLabel(start.slice(0, 10))} · ${start.slice(11, 16)}–${end.slice(11, 16)}`;
+    if (type === "added") line("Proposed time", span(item.scheduled_start, item.scheduled_end));
+    if (type === "moved" || type === "moving") {
+      line("Proposed time", span(item.to_start, item.to_end));
+      line("Currently", span(item.from_start, item.from_end));
+    }
+    if (type === "cancelled") line("Currently", span(session.scheduled_start, session.scheduled_end));
+    const why = plannerChangeWhy(type === "moving" ? "moved" : type, item);
+    if (why) {
+      const reason = pcalEl("p", "pcal-popover-reason");
+      reason.append(pcalEl("span", "pcal-popover-caption", "Why this change?"), document.createTextNode(` ${why}`));
+      content.appendChild(reason);
+    }
+    content.appendChild(pcalEl("p", "pcal-popover-hint", "Nothing changes until you accept."));
+    popover.appendChild(content);
+  });
 }
 
 async function plannerRefreshSchedules() {
@@ -6141,6 +6363,7 @@ async function pcalStartNewPlan() {
 
 function renderPlannerWorkspace() {
   if (!plannerWorkspace || plannerWorkspace.hidden) return;
+  pcalReviewJump();
   pcalClosePopover();
   pcalRenderMaterials();
   pcalRenderToolbar();
@@ -6261,10 +6484,29 @@ function pcalWeekItems(fromKey, untilKey) {
   };
   const items = plannerHistorySessions.filter(inWeek).map((session) => ({ kind: session.status, session }));
   if (plannerHasLivePlan()) {
+    const review = pcalReviewActive() ? plannerAdaptReview.proposal : null;
     plannerSessions.filter(inWeek).forEach((session) => {
       const kind = session.status === "in_progress" ? "active" : plannerIsOverdue(session) ? "overdue" : "confirmed";
-      items.push({ kind, session });
+      // Under review, a session the proposal moves or drops stays where it is, marked.
+      const moving = review?.moved.find((item) => item.session_id === session.session_id);
+      const dropping = review?.cancelled.find((item) => item.session_id === session.session_id);
+      const change = moving ? { type: "moving", item: moving } : dropping ? { type: "cancelled", item: dropping } : null;
+      items.push({ kind, session, change });
     });
+    if (review) {
+      const ghost = (item, start, end, minutes) => ({ document_id: item.document_id, document_title: pcalDocumentTitle(item.document_id),
+        activity_type: item.activity_type, scheduled_start: start, scheduled_end: end, duration_minutes: minutes, status: "proposed" });
+      review.added.forEach((item) => {
+        const session = ghost(item, item.scheduled_start, item.scheduled_end, item.duration_minutes);
+        if (inWeek(session)) items.push({ kind: "proposed", session, change: { type: "added", item } });
+      });
+      review.moved.forEach((item) => {
+        const minutes = plannerSessionsById.get(item.session_id)?.duration_minutes
+          ?? plannerToMinutes(item.to_end.slice(11, 16)) - plannerToMinutes(item.to_start.slice(11, 16));
+        const session = ghost(item, item.to_start, item.to_end, minutes);
+        if (inWeek(session)) items.push({ kind: "proposed", session, change: { type: "moved", item } });
+      });
+    }
   } else if (plannerPreview) {
     plannerPreview.sessions.filter(inWeek).forEach((session) => items.push({ kind: "suggested", session }));
   }
@@ -6310,6 +6552,8 @@ function pcalRenderToolbar() {
   pcal.accept.hidden = live || !plannerPreview?.sessions.length;
   pcal.accept.disabled = plannerBusy || plannerPreviewing;
   pcal.accept.textContent = plannerBusy ? "Saving…" : "Accept plan";
+  pcalRenderReviewBar(plannerDateKey(first), plannerDateKey(last));
+  pcal.status.parentElement.hidden = pcalReviewActive();   // the review bar takes the status line's place
   pcalRenderNotice();
 }
 
@@ -6319,7 +6563,14 @@ function pcalRenderNotice() {
   notice.innerHTML = "";
   notice.dataset.tone = "";
   let text = "";
-  if (plannerHasLivePlan()) text = "";
+  if (plannerAdaptStale && plannerAdaptStale.planId === plannerPlan?.plan_id) {
+    text = "Your plan changed. Review the latest schedule.";
+    const action = pcalEl("button", "pcal-notice-action", "Check for new suggestions");
+    action.type = "button";
+    action.id = "pcal-review-recheck";
+    action.addEventListener("click", () => plannerRecheckAfterStale(action));
+    notice.append(pcalEl("span", "", text), action);
+  } else if (plannerHasLivePlan()) text = "";
   else if (!plannerMaterials.length) {
     text = "Add the materials you want to study.";
     const action = pcalEl("button", "pcal-notice-action", "Add materials");
@@ -6485,7 +6736,7 @@ function pcalAvailabilityBlock(slot, dateKey, busy = []) {
   return block;
 }
 
-function pcalEventBlock({ kind, session }) {
+function pcalEventBlock({ kind, session, change = null }) {
   const start = plannerToMinutes(session.scheduled_start.slice(11, 16));
   const end = plannerToMinutes(session.scheduled_end.slice(11, 16));
   const block = pcalEl("button", `pcal-event pcal-event--${kind} pcal-activity--${session.activity_type}`);
@@ -6494,14 +6745,25 @@ function pcalEventBlock({ kind, session }) {
   block.dataset.start = session.scheduled_start;
   if (session.session_id) block.dataset.sessionId = session.session_id;
   const title = session.document_title || plannerDocumentTitle(session.document_id);
-  block.setAttribute("aria-label", `${PCAL_KIND_LABELS[kind]}: ${pcalActivity(session.activity_type)} · ${title}, ${pcalShortDay(session.scheduled_start.slice(0, 10))} ${pcalSessionTimes(session)}`);
+  const label = change ? PCAL_CHANGE_KIND_LABELS[change.type] : PCAL_KIND_LABELS[kind];
+  block.setAttribute("aria-label", `${label}: ${pcalActivity(session.activity_type)} · ${title}, ${pcalShortDay(session.scheduled_start.slice(0, 10))} ${pcalSessionTimes(session)}`);
   pcalPlace(block, start, end);
   block.classList.toggle("is-compact", end - start < 40);
+  if (change) {
+    // A proposed change: tagged, reviewable, not draggable until the learner decides.
+    block.classList.add("pcal-change", `pcal-change--${change.type}`);
+    block.dataset.change = change.type;
+    block.title = PCAL_CHANGE_LABELS[change.type];
+    // Short blocks keep the title readable: a glyph for ghosts; muted / struck styling says the rest.
+    const tag = end - start < 40 ? { added: "+", moved: "→" }[change.type]
+      : change.type === "added" ? `+ ${PCAL_CHANGE_LABELS.added}` : PCAL_CHANGE_LABELS[change.type];
+    if (tag) block.appendChild(pcalEl("span", "pcal-event-tag", tag));
+  }
   block.append(pcalEl("strong", "pcal-event-title", title),
     pcalEl("span", "pcal-event-meta", `${pcalActivity(session.activity_type)} · ${pcalSessionTimes(session)}`));
+  const source = change ? null : pcalMoveSourceFor(kind, session, block);
   block.addEventListener("pointerdown", (event) => {
     event.stopPropagation();
-    const source = pcalMoveSourceFor(kind, session, block);
     if (source) pcalBeginMove(event, source);
   });
   block.addEventListener("click", () => {
@@ -6509,9 +6771,10 @@ function pcalEventBlock({ kind, session }) {
       pcalSuppressClick = false;
       return;
     }
-    pcalOpenSessionPopover(kind, session, block);
+    if (change) pcalOpenChangePopover(change, session, block);
+    else pcalOpenSessionPopover(kind, session, block);
   });
-  if (pcalMoveSourceFor(kind, session, block)) block.classList.add("is-draggable");
+  if (source) block.classList.add("is-draggable");
   return block;
 }
 
