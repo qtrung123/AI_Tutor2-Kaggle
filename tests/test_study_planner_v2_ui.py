@@ -1,6 +1,7 @@
 """Real-browser tests for the document-centric Study Planner flow (headless Chrome, mocked API):
 Materials -> Deadlines -> Availability -> Preview -> Adjust -> Preview -> Confirm -> saved plan.
-Runs the same driver at desktop (1280px) and phone (390px). Skipped when Chrome is not installed.
+This step flow is the phone/tablet planner (desktop >=1024px plans on the calendar workspace, see
+tests/test_study_planner_calendar_ui.py), so it runs at phone width (390px). Skipped when Chrome is not installed.
 """
 
 import unittest
@@ -51,14 +52,20 @@ window.fetch = async (input, init = {}) => {
     {id: "pbi.pdf", title: "PowerBI", chunks: 12, topics: [], topic_schema_version: 2}]);
   if (p === "/api/planner/availability" && method === "GET") return json(P.availability);
   if (p === "/api/planner/availability" && method === "POST") { P.availability.push({...body, availability_id: "a" + P.availability.length}); return json(P.availability); }
-  if (p === "/api/planner/availability/remove") { P.availability = []; return json(P.availability); }
+  if (p === "/api/planner/availability/remove") {
+    // Erase exactly the given slot, or everything for a range that matches none (the step flow's erase mode).
+    const same = (slot) => slot.start_at === body.start_at && slot.end_at === body.end_at && Boolean(slot.is_recurring) === Boolean(body.is_recurring)
+      && (body.is_recurring ? slot.day_of_week === body.day_of_week : slot.date === body.date);
+    P.availability = P.availability.some(same) ? P.availability.filter((slot) => !same(slot)) : [];
+    return json(P.availability);
+  }
   if (p === "/api/planner/plans" && method === "GET") return json(P.plans);
   if (p === "/api/planner/plans" && method === "POST") { const plan = {plan_id: "plan-" + (P.plans.length + 1), title: body.title, status: "active"}; P.plans.push(plan); return json(plan, 201); }
   let m = p.match(/^\/api\/planner\/plans\/([^/]+)$/);
   if (m && method === "GET") return json({...P.plans.find((x) => x.plan_id === m[1]), materials: P.materials});
   if (m && method === "PATCH") { const plan = P.plans.find((x) => x.plan_id === m[1]); Object.assign(plan, body); return json(plan); }
   m = p.match(/^\/api\/planner\/plans\/([^/]+)\/materials$/);
-  if (m && method === "POST") { const mat = {material_id: "m-" + body.document_id, plan_id: m[1], document_id: body.document_id, deadline: null, familiarity: null, learning_state: "new"}; P.materials.push(mat); return json(mat, 201); }
+  if (m && method === "POST") { const mat = {material_id: "m-" + body.document_id, plan_id: m[1], document_id: body.document_id, deadline: body.deadline || null, familiarity: null, learning_state: "new"}; P.materials.push(mat); return json(mat, 201); }
   m = p.match(/^\/api\/planner\/plans\/([^/]+)\/materials\/([^/]+)$/);
   if (m && method === "PATCH") { const mat = P.materials.find((x) => x.material_id === m[2]); Object.assign(mat, body); return json(mat); }
   if (m && method === "DELETE") { P.materials = P.materials.filter((x) => x.material_id !== m[2]); return json({deleted: m[2]}); }
@@ -297,13 +304,6 @@ class PlannerFlowAssertions:
     def test_no_horizontal_overflow(self):
         self.assertTrue(self.out["overflow"])
         self.assertTrue(all(self.out["overflow"].values()), self.out["overflow"])
-
-
-@unittest.skipUnless(find_chrome(), "Chrome is not installed")
-class PlannerFlowDesktopTests(PlannerFlowAssertions, unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.out = run_at_width(1280, 900)
 
 
 @unittest.skipUnless(find_chrome(), "Chrome is not installed")

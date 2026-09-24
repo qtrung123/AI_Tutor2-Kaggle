@@ -1,6 +1,6 @@
 """Real-browser tests for the read-only Study Planner daily experience (headless Chrome, mocked
 v2 API): Home "Today's Study Plan" (Next up / Later today / next upcoming / empty), the
-confirmed plan's week view with previous/next navigation, Start/Resume (Phase 4B): one start
+confirmed plan's week (desktop: the calendar workspace; phone: the week list) with previous/next navigation, Start/Resume (Phase 4B): one start
 request per click burst, then the session's document opens on the mapped tool, and Complete /
 "Session not completed" -> Reschedule / Skip (Phase 4C) with Home + week refreshed afterwards. "Now" is pinned to Thu 2026-09-24 12:00
 in the browser's local time. Runs at desktop (1280px) and phone (390px). Skipped without Chrome.
@@ -103,7 +103,20 @@ const today = () => ({
 const noOverflow = () => document.documentElement.scrollWidth <= window.innerWidth + 1;
 const view = () => document.getElementById("planner-view");
 const visibleStep = () => [...view().querySelectorAll("[data-planner-step]")].find((s) => !s.hidden)?.dataset.plannerStep;
-const week = () => ({
+// Desktop (>=1024px) shows the plan on the calendar workspace; phone keeps the step flow's week list.
+const desktop = window.innerWidth >= 1024;
+const calendarEvents = () => [...document.querySelectorAll("#pcal-body .pcal-event")]
+  .sort((a, b) => a.dataset.start.localeCompare(b.dataset.start));
+const week = () => desktop ? ({
+  label: document.getElementById("pcal-range").textContent,
+  days: [...new Set(calendarEvents().map((e) => e.closest(".pcal-col").dataset.date))],
+  sessions: calendarEvents().map((e) => e.querySelector(".pcal-event-title").textContent),
+  kinds: calendarEvents().map((e) => e.dataset.kind),
+  status: document.getElementById("pcal-status").textContent,
+  queue: [...document.querySelectorAll("#pcal-queue .planner-session")].map((li) => li.querySelector("strong").textContent
+    + " " + li.querySelector(".planner-session-time").textContent),
+  wizardHidden: document.querySelector(".planner-shell").hidden,
+}) : ({
   step: visibleStep(),
   label: document.getElementById("planner-plan-week-label").textContent,
   days: [...document.querySelectorAll("#planner-plan-sessions .planner-day h4")].map((h) => h.childNodes[0].textContent),
@@ -165,12 +178,14 @@ const startButton = (title, activity) => [...document.querySelectorAll(".planner
   out.page = document.body.dataset.page;
   out.weekThis = week();
   out.overflow.plannerWeek = noOverflow();
-  document.getElementById("planner-plan-next-week").click(); await sleep(100);
+  const nextWeek = () => document.getElementById(desktop ? "pcal-next" : "planner-plan-next-week").click();
+  const prevWeek = () => document.getElementById(desktop ? "pcal-prev" : "planner-plan-prev-week").click();
+  nextWeek(); await sleep(100);
   out.weekNext = week();
-  document.getElementById("planner-plan-next-week").click(); await sleep(100);
+  nextWeek(); await sleep(100);
   out.weekEmpty = week();
   out.overflow.plannerEmptyWeek = noOverflow();
-  document.getElementById("planner-plan-prev-week").click(); document.getElementById("planner-plan-prev-week").click(); await sleep(100);
+  prevWeek(); prevWeek(); await sleep(100);
   out.weekBack = week();
 
   // Phase 4B: Start from the week view (quiz_retry -> Quiz tab).
@@ -267,8 +282,11 @@ const startButton = (title, activity) => [...document.querySelectorAll(".planner
 
   // The week keeps history (Completed / Skipped) and shows the moved session as current work.
   setPage("planner"); await sleep(500);
-  out.weekAfter = {running: describe(item("Statistics", "Quiz")), skipped: describe(item("Statistics", "Review")),
-    moved: describe(item("Marketing", "Summary")), days: week().days.length};
+  out.weekAfter = desktop
+    ? {calendar: calendarEvents().map((e) => [e.querySelector(".pcal-event-title").textContent, e.querySelector(".pcal-event-meta").textContent, e.dataset.kind]),
+       moved: describe(item("Marketing", "Summary")), queue: week().queue}
+    : {running: describe(item("Statistics", "Quiz")), skipped: describe(item("Statistics", "Review")),
+       moved: describe(item("Marketing", "Summary")), days: week().days.length};
   out.overflow.weekHistory = noOverflow();
   out.calls = P.calls;
   publish();
@@ -328,7 +346,6 @@ class TodayAndWeekAssertions:
                          ["View full schedule", "Complete", "Resume", "Start", "Start", "Reschedule", "Skip"])
         self.assertEqual(self.out["upcoming"]["buttons"], ["View full schedule", "Start", "Reschedule", "Skip"])
         self.assertEqual(self.out["none"]["buttons"], ["View full schedule"])
-        self.assertEqual((self.out["weekThis"]["inputs"], self.out["weekThis"]["actions"]), (0, ["Start"]))
 
     def test_start_from_week_opens_the_mapped_tool(self):
         week_start = self.out["weekStart"]
@@ -402,6 +419,16 @@ class TodayAndWeekAssertions:
         self.assertEqual((skipped["toast"], skipped["status"]), ("Session skipped", "skipped"))
         self.assertNotIn("Not completed", skipped["sections"])
 
+    def test_no_horizontal_overflow(self):
+        self.assertTrue(all(self.out["overflow"].values()), self.out["overflow"])
+
+
+class PhoneWeekListAssertions:
+    """The step flow's saved-plan week list (phone and tablet widths)."""
+
+    def test_week_list_actions(self):
+        self.assertEqual((self.out["weekThis"]["inputs"], self.out["weekThis"]["actions"]), (0, ["Start"]))
+
     def test_week_keeps_history_and_shows_moved_session(self):
         after = self.out["weekAfter"]
         self.assertEqual(after["running"], {"note": None, "status": "Completed", "buttons": []})
@@ -422,19 +449,49 @@ class TodayAndWeekAssertions:
         self.assertRegex(empty["empty"], r"^No study sessions this week\. Next session: .*12")
         self.assertEqual(self.out["weekBack"], this_week)
 
-    def test_no_horizontal_overflow(self):
-        self.assertTrue(all(self.out["overflow"].values()), self.out["overflow"])
+
+class DesktopCalendarWeekAssertions:
+    """Desktop: the confirmed plan opens straight into the week calendar (no step flow)."""
+
+    def test_week_view_and_navigation(self):
+        self.assertEqual(self.out["page"], "planner")
+        this_week = self.out["weekThis"]
+        self.assertTrue(this_week["wizardHidden"])
+        self.assertRegex(this_week["label"], r"21.*27")
+        self.assertEqual((len(this_week["days"]), this_week["sessions"], this_week["kinds"]), (1, ["Marketing"], ["confirmed"]))
+        self.assertEqual(this_week["status"], "1 planned session this week · 45m")
+        next_week = self.out["weekNext"]
+        self.assertRegex(next_week["label"], r"28.*4")
+        self.assertEqual((len(next_week["days"]), next_week["sessions"]), (2, ["Statistics", "Marketing"]))
+        empty = self.out["weekEmpty"]
+        self.assertEqual((empty["sessions"], empty["status"]), ([], "No sessions this week"))
+        self.assertRegex(empty["queue"][-1], r"^Marketing .*12 · 19:00–19:30$")   # the queue still shows what is next
+        self.assertEqual(self.out["weekBack"], this_week)
+
+    def test_queue_lists_upcoming_work_with_actions(self):
+        self.assertEqual(len(self.out["weekThis"]["queue"]), 4)
+        self.assertRegex(self.out["weekThis"]["queue"][0], r"^Marketing .*25 · 18:00–18:45$")
+
+    def test_week_keeps_history_and_shows_moved_session(self):
+        after = self.out["weekAfter"]
+        calendar = {(title, meta.split(" · ")[0]): kind for title, meta, kind in after["calendar"]}
+        self.assertEqual(calendar[("Statistics", "Quiz")], "completed")
+        self.assertEqual(calendar[("Statistics", "Review")], "skipped")
+        self.assertEqual(calendar[("PowerBI", "Flashcards")], "confirmed")   # later today
+        self.assertEqual(calendar[("Marketing", "Summary")], "confirmed")   # the moved session, on its new day
+        self.assertEqual(after["moved"], {"note": None, "status": None, "buttons": ["Start"]})
+        self.assertFalse(any(entry.startswith("Statistics") for entry in after["queue"]))   # history is not queued work
 
 
 @unittest.skipUnless(find_chrome(), "Chrome is not installed")
-class TodayAndWeekDesktopTests(TodayAndWeekAssertions, unittest.TestCase):
+class TodayAndWeekDesktopTests(TodayAndWeekAssertions, DesktopCalendarWeekAssertions, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.out = run_at_width(1280, 900)
 
 
 @unittest.skipUnless(find_chrome(), "Chrome is not installed")
-class TodayAndWeekPhoneTests(TodayAndWeekAssertions, unittest.TestCase):
+class TodayAndWeekPhoneTests(TodayAndWeekAssertions, PhoneWeekListAssertions, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.out = run_at_width(390, 844)

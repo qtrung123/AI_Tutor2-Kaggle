@@ -412,6 +412,39 @@ if (plannerView) {
     <div id="planner-plan-sessions" class="planner-day-list"></div>
     <div class="planner-step-actions"><button class="secondary-button" id="planner-new-plan" type="button">Start a new plan</button></div>
   </section>
+</div>
+<div class="pcal" id="planner-workspace" hidden>
+  <aside class="pcal-rail pcal-materials" aria-labelledby="pcal-materials-title">
+    <h3 class="pcal-rail-title" id="pcal-materials-title">Materials</h3>
+    <ul id="pcal-material-list" class="pcal-material-list"></ul>
+    <button class="pcal-add-button" id="pcal-add-materials" type="button" aria-haspopup="dialog">+ Add materials</button>
+    <button class="text-button pcal-new-plan" id="pcal-new-plan" type="button" hidden>Start a new plan</button>
+  </aside>
+  <section class="pcal-main" aria-label="Study calendar">
+    <div class="pcal-toolbar">
+      <button class="pcal-button" id="pcal-today" type="button">Today</button>
+      <div class="pcal-nav"><button class="pcal-icon-button" id="pcal-prev" type="button" aria-label="Previous week">‹</button><button class="pcal-icon-button" id="pcal-next" type="button" aria-label="Next week">›</button></div>
+      <h2 class="pcal-range" id="pcal-range"></h2>
+      <span class="pcal-view-pill">Week</span>
+      <span class="pcal-status" id="pcal-status" aria-live="polite"></span>
+      <div class="pcal-actions"><button class="pcal-button" id="pcal-auto-plan" type="button">Auto Plan</button><button class="primary-button pcal-accept" id="pcal-accept" type="button">Accept plan</button></div>
+    </div>
+    <div class="pcal-notice" id="pcal-notice" role="status" hidden></div>
+    <div class="pcal-scroll" id="pcal-scroll">
+      <div class="pcal-head" id="pcal-head"></div>
+      <div class="pcal-body" id="pcal-body"></div>
+    </div>
+  </section>
+  <aside class="pcal-rail pcal-queue" aria-labelledby="pcal-queue-title">
+    <div class="pcal-queue-head"><h3 class="pcal-rail-title" id="pcal-queue-title">Study queue</h3><span class="pcal-queue-count" id="pcal-queue-count"></span></div>
+    <p class="pcal-progress" id="pcal-progress" hidden></p>
+    <ol class="pcal-queue-list" id="pcal-queue"></ol>
+  </aside>
+  <section class="pcal-sheet" id="pcal-sheet" role="dialog" aria-labelledby="pcal-sheet-title" hidden>
+    <div class="pcal-sheet-head"><h3 id="pcal-sheet-title">Add materials</h3><button class="pcal-icon-button" id="pcal-sheet-close" type="button" aria-label="Close">×</button></div>
+    <ul class="pcal-sheet-list" id="pcal-sheet-list"></ul>
+  </section>
+  <div class="pcal-popover" id="pcal-popover" role="dialog" hidden></div>
 </div>`;
 }
 const plannerMaterialList = document.getElementById("planner-material-list");
@@ -436,6 +469,31 @@ const plannerNewPlanButton = document.getElementById("planner-new-plan");
 const plannerPlanWeekLabel = document.getElementById("planner-plan-week-label");
 const plannerPlanPrevWeekButton = document.getElementById("planner-plan-prev-week");
 const plannerPlanNextWeekButton = document.getElementById("planner-plan-next-week");
+const plannerShell = plannerView?.querySelector(".planner-shell");
+const plannerWorkspace = document.getElementById("planner-workspace");
+const pcal = {
+  materials: document.getElementById("pcal-material-list"),
+  addMaterials: document.getElementById("pcal-add-materials"),
+  newPlan: document.getElementById("pcal-new-plan"),
+  today: document.getElementById("pcal-today"),
+  prev: document.getElementById("pcal-prev"),
+  next: document.getElementById("pcal-next"),
+  range: document.getElementById("pcal-range"),
+  status: document.getElementById("pcal-status"),
+  autoPlan: document.getElementById("pcal-auto-plan"),
+  accept: document.getElementById("pcal-accept"),
+  notice: document.getElementById("pcal-notice"),
+  scroll: document.getElementById("pcal-scroll"),
+  head: document.getElementById("pcal-head"),
+  body: document.getElementById("pcal-body"),
+  queue: document.getElementById("pcal-queue"),
+  queueCount: document.getElementById("pcal-queue-count"),
+  progress: document.getElementById("pcal-progress"),
+  sheet: document.getElementById("pcal-sheet"),
+  sheetList: document.getElementById("pcal-sheet-list"),
+  sheetClose: document.getElementById("pcal-sheet-close"),
+  popover: document.getElementById("pcal-popover"),
+};
 const todayPlanPanel = document.getElementById("today-plan");
 
 const authScreen = document.getElementById("auth-screen");
@@ -4936,7 +4994,9 @@ async function loadPlannerData({ keepWeek = false } = {}) {
     if (plannerSessions.length || plannerHistorySessions.length) plannerStep = "plan";
     if (plannerPlan && plannerStep === "plan") loadPlannerPlanProgress(plannerPlan.plan_id);
     else if (plannerStep === "plan") plannerStep = "materials";
+    if (!keepWeek) plannerCalWeekStart = null;
     renderPlanner();
+    if (plannerIsDesktop()) plannerQueueAutoPreview(0);
   } catch (error) {
     showToast(error.message || "Could not load Study Planner data");
   }
@@ -4949,6 +5009,14 @@ function plannerSetStep(step) {
 
 function renderPlanner() {
   if (!plannerView) return;
+  // Desktop (>=1024px) plans on one calendar workspace; smaller screens keep the step-by-step flow.
+  const desktop = plannerIsDesktop();
+  if (plannerShell) plannerShell.hidden = desktop;
+  if (plannerWorkspace) plannerWorkspace.hidden = !desktop;
+  if (desktop) {
+    renderPlannerWorkspace();
+    return;
+  }
   const current = PLANNER_STEPS.indexOf(plannerStep);
   plannerView.querySelectorAll("[data-planner-step]").forEach((section) => {
     section.hidden = section.dataset.plannerStep !== plannerStep;
@@ -5713,6 +5781,7 @@ function renderPlannerPlan() {
 
 async function loadPlannerPlanProgress(planId) {
   if (!plannerPlanProgress) return;
+  if (pcal.progress) pcal.progress.hidden = true;
   try {
     const progress = await plannerRequest(plannerPlanUrl(`/progress?utc_offset_minutes=${plannerUtcOffsetMinutes()}`));
     if (plannerPlan?.plan_id !== planId) return;
@@ -5723,6 +5792,10 @@ async function loadPlannerPlanProgress(planId) {
     plannerPlanProgress.textContent = `${progress.completed_sessions} of ${progress.planned_sessions} sessions done · `
       + `${plannerFormatDuration(progress.completed_minutes)} studied, ${plannerFormatDuration(progress.remaining_minutes)} still planned · ${quizText}`;
     plannerPlanProgress.hidden = false;
+    if (pcal.progress) {
+      pcal.progress.textContent = plannerPlanProgress.textContent;
+      pcal.progress.hidden = false;
+    }
   } catch (error) {
     plannerPlanProgress.hidden = true;
   }
@@ -5743,6 +5816,793 @@ function plannerShiftPlanWeek(days) {
   plannerPlanWeekStart = next;
   renderPlannerPlan();
 }
+
+// ---- Desktop: calendar-first planning workspace (Phase 7A) --------------------
+// One week calendar is the whole flow: add materials, drag availability, and the existing preview
+// endpoint fills the week with suggested (ghost) sessions; Accept plan confirms them in place.
+// Same plan state and APIs as the step flow above, which stays the small-screen experience.
+
+const PCAL_HOUR_PX = 48;
+const PCAL_MINUTE_PX = PCAL_HOUR_PX / 60;
+const PCAL_DAY_MINUTES = 24 * 60;
+const PCAL_PREVIEW_DELAY_MS = 450;
+const PLANNER_LEARNING_STATE_LABELS = {
+  new: "New", learning: "Learning", needs_review: "Needs review", on_track: "On track", completed: "Completed",
+};
+const PCAL_KIND_LABELS = {
+  suggested: "Suggested", confirmed: "Planned", active: "In progress", overdue: "Not completed",
+  completed: "Completed", skipped: "Skipped",
+};
+const plannerDesktopQuery = window.matchMedia ? window.matchMedia("(min-width: 1024px)") : null;
+
+let plannerCalWeekStart = null;   // Monday of the week on the calendar; null = this week
+let plannerPreviewing = false;    // a (debounced) preview is pending or in flight
+let plannerPreviewFailure = null; // the last preview error (e.g. a deadline already passed)
+let plannerPreviewTimer = null;
+let plannerPreviewSeq = 0;        // only the newest preview response is shown
+let plannerAvailabilityTimer = null;
+let pcalDrag = null;
+let pcalScrolledWeek = null;      // the week whose initial scroll position was already set
+
+function plannerIsDesktop() {
+  return Boolean(plannerDesktopQuery?.matches);
+}
+
+function plannerHasLivePlan() {
+  // A confirmed plan with current work: the calendar shows it; nothing is previewed.
+  return plannerSessions.length > 0;
+}
+
+function plannerReadyToPreview() {
+  return Boolean(plannerPlan && plannerMaterials.length && plannerAvailability.length && !plannerHasLivePlan());
+}
+
+function pcalWeekDates() {
+  if (!plannerCalWeekStart) plannerCalWeekStart = plannerMondayOf(plannerNow());
+  return plannerWeekDates(plannerCalWeekStart);
+}
+
+function pcalEl(tag, className, text) {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text !== undefined) element.textContent = text;
+  return element;
+}
+
+function pcalSessionTimes(session) {
+  return `${session.scheduled_start.slice(11, 16)}–${session.scheduled_end.slice(11, 16)}`;
+}
+
+function pcalShortDay(dateKey) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  return `${date.toLocaleDateString(undefined, { weekday: "short" })} ${day}`;
+}
+
+function pcalActivity(activity) {
+  return PLANNER_ACTIVITY_LABELS[activity] || activity;
+}
+
+function pcalMaterialTitle(material) {
+  return material.document_title || plannerDocumentTitle(material.document_id);
+}
+
+// -- state changes that re-plan ------------------------------------------------
+
+function plannerQueueAutoPreview(delay = PCAL_PREVIEW_DELAY_MS) {
+  // Materials, deadlines and availability all feed the preview: any change re-runs it (debounced).
+  clearTimeout(plannerPreviewTimer);
+  if (!plannerReadyToPreview()) {
+    plannerPreviewSeq += 1;   // drop any response still in flight
+    plannerPreviewing = false;
+    if (!plannerHasLivePlan()) plannerPreview = null;
+    plannerPreviewFailure = null;
+    if (plannerIsDesktop()) renderPlannerWorkspace();
+    return;
+  }
+  plannerPreviewing = true;
+  if (plannerIsDesktop()) renderPlannerWorkspace();
+  plannerPreviewTimer = setTimeout(plannerRunPreview, delay);
+}
+
+async function plannerRunPreview() {
+  if (!plannerReadyToPreview()) {
+    plannerQueueAutoPreview();
+    return;
+  }
+  const seq = ++plannerPreviewSeq;
+  const planId = plannerPlan.plan_id;
+  plannerPreviewing = true;
+  pcalRenderToolbar();
+  try {
+    const result = await plannerRequest(plannerPlanUrl("/preview"), {
+      method: "POST", body: { utc_offset_minutes: plannerUtcOffsetMinutes() },
+    });
+    if (seq !== plannerPreviewSeq || plannerPlan?.plan_id !== planId) return;
+    plannerPreview = result;
+    plannerPreviewFailure = null;
+  } catch (error) {
+    if (seq !== plannerPreviewSeq) return;
+    plannerPreview = null;
+    plannerPreviewFailure = error;
+  }
+  plannerPreviewing = false;
+  if (plannerIsDesktop()) renderPlannerWorkspace();
+}
+
+function plannerAfterAvailabilityChange() {
+  if (!plannerHasLivePlan()) {
+    plannerQueueAutoPreview();
+    return;
+  }
+  // A confirmed plan: sessions that no longer fit move (existing adaptation API), once the edits settle.
+  renderPlannerWorkspace();
+  clearTimeout(plannerAvailabilityTimer);
+  const planId = plannerPlan?.plan_id;
+  plannerAvailabilityTimer = setTimeout(() => plannerAdapt(planId, { kind: "availability_changed" }), 800);
+}
+
+async function pcalAddMaterial(documentId, deadline, button) {
+  if (button) button.disabled = true;
+  try {
+    await plannerEnsurePlan();
+    const body = { document_id: documentId };
+    if (deadline) body.deadline = deadline;
+    const material = await plannerRequest(plannerPlanUrl("/materials"), { method: "POST", body });
+    plannerMaterials = [...plannerMaterials, material];
+    if (plannerHasLivePlan() && material.deadline) {
+      await plannerAdapt(plannerPlan.plan_id, { kind: "deadline_changed", document_id: documentId });
+    }
+  } catch (error) {
+    showToast(error.message || "Could not add this material");
+  }
+  plannerQueueAutoPreview();
+}
+
+async function pcalRemoveMaterial(material, button) {
+  button.disabled = true;
+  try {
+    await plannerRequest(plannerPlanUrl(`/materials/${encodeURIComponent(material.material_id)}`), { method: "DELETE" });
+    plannerMaterials = plannerMaterials.filter((item) => item.material_id !== material.material_id);
+  } catch (error) {
+    showToast(error.message || "Could not remove this material");
+    button.disabled = false;
+    return;
+  }
+  if (plannerHasLivePlan()) await loadPlannerData({ keepWeek: true });
+  else plannerQueueAutoPreview();
+}
+
+async function pcalSetDeadline(material, input) {
+  try {
+    const updated = await plannerRequest(plannerPlanUrl(`/materials/${encodeURIComponent(material.material_id)}`), {
+      method: "PATCH", body: { deadline: input.value || null },
+    });
+    plannerMaterials = plannerMaterials.map((item) => (item.material_id === updated.material_id ? { ...item, ...updated } : item));
+  } catch (error) {
+    input.value = material.deadline || "";
+    showToast(error.message || "Could not save the deadline");
+    return;
+  }
+  if (plannerHasLivePlan()) {
+    renderPlannerWorkspace();
+    await plannerAdapt(plannerPlan.plan_id, { kind: "deadline_changed", document_id: material.document_id });
+  } else plannerQueueAutoPreview();
+}
+
+async function pcalChangeAvailability(action, payload) {
+  const url = action === "remove" ? `${PLANNER_AVAILABILITY_API_URL}/remove` : PLANNER_AVAILABILITY_API_URL;
+  plannerAvailability = await plannerRequest(url, { method: "POST", body: payload });
+}
+
+function pcalSlotPayload(slot, dateKey) {
+  return slot.is_recurring
+    ? { start_at: slot.start_at, end_at: slot.end_at, is_recurring: true, day_of_week: slot.day_of_week }
+    : { start_at: slot.start_at, end_at: slot.end_at, is_recurring: false, date: slot.date || dateKey };
+}
+
+async function plannerAcceptPlan() {
+  if (plannerBusy || plannerPreviewing || !plannerPlan || !plannerPreview?.sessions.length || plannerHasLivePlan()) return;
+  plannerBusy = true;
+  clearTimeout(plannerPreviewTimer);
+  pcalRenderToolbar();
+  let alreadyConfirmed = false;
+  try {
+    // One atomic confirm; the server recomputes the same deterministic schedule from its own data.
+    const result = await plannerRequest(plannerPlanUrl("/confirm"), {
+      method: "POST", body: { utc_offset_minutes: plannerUtcOffsetMinutes() },
+    });
+    const planId = plannerPlan.plan_id;
+    plannerSessions = result.sessions.map((session) => ({ ...session, plan_id: planId })).filter(plannerIsActiveSession);
+    plannerPreview = null;
+    plannerPreviewFailure = null;
+    plannerStep = "plan";
+    showToast("Study plan saved");
+    loadPlannerPlanProgress(planId);
+    loadTodayPlan();
+  } catch (error) {
+    if (error.status === 409) alreadyConfirmed = true;
+    else plannerPreviewFailure = error;
+  } finally {
+    plannerBusy = false;
+    renderPlannerWorkspace();
+  }
+  if (alreadyConfirmed) {
+    showToast("This plan is already confirmed");
+    await loadPlannerData({ keepWeek: true });
+  }
+}
+
+async function pcalStartNewPlan() {
+  if (!plannerPlan) return;
+  try {
+    // Archive the confirmed plan (its saved sessions stay in its history) and start fresh.
+    await plannerRequest(plannerPlanUrl(), { method: "PATCH", body: { status: "archived" } });
+    plannerPlan = null;
+    plannerMaterials = [];
+    plannerSessions = [];
+    plannerHistorySessions = [];
+    plannerPreview = null;
+    plannerStep = "materials";
+    plannerQueueAutoPreview();
+    loadTodayPlan();
+  } catch (error) {
+    showToast(error.message || "Could not start a new plan");
+  }
+}
+
+// -- rendering -----------------------------------------------------------------
+
+function renderPlannerWorkspace() {
+  if (!plannerWorkspace || plannerWorkspace.hidden) return;
+  pcalClosePopover();
+  pcalRenderMaterials();
+  pcalRenderToolbar();
+  pcalRenderGrid();
+  pcalRenderQueue();
+  pcalRenderSheet();
+}
+
+function pcalRenderMaterials() {
+  pcal.materials.innerHTML = "";
+  const today = plannerDateKey(plannerNow());
+  plannerMaterials.forEach((material) => {
+    const title = pcalMaterialTitle(material);
+    const item = pcalEl("li", "pcal-material");
+    item.dataset.documentId = material.document_id;
+    const top = pcalEl("div", "pcal-material-top");
+    const name = pcalEl("strong", "pcal-material-title", title);
+    name.title = title;
+    const remove = pcalEl("button", "pcal-material-remove", "×");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Remove ${title}`);
+    remove.addEventListener("click", () => pcalRemoveMaterial(material, remove));
+    top.append(name, remove);
+    const meta = pcalEl("div", "pcal-material-meta");
+    const stateKey = material.learning_state || "new";
+    meta.appendChild(pcalEl("span", `pcal-pill pcal-pill--${stateKey}`, PLANNER_LEARNING_STATE_LABELS[stateKey] || stateKey));
+    const deadline = pcalEl("label", "pcal-deadline");
+    deadline.classList.toggle("is-set", Boolean(material.deadline));
+    deadline.classList.toggle("is-past", Boolean(material.deadline && material.deadline < today));
+    deadline.appendChild(pcalEl("span", "pcal-deadline-caption", material.deadline ? "Due" : "Deadline"));
+    const input = document.createElement("input");
+    input.type = "date";
+    input.value = material.deadline || "";
+    input.setAttribute("aria-label", `Deadline for ${title}`);
+    input.addEventListener("change", () => pcalSetDeadline(material, input));
+    deadline.appendChild(input);
+    meta.appendChild(deadline);
+    item.append(top, meta);
+    pcal.materials.appendChild(item);
+  });
+  pcal.newPlan.hidden = !(plannerPlan && (plannerSessions.length || plannerHistorySessions.length));
+}
+
+function pcalWeekItems(fromKey, untilKey) {
+  const inWeek = (session) => {
+    const key = session.scheduled_start.slice(0, 10);
+    return key >= fromKey && key <= untilKey;
+  };
+  const items = plannerHistorySessions.filter(inWeek).map((session) => ({ kind: session.status, session }));
+  if (plannerHasLivePlan()) {
+    plannerSessions.filter(inWeek).forEach((session) => {
+      const kind = session.status === "in_progress" ? "active" : plannerIsOverdue(session) ? "overdue" : "confirmed";
+      items.push({ kind, session });
+    });
+  } else if (plannerPreview) {
+    plannerPreview.sessions.filter(inWeek).forEach((session) => items.push({ kind: "suggested", session }));
+  }
+  return items;
+}
+
+function pcalRenderToolbar() {
+  if (!pcal.range) return;
+  const dates = pcalWeekDates();
+  const first = dates[0], last = dates[6];
+  const sameMonth = first.getMonth() === last.getMonth();
+  const startLabel = first.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const endLabel = last.toLocaleDateString(undefined, sameMonth ? { day: "numeric" } : { month: "short", day: "numeric" });
+  pcal.range.textContent = `${startLabel} – ${endLabel}, ${last.getFullYear()}`;
+
+  const live = plannerHasLivePlan();
+  let status = "";
+  let tone = "";
+  if (live) {
+    const week = pcalWeekItems(plannerDateKey(first), plannerDateKey(last))
+      .filter((item) => ["confirmed", "active", "overdue"].includes(item.kind));
+    const minutes = week.reduce((sum, item) => sum + item.session.duration_minutes, 0);
+    status = week.length
+      ? `${week.length} planned session${week.length === 1 ? "" : "s"} this week · ${plannerFormatDuration(minutes)}`
+      : "No sessions this week";
+  } else if (plannerPreviewing && plannerReadyToPreview()) {
+    status = "Updating suggestions…";
+    tone = "busy";
+  } else if (plannerPreview) {
+    const sessions = plannerPreview.sessions;
+    const minutes = sessions.reduce((sum, session) => sum + session.duration_minutes, 0);
+    status = `${sessions.length} suggested session${sessions.length === 1 ? "" : "s"} · ${plannerFormatDuration(minutes)}`;
+    if (plannerPreview.capacity.status === "at_risk") {
+      status += ` · ${plannerFormatDuration(plannerPreview.capacity.shortfall_minutes)} doesn’t fit`;
+      tone = "warn";
+    }
+  }
+  pcal.status.textContent = status;
+  pcal.status.dataset.tone = tone;
+  pcal.autoPlan.hidden = live || !plannerMaterials.length;
+  pcal.autoPlan.disabled = plannerBusy || !plannerReadyToPreview();
+  pcal.accept.hidden = live || !plannerPreview?.sessions.length;
+  pcal.accept.disabled = plannerBusy || plannerPreviewing;
+  pcal.accept.textContent = plannerBusy ? "Saving…" : "Accept plan";
+  pcalRenderNotice();
+}
+
+function pcalRenderNotice() {
+  // Progressive disclosure: only the next thing the learner needs, in one short line.
+  const notice = pcal.notice;
+  notice.innerHTML = "";
+  notice.dataset.tone = "";
+  let text = "";
+  if (plannerHasLivePlan()) text = "";
+  else if (!plannerMaterials.length) {
+    text = "Add the materials you want to study.";
+    const action = pcalEl("button", "pcal-notice-action", "Add materials");
+    action.type = "button";
+    action.addEventListener("click", pcalOpenSheet);
+    notice.append(pcalEl("span", "", text), action);
+  } else if (!plannerAvailability.length) {
+    text = "Drag on the calendar to mark when you could study.";
+    notice.appendChild(pcalEl("span", "", text));
+  } else if (plannerPreviewFailure && !plannerPreviewing) {
+    const failure = plannerPreviewFailure;
+    text = failure.message || "Could not suggest a plan";
+    notice.dataset.tone = "warn";
+    notice.appendChild(pcalEl("span", "", text));
+    const documents = failure.detail?.code === "deadline_passed" ? failure.detail.documents || [] : [];
+    documents.forEach((item) => notice.appendChild(pcalEl("span", "pcal-notice-chip", `${item.document_title || item.document_id} · ${item.deadline}`)));
+  } else if (plannerPreview && !plannerPreviewing && !plannerPreview.sessions.length) {
+    text = "Nothing fits in your available time yet. Drag to add more.";
+    notice.dataset.tone = "warn";
+    notice.appendChild(pcalEl("span", "", text));
+  }
+  notice.hidden = !text;
+}
+
+function pcalAvailabilityFor(dateKey, weekday) {
+  return plannerAvailability.filter((slot) => plannerAvailabilityCoversDate(slot, dateKey, weekday));
+}
+
+function pcalRenderGrid() {
+  const dates = pcalWeekDates();
+  const now = plannerNow();
+  const todayKey = plannerDateKey(now);
+  const fromKey = plannerDateKey(dates[0]);
+  const untilKey = plannerDateKey(dates[6]);
+  const items = pcalWeekItems(fromKey, untilKey);
+
+  // Sticky header: weekday + date, then the all-day row that carries deadline markers.
+  pcal.head.innerHTML = "";
+  pcal.head.appendChild(pcalEl("div", "pcal-corner"));
+  dates.forEach((date) => {
+    const key = plannerDateKey(date);
+    const head = pcalEl("div", "pcal-dayhead");
+    head.classList.toggle("is-today", key === todayKey);
+    head.classList.toggle("is-past", key < todayKey);
+    head.append(pcalEl("span", "pcal-dow", PLANNER_DAY_LABELS[(date.getDay() + 6) % 7]), pcalEl("span", "pcal-daynum", String(date.getDate())));
+    pcal.head.appendChild(head);
+  });
+  pcal.head.appendChild(pcalEl("div", "pcal-allday-label"));
+  dates.forEach((date) => {
+    const key = plannerDateKey(date);
+    const cell = pcalEl("div", "pcal-allday");
+    cell.dataset.date = key;
+    plannerMaterials.filter((material) => material.deadline === key).forEach((material) => {
+      const marker = pcalEl("span", "pcal-deadline-marker", pcalMaterialTitle(material));
+      marker.classList.toggle("is-past", key < todayKey);
+      marker.title = `${pcalMaterialTitle(material)} due ${plannerDayLabel(key)}`;
+      marker.setAttribute("aria-label", marker.title);
+      cell.appendChild(marker);
+    });
+    pcal.head.appendChild(cell);
+  });
+
+  // Body: hour gutter + seven day columns; availability, sessions and "now" are positioned layers.
+  pcal.body.innerHTML = "";
+  const gutter = pcalEl("div", "pcal-gutter");
+  for (let hour = 1; hour < 24; hour += 1) {
+    const label = pcalEl("span", "pcal-hour", plannerMinutesToLabel(hour * 60));
+    label.style.top = `${hour * PCAL_HOUR_PX}px`;
+    gutter.appendChild(label);
+  }
+  pcal.body.appendChild(gutter);
+  dates.forEach((date) => {
+    const key = plannerDateKey(date);
+    const weekday = (date.getDay() + 6) % 7;
+    const column = pcalEl("div", "pcal-col");
+    column.dataset.date = key;
+    column.dataset.weekday = String(weekday);
+    column.classList.toggle("is-today", key === todayKey);
+    column.classList.toggle("is-past", key < todayKey);
+    column.setAttribute("aria-label", plannerDayLabel(key));
+    pcalAvailabilityFor(key, weekday).forEach((slot) => column.appendChild(pcalAvailabilityBlock(slot, key)));
+    items.filter((item) => item.session.scheduled_start.slice(0, 10) === key)
+      .forEach((item) => column.appendChild(pcalEventBlock(item)));
+    if (key === todayKey) {
+      const line = pcalEl("div", "pcal-now");
+      line.style.top = `${(now.getHours() * 60 + now.getMinutes()) * PCAL_MINUTE_PX}px`;
+      line.setAttribute("aria-hidden", "true");
+      column.appendChild(line);
+    }
+    column.addEventListener("pointerdown", (event) => pcalStartDrag(event, column, null));
+    pcal.body.appendChild(column);
+  });
+
+  // First view of a week: scroll to the morning, or earlier if something starts earlier.
+  if (pcalScrolledWeek !== fromKey) {
+    pcalScrolledWeek = fromKey;
+    const starts = [
+      ...items.map((item) => plannerToMinutes(item.session.scheduled_start.slice(11, 16))),
+      ...dates.flatMap((date) => pcalAvailabilityFor(plannerDateKey(date), (date.getDay() + 6) % 7).map((slot) => plannerToMinutes(slot.start_at))),
+    ];
+    const first = Math.min(8 * 60, ...starts);
+    pcal.scroll.scrollTop = Math.max(0, (first - 60) * PCAL_MINUTE_PX);
+  }
+}
+
+function pcalPlace(element, startMinute, endMinute) {
+  element.style.top = `${startMinute * PCAL_MINUTE_PX}px`;
+  element.style.height = `${Math.max(12, (endMinute - startMinute) * PCAL_MINUTE_PX - 2)}px`;
+}
+
+function pcalAvailabilityBlock(slot, dateKey) {
+  const start = plannerToMinutes(slot.start_at), end = plannerToMinutes(slot.end_at);
+  const block = pcalEl("div", "pcal-avail");
+  block.dataset.start = slot.start_at;
+  block.dataset.end = slot.end_at;
+  block.dataset.recurring = String(Boolean(slot.is_recurring));
+  block.tabIndex = 0;
+  block.setAttribute("role", "button");
+  block.setAttribute("aria-label", `Available ${slot.start_at}–${slot.end_at}${slot.is_recurring ? ", every week" : ""}`);
+  pcalPlace(block, start, end);
+  block.classList.toggle("is-short", end - start < 60);
+  block.append(pcalEl("span", "pcal-avail-label", "Available"),
+    pcalEl("span", "pcal-avail-time", `${slot.start_at}–${slot.end_at} · ${plannerFormatDuration(end - start)}`));
+  block.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+    pcalStartDrag(event, block.parentElement, { slot, dateKey, block });
+  });
+  block.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      pcalOpenAvailabilityPopover(slot, dateKey, block);
+    }
+  });
+  return block;
+}
+
+function pcalEventBlock({ kind, session }) {
+  const start = plannerToMinutes(session.scheduled_start.slice(11, 16));
+  const end = plannerToMinutes(session.scheduled_end.slice(11, 16));
+  const block = pcalEl("button", `pcal-event pcal-event--${kind} pcal-activity--${session.activity_type}`);
+  block.type = "button";
+  block.dataset.kind = kind;
+  block.dataset.start = session.scheduled_start;
+  if (session.session_id) block.dataset.sessionId = session.session_id;
+  const title = session.document_title || plannerDocumentTitle(session.document_id);
+  block.setAttribute("aria-label", `${PCAL_KIND_LABELS[kind]}: ${pcalActivity(session.activity_type)} · ${title}, ${pcalShortDay(session.scheduled_start.slice(0, 10))} ${pcalSessionTimes(session)}`);
+  pcalPlace(block, start, end);
+  block.classList.toggle("is-compact", end - start < 40);
+  block.append(pcalEl("strong", "pcal-event-title", title),
+    pcalEl("span", "pcal-event-meta", `${pcalActivity(session.activity_type)} · ${pcalSessionTimes(session)}`));
+  block.addEventListener("pointerdown", (event) => event.stopPropagation());
+  block.addEventListener("click", () => pcalOpenSessionPopover(kind, session, block));
+  return block;
+}
+
+// -- drag to mark availability --------------------------------------------------
+
+function pcalMinuteAt(column, clientY) {
+  const box = column.getBoundingClientRect();
+  const minute = Math.floor((clientY - box.top) / PCAL_MINUTE_PX / PLANNER_CELL_MINUTES) * PLANNER_CELL_MINUTES;
+  return Math.min(PCAL_DAY_MINUTES - PLANNER_CELL_MINUTES, Math.max(0, minute));
+}
+
+function pcalStartDrag(event, column, from) {
+  if (event.button !== undefined && event.button > 0) return;
+  event.preventDefault();
+  pcalClosePopover();
+  const anchor = pcalMinuteAt(column, event.clientY);
+  const ghost = pcalEl("div", "pcal-drag");
+  column.appendChild(ghost);
+  pcalDrag = { column, anchor, start: anchor, end: anchor + PLANNER_CELL_MINUTES, moved: false, from, ghost };
+  pcalUpdateDragGhost();
+}
+
+function pcalUpdateDragGhost() {
+  const drag = pcalDrag;
+  pcalPlace(drag.ghost, drag.start, drag.end);
+  drag.ghost.textContent = `${plannerMinutesToLabel(drag.start)}–${plannerMinutesToLabel(drag.end)}`;
+  drag.ghost.hidden = Boolean(drag.from) && !drag.moved;
+}
+
+function pcalMoveDrag(event) {
+  if (!pcalDrag) return;
+  const minute = pcalMinuteAt(pcalDrag.column, event.clientY);
+  if (minute !== pcalDrag.anchor) pcalDrag.moved = true;
+  pcalDrag.start = Math.min(pcalDrag.anchor, minute);
+  pcalDrag.end = Math.max(pcalDrag.anchor, minute) + PLANNER_CELL_MINUTES;
+  pcalUpdateDragGhost();
+}
+
+async function pcalFinishDrag() {
+  const drag = pcalDrag;
+  pcalDrag = null;
+  if (!drag) return;
+  if (drag.from && !drag.moved) {   // a click on an availability block: its details
+    drag.ghost.remove();
+    pcalOpenAvailabilityPopover(drag.from.slot, drag.from.dateKey, drag.from.block);
+    return;
+  }
+  const weekday = Number(drag.column.dataset.weekday);
+  // New availability repeats weekly by default; the block's popover can limit it to this date.
+  const payload = { start_at: plannerMinutesToLabel(drag.start), end_at: plannerMinutesToLabel(drag.end), is_recurring: true, day_of_week: weekday };
+  try {
+    await pcalChangeAvailability("add", payload);
+  } catch (error) {
+    showToast(error.message || "Could not save availability");
+  }
+  drag.ghost.remove();
+  plannerAfterAvailabilityChange();
+}
+
+// -- popovers ---------------------------------------------------------------------
+
+function pcalClosePopover() {
+  if (!pcal.popover || pcal.popover.hidden) return;
+  pcal.popover.hidden = true;
+  pcal.popover.innerHTML = "";
+  plannerWorkspace.querySelectorAll(".is-selected").forEach((item) => item.classList.remove("is-selected"));
+}
+
+function pcalShowPopover(anchor, label, build) {
+  pcalClosePopover();
+  const popover = pcal.popover;
+  popover.setAttribute("aria-label", label);
+  const close = pcalEl("button", "pcal-popover-close", "×");
+  close.type = "button";
+  close.setAttribute("aria-label", "Close");
+  close.addEventListener("click", pcalClosePopover);
+  popover.appendChild(close);
+  build(popover);
+  popover.hidden = false;
+  anchor.classList.add("is-selected");
+  // Beside the block, inside the workspace: to the right when there is room, else to the left.
+  const frame = plannerWorkspace.getBoundingClientRect();
+  const box = anchor.getBoundingClientRect();
+  const width = popover.offsetWidth, height = popover.offsetHeight;
+  let left = box.right + 8 - frame.left;
+  if (left + width > frame.width - 8) left = box.left - width - 8 - frame.left;
+  const top = Math.min(Math.max(8, box.top - frame.top), frame.height - height - 8);
+  popover.style.left = `${Math.max(8, left)}px`;
+  popover.style.top = `${Math.max(8, top)}px`;
+}
+
+function pcalOpenAvailabilityPopover(slot, dateKey, block) {
+  pcalShowPopover(block, "Availability", (popover) => {
+    const start = plannerToMinutes(slot.start_at), end = plannerToMinutes(slot.end_at);
+    popover.append(pcalEl("h4", "pcal-popover-title", "Available"),
+      pcalEl("p", "pcal-popover-when", `${plannerDayLabel(dateKey)} · ${slot.start_at}–${slot.end_at} (${plannerFormatDuration(end - start)})`));
+    const repeat = pcalEl("label", "pcal-popover-toggle");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.id = "pcal-repeat";
+    checkbox.checked = Boolean(slot.is_recurring);
+    repeat.append(checkbox, pcalEl("span", "", "Repeat weekly"));
+    const remove = pcalEl("button", "pcal-button pcal-danger", "Delete");
+    remove.type = "button";
+    remove.id = "pcal-delete-availability";
+    const actions = pcalEl("div", "pcal-popover-actions");
+    actions.appendChild(remove);
+    popover.append(repeat, actions);
+    const run = async (steps) => {
+      checkbox.disabled = remove.disabled = true;
+      try {
+        for (const [action, payload] of steps) await pcalChangeAvailability(action, payload);
+      } catch (error) {
+        showToast(error.message || "Could not update availability");
+      }
+      pcalClosePopover();
+      plannerAfterAvailabilityChange();
+    };
+    const current = pcalSlotPayload(slot, dateKey);
+    remove.addEventListener("click", () => run([["remove", current]]));
+    checkbox.addEventListener("change", () => {
+      // Weekly <-> this date only: the same time range moves between the two kinds of availability.
+      const other = checkbox.checked
+        ? { start_at: slot.start_at, end_at: slot.end_at, is_recurring: true, day_of_week: slot.day_of_week ?? Number(block.parentElement.dataset.weekday) }
+        : { start_at: slot.start_at, end_at: slot.end_at, is_recurring: false, date: dateKey };
+      run([["remove", current], ["add", other]]);
+    });
+  });
+}
+
+function pcalOpenSessionPopover(kind, session, block) {
+  const title = session.document_title || plannerDocumentTitle(session.document_id);
+  pcalShowPopover(block, `${pcalActivity(session.activity_type)} · ${title}`, (popover) => {
+    const holder = pcalEl("div", "pcal-popover-session");
+    const content = pcalEl("div", "pcal-popover-body");
+    content.append(pcalEl("span", `pcal-kind pcal-kind--${kind}`, PCAL_KIND_LABELS[kind]),
+      pcalEl("h4", "pcal-popover-title", title),
+      pcalEl("p", "pcal-popover-when", `${pcalActivity(session.activity_type)} · ${plannerDayLabel(session.scheduled_start.slice(0, 10))} · ${pcalSessionTimes(session)} (${plannerFormatDuration(session.duration_minutes)})`));
+    if (session.reason?.message) content.appendChild(pcalEl("p", "pcal-popover-reason", session.reason.message));
+    holder.appendChild(content);
+    if (kind === "suggested") content.appendChild(pcalEl("p", "pcal-popover-hint", "Suggested. Accept plan to save it."));
+    else if (session.session_id && plannerIsActiveSession(session)) {
+      plannerAddSessionActions(holder, content, session, `${title} (${pcalActivity(session.activity_type)})`);
+    }
+    popover.appendChild(holder);
+  });
+}
+
+// -- add materials sheet ------------------------------------------------------------
+
+function pcalOpenSheet() {
+  pcalClosePopover();
+  pcal.sheet.hidden = false;
+  pcal.addMaterials.setAttribute("aria-expanded", "true");
+  pcalRenderSheet();
+  pcal.sheet.querySelector(".pcal-sheet-add, #pcal-sheet-close")?.focus();
+}
+
+function pcalCloseSheet() {
+  if (!pcal.sheet || pcal.sheet.hidden) return;
+  pcal.sheet.hidden = true;
+  pcal.addMaterials.setAttribute("aria-expanded", "false");
+}
+
+function pcalRenderSheet() {
+  if (!pcal.sheet || pcal.sheet.hidden) return;
+  pcal.sheetList.innerHTML = "";
+  const chosen = new Set(plannerMaterials.map((material) => material.document_id));
+  const available = indexedDocuments.filter((doc) => !chosen.has(doc.id));
+  if (!indexedDocuments.length) {
+    pcal.sheetList.appendChild(pcalEl("li", "pcal-sheet-empty", "Upload a document first, then add it here."));
+    return;
+  }
+  if (!available.length) {
+    pcal.sheetList.appendChild(pcalEl("li", "pcal-sheet-empty", "All your documents are in this plan."));
+    return;
+  }
+  const today = plannerDateKey(plannerNow());
+  available.forEach((doc) => {
+    const row = pcalEl("li", "pcal-sheet-row");
+    row.dataset.documentId = doc.id;
+    const name = pcalEl("strong", "pcal-sheet-title", doc.title);
+    name.title = doc.title;
+    const deadline = pcalEl("label", "pcal-deadline");
+    deadline.appendChild(pcalEl("span", "pcal-deadline-caption", "Deadline"));
+    const input = document.createElement("input");
+    input.type = "date";
+    input.min = today;
+    input.setAttribute("aria-label", `Deadline for ${doc.title} (optional)`);
+    deadline.appendChild(input);
+    const add = pcalEl("button", "pcal-button pcal-sheet-add", "Add");
+    add.type = "button";
+    add.setAttribute("aria-label", `Add ${doc.title}`);
+    add.addEventListener("click", () => pcalAddMaterial(doc.id, input.value || null, add));
+    row.append(name, deadline, add);
+    pcal.sheetList.appendChild(row);
+  });
+}
+
+// -- study queue ----------------------------------------------------------------------
+
+function pcalQueueSessionItem(session, kind) {
+  const item = plannerSessionItem(session, "li", { action: kind === "live" && Boolean(session.session_id) });
+  item.classList.add("pcal-queue-item", `pcal-queue-item--${kind}`);
+  item.querySelector(".planner-session-time").textContent = `${pcalShortDay(session.scheduled_start.slice(0, 10))} · ${pcalSessionTimes(session)}`;
+  item.addEventListener("click", (event) => {
+    if (event.target.closest("button")) return;
+    pcalReveal(session);
+  });
+  return item;
+}
+
+function pcalQueueUnscheduledItem(entry) {
+  // Work the scheduler could not place (or a material with nothing planned yet): stays visible.
+  const item = pcalEl("li", "planner-session pcal-queue-item pcal-queue-item--unscheduled");
+  item.appendChild(pcalEl("span", "planner-session-time", "Not scheduled"));
+  const content = pcalEl("div", "planner-session-body");
+  content.appendChild(pcalEl("strong", "", entry.document_title || plannerDocumentTitle(entry.document_id)));
+  if (entry.activity_type) {
+    const meta = pcalEl("span", "planner-session-meta");
+    meta.append(pcalEl("span", "planner-activity-chip", pcalActivity(entry.activity_type)),
+      pcalEl("span", "", plannerFormatDuration(entry.estimated_minutes)));
+    content.appendChild(meta);
+  }
+  content.appendChild(pcalEl("small", "planner-session-reason", entry.reason?.message || ""));
+  item.appendChild(content);
+  return item;
+}
+
+function pcalRenderQueue() {
+  pcal.queue.innerHTML = "";
+  const entries = [];
+  const byTime = (left, right) => left.scheduled_start.localeCompare(right.scheduled_start);
+  if (plannerHasLivePlan()) {
+    const nowIso = plannerLocalIso(plannerNow());
+    plannerSessions.filter((session) => plannerIsOverdue(session)).sort(byTime)
+      .forEach((session) => entries.push(pcalQueueSessionItem(session, "live")));
+    plannerSessions.filter((session) => !plannerIsOverdue(session) && (session.status === "in_progress" || session.scheduled_end > nowIso))
+      .sort(byTime).forEach((session) => entries.push(pcalQueueSessionItem(session, "live")));
+    const planned = new Set([...plannerSessions, ...plannerHistorySessions].map((session) => session.document_id));
+    plannerMaterials.filter((material) => !planned.has(material.document_id))
+      .forEach((material) => entries.push(pcalQueueUnscheduledItem({ document_id: material.document_id, document_title: material.document_title,
+        reason: { message: "Added after this plan was saved. Set a deadline to fit it in." } })));
+  } else if (plannerPreview) {
+    [...plannerPreview.sessions].sort(byTime).forEach((session) => entries.push(pcalQueueSessionItem(session, "suggested")));
+    plannerPreview.capacity.unscheduled.forEach((entry) => entries.push(pcalQueueUnscheduledItem(entry)));
+  }
+  entries.forEach((entry) => pcal.queue.appendChild(entry));
+  pcal.queueCount.textContent = entries.length ? String(entries.length) : "";
+  if (!entries.length) {
+    const empty = !plannerMaterials.length ? "Your study sessions will appear here."
+      : !plannerAvailability.length ? "Mark some free time to see suggested sessions."
+        : plannerPreviewing ? "Finding the best times…" : "Nothing to study right now.";
+    pcal.queue.appendChild(pcalEl("li", "pcal-queue-empty", empty));
+  }
+}
+
+function pcalReveal(session) {
+  const key = session.scheduled_start.slice(0, 10);
+  const [year, month, day] = key.split("-").map(Number);
+  const monday = plannerMondayOf(new Date(year, month - 1, day));
+  if (plannerDateKey(monday) !== plannerDateKey(pcalWeekDates()[0])) {
+    plannerCalWeekStart = monday;
+    renderPlannerWorkspace();
+  }
+  const block = [...pcal.body.querySelectorAll(".pcal-event")].find((element) => element.dataset.start === session.scheduled_start
+    && (!session.session_id || element.dataset.sessionId === session.session_id));
+  if (!block) return;
+  pcal.scroll.scrollTop = Math.max(0, block.offsetTop - 2 * PCAL_HOUR_PX);
+  block.classList.remove("is-flash");
+  void block.offsetWidth;
+  block.classList.add("is-flash");
+}
+
+function pcalShiftWeek(days) {
+  const next = new Date(pcalWeekDates()[0]);
+  next.setDate(next.getDate() + days);
+  plannerCalWeekStart = next;
+  renderPlannerWorkspace();
+}
+
+setInterval(() => {
+  // Keep the current-time line honest while the week is open.
+  if (!plannerWorkspace || plannerWorkspace.hidden || document.body.dataset.page !== "planner" || pcalDrag) return;
+  const line = pcal.body.querySelector(".pcal-now");
+  const now = plannerNow();
+  if (line) line.style.top = `${(now.getHours() * 60 + now.getMinutes()) * PCAL_MINUTE_PX}px`;
+}, 60 * 1000);
 
 // ---- Home: Today's Study Plan (read-only) ------------------------------------
 
@@ -5896,6 +6756,43 @@ document.addEventListener("pointerup", () => {
 });
 document.addEventListener("pointercancel", () => {
   if (plannerDrag) plannerFinishDrag();
+});
+// Desktop calendar workspace.
+pcal.today?.addEventListener("click", () => {
+  plannerCalWeekStart = plannerMondayOf(plannerNow());
+  renderPlannerWorkspace();
+});
+pcal.prev?.addEventListener("click", () => pcalShiftWeek(-7));
+pcal.next?.addEventListener("click", () => pcalShiftWeek(7));
+pcal.autoPlan?.addEventListener("click", () => plannerQueueAutoPreview(0));
+pcal.accept?.addEventListener("click", plannerAcceptPlan);
+pcal.addMaterials?.addEventListener("click", () => (pcal.sheet.hidden ? pcalOpenSheet() : pcalCloseSheet()));
+pcal.sheetClose?.addEventListener("click", pcalCloseSheet);
+pcal.newPlan?.addEventListener("click", pcalStartNewPlan);
+document.addEventListener("pointermove", (event) => {
+  if (pcalDrag) pcalMoveDrag(event);
+});
+document.addEventListener("pointerup", () => {
+  if (pcalDrag) pcalFinishDrag();
+});
+document.addEventListener("pointercancel", () => {
+  if (pcalDrag) pcalFinishDrag();
+});
+document.addEventListener("pointerdown", (event) => {
+  // Click-away closes the popover and the add-materials sheet.
+  if (!plannerWorkspace || plannerWorkspace.hidden) return;
+  if (!pcal.popover.hidden && !pcal.popover.contains(event.target) && !event.target.closest?.(".pcal-event, .pcal-avail")) pcalClosePopover();
+  if (!pcal.sheet.hidden && !pcal.sheet.contains(event.target) && !pcal.addMaterials.contains(event.target)) pcalCloseSheet();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !plannerWorkspace || plannerWorkspace.hidden) return;
+  pcalClosePopover();
+  pcalCloseSheet();
+});
+plannerDesktopQuery?.addEventListener?.("change", () => {
+  if (document.body.dataset.page !== "planner") return;
+  renderPlanner();
+  if (plannerIsDesktop()) plannerQueueAutoPreview(0);
 });
 
 async function initializeApplication() {

@@ -92,6 +92,12 @@ const readPanel = () => panel() && ({
     && panel().querySelector(".adapt-panel").getBoundingClientRect().left >= -1,
 });
 const skipCalls = () => P.actionCalls.filter((c) => c[0] === "skip").length;
+// The saved week: calendar events on desktop (>=1024px), the step flow's week list on phone.
+const weekEntries = () => window.innerWidth >= 1024
+  ? [...document.querySelectorAll("#pcal-body .pcal-event")].map((e) => e.querySelector(".pcal-event-title").textContent + " "
+    + e.querySelector(".pcal-event-meta").textContent.split(" · ")[1])
+  : [...document.querySelectorAll("#planner-plan-sessions .planner-session")].map((li) =>
+    li.querySelector("strong").textContent + " " + li.querySelector(".planner-session-time").textContent);
 (async () => {
   await sleep(1500);
   const noMotion = document.createElement("style"); noMotion.textContent = "*,*::before,*::after{transition:none!important}"; document.head.appendChild(noMotion);
@@ -109,8 +115,7 @@ const skipCalls = () => P.actionCalls.filter((c) => c[0] === "skip").length;
   out.small = {calls: P.adaptCalls.map((c) => c.trigger), confirm: P.adaptCalls.map((c) => !!c.confirm), toast: toast.textContent,
     panel: !!panel(), skips: skipCalls()};
   setPage("planner"); await sleep(500);
-  out.small.week = [...document.querySelectorAll("#planner-plan-sessions .planner-session")].map((li) =>
-    li.querySelector("strong").textContent + " " + li.querySelector(".planner-session-time").textContent);
+  out.small.week = weekEntries();
   out.overflow.small = noOverflow();
 
   // 2. Large via "Reschedule" on a session not completed: review panel, Keep current plan writes nothing.
@@ -139,8 +144,7 @@ const skipCalls = () => P.actionCalls.filter((c) => c[0] === "skip").length;
     notCompleted: !!item("Marketing", "Summary") && !!item("Marketing", "Summary").querySelector(".planner-session-note"),
     homeTitles: [...document.querySelectorAll("#today-plan .planner-session strong")].map((s) => s.textContent)};
   setPage("planner"); await sleep(500);
-  out.accepted.week = [...document.querySelectorAll("#planner-plan-sessions .planner-session")].map((li) =>
-    li.querySelector("strong").textContent + " " + li.querySelector(".planner-session-time").textContent);
+  out.accepted.week = weekEntries();
 
   // 4. Stale plan while reviewing: a clear, calm error; nothing closes; buttons usable again.
   P.adaptMode = "conflict"; P.adaptCalls = [];

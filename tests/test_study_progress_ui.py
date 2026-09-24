@@ -84,7 +84,8 @@ const noOverflow = () => document.documentElement.scrollWidth <= window.innerWid
     activity_type: "quiz", scheduled_start: "2026-09-25T18:00:00", scheduled_end: "2026-09-25T18:30:00", duration_minutes: 30,
     status: "scheduled", reason: {code: "new_material", message: "New material to learn"}, artifact_id: null}]};
   setPage("planner"); await sleep(700);
-  out.planProgress = document.getElementById("planner-plan-progress").hidden ? null : document.getElementById("planner-plan-progress").textContent;
+  const progressLine = document.getElementById(window.innerWidth >= 1024 ? "pcal-progress" : "planner-plan-progress");
+  out.planProgress = progressLine.hidden ? null : progressLine.textContent;
   out.overflow.planner = noOverflow();
   setPage("overview"); await sleep(500);
   out.todayProgress = document.querySelector("#today-plan .today-plan-progress")?.textContent || null;
