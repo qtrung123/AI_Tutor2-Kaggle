@@ -3377,14 +3377,24 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-popover-reason,.pcal-popover-hint{margin:0;font-size:12px;color:var(--muted)}
 .pcal-popover-body{display:grid;gap:4px}
 .pcal-popover-session{display:grid;gap:10px}
-.pcal-popover-session .planner-session-actions{justify-content:flex-start}
-.pcal-popover-session .planner-session-action{padding:6px 14px;font-size:13px;border-radius:8px}
+.pcal-popover-session .primary-button.planner-session-action{padding:6px 14px;font-size:13px;border-radius:8px}
 .pcal-kind{justify-self:start;padding:1px 8px;border-radius:999px;font-size:10.5px;font-weight:700;background:var(--session-wash);color:var(--session-accent)}
 .pcal-kind--overdue{background:var(--pcal-warn-bg);color:var(--pcal-warn-ink)}
 .pcal-kind--completed,.pcal-kind--skipped{background:var(--pcal-line-soft);color:var(--muted)}
 .pcal-popover-toggle{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer}
 .pcal-popover-toggle input{width:16px;height:16px;margin:0;accent-color:var(--session-accent)}
 .pcal-popover-actions{display:flex;justify-content:flex-end}
+/* session popover: status, what/when, why, then the primary action and quiet secondary ones */
+.pcal-popover-activity{margin:0;font-size:12.5px;font-weight:600;color:var(--pcal-ink-2)}
+.pcal-popover-caption{display:block;font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#9aa1ad;margin-bottom:1px}
+.pcal-popover-reason{margin:4px 0 0}
+.pcal-popover-note{margin:2px 0 0;font-size:11.5px;color:var(--muted)}
+.pcal-session-actions{justify-content:flex-start;align-items:center;flex-wrap:wrap;gap:4px 12px;padding-top:4px;border-top:1px solid var(--pcal-line-soft)}
+.pcal-session-actions .primary-button{margin-right:4px}
+.pcal-text-action{border:0;background:transparent;padding:4px 0;font:inherit;font-size:12.5px;font-weight:600;color:var(--pcal-ink-2);cursor:pointer;border-radius:4px}
+.pcal-text-action:hover:not(:disabled){color:var(--ink);text-decoration:underline;text-underline-offset:3px}
+.pcal-text-action:focus-visible{outline:2px solid var(--session-accent);outline-offset:2px}
+.pcal-text-action:disabled{opacity:.5;cursor:default}
 .pcal-danger{color:#b4432a}
 .pcal-sheet{position:absolute;z-index:25;left:0;top:0;bottom:0;width:320px;box-sizing:border-box;padding:16px;background:#fff;border-radius:14px;box-shadow:0 16px 40px rgba(20,24,60,.16),0 0 0 1px rgba(20,24,60,.06);display:flex;flex-direction:column;gap:8px;overflow:hidden;animation:pcal-pop .16s var(--pcal-ease)}
 .pcal-sheet-head{display:flex;align-items:center;justify-content:space-between}

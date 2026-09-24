@@ -4995,10 +4995,12 @@ async function loadPlannerData({ keepWeek = false } = {}) {
     plannerMaterials = [];
     plannerSessions = [];
     plannerHistorySessions = [];
+    plannerSessionsById = new Map();
     if (!keepWeek) plannerPlanWeekStart = null;
     if (plannerPlan) {
       const [detail, saved] = await Promise.all([plannerRequest(plannerPlanUrl()), plannerRequest(plannerPlanUrl("/sessions"))]);
       const sessions = saved.map((session) => ({ ...session, plan_id: plannerPlan.plan_id }));
+      plannerSessionsById = new Map(sessions.map((session) => [session.session_id, session]));
       plannerMaterials = detail.materials;
       plannerSessions = sessions.filter(plannerIsActiveSession);
       plannerHistorySessions = sessions.filter((session) => PLANNER_HISTORY_SESSION_STATUSES.includes(session.status));
@@ -5879,6 +5881,7 @@ let pcalSuppressClick = false;    // the click that ends a drag must not open a 
 const PCAL_SNAP_MINUTES = 15;
 
 let plannerPlacementsPlanId = null;
+let plannerSessionsById = new Map();   // every saved session of the plan (lineage for "Moved from")
 
 async function plannerLoadLiveCandidates() {
   // What a confirmed plan still wants scheduled (draggable from the queue). Server-computed only.
@@ -6596,22 +6599,59 @@ function pcalOpenAvailabilityPopover(slot, dateKey, block) {
   });
 }
 
+// The calendar popover's actions by state -- the primary action first; terminal or history-changing
+// ones stay secondary. Only what the lifecycle API allows for that state (Home keeps its own set).
+const PCAL_SESSION_ACTIONS = {
+  confirmed: [["start", "Start", true], ["reschedule", "Reschedule", false], ["skip", "Skip", false]],
+  active: [["start", "Resume", true], ["complete", "Complete session", false], ["skip", "Skip", false]],
+  overdue: [["reschedule", "Reschedule", true], ["skip", "Skip", false]],
+};
+
+function pcalWhen(iso) {
+  return `${plannerDayLabel(iso.slice(0, 10))} · ${iso.slice(11, 16)}`;
+}
+
 function pcalOpenSessionPopover(kind, session, block) {
   const title = session.document_title || plannerDocumentTitle(session.document_id);
+  const name = `${title} (${pcalActivity(session.activity_type)})`;
   pcalShowPopover(block, `${pcalActivity(session.activity_type)} · ${title}`, (popover) => {
     const holder = pcalEl("div", "pcal-popover-session");
     const content = pcalEl("div", "pcal-popover-body");
     content.append(pcalEl("span", `pcal-kind pcal-kind--${kind}`, PCAL_KIND_LABELS[kind]),
       pcalEl("h4", "pcal-popover-title", title),
-      pcalEl("p", "pcal-popover-when", `${pcalActivity(session.activity_type)} · ${plannerDayLabel(session.scheduled_start.slice(0, 10))} · ${pcalSessionTimes(session)} (${plannerFormatDuration(session.duration_minutes)})`));
-    if (session.reason?.message) content.appendChild(pcalEl("p", "pcal-popover-reason", session.reason.message));
+      pcalEl("p", "pcal-popover-activity", pcalActivity(session.activity_type)),
+      pcalEl("p", "pcal-popover-when", `${plannerDayLabel(session.scheduled_start.slice(0, 10))} · ${pcalSessionTimes(session)} · ${plannerFormatDuration(session.duration_minutes)}`));
+    if (session.reason?.message) {
+      const why = pcalEl("p", "pcal-popover-reason");
+      why.append(pcalEl("span", "pcal-popover-caption", "Why this session?"), document.createTextNode(` ${session.reason.message}`));
+      content.appendChild(why);
+    }
+    const original = session.rescheduled_from && plannerSessionsById.get(session.rescheduled_from);
+    if (original) content.appendChild(pcalEl("p", "pcal-popover-note", `Moved from ${pcalWhen(original.scheduled_start)}`));
+    if (kind === "completed" && session.completed_at) {
+      content.appendChild(pcalEl("p", "pcal-popover-note", `Completed ${new Date(session.completed_at).toLocaleString(undefined,
+        { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`));
+    }
     holder.appendChild(content);
     if (kind === "suggested") content.appendChild(pcalEl("p", "pcal-popover-hint", "Suggested. Accept plan to save it."));
-    else if (session.session_id && plannerIsActiveSession(session)) {
-      plannerAddSessionActions(holder, content, session, `${title} (${pcalActivity(session.activity_type)})`);
+    const actions = session.session_id ? PCAL_SESSION_ACTIONS[kind] || [] : [];
+    if (actions.length) {
+      const group = pcalEl("div", "pcal-popover-actions pcal-session-actions");
+      actions.forEach(([action, label, primary]) => {
+        const button = pcalEl("button", `${primary ? "primary-button" : "pcal-text-action"} planner-session-action planner-session-${action}`, label);
+        button.type = "button";
+        button.dataset.sessionAction = action;
+        button.dataset.sessionId = session.session_id;
+        button.setAttribute("aria-label", `${label} ${name}`);
+        // The same lifecycle call as everywhere else: one request per session at a time.
+        button.addEventListener("click", () => plannerSessionAction(session, action, button, group));
+        group.appendChild(button);
+      });
+      holder.appendChild(group);
     }
     popover.appendChild(holder);
   });
+  pcal.popover.querySelector(".pcal-session-actions .primary-button")?.focus();
 }
 
 // -- add materials sheet ------------------------------------------------------------
@@ -6929,6 +6969,8 @@ async function pcalRescheduleTo(session, startIso) {
       method: "POST", body: { utc_offset_minutes: plannerUtcOffsetMinutes(), target_start: startIso },
     });
     const moved = { ...result.session, plan_id: session.plan_id };
+    plannerSessionsById.set(session.session_id, { ...session, ...(result.previous || {}) });
+    plannerSessionsById.set(moved.session_id, moved);
     plannerSessions = [...plannerSessions.filter((item) => item.session_id !== session.session_id), moved];
     renderPlannerWorkspace();
     loadTodayPlan();

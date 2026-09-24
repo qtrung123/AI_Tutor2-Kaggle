@@ -263,9 +263,14 @@ const startButton = (title, activity) => [...document.querySelectorAll(".planner
   // Week view shows the same states.
   setPage("planner"); await sleep(500);
   // (desktop: each session's actions are in its calendar popover)
-  const inWeek = (s, title, activity) => desktop ? weekSession(s) : item(title, activity);
-  out.lifecycleWeek = {overdue: describe(inWeek(overdue, "Marketing", "Summary")), running: describe(inWeek(running, "Statistics", "Quiz")),
-    later: describe(inWeek(later, "PowerBI", "Flashcards"))};
+  // (desktop: each session's actions are in its calendar popover -- primary first, secondary quiet)
+  const popover = (holder) => holder && ({pill: holder.querySelector(".pcal-kind").textContent,
+    primary: [...holder.querySelectorAll(".pcal-session-actions .primary-button")].map((b) => b.textContent),
+    secondary: [...holder.querySelectorAll(".pcal-session-actions .pcal-text-action")].map((b) => b.textContent),
+    note: holder.querySelector(".pcal-popover-note")?.textContent || null});
+  const inWeek = (s, title, activity) => desktop ? popover(weekSession(s)) : describe(item(title, activity));
+  out.lifecycleWeek = {overdue: inWeek(overdue, "Marketing", "Summary"), running: inWeek(running, "Statistics", "Quiz"),
+    later: inWeek(later, "PowerBI", "Flashcards")};
   document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape"}));
   out.overflow.weekLifecycle = noOverflow();
 
@@ -295,7 +300,7 @@ const startButton = (title, activity) => [...document.querySelectorAll(".planner
   setPage("planner"); await sleep(500);
   out.weekAfter = desktop
     ? {calendar: calendarEvents().map((e) => [e.querySelector(".pcal-event-title").textContent, e.querySelector(".pcal-event-meta").textContent, e.dataset.kind]),
-       moved: describe(weekSession(P.sessionsByPlan["plan-1"].find((s) => s.rescheduled_from === overdue.session_id))),
+       moved: popover(weekSession(P.sessionsByPlan["plan-1"].find((s) => s.rescheduled_from === overdue.session_id))),
        queue: week().queue}
     : {running: describe(item("Statistics", "Quiz")), skipped: describe(item("Statistics", "Review")),
        moved: describe(item("Marketing", "Summary")), days: week().days.length};
@@ -404,7 +409,13 @@ class TodayAndWeekAssertions:
         self.assertEqual((home["overdue"], home["running"], home["later"], home["lastWeek"]),
                          (not_completed, running, ahead, not_completed))
         week = self.out["lifecycleWeek"]
-        self.assertEqual((week["overdue"], week["running"], week["later"]), (not_completed, running, ahead))
+        if self.out["width"] >= 1024:   # the calendar popover: one primary action, the rest secondary
+            self.assertEqual(week["overdue"], {"pill": "Not completed", "primary": ["Reschedule"], "secondary": ["Skip"], "note": None})
+            self.assertEqual(week["running"], {"pill": "In progress", "primary": ["Resume"],
+                                               "secondary": ["Complete session", "Skip"], "note": None})
+            self.assertEqual(week["later"], {"pill": "Planned", "primary": ["Start"], "secondary": ["Reschedule", "Skip"], "note": None})
+        else:
+            self.assertEqual((week["overdue"], week["running"], week["later"]), (not_completed, running, ahead))
         for state in list(home.values()) + list(week.values()):
             if isinstance(state, dict):
                 self.assertNotRegex(str(state).lower(), r"fail")
@@ -492,7 +503,8 @@ class DesktopCalendarWeekAssertions:
         self.assertEqual(calendar[("Statistics", "Review")], "skipped")
         self.assertEqual(calendar[("PowerBI", "Flashcards")], "confirmed")   # later today
         self.assertEqual(calendar[("Marketing", "Summary")], "confirmed")   # the moved session, on its new day
-        self.assertEqual(after["moved"], {"note": None, "status": None, "buttons": ["Start"]})
+        self.assertEqual(after["moved"]["primary"], ["Start"])
+        self.assertRegex(after["moved"]["note"], r"^Moved from .*24.* · 09:00$")   # lineage, from data already loaded
         self.assertEqual(after["queue"], [])   # neither history nor scheduled sessions are queued work
 
 

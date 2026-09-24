@@ -370,7 +370,7 @@ class CalendarPlannerAssertions:
         self.assertFalse(accepted["acceptShown"])
         self.assertFalse(accepted["autoPlanShown"])
         self.assertEqual((accepted["queue"]["items"], accepted["queue"]["sessionCards"]), ([], 0))   # confirmed sessions live on the calendar
-        self.assertEqual(self.out["confirmedPopover"], ["×", "Start"])
+        self.assertEqual(self.out["confirmedPopover"], ["×", "Start", "Reschedule", "Skip"])   # Start primary; no Complete before starting
 
     def test_reload_opens_the_confirmed_calendar(self):
         reloaded = self.out["reloaded"]
