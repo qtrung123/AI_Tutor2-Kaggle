@@ -3268,6 +3268,17 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-view-pill{flex:none;padding:3px 11px;border:1px solid var(--session-line);border-radius:999px;font-size:12px;font-weight:600;color:var(--pcal-ink-2)}
 .pcal-actions{display:flex;gap:6px;flex:none;margin-left:auto}
 .pcal-secondary{color:var(--pcal-ink-2)}
+.pcal-status-line{display:flex;align-items:center;gap:10px;min-width:0}
+.pcal-explain{flex:none;border:0;background:transparent;padding:0;font:inherit;font-size:12px;font-weight:600;color:var(--session-accent);cursor:pointer;line-height:17px}
+.pcal-explain:hover{text-decoration:underline;text-underline-offset:3px}
+.pcal-explain:focus-visible{outline:2px solid var(--session-accent);outline-offset:2px;border-radius:3px}
+.pcal-factors{margin:2px 0 0;display:grid;gap:7px}
+.pcal-factor dt{font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#9aa1ad}
+.pcal-factor dd{margin:1px 0 0;font-size:12.5px;color:var(--ink);line-height:1.4}
+.pcal-material-pack{font-size:11px;color:#8b93a1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pcal-sheet-facts{grid-area:facts;display:grid;gap:2px;min-width:0}
+.pcal-sheet-state{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--pcal-ink-2)}
+.pcal-sheet-pack{font-size:11.5px;color:#8b93a1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pcal-status{min-width:0;min-height:17px;line-height:17px;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pcal-status[data-tone="warn"]{color:var(--pcal-warn-ink)}
 .pcal-status[data-tone="busy"]{color:var(--session-accent)}
@@ -3400,7 +3411,7 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-sheet-head{display:flex;align-items:center;justify-content:space-between}
 .pcal-sheet-head h3{margin:0;font-size:15px}
 .pcal-sheet-list{list-style:none;margin:0;padding:0;overflow-y:auto;display:grid;gap:0}
-.pcal-sheet-row{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"title add" "deadline add";gap:2px 10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--pcal-line-soft)}
+.pcal-sheet-row{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"title add" "facts add" "deadline add";gap:3px 10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--pcal-line-soft)}
 .pcal-sheet-title{grid-area:title;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pcal-sheet-row .pcal-deadline{grid-area:deadline;justify-self:start}
 .pcal-sheet-add{grid-area:add}

@@ -117,6 +117,10 @@ def document_progress(owner_id: str, document_id: str, now_local: datetime) -> d
             "attempts": attempts, "attempt_count": len(attempts), "trend": _trend(attempts),
         },
         "flashcards": {"card_count": state.flashcards.card_count},
+        # What the document's Study Pack actually holds right now (nothing inferred).
+        "study_pack": {"summary_ready": state.summary.available,
+                       "flashcard_count": state.flashcards.card_count if state.flashcards.available else 0,
+                       "quiz_count": state.quiz.quiz_count},
         "plan": plan_block,
     }
 

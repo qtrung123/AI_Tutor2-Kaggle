@@ -429,7 +429,7 @@ if (plannerView) {
         <span class="pcal-view-pill">Week</span>
         <div class="pcal-actions"><button class="pcal-button pcal-secondary" id="pcal-auto-plan" type="button">Auto Plan</button><button class="primary-button pcal-accept" id="pcal-accept" type="button">Accept plan</button></div>
       </div>
-      <span class="pcal-status" id="pcal-status" aria-live="polite"></span>
+      <div class="pcal-status-line"><span class="pcal-status" id="pcal-status" aria-live="polite"></span><button class="pcal-explain" id="pcal-explain" type="button" aria-haspopup="dialog" hidden>How this plan was built</button></div>
     </div>
     <div class="pcal-notice" id="pcal-notice" role="status" hidden></div>
     <div class="pcal-scroll" id="pcal-scroll">
@@ -481,6 +481,7 @@ const pcal = {
   next: document.getElementById("pcal-next"),
   range: document.getElementById("pcal-range"),
   status: document.getElementById("pcal-status"),
+  explain: document.getElementById("pcal-explain"),
   autoPlan: document.getElementById("pcal-auto-plan"),
   accept: document.getElementById("pcal-accept"),
   notice: document.getElementById("pcal-notice"),
@@ -5015,6 +5016,7 @@ async function loadPlannerData({ keepWeek = false } = {}) {
     if (plannerIsDesktop()) {
       plannerQueueAutoPreview(0);
       plannerLoadLiveCandidates();
+      plannerLoadDocStates();
     }
   } catch (error) {
     showToast(error.message || "Could not load Study Planner data");
@@ -6163,15 +6165,62 @@ function pcalRenderMaterials() {
     remove.addEventListener("click", () => pcalRemoveMaterial(material, remove));
     top.append(name, remove);
     const meta = pcalEl("div", "pcal-material-meta");
-    const stateKey = material.learning_state || "new";
+    const stateKey = pcalLearningKey(material.document_id, material.learning_state || "new");
     meta.appendChild(pcalEl("span", `pcal-pill pcal-pill--${stateKey}`, PLANNER_LEARNING_STATE_LABELS[stateKey] || stateKey));
     const { control: deadline, input } = pcalDeadlineControl(material.deadline || "", `Deadline for ${title}`, today);
     input.addEventListener("change", () => pcalSetDeadline(material, input));
     meta.appendChild(deadline);
     item.append(top, meta);
+    const pack = pcalStudyPackText(material.document_id, { compact: true });
+    if (pack) item.appendChild(pcalEl("span", "pcal-material-pack", pack));
     pcal.materials.appendChild(item);
   });
   pcal.newPlan.hidden = !(plannerPlan && (plannerSessions.length || plannerHistorySessions.length));
+}
+
+// Each document's real study state -- learning state, Study Pack contents, latest quiz -- from
+// /api/progress/documents (DocumentStudyState). Nothing here is inferred on the page.
+let plannerDocStates = new Map();   // document id -> progress payload (null while loading / unavailable)
+let plannerDocStatesLoad = 0;
+
+async function plannerLoadDocStates() {
+  const load = ++plannerDocStatesLoad;
+  plannerDocStates = new Map();
+  const ids = indexedDocuments.map((doc) => doc.id);
+  await Promise.all(ids.map(async (id) => {
+    try {
+      const state = await plannerRequest(`${PROGRESS_API_BASE_URL}/${encodeURIComponent(id)}?utc_offset_minutes=${plannerUtcOffsetMinutes()}`);
+      if (load === plannerDocStatesLoad && state?.learning) plannerDocStates.set(id, state);
+    } catch (error) {
+      // no state for this document: its details are simply not shown
+    }
+  }));
+  if (load !== plannerDocStatesLoad || !plannerIsDesktop()) return;
+  pcalRenderMaterials();
+  pcalRenderSheet();
+}
+
+function pcalLearningKey(documentId, fallback = "new") {
+  return plannerDocStates.get(documentId)?.learning.state || fallback;
+}
+
+function pcalStudyPackText(documentId, { compact = false } = {}) {
+  // What the Study Pack actually holds; missing parts are said plainly, never assumed.
+  const pack = plannerDocStates.get(documentId)?.study_pack;
+  if (!pack) return "";
+  const cards = pack.flashcard_count;
+  if (compact) {
+    const parts = [pack.summary_ready && "Summary", cards && `${cards} cards`, pack.quiz_count && "Quiz"].filter(Boolean);
+    return parts.length ? parts.join(" · ") : "No study pack yet";
+  }
+  return [pack.summary_ready ? "Summary ready" : "No summary yet", cards ? `${cards} flashcard${cards === 1 ? "" : "s"}` : "No flashcards yet",
+    pack.quiz_count ? "Quiz ready" : "No quiz yet"].join(" · ");
+}
+
+function pcalQuizText(documentId) {
+  const quiz = plannerDocStates.get(documentId)?.quiz;
+  if (!quiz) return "";
+  return quiz.latest ? `Latest quiz ${Math.round(quiz.latest.percentage)}%` : "No quiz attempt yet";
 }
 
 function pcalDeadlineControl(value, label, today) {
@@ -6255,6 +6304,7 @@ function pcalRenderToolbar() {
   }
   pcal.status.textContent = status;
   pcal.status.dataset.tone = tone;
+  pcal.explain.hidden = !(live || plannerPreview?.sessions.length);
   pcal.autoPlan.hidden = live || !plannerMaterials.length;
   pcal.autoPlan.disabled = plannerBusy || !plannerReadyToPreview();
   pcal.accept.hidden = live || !plannerPreview?.sessions.length;
@@ -6607,6 +6657,79 @@ const PCAL_SESSION_ACTIONS = {
   overdue: [["reschedule", "Reschedule", true], ["skip", "Skip", false]],
 };
 
+// The scheduler's own reason code, in plain words (its message when the code is unknown).
+const PCAL_REASON_TEXT = {
+  new_material: "Build understanding of new material.",
+  deadline_approaching: "The deadline is coming up.",
+  review_due: "This material is due for review.",
+  low_quiz_score: "Your latest quiz shows this needs more practice.",
+  flashcard_review_due: "Flashcard review is due.",
+  final_review: "Final retrieval practice before the deadline.",
+  quiz_in_progress: "Continue the quiz already in progress.",
+  rescheduled: "Moved from an earlier study session.",
+};
+
+function pcalReasonText(reason) {
+  if (!reason) return "";
+  return PCAL_REASON_TEXT[reason.code] || reason.message || "";
+}
+
+// "How this plan was built": only the factors the planner really used, with this plan's data.
+const PCAL_REASON_PHRASES = {
+  new_material: "new material", deadline_approaching: "deadline catch-up", review_due: "spaced review",
+  low_quiz_score: "practice after a low quiz score", flashcard_review_due: "flashcard review",
+  final_review: "final review before a deadline", quiz_in_progress: "quiz to finish", rescheduled: "moved session",
+};
+
+function pcalPlanFactors() {
+  const factors = [];
+  const materials = plannerMaterials.map((material) => ({ material, state: plannerDocStates.get(material.document_id) }));
+  const known = materials.filter((item) => item.state);
+  if (known.length) {
+    const counts = {};
+    known.forEach(({ state }) => {
+      const label = (PLANNER_LEARNING_STATE_LABELS[state.learning.state] || state.learning.state).toLowerCase();
+      counts[label] = (counts[label] || 0) + 1;
+    });
+    factors.push(["Learning state", Object.entries(counts).map(([label, count]) => `${count} ${label}`).join(", ")]);
+    const quizzed = known.filter(({ state }) => state.quiz.latest);
+    factors.push(["Quiz performance", quizzed.length
+      ? quizzed.map(({ material, state }) => `${pcalMaterialTitle(material)} ${Math.round(state.quiz.latest.percentage)}%`).join(", ")
+      : "No quiz results yet — planning starts from new material."]);
+  }
+  const due = plannerMaterials.filter((material) => material.deadline);
+  factors.push(["Deadlines", due.length
+    ? due.map((material) => `${pcalMaterialTitle(material)} ${new Date(`${material.deadline}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`).join(", ")
+    : "None set — sessions spread over the next two weeks."]);
+  const weekMinutes = pcalWeekDates().reduce((sum, date) => sum + pcalAvailabilityFor(plannerDateKey(date), (date.getDay() + 6) % 7)
+    .reduce((total, slot) => total + plannerToMinutes(slot.end_at) - plannerToMinutes(slot.start_at), 0), 0);
+  factors.push(["Available time", `Only the time you marked — ${plannerFormatDuration(weekMinutes)} this week.`]);
+  const sessions = plannerHasLivePlan() ? plannerSessions : plannerPreview?.sessions || [];
+  const reasons = {};
+  sessions.forEach((session) => {
+    const code = session.reason?.code;
+    if (PCAL_REASON_PHRASES[code]) reasons[code] = (reasons[code] || 0) + 1;
+  });
+  if (Object.keys(reasons).length) {
+    factors.push(["In this plan", Object.entries(reasons).map(([code, count]) => `${count} × ${PCAL_REASON_PHRASES[code]}`).join(", ")]);
+  }
+  return factors;
+}
+
+function pcalOpenPlanExplanation() {
+  pcalShowPopover(pcal.explain, "How this plan was built", (popover) => {
+    popover.appendChild(pcalEl("h4", "pcal-popover-title", "How this plan was built"));
+    popover.appendChild(pcalEl("p", "pcal-popover-when", "Tutor picks each session from what your materials need, then fits it into your free time."));
+    const list = pcalEl("dl", "pcal-factors");
+    pcalPlanFactors().forEach(([term, detail]) => {
+      const row = pcalEl("div", "pcal-factor");
+      row.append(pcalEl("dt", "", term), pcalEl("dd", "", detail));
+      list.appendChild(row);
+    });
+    popover.appendChild(list);
+  });
+}
+
 function pcalWhen(iso) {
   return `${plannerDayLabel(iso.slice(0, 10))} · ${iso.slice(11, 16)}`;
 }
@@ -6621,10 +6744,15 @@ function pcalOpenSessionPopover(kind, session, block) {
       pcalEl("h4", "pcal-popover-title", title),
       pcalEl("p", "pcal-popover-activity", pcalActivity(session.activity_type)),
       pcalEl("p", "pcal-popover-when", `${plannerDayLabel(session.scheduled_start.slice(0, 10))} · ${pcalSessionTimes(session)} · ${plannerFormatDuration(session.duration_minutes)}`));
-    if (session.reason?.message) {
+    const reason = pcalReasonText(session.reason);
+    if (reason) {
       const why = pcalEl("p", "pcal-popover-reason");
-      why.append(pcalEl("span", "pcal-popover-caption", "Why this session?"), document.createTextNode(` ${session.reason.message}`));
+      why.append(pcalEl("span", "pcal-popover-caption", "Why this session?"), document.createTextNode(` ${reason}`));
       content.appendChild(why);
+    }
+    const deadline = pcalMaterialDeadline(session.document_id);
+    if (deadline && !PLANNER_HISTORY_SESSION_STATUSES.includes(session.status)) {
+      content.appendChild(pcalEl("p", "pcal-popover-note", `Due ${new Date(`${deadline}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`));
     }
     const original = session.rescheduled_from && plannerSessionsById.get(session.rescheduled_from);
     if (original) content.appendChild(pcalEl("p", "pcal-popover-note", `Moved from ${pcalWhen(original.scheduled_start)}`));
@@ -6689,6 +6817,14 @@ function pcalRenderSheet() {
     row.dataset.documentId = doc.id;
     const name = pcalEl("strong", "pcal-sheet-title", doc.title);
     name.title = doc.title;
+    const facts = pcalEl("div", "pcal-sheet-facts");
+    if (plannerDocStates.has(doc.id)) {
+      const stateKey = pcalLearningKey(doc.id);
+      const line = pcalEl("span", "pcal-sheet-state");
+      line.append(pcalEl("span", `pcal-pill pcal-pill--${stateKey}`, PLANNER_LEARNING_STATE_LABELS[stateKey] || stateKey),
+        pcalEl("span", "pcal-sheet-quiz", pcalQuizText(doc.id)));
+      facts.append(line, pcalEl("span", "pcal-sheet-pack", pcalStudyPackText(doc.id)));
+    }
     const { control: deadline, input, refresh } = pcalDeadlineControl("", `Deadline for ${doc.title} (optional)`, today);
     input.min = today;
     input.addEventListener("change", refresh);
@@ -6696,7 +6832,7 @@ function pcalRenderSheet() {
     add.type = "button";
     add.setAttribute("aria-label", `Add ${doc.title}`);
     add.addEventListener("click", () => pcalAddMaterial(doc.id, input.value || null, add));
-    row.append(name, deadline, add);
+    row.append(name, facts, deadline, add);
     pcal.sheetList.appendChild(row);
   });
 }
@@ -7168,6 +7304,7 @@ pcal.today?.addEventListener("click", () => {
 pcal.prev?.addEventListener("click", () => pcalShiftWeek(-7));
 pcal.next?.addEventListener("click", () => pcalShiftWeek(7));
 pcal.autoPlan?.addEventListener("click", () => plannerQueueAutoPreview(0));
+pcal.explain?.addEventListener("click", () => (pcal.popover.hidden ? pcalOpenPlanExplanation() : pcalClosePopover()));
 pcal.accept?.addEventListener("click", plannerAcceptPlan);
 pcal.addMaterials?.addEventListener("click", () => (pcal.sheet.hidden ? pcalOpenSheet() : pcalCloseSheet()));
 pcal.sheetClose?.addEventListener("click", pcalCloseSheet);

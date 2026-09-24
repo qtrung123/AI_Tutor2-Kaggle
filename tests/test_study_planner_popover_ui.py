@@ -157,7 +157,7 @@ class PopoverAssertions:
     def test_reason_is_shown_without_internal_codes(self):
         for state in ("scheduled", "running", "missed", "completed", "skipped", "moved"):
             popover = self.out[state]
-            self.assertEqual(popover["reason"], "Why this session? New material to learn")
+            self.assertEqual(popover["reason"], "Why this session? Build understanding of new material.")
             self.assertNotRegex(popover["text"], r"new_material|priority|score")
 
     def test_each_action_fires_once(self):

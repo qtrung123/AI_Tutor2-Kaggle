@@ -354,7 +354,7 @@ class CalendarPlannerAssertions:
         ghost = self.out["ghostPopover"]
         self.assertTrue(ghost["open"])
         self.assertIn("Suggested", ghost["text"])
-        self.assertIn('"Marketing" is due 2026-10-01', ghost["text"])
+        self.assertIn("Why this session? The deadline is coming up.", ghost["text"])
         self.assertEqual(ghost["buttons"], ["×"])
 
     def test_accept_confirms_once_and_ghosts_become_solid_in_place(self):

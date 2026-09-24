@@ -87,6 +87,15 @@ class StudyProgressApiTests(PlannerDatabaseMixin, unittest.TestCase):
         self.assertEqual(plan["next_session"]["session_id"], running["session_id"])   # work under way comes first
         self.assertNotEqual(plan["next_session"]["session_id"], done["session_id"])
 
+    def test_study_pack_reports_only_real_artifacts(self):
+        pack = lambda: self.client.get(f"/api/progress/documents/stats{QUERY}").json()["study_pack"]
+        self.assertEqual(pack(), {"summary_ready": False, "flashcard_count": 0, "quiz_count": 0})   # nothing created yet
+        self.add_summary(self.alice, "stats")
+        self.add_flashcards(self.alice, "stats", 7)
+        self.assertEqual(pack(), {"summary_ready": True, "flashcard_count": 7, "quiz_count": 0})
+        self.add_quiz(self.alice, "stats", "q-stats")
+        self.assertEqual(pack(), {"summary_ready": True, "flashcard_count": 7, "quiz_count": 1})
+
     def test_next_session_skips_sessions_whose_time_has_passed(self):
         self.session("stats", "summary", "2026-09-24T09:00:00", 30)
         later = self.session("stats", "quiz", "2026-09-26T18:00:00", 30)
