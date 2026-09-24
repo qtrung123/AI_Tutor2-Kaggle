@@ -3315,6 +3315,23 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 @keyframes pcal-flash{0%,60%{box-shadow:0 0 0 4px rgba(104,118,245,.45)}100%{box-shadow:none}}
 .pcal-now{position:absolute;left:-1px;right:0;height:2px;background:#e5484d;z-index:5;pointer-events:none}
 .pcal-now::before{content:"";position:absolute;left:-5px;top:-4px;width:10px;height:10px;border-radius:50%;background:#e5484d}
+/* direct manipulation (drag a session or queue item to a time) */
+.pcal-event.is-draggable,.pcal-queue-item.is-draggable{cursor:grab}
+.pcal-event.is-draggable:hover{box-shadow:0 2px 6px rgba(40,48,120,.22)}
+.pcal-queue-item.is-draggable:hover{border-color:var(--session-accent)}
+.pcal.is-moving,.pcal.is-moving *{cursor:grabbing!important}
+.pcal.is-moving .pcal-col{background-color:#f6f7f9}
+.pcal.is-moving .pcal-avail{background:#dff0e5;box-shadow:inset 0 0 0 1px var(--pcal-avail-edge)}
+.pcal.is-moving .pcal-event:not(.is-moving-source){opacity:.55}
+.is-moving-source{opacity:.35!important}
+.pcal-drop{position:absolute;z-index:7;box-sizing:border-box;padding:3px 7px;border-radius:6px;background:rgba(104,118,245,.85);color:#fff;box-shadow:0 6px 16px rgba(40,48,120,.3);display:flex;flex-direction:column;gap:1px;overflow:hidden;pointer-events:none}
+.pcal-drop-title{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pcal-drop-time{font-size:11px;font-weight:600}
+.pcal-drop.is-invalid{background:rgba(120,126,140,.55);box-shadow:none}
+.pcal-drop.is-saving{opacity:.7}
+.pcal-drag-chip{position:fixed;z-index:60;max-width:220px;padding:6px 10px;border-radius:8px;background:var(--session-accent);color:#fff;font-size:12px;font-weight:600;box-shadow:0 8px 20px rgba(40,48,120,.3);pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.is-returning{animation:pcal-return .35s ease}
+@keyframes pcal-return{0%{transform:translateX(0)}25%{transform:translateX(-4px)}50%{transform:translateX(4px)}75%{transform:translateX(-2px)}100%{transform:none}}
 .pcal-drag{position:absolute;left:2px;right:2px;z-index:4;box-sizing:border-box;border:1.5px dashed var(--pcal-avail-edge);background:rgba(159,207,177,.28);border-radius:4px;color:var(--pcal-avail-ink);font-size:11px;font-weight:600;padding:2px 6px;pointer-events:none}
 
 /* study queue */

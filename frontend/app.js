@@ -2575,6 +2575,7 @@ async function loadIndexedDocuments() {
     }
 
     indexedDocuments = await response.json();
+    pcalRenderSheet();   // the planner's add-materials sheet may already be open
     await loadQuizStatuses();
     quizDocumentSelect.innerHTML = "";
 
@@ -4995,8 +4996,13 @@ async function loadPlannerData({ keepWeek = false } = {}) {
     if (plannerPlan && plannerStep === "plan") loadPlannerPlanProgress(plannerPlan.plan_id);
     else if (plannerStep === "plan") plannerStep = "materials";
     if (!keepWeek) plannerCalWeekStart = null;
+    if (plannerPlacements.length && plannerPlacementsPlanId !== plannerPlan?.plan_id) plannerPlacements = [];
+    plannerPlacementsPlanId = plannerPlan?.plan_id || null;
     renderPlanner();
-    if (plannerIsDesktop()) plannerQueueAutoPreview(0);
+    if (plannerIsDesktop()) {
+      plannerQueueAutoPreview(0);
+      plannerLoadLiveCandidates();
+    }
   } catch (error) {
     showToast(error.message || "Could not load Study Planner data");
   }
@@ -5843,6 +5849,31 @@ let plannerPreviewSeq = 0;        // only the newest preview response is shown
 let plannerAvailabilityTimer = null;
 let pcalDrag = null;
 let pcalScrolledWeek = null;      // the week whose initial scroll position was already set
+let plannerPlacements = [];       // draft moves before Accept: [{candidate_key, scheduled_start}]
+let plannerLiveCandidates = [];   // a confirmed plan's still-wanted activities (server-computed)
+let pcalMove = null;              // a session / queue item being dragged onto the calendar
+let pcalMoveBusy = false;         // a drop request is in flight (one at a time)
+let pcalSuppressClick = false;    // the click that ends a drag must not open a popover
+const PCAL_SNAP_MINUTES = 15;
+
+let plannerPlacementsPlanId = null;
+
+async function plannerLoadLiveCandidates() {
+  // What a confirmed plan still wants scheduled (draggable from the queue). Server-computed only.
+  if (!plannerPlan || !plannerHasLivePlan()) {
+    plannerLiveCandidates = [];
+    return;
+  }
+  const planId = plannerPlan.plan_id;
+  try {
+    const found = await plannerRequest(plannerPlanUrl(`/candidates?utc_offset_minutes=${plannerUtcOffsetMinutes()}`));
+    if (plannerPlan?.plan_id !== planId) return;
+    plannerLiveCandidates = Array.isArray(found) ? found : [];
+  } catch (error) {
+    plannerLiveCandidates = [];
+  }
+  if (plannerIsDesktop() && !pcalMove) pcalRenderQueue();
+}
 
 function plannerIsDesktop() {
   return Boolean(plannerDesktopQuery?.matches);
@@ -5916,11 +5947,12 @@ async function plannerRunPreview() {
   pcalRenderToolbar();
   try {
     const result = await plannerRequest(plannerPlanUrl("/preview"), {
-      method: "POST", body: { utc_offset_minutes: plannerUtcOffsetMinutes() },
+      method: "POST", body: plannerScheduleBody(),
     });
     if (seq !== plannerPreviewSeq || plannerPlan?.plan_id !== planId) return;
     plannerPreview = result;
     plannerPreviewFailure = null;
+    plannerDropRejectedPlacements(result.placements?.rejected);
   } catch (error) {
     if (seq !== plannerPreviewSeq) return;
     plannerPreview = null;
@@ -5928,6 +5960,20 @@ async function plannerRunPreview() {
   }
   plannerPreviewing = false;
   if (plannerIsDesktop()) renderPlannerWorkspace();
+}
+
+function plannerScheduleBody() {
+  // Only the learner's offset, plus their draft moves; the server recomputes and validates everything.
+  const body = { utc_offset_minutes: plannerUtcOffsetMinutes() };
+  if (plannerPlacements.length) body.placements = plannerPlacements.map((item) => ({ ...item }));
+  return body;
+}
+
+function plannerDropRejectedPlacements(rejected) {
+  if (!rejected?.length) return;
+  const keys = new Set(rejected.map((item) => item.candidate_key));
+  plannerPlacements = plannerPlacements.filter((item) => !keys.has(item.candidate_key));
+  showToast(rejected[0].message || "That time is not available");
 }
 
 function plannerAfterAvailabilityChange() {
@@ -6010,17 +6056,26 @@ async function plannerAcceptPlan() {
   try {
     // One atomic confirm; the server recomputes the same deterministic schedule from its own data.
     const result = await plannerRequest(plannerPlanUrl("/confirm"), {
-      method: "POST", body: { utc_offset_minutes: plannerUtcOffsetMinutes() },
+      method: "POST", body: plannerScheduleBody(),
     });
     const planId = plannerPlan.plan_id;
     plannerSessions = result.sessions.map((session) => ({ ...session, plan_id: planId })).filter(plannerIsActiveSession);
     plannerPreview = null;
     plannerPreviewFailure = null;
+    plannerPlacements = [];
+    plannerLoadLiveCandidates();
     plannerStep = "plan";
     showToast("Study plan saved");
     loadPlannerPlanProgress(planId);
     loadTodayPlan();
   } catch (error) {
+    if (error.detail?.code === "placement_rejected") {
+      // A moved suggestion no longer fits: nothing was saved; show the refreshed suggestion instead.
+      plannerBusy = false;
+      plannerDropRejectedPlacements(error.detail.placements);
+      plannerQueueAutoPreview(0);
+      return;
+    }
     if (error.status === 409) alreadyConfirmed = true;
     else plannerPreviewFailure = error;
   } finally {
@@ -6043,6 +6098,8 @@ async function pcalStartNewPlan() {
     plannerSessions = [];
     plannerHistorySessions = [];
     plannerPreview = null;
+    plannerPlacements = [];
+    plannerLiveCandidates = [];
     plannerStep = "materials";
     plannerQueueAutoPreview();
     loadTodayPlan();
@@ -6313,8 +6370,19 @@ function pcalEventBlock({ kind, session }) {
   block.classList.toggle("is-compact", end - start < 40);
   block.append(pcalEl("strong", "pcal-event-title", title),
     pcalEl("span", "pcal-event-meta", `${pcalActivity(session.activity_type)} · ${pcalSessionTimes(session)}`));
-  block.addEventListener("pointerdown", (event) => event.stopPropagation());
-  block.addEventListener("click", () => pcalOpenSessionPopover(kind, session, block));
+  block.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+    const source = pcalMoveSourceFor(kind, session, block);
+    if (source) pcalBeginMove(event, source);
+  });
+  block.addEventListener("click", () => {
+    if (pcalSuppressClick) {
+      pcalSuppressClick = false;
+      return;
+    }
+    pcalOpenSessionPopover(kind, session, block);
+  });
+  if (pcalMoveSourceFor(kind, session, block)) block.classList.add("is-draggable");
   return block;
 }
 
@@ -6527,9 +6595,20 @@ function pcalQueueSessionItem(session, kind) {
   return item;
 }
 
-function pcalQueueUnscheduledItem(entry) {
+function pcalQueueUnscheduledItem(entry, kind = "suggested") {
   // Work the scheduler could not place (or a material with nothing planned yet): stays visible.
+  // With a candidate key it can be dragged onto the calendar (a server-validated placement).
   const item = pcalEl("li", "planner-session pcal-queue-item pcal-queue-item--unscheduled");
+  if (entry.candidate_key && entry.estimated_minutes) {
+    item.classList.add("is-draggable");
+    item.dataset.candidateKey = entry.candidate_key;
+    item.addEventListener("pointerdown", (event) => pcalBeginMove(event, {
+      kind: kind === "live" ? "candidate" : "unscheduled", key: entry.candidate_key, element: item,
+      documentId: entry.document_id, duration: entry.estimated_minutes, deadline: entry.deadline,
+      title: entry.document_title || plannerDocumentTitle(entry.document_id), activity: entry.activity_type,
+      grabMinutes: 0,
+    }));
+  }
   item.appendChild(pcalEl("span", "planner-session-time", "Not scheduled"));
   const content = pcalEl("div", "planner-session-body");
   content.appendChild(pcalEl("strong", "", entry.document_title || plannerDocumentTitle(entry.document_id)));
@@ -6554,10 +6633,7 @@ function pcalRenderQueue() {
       .forEach((session) => entries.push(pcalQueueSessionItem(session, "live")));
     plannerSessions.filter((session) => !plannerIsOverdue(session) && (session.status === "in_progress" || session.scheduled_end > nowIso))
       .sort(byTime).forEach((session) => entries.push(pcalQueueSessionItem(session, "live")));
-    const planned = new Set([...plannerSessions, ...plannerHistorySessions].map((session) => session.document_id));
-    plannerMaterials.filter((material) => !planned.has(material.document_id))
-      .forEach((material) => entries.push(pcalQueueUnscheduledItem({ document_id: material.document_id, document_title: material.document_title,
-        reason: { message: "Added after this plan was saved. Set a deadline to fit it in." } })));
+    plannerLiveCandidates.forEach((candidate) => entries.push(pcalQueueUnscheduledItem(candidate, "live")));
   } else if (plannerPreview) {
     [...plannerPreview.sessions].sort(byTime).forEach((session) => entries.push(pcalQueueSessionItem(session, "suggested")));
     plannerPreview.capacity.unscheduled.forEach((entry) => entries.push(pcalQueueUnscheduledItem(entry)));
@@ -6603,6 +6679,243 @@ setInterval(() => {
   const now = plannerNow();
   if (line) line.style.top = `${(now.getHours() * 60 + now.getMinutes()) * PCAL_MINUTE_PX}px`;
 }, 60 * 1000);
+
+// -- direct manipulation: drag a session / queue item to a time (Phase 7B) ------------------
+// The page only proposes a start; the server validates every drop (availability, overlap,
+// deadline, status) and stays authoritative. An obviously invalid drop never sends a request.
+
+function pcalMoveSourceFor(kind, session, element) {
+  const grab = { element, documentId: session.document_id, duration: session.duration_minutes,
+    title: session.document_title || plannerDocumentTitle(session.document_id), activity: session.activity_type };
+  if (kind === "suggested" && session.candidate_key) return { ...grab, kind: "suggested", key: session.candidate_key, session };
+  if ((kind === "confirmed" || kind === "overdue") && session.session_id && session.status === "scheduled") {
+    return { ...grab, kind: "session", session };
+  }
+  return null;
+}
+
+function pcalBeginMove(event, source) {
+  if ((event.button !== undefined && event.button > 0) || pcalMoveBusy) return;
+  event.preventDefault();
+  let grabMinutes = source.grabMinutes;
+  if (grabMinutes === undefined) {
+    const box = source.element.getBoundingClientRect();
+    grabMinutes = Math.max(0, Math.round((event.clientY - box.top) / PCAL_MINUTE_PX));
+  }
+  pcalMove = { source, grabMinutes, x: event.clientX, y: event.clientY, active: false, target: null };
+}
+
+function pcalMaterialDeadline(documentId) {
+  return plannerMaterials.find((material) => material.document_id === documentId)?.deadline || null;
+}
+
+function pcalOccupied(dateKey, source) {
+  // Everything already on that day's calendar, except the item being moved.
+  const same = (session) => session.scheduled_start.slice(0, 10) === dateKey;
+  if (plannerHasLivePlan()) {
+    return [...plannerSessions, ...plannerHistorySessions.filter((session) => session.status === "completed")]
+      .filter((session) => same(session) && session !== source.session);
+  }
+  return [...(plannerPreview?.sessions || []), ...plannerHistorySessions.filter((session) => session.status === "completed")]
+    .filter((session) => same(session) && !(source.key && session.candidate_key === source.key));
+}
+
+function pcalCheckTarget(dateKey, weekday, start, source) {
+  // The same rules the server applies, so an obviously invalid drop sends nothing.
+  const end = start + source.duration;
+  const now = plannerNow();
+  const todayKey = plannerDateKey(now);
+  if (dateKey < todayKey || (dateKey === todayKey && start < now.getHours() * 60 + now.getMinutes())) return "That time has already passed.";
+  const deadline = source.deadline || pcalMaterialDeadline(source.documentId);
+  if (deadline && dateKey > deadline) return "That is after this material’s deadline.";
+  const windows = pcalAvailabilityFor(dateKey, weekday)
+    .map((slot) => [plannerToMinutes(slot.start_at), plannerToMinutes(slot.end_at)])
+    .sort((left, right) => left[0] - right[0])
+    .reduce((merged, [from, to]) => {
+      const last = merged[merged.length - 1];
+      if (last && from <= last[1]) last[1] = Math.max(last[1], to);
+      else merged.push([from, to]);
+      return merged;
+    }, []);
+  if (!windows.some(([from, to]) => from <= start && end <= to)) return "Pick a time inside your available hours.";
+  const clash = pcalOccupied(dateKey, source).some((session) => {
+    const from = plannerToMinutes(session.scheduled_start.slice(11, 16));
+    const to = plannerToMinutes(session.scheduled_end.slice(11, 16));
+    return from < end && to > start;
+  });
+  return clash ? "That time is already taken by another session." : null;
+}
+
+function pcalMoveElements() {
+  let preview = document.getElementById("pcal-drop");
+  if (!preview) {
+    preview = pcalEl("div", "pcal-drop");
+    preview.id = "pcal-drop";
+    preview.setAttribute("aria-hidden", "true");
+    preview.append(pcalEl("strong", "pcal-drop-title"), pcalEl("span", "pcal-drop-time"));
+    pcal.scroll.appendChild(preview);
+  }
+  let chip = document.getElementById("pcal-drag-chip");
+  if (!chip) {
+    chip = pcalEl("div", "pcal-drag-chip");
+    chip.id = "pcal-drag-chip";
+    chip.setAttribute("aria-hidden", "true");
+    document.body.appendChild(chip);
+  }
+  return { preview, chip };
+}
+
+function pcalUpdateMove(event) {
+  const move = pcalMove;
+  if (!move.active) {
+    if (Math.hypot(event.clientX - move.x, event.clientY - move.y) < 5) return;
+    move.active = true;
+    pcalClosePopover();
+    plannerWorkspace.classList.add("is-moving");
+    move.source.element.classList.add("is-moving-source");
+  }
+  const { preview, chip } = pcalMoveElements();
+  const scrollBox = pcal.scroll.getBoundingClientRect();
+  const column = [...pcal.body.querySelectorAll(".pcal-col")].find((col) => {
+    const box = col.getBoundingClientRect();
+    return event.clientX >= box.left && event.clientX < box.right;
+  });
+  const overGrid = column && event.clientY >= scrollBox.top && event.clientY <= scrollBox.bottom;
+  const label = `${pcalActivity(move.source.activity)} · ${move.source.title}`;
+  if (!overGrid) {
+    move.target = null;
+    preview.hidden = true;
+    chip.hidden = false;
+    chip.textContent = label;
+    chip.style.left = `${event.clientX + 12}px`;
+    chip.style.top = `${event.clientY + 8}px`;
+    return;
+  }
+  chip.hidden = true;
+  const colBox = column.getBoundingClientRect();
+  const raw = (event.clientY - colBox.top) / PCAL_MINUTE_PX - move.grabMinutes;
+  const start = Math.min(PCAL_DAY_MINUTES - move.source.duration,
+    Math.max(0, Math.round(raw / PCAL_SNAP_MINUTES) * PCAL_SNAP_MINUTES));
+  const dateKey = column.dataset.date;
+  const problem = pcalCheckTarget(dateKey, Number(column.dataset.weekday), start, move.source);
+  move.target = { dateKey, start, problem };
+  preview.hidden = false;
+  preview.classList.toggle("is-invalid", Boolean(problem));
+  preview.style.left = `${pcal.body.offsetLeft + column.offsetLeft + 2}px`;
+  preview.style.width = `${column.offsetWidth - 4}px`;
+  preview.style.top = `${pcal.body.offsetTop + start * PCAL_MINUTE_PX}px`;
+  preview.style.height = `${Math.max(12, move.source.duration * PCAL_MINUTE_PX - 2)}px`;
+  preview.querySelector(".pcal-drop-title").textContent = move.source.title;
+  preview.querySelector(".pcal-drop-time").textContent = `${plannerMinutesToLabel(start)}–${plannerMinutesToLabel(start + move.source.duration)}`;
+}
+
+function pcalClearMoveVisuals(source) {
+  plannerWorkspace.classList.remove("is-moving");
+  source?.element?.classList.remove("is-moving-source");
+  document.getElementById("pcal-drop")?.remove();
+  document.getElementById("pcal-drag-chip")?.remove();
+}
+
+function pcalCancelMove() {
+  const move = pcalMove;
+  pcalMove = null;
+  pcalClearMoveVisuals(move?.source);
+}
+
+function pcalBounce(source, message) {
+  // An invalid drop: nothing is written; the item settles back where it was.
+  if (message) showToast(message);
+  const selector = source.kind === "session" ? `.pcal-event[data-session-id="${source.session.session_id}"]`
+    : source.key ? `[data-candidate-key="${source.key}"]` : null;
+  const element = selector ? plannerWorkspace.querySelector(selector) : null;
+  if (!element) return;
+  element.classList.remove("is-returning");
+  void element.offsetWidth;
+  element.classList.add("is-returning");
+}
+
+async function pcalEndMove(event) {
+  const move = pcalMove;
+  pcalMove = null;
+  if (!move?.active) {
+    pcalClearMoveVisuals(move?.source);
+    return;   // a plain click: the popover opens as before
+  }
+  pcalSuppressClick = true;
+  setTimeout(() => { pcalSuppressClick = false; }, 0);
+  const { source, target } = move;
+  if (!target) {
+    pcalClearMoveVisuals(source);
+    return;
+  }
+  if (target.problem) {
+    pcalClearMoveVisuals(source);
+    pcalBounce(source, target.problem);
+    return;
+  }
+  const startIso = `${target.dateKey}T${plannerMinutesToLabel(target.start)}:00`;
+  if (source.kind === "session" && source.session.scheduled_start === startIso) {
+    pcalClearMoveVisuals(source);
+    return;
+  }
+  document.getElementById("pcal-drop")?.classList.add("is-saving");
+  try {
+    if (source.kind === "session") await pcalRescheduleTo(source.session, startIso);
+    else if (source.kind === "candidate") await pcalPlaceCandidate(source.key, startIso);
+    else pcalSetPlacement(source.key, startIso);
+  } finally {
+    pcalClearMoveVisuals(source);
+  }
+}
+
+function pcalSetPlacement(key, startIso) {
+  // Before Accept: a draft move of one of the server's own suggestions. The preview re-runs with
+  // it and the server applies it only if it is (still) valid; Accept sends the same moves.
+  plannerPlacements = [...plannerPlacements.filter((item) => item.candidate_key !== key), { candidate_key: key, scheduled_start: startIso }];
+  plannerQueueAutoPreview(0);
+}
+
+async function pcalRescheduleTo(session, startIso) {
+  if (pcalMoveBusy || plannerBusySessions.has(session.session_id)) return;
+  pcalMoveBusy = true;
+  plannerBusySessions.add(session.session_id);
+  try {
+    const result = await plannerRequest(`${PLANNER_SESSIONS_API_URL}/${encodeURIComponent(session.session_id)}/reschedule`, {
+      method: "POST", body: { utc_offset_minutes: plannerUtcOffsetMinutes(), target_start: startIso },
+    });
+    const moved = { ...result.session, plan_id: session.plan_id };
+    plannerSessions = [...plannerSessions.filter((item) => item.session_id !== session.session_id), moved];
+    renderPlannerWorkspace();
+    loadTodayPlan();
+  } catch (error) {
+    renderPlannerWorkspace();
+    pcalBounce({ kind: "session", session }, error.message || "Could not move this session");
+    if (error.status === 404 || error.detail?.code === "session_not_reschedulable") await loadPlannerData({ keepWeek: true });
+  } finally {
+    pcalMoveBusy = false;
+    plannerBusySessions.delete(session.session_id);
+  }
+}
+
+async function pcalPlaceCandidate(key, startIso) {
+  if (pcalMoveBusy || !plannerPlan) return;
+  pcalMoveBusy = true;
+  try {
+    const result = await plannerRequest(plannerPlanUrl("/candidates/place"), {
+      method: "POST", body: { utc_offset_minutes: plannerUtcOffsetMinutes(), candidate_key: key, scheduled_start: startIso },
+    });
+    plannerSessions = [...plannerSessions, { ...result.session, plan_id: plannerPlan.plan_id }];
+    plannerLiveCandidates = plannerLiveCandidates.filter((candidate) => candidate.candidate_key !== key);
+    renderPlannerWorkspace();
+    loadTodayPlan();
+    plannerLoadLiveCandidates();
+  } catch (error) {
+    pcalBounce({ kind: "candidate", key }, error.message || "Could not add this session");
+    if (error.detail?.code === "candidate_stale" || error.detail?.code === "stale_plan") await loadPlannerData({ keepWeek: true });
+  } finally {
+    pcalMoveBusy = false;
+  }
+}
 
 // ---- Home: Today's Study Plan (read-only) ------------------------------------
 
@@ -6771,12 +7084,15 @@ pcal.sheetClose?.addEventListener("click", pcalCloseSheet);
 pcal.newPlan?.addEventListener("click", pcalStartNewPlan);
 document.addEventListener("pointermove", (event) => {
   if (pcalDrag) pcalMoveDrag(event);
+  if (pcalMove) pcalUpdateMove(event);
 });
-document.addEventListener("pointerup", () => {
+document.addEventListener("pointerup", (event) => {
   if (pcalDrag) pcalFinishDrag();
+  if (pcalMove) pcalEndMove(event);
 });
 document.addEventListener("pointercancel", () => {
   if (pcalDrag) pcalFinishDrag();
+  if (pcalMove) pcalCancelMove();
 });
 document.addEventListener("pointerdown", (event) => {
   // Click-away closes the popover and the add-materials sheet.

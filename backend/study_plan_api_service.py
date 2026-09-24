@@ -7,7 +7,7 @@ result without persisting anything; confirm recomputes the same schedule server-
 
 from datetime import date, datetime, timedelta, timezone
 
-from backend import study_adaptation, study_planner_service, study_planner_store, study_progress
+from backend import study_adaptation, study_placement, study_planner_service, study_planner_store, study_progress
 from backend.document_study_state import get_document_study_state
 from backend.indexed_document_store import list_indexed_documents
 from backend.study_scheduler import DEFAULT_CONFIG, find_next_slot, plan_schedule
@@ -162,9 +162,11 @@ def _parse_local_now(local_now: str | None, offset: timedelta) -> datetime:
     return parsed
 
 
-def _schedule_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None):
-    """Shared by preview and confirm: validate the learner time context and the plan, then run the
-    deterministic scheduler. Returns (local_now, offset, result, warnings, titles)."""
+def _schedule_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None, placements=()):
+    """Shared by preview and confirm: validate the learner time context and the plan, run the
+    deterministic scheduler, then apply the learner's validated placements (study_placement).
+    Returns (local_now, offset, result, warnings, titles, placement) where placement is
+    (entries by candidate key, applied keys, rejected placements)."""
     offset = _validate_utc_offset(utc_offset_minutes)
     local_now = _parse_local_now(local_now, offset)
     materials = study_planner_store.list_materials(owner_id, plan_id)
@@ -184,7 +186,10 @@ def _schedule_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_n
         )
 
     context = study_planner_service.build_scheduling_context(owner_id, plan_id, now=local_now, utc_offset=offset)
-    result = plan_schedule(context)
+    result, entries, applied, rejected = study_placement.apply_placements(
+        plan_schedule(context), list(placements), now=local_now, availability=context.availability,
+        busy=context.busy_sessions, deadlines={m.document_id: m.deadline for m in context.materials},
+    )
 
     titles = {material.document_id: material.state.title for material in context.materials}
     warnings = []
@@ -193,10 +198,17 @@ def _schedule_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_n
     for material in materials:
         if material["document_id"] not in titles:
             warnings.append({"code": "document_missing", "document_id": material["document_id"]})
-    return local_now, offset, result, warnings, titles
+    return local_now, offset, result, warnings, titles, (entries, applied, rejected)
 
 
-def _capacity(capacity, titles: dict) -> dict:
+def _candidate_keys(result, entries: dict) -> tuple[list[str], list[str]]:
+    """The candidate key of every proposal and every unscheduled activity of a placed result."""
+    by_slot = {(e.document_id, e.activity_type, e.start): key for key, e in entries.items() if e.start}
+    waiting = [key for key, e in entries.items() if not e.start]
+    return ([by_slot[(p.document_id, p.activity_type, p.scheduled_start)] for p in result.proposals], waiting)
+
+
+def _capacity(capacity, titles: dict, keys: list[str] | None = None) -> dict:
     return {
         "status": capacity.status,
         "required_minutes": capacity.required_minutes,
@@ -209,8 +221,9 @@ def _capacity(capacity, titles: dict) -> dict:
                 "document_id": c.document_id, "document_title": titles.get(c.document_id),
                 "activity_type": c.activity_type, "estimated_minutes": c.estimated_minutes,
                 "deadline": c.deadline, "reason": _reason(c.reason), "artifact_id": c.artifact_id,
+                **({"candidate_key": keys[index]} if keys else {}),
             }
-            for c in capacity.unscheduled
+            for index, c in enumerate(capacity.unscheduled)
         ],
     }
 
@@ -229,7 +242,8 @@ def _saved_session(session: dict, titles: dict) -> dict:
     }
 
 
-def preview_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None = None) -> dict:
+def preview_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None = None,
+                 placements=()) -> dict:
     """Run the deterministic scheduler for one plan WITHOUT saving anything.
 
     The learner's timezone comes only from `utc_offset_minutes` (required, a real civil offset).
@@ -237,9 +251,13 @@ def preview_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now
     planner-local now is the current UTC instant shifted by that offset -- never the server's
     timezone. Insufficient capacity is a normal result (status "at_risk"); a deadline already past
     on the learner's local date is a validation error (PlanValidationError "deadline_passed").
+    Each session / unscheduled activity carries its `candidate_key`; `placements` (the learner's
+    moves, see study_placement) are applied when valid and listed under placements.rejected if not.
     """
     _require_plan(owner_id, plan_id)
-    local_now, offset, result, warnings, titles = _schedule_plan(owner_id, plan_id, utc_offset_minutes, local_now)
+    local_now, offset, result, warnings, titles, (entries, applied, rejected) = _schedule_plan(
+        owner_id, plan_id, utc_offset_minutes, local_now, placements)
+    session_keys, waiting_keys = _candidate_keys(result, entries)
     return {
         "plan_id": plan_id,
         "persisted": False,
@@ -251,22 +269,30 @@ def preview_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now
                 "activity_type": p.activity_type, "scheduled_start": p.scheduled_start,
                 "scheduled_end": p.scheduled_end, "duration_minutes": p.duration_minutes,
                 "reason": _reason(p.reason), "artifact_id": p.artifact_id,
+                "candidate_key": key, "placed": key in applied,
             }
-            for p in result.proposals
+            for p, key in zip(result.proposals, session_keys)
         ],
-        "capacity": _capacity(result.capacity, titles),
+        "capacity": _capacity(result.capacity, titles, waiting_keys),
+        "placements": {"applied": sorted(applied), "rejected": rejected},
         "warnings": warnings,
     }
 
 
-def confirm_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None = None) -> dict:
+def confirm_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None = None,
+                 placements=()) -> dict:
     """Recompute the schedule server-side (the client never sends sessions) and save it: every
     proposed session plus one schedule_run, atomically. A partial (at_risk) plan may be confirmed
-    as long as something can be scheduled; a plan that already has active sessions is a conflict."""
+    as long as something can be scheduled; a plan that already has active sessions is a conflict.
+    The learner's placements are re-validated against this recomputation: if any is stale or
+    invalid the whole confirm is refused (409 placement_rejected) and nothing is saved."""
     _require_plan(owner_id, plan_id)
     if study_planner_store.count_active_plan_sessions(owner_id, plan_id):
         raise PlanConflictError("This plan is already confirmed.")
-    local_now, offset, result, warnings, titles = _schedule_plan(owner_id, plan_id, utc_offset_minutes, local_now)
+    local_now, offset, result, warnings, titles, (_, _, rejected) = _schedule_plan(
+        owner_id, plan_id, utc_offset_minutes, local_now, placements)
+    if rejected:
+        raise SessionConflictError("placement_rejected", rejected[0]["message"], placements=rejected)
     if not result.proposals:
         raise PlanValidationError(
             "nothing_to_schedule",
@@ -353,18 +379,24 @@ def skip_session(owner_id: str, session_id: str) -> dict:
     return {"session": _saved_session(session, _document_titles(owner_id)), "changed": changed}
 
 
-def reschedule_session(owner_id: str, session_id: str, utc_offset_minutes: int, local_now: str | None = None) -> dict:
+def reschedule_session(owner_id: str, session_id: str, utc_offset_minutes: int, local_now: str | None = None,
+                       target_start: str | None = None) -> dict:
     """Move one session to the first usable slot: inside the learner's availability, clear of busy
     sessions, from now (or, for a session still ahead, after its current end) up to the material's
     deadline. Only when nothing fits by the deadline -- or the deadline has already passed -- is a
     slot after it used (after_deadline=true), within the default planning horizon. Nothing else in
-    the plan moves."""
+    the plan moves.
+
+    With `target_start` (a calendar drag) the session moves to exactly that start instead, when the
+    window is valid (study_placement.validate_window); otherwise 409 with the reason and no write."""
     session = study_planner_store.get_session(owner_id, session_id)
     if not session:
         raise PlanNotFoundError("Study session not found.")
     offset = _validate_utc_offset(utc_offset_minutes)
     now = _parse_local_now(local_now, offset)
     material = study_planner_store.get_plan_material(owner_id, session["plan_id"], session["document_id"])
+    if target_start is not None:
+        return _reschedule_to(owner_id, session, target_start, now, material["deadline"] if material else None)
     deadline = date.fromisoformat(material["deadline"]) if material and material["deadline"] else None
     context = SchedulingContext(
         owner_id=owner_id, plan_id=session["plan_id"], now=now, utc_offset=offset, materials=(),
@@ -393,6 +425,83 @@ def reschedule_session(owner_id: str, session_id: str, utc_offset_minutes: int, 
     titles = _document_titles(owner_id)
     return {"session": _saved_session(moved, titles), "previous": _saved_session(previous, titles),
             "after_deadline": after_deadline}
+
+
+def _reschedule_to(owner_id: str, session: dict, target_start: str, now: datetime, deadline: str | None) -> dict:
+    if session["status"] not in study_planner_store.RESCHEDULABLE_STATUSES:
+        raise SessionConflictError("session_not_reschedulable", f"A {session['status']} session cannot be rescheduled.",
+                                   status=session["status"])
+    busy = [s for s in study_planner_store.list_busy_sessions(owner_id, start_from=now.date().isoformat())
+            if s["session_id"] != session["session_id"]]
+    try:
+        start, end = study_placement.validate_window(
+            target_start, session["duration_minutes"], now=now,
+            availability=study_planner_store.list_availability(owner_id), deadline=deadline, busy=busy)
+    except study_placement.PlacementError as error:
+        raise SessionConflictError(error.code, str(error), status=session["status"]) from error
+    try:
+        # One transaction; the store re-checks status and overlap and keeps the rescheduled_from lineage.
+        previous, moved = study_planner_store.reschedule_session(owner_id, session["session_id"], start, end)
+    except study_planner_store.SessionTransitionError as error:
+        raise SessionConflictError(error.code, str(error), status=error.status) from error
+    titles = _document_titles(owner_id)
+    return {"session": _saved_session(moved, titles), "previous": _saved_session(previous, titles),
+            "after_deadline": False}
+
+
+def _live_context(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None):
+    plan = _require_plan(owner_id, plan_id)
+    if plan["status"] != "active":
+        raise PlanValidationError("plan_not_active", "Only an active plan can take new sessions.")
+    offset = _validate_utc_offset(utc_offset_minutes)
+    now = _parse_local_now(local_now, offset)
+    context = study_planner_service.build_scheduling_context(owner_id, plan_id, now=now, utc_offset=offset)
+    return now, context, study_planner_store.list_sessions(owner_id, plan_id=plan_id)
+
+
+def list_live_candidates(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None = None) -> list[dict]:
+    """Activities the scheduler still wants for a confirmed plan that no scheduled / in-progress
+    session covers -- the only things a learner may drag onto the calendar. Read-only."""
+    _, context, plan_sessions = _live_context(owner_id, plan_id, utc_offset_minutes, local_now)
+    found = []
+    for item in study_placement.live_candidates(context, plan_sessions):
+        candidate = item["candidate"]
+        found.append({"candidate_key": item["candidate_key"], "document_id": candidate.document_id,
+                      "document_title": item["title"], "activity_type": candidate.activity_type,
+                      "estimated_minutes": candidate.estimated_minutes, "deadline": candidate.deadline,
+                      "reason": _reason(candidate.reason), "artifact_id": candidate.artifact_id})
+    return found
+
+
+def place_live_candidate(owner_id: str, plan_id: str, key: str, target_start: str, utc_offset_minutes: int,
+                         local_now: str | None = None) -> dict:
+    """Schedule one still-wanted activity (by candidate_key, recomputed here) at the learner's chosen
+    start. Validated like any placement, then written atomically: if the plan's sessions changed
+    since they were read, nothing is saved (409 stale_plan)."""
+    now, context, plan_sessions = _live_context(owner_id, plan_id, utc_offset_minutes, local_now)
+    match = next((item for item in study_placement.live_candidates(context, plan_sessions)
+                  if item["candidate_key"] == key), None)
+    if match is None:
+        raise SessionConflictError("candidate_stale", study_placement.PLACEMENT_MESSAGES["candidate_stale"], status="")
+    candidate = match["candidate"]
+    try:
+        start, end = study_placement.validate_window(
+            target_start, candidate.estimated_minutes, now=now, availability=context.availability,
+            deadline=candidate.deadline,
+            busy=study_planner_store.list_busy_sessions(owner_id, start_from=now.date().isoformat()))
+    except study_placement.PlacementError as error:
+        raise SessionConflictError(error.code, str(error), status="") from error
+    record = {"document_id": candidate.document_id, "activity_type": candidate.activity_type,
+              "scheduled_start": start, "scheduled_end": end, "duration_minutes": candidate.estimated_minutes,
+              "reason": candidate.reason.code, "artifact_id": candidate.artifact_id}
+    try:
+        written = study_planner_store.apply_adaptation_changes(
+            owner_id, plan_id, study_planner_store.plan_sessions_fingerprint(plan_sessions), now.isoformat(),
+            added=[record], moved=[], cancelled=[], replaced=[])
+    except study_planner_store.SessionTransitionError as error:
+        raise SessionConflictError(error.code, str(error), status=error.status) from error
+    session = study_planner_store.get_session(owner_id, written["added"][0])
+    return {"session": _saved_session(session, _document_titles(owner_id))}
 
 
 def _compute_adaptation(owner_id: str, plan_id: str, trigger: dict, utc_offset_minutes: int,

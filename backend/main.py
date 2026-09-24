@@ -269,6 +269,28 @@ class PlanPreviewRequest(BaseModel):
     local_now: Optional[str] = None
 
 
+class PlacementRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # A candidate the server itself proposed (its candidate_key) and the learner's chosen start.
+    candidate_key: str = Field(min_length=1, max_length=300)
+    scheduled_start: str = Field(min_length=1, max_length=40)
+
+
+class PlanScheduleRequest(PlanPreviewRequest):
+    # Learner placements (calendar drags); the server validates each against its own recomputation.
+    placements: list[PlacementRequest] = Field(default_factory=list, max_length=100)
+
+
+class SessionRescheduleRequest(PlanPreviewRequest):
+    # A calendar drag: move to exactly this naive-local start (validated server-side). Omitted = first free slot.
+    target_start: Optional[str] = Field(default=None, max_length=40)
+
+
+class CandidatePlaceRequest(PlanPreviewRequest):
+    candidate_key: str = Field(min_length=1, max_length=300)
+    scheduled_start: str = Field(min_length=1, max_length=40)
+
+
 class QuizGenerateRequest(BaseModel):
     """Request body for POST /api/quiz/generate."""
     document_id: str
@@ -1531,26 +1553,24 @@ def planner_v2_adaptation_apply(plan_id: str, request: PlanAdaptationApplyReques
 
 
 @app.post("/api/planner/plans/{plan_id}/preview")
-def planner_v2_preview(plan_id: str, request: PlanPreviewRequest, current_user: dict = Depends(require_current_user)) -> dict:
-    """Deterministic schedule preview. Read-only: never saves study sessions."""
+def planner_v2_preview(plan_id: str, request: PlanScheduleRequest, current_user: dict = Depends(require_current_user)) -> dict:
+    """Deterministic schedule preview (plus validated learner placements). Read-only: never saves study sessions."""
     try:
         return study_plan_api_service.preview_plan(
             current_user["id"], plan_id, request.utc_offset_minutes, local_now=request.local_now,
+            placements=[p.model_dump() for p in request.placements],
         )
     except _PLAN_V2_ERRORS as error:
         raise _plan_v2_error(error) from error
 
 
 @app.post("/api/planner/plans/{plan_id}/confirm", status_code=201)
-def planner_v2_confirm(plan_id: str, request: PlanPreviewRequest, current_user: dict = Depends(require_current_user)) -> dict:
+def planner_v2_confirm(plan_id: str, request: PlanScheduleRequest, current_user: dict = Depends(require_current_user)) -> dict:
     """Recompute the schedule server-side and save it (sessions + schedule run, atomically). Same body
-    as preview -- client-sent sessions are never accepted (extra fields are rejected)."""
-    try:
-        return study_plan_api_service.confirm_plan(
-            current_user["id"], plan_id, request.utc_offset_minutes, local_now=request.local_now,
-        )
-    except _PLAN_V2_ERRORS as error:
-        raise _plan_v2_error(error) from error
+    as preview -- client-sent sessions are never accepted (extra fields are rejected); placements
+    only move the server's own candidates and a stale/invalid one refuses the whole confirm (409)."""
+    return _session_action(study_plan_api_service.confirm_plan, current_user["id"], plan_id,
+                           request.utc_offset_minutes, request.local_now, [p.model_dump() for p in request.placements])
 
 
 def _session_action(action, *args) -> dict:
@@ -1578,10 +1598,27 @@ def planner_v2_skip_session(session_id: str, current_user: dict = Depends(requir
 
 
 @app.post("/api/planner/sessions/{session_id}/reschedule")
-def planner_v2_reschedule_session(session_id: str, request: PlanPreviewRequest,
+def planner_v2_reschedule_session(session_id: str, request: SessionRescheduleRequest,
                                   current_user: dict = Depends(require_current_user)) -> dict:
     return _session_action(study_plan_api_service.reschedule_session, current_user["id"], session_id,
-                           request.utc_offset_minutes, request.local_now)
+                           request.utc_offset_minutes, request.local_now, request.target_start)
+
+
+@app.get("/api/planner/plans/{plan_id}/candidates")
+def planner_v2_live_candidates(plan_id: str, utc_offset_minutes: int, local_now: Optional[str] = None,
+                               current_user: dict = Depends(require_current_user)) -> list[dict]:
+    """What a confirmed plan still wants scheduled (read-only): the only activities a learner may place."""
+    return _session_action(study_plan_api_service.list_live_candidates, current_user["id"], plan_id,
+                           utc_offset_minutes, local_now)
+
+
+@app.post("/api/planner/plans/{plan_id}/candidates/place", status_code=201)
+def planner_v2_place_candidate(plan_id: str, request: CandidatePlaceRequest,
+                               current_user: dict = Depends(require_current_user)) -> dict:
+    """Schedule one server-recomputed candidate at the learner's chosen start (validated, atomic)."""
+    return _session_action(study_plan_api_service.place_live_candidate, current_user["id"], plan_id,
+                           request.candidate_key, request.scheduled_start, request.utc_offset_minutes,
+                           request.local_now)
 
 
 @app.get("/api/progress/documents/{document_id}")

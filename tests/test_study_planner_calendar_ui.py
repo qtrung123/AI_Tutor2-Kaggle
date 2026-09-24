@@ -198,14 +198,14 @@ FRAME_HOST = """<!doctype html><html><body style="margin:0">
 pre.textContent = event.data; document.body.appendChild(pre); }});</script></body></html>"""
 
 
-def run_at_width(width, height):
+def run_at_width(width, height, mock=MOCK, driver=DRIVER):
     """1280px: the page itself (the headless window size). Other widths: the page inside an iframe."""
     work = Path(tempfile.mkdtemp(prefix=f"calendar_{width}_"))
     try:
         for name in ("index.html", "styles.css", "app.js"):
             shutil.copy(FRONTEND / name, work / name)
-        (work / "app-config.js").write_text(MOCK, encoding="utf-8")
-        (work / "driver.js").write_text(DRIVER, encoding="utf-8")
+        (work / "app-config.js").write_text(mock, encoding="utf-8")
+        (work / "driver.js").write_text(driver, encoding="utf-8")
         page = (work / "index.html").read_text(encoding="utf-8").replace(
             '<script src="app.js"></script>', '<script src="app.js"></script><script src="driver.js"></script>')
         (work / "index.html").write_text(page, encoding="utf-8")

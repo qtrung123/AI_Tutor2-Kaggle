@@ -216,7 +216,7 @@ class StudyPlanApiTests(PlannerDatabaseMixin, unittest.TestCase):
         self.assertGreater(capacity["available_minutes"], 0)
         unscheduled = capacity["unscheduled"][0]
         self.assertEqual(set(unscheduled), {"document_id", "document_title", "activity_type", "estimated_minutes",
-                                            "deadline", "reason", "artifact_id"})
+                                            "deadline", "reason", "artifact_id", "candidate_key"})
         self.assertEqual(body["warnings"], [])
 
     def test_past_deadline_is_judged_on_the_learner_local_date_at_preview(self):
@@ -258,7 +258,8 @@ class StudyPlanApiTests(PlannerDatabaseMixin, unittest.TestCase):
         self.assertEqual(body["capacity"]["status"], "on_track")
         self.assertLess(body["capacity"]["scheduled_minutes"], body["capacity"]["available_minutes"] / 3)
         self.assertEqual(set(sessions[0]), {"document_id", "document_title", "activity_type", "scheduled_start",
-                                            "scheduled_end", "duration_minutes", "reason", "artifact_id"})
+                                            "scheduled_end", "duration_minutes", "reason", "artifact_id",
+                                            "candidate_key", "placed"})
         self.assertEqual((sessions[0]["document_id"], sessions[0]["document_title"], sessions[0]["scheduled_start"]),
                          ("mkt", "Marketing", "2026-09-28T18:00:00"))
         self.assertEqual({s["document_id"] for s in sessions}, {"mkt", "stats", "pbi"})
