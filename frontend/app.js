@@ -1329,7 +1329,10 @@ async function loadDocumentSummary(regenerate = false) {
   }
 }
 
-async function openStudySession(documentId, tab = "overview", topicId = "") {
+async function openStudySession(documentId, tab = "overview", topicId = "", { quizTarget } = {}) {
+  // quizTarget (Quiz tab only): open that exact quiz in the focused Quiz Player -- the same entry
+  // as the Quiz library's Start/Resume -- or, when null, land on the Quiz library. Either way the
+  // default quiz is not pre-loaded, so the older inline quiz view is never shown on the way in.
   const documentItem = indexedDocuments.find((item) => item.id === documentId);
   if (!documentItem) return;
   activeDocumentId = documentId;
@@ -1374,10 +1377,18 @@ async function openStudySession(documentId, tab = "overview", topicId = "") {
   if (quizDocumentSelect) quizDocumentSelect.value = documentId;
   quizScopeSelect.value = "document";   // a quiz always covers the whole document
   flashcardTopicFilter = topicId && topicId !== "document" ? topicId : "all";
-  await Promise.all([loadSelectedQuiz(), loadQuizHistory(documentId)]);
+  const toQuizPlayer = quizTarget !== undefined;
+  await Promise.all([toQuizPlayer ? null : loadSelectedQuiz(), loadQuizHistory(documentId)]);
   renderSessionProgress(documentId);
   setPage("session");
   setSessionTab(tab);
+  if (toQuizPlayer && quizTarget) {
+    try {
+      await openQuizPlayer(quizTarget);
+    } catch (error) {
+      showToast(error.message || "Could not open this quiz");
+    }
+  }
 }
 
 function renderSessionProgress(documentId) {
@@ -5335,6 +5346,21 @@ function plannerAddSessionActions(item, content, session, name) {
   item.appendChild(group);
 }
 
+async function plannerQuizTarget(session) {
+  // The exact quiz a planned quiz / quiz_retry session is about: its own artifact (the quiz to
+  // take or retake), else the document's quiz already in progress. null = the Quiz library.
+  await loadQuizStatuses();
+  const variants = (quizStatuses.find((item) => item.document_id === session.document_id)?.variants || [])
+    .filter((variant) => variant.quiz_id);
+  const byRecent = (left, right) => new Date(right.updated_at || right.created_at || 0) - new Date(left.updated_at || left.created_at || 0);
+  const variant = session.artifact_id
+    ? variants.find((item) => item.quiz_id === session.artifact_id)
+    : variants.filter((item) => item.progress_status === "in_progress").sort(byRecent)[0];
+  const quizId = session.artifact_id || variant?.quiz_id;
+  if (!quizId) return null;
+  return { document_id: session.document_id, topic_id: variant?.topic_id || "document", difficulty: variant?.difficulty, quiz_id: quizId };
+}
+
 const plannerBusySessions = new Set();   // session ids with a lifecycle request in flight
 
 async function plannerSessionAction(session, kind, button, group) {
@@ -5363,7 +5389,8 @@ async function plannerSessionAction(session, kind, button, group) {
         return;
       }
       // A missing artifact is fine: the tool's own empty state offers to generate/create it.
-      await openStudySession(session.document_id, result.tool);
+      if (result.tool === "quiz") await openStudySession(session.document_id, "quiz", "", { quizTarget: await plannerQuizTarget(session) });
+      else await openStudySession(session.document_id, result.tool);
     } else if (kind === "complete") showToast("Session completed. Nice work!");
     else if (kind === "skip") skipped = { changed: Boolean(result.changed) };
     else {
