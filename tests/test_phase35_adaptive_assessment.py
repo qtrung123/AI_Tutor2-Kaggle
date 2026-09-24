@@ -284,10 +284,10 @@ class AdaptiveAssessmentTests(unittest.TestCase):
             self.assertNotIn(f'id="{removed}"', markup)
         self.assertIn('id="overview-materials-list"', markup)
         self.assertIn('/api/dashboard', script)
-        self.assertIn('"Learning materials"', script)
-        self.assertIn('"Quiz performance"', script)   # replaced the all-time "Overall accuracy" (Phase 6A)
-        self.assertIn('"Topics mastered"', script)
-        self.assertNotIn('"Topics assessed"', script)   # folded into the Topics mastered note
+        # Home is document-centric: no cross-document headline metrics.
+        self.assertNotIn('id="overview-kpis"', markup)
+        for removed in ('"Topics mastered"', '"Topics assessed"', '"Overall accuracy"'):
+            self.assertNotIn(removed, script)
         self.assertIn('item.mastery_level !== "Not assessed"', script)   # Progress tab lists assessed topics only
 
 

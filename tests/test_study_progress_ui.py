@@ -1,6 +1,7 @@
 """Real-browser tests for Phase 6A progress (headless Chrome, mocked API): the Progress tab's
 Where you are / Quiz results / Study plan panels, the Quiz coverage fix (concept_coverage_ratio),
-the Home "Quiz performance" stat and the Planner's plan-progress line. Desktop + 390px."""
+Home's per-document "Continue studying" cards (no cross-document headline metrics) and the
+Planner's plan-progress line. Desktop + 390px."""
 
 import unittest
 
@@ -21,7 +22,9 @@ window.fetch = async (input, init = {}) => {
               {document_id: "mkt.pdf", document_name: "Marketing", topic_id: "t2", topic_name: "Pricing",
                mastery_level: "Insufficient evidence", mastery_score: 0.3, has_evidence: true, has_sufficient_evidence: false,
                concept_coverage_ratio: 0.25, answered_questions: 3}],
-    materials: [{document_id: "mkt.pdf", document_name: "Marketing", topic_count: 2, assessed_topic_count: 2}]});
+    materials: [{document_id: "stats.pdf", document_name: "Statistics", topic_count: 1, assessed_topic_count: 0},
+                {document_id: "mkt.pdf", document_name: "Marketing", topic_count: 2, assessed_topic_count: 2},
+                {document_id: "pbi.pdf", document_name: "PowerBI", topic_count: 1, assessed_topic_count: 1}]});
   if (p === "/api/progress/documents/mkt.pdf") return json({document_id: "mkt.pdf", title: "Marketing",
     learning: {state: "learning", label: "Learning", explanation: "Latest quiz score 7/10 (70%); keep practicing."},
     quiz: {latest: {score: 7, total: 10, percentage: 70, completed_at: "2026-09-23T10:00:00+00:00"},
@@ -29,14 +32,15 @@ window.fetch = async (input, init = {}) => {
                       {percentage: 55, score: 5.5, total: 10, completed_at: "2026-09-21T10:00:00+00:00"},
                       {percentage: 70, score: 7, total: 10, completed_at: "2026-09-23T10:00:00+00:00"}],
            attempt_count: 3, trend: "improving"},
-    flashcards: {card_count: 12},
+    flashcards: {card_count: 12}, study_pack: {summary_ready: true, flashcard_count: 12, quiz_count: 2},
     plan: {plan_id: "plan-1", plan_title: "Now", deadline: "2026-10-01", completed_sessions: 2, planned_sessions: 5,
            completed_minutes: 75, remaining_minutes: 90, next_session: {session_id: "s9", document_id: "mkt.pdf",
            activity_type: "quiz", scheduled_start: "2026-09-25T18:00:00", scheduled_end: "2026-09-25T18:30:00",
            duration_minutes: 30, status: "scheduled"}}});
   if (p === "/api/progress/documents/stats.pdf") return json({document_id: "stats.pdf", title: "Statistics",
     learning: {state: "new", label: "Not started", explanation: "Not studied yet."},
-    quiz: {latest: null, attempts: [], attempt_count: 0, trend: null}, flashcards: {card_count: 0}, plan: null});
+    quiz: {latest: null, attempts: [], attempt_count: 0, trend: null}, flashcards: {card_count: 0},
+    study_pack: {summary_ready: false, flashcard_count: 0, quiz_count: 0}, plan: null});
   if (p === "/api/progress/documents/pbi.pdf") return json({document_id: "pbi.pdf", title: "PowerBI",
     learning: {state: "learning", label: "Learning", explanation: "Latest quiz score 5/10 (50%)."},
     quiz: {latest: {score: 5, total: 10, percentage: 50, completed_at: "2026-09-22T10:00:00+00:00"},
@@ -61,20 +65,34 @@ window.addEventListener("error", (e) => out.errors.push(String(e.message) + " @ 
 window.addEventListener("unhandledrejection", (e) => out.errors.push("rejection: " + String(e.reason && e.reason.message || e.reason)));
 const lines = (id) => [...document.getElementById(id).children].map((el) => el.textContent);
 const noOverflow = () => document.documentElement.scrollWidth <= window.innerWidth + 1;
+const pack = () => [...document.querySelectorAll("#session-progress-pack .progress-pack-row")].map((row) => [row.querySelector("dt").textContent, row.querySelector("dd").textContent]);
+const details = () => ({hidden: document.getElementById("session-quiz-details").hidden, open: document.getElementById("session-quiz-details").open,
+  sections: [...document.querySelectorAll("#session-quiz-details h3")].map((h) => h.textContent)});
 (async () => {
   await sleep(1500);
   plannerNow = () => new Date(2026, 8, 24, 12, 0, 0);
   setPage("overview"); await sleep(300);
-  out.kpis = [...document.querySelectorAll("#overview-kpis .stat-card")].map((card) => [...card.children].map((el) => el.textContent));
+  await sleep(400);   // the per-document progress requests
+  out.home = {
+    cards: [...document.querySelectorAll("#overview-materials-list .home-doc-card")].map((card) => ({
+      title: card.querySelector("h3").textContent, state: card.querySelector(".home-doc-state")?.textContent || null,
+      facts: Object.fromEntries([...card.querySelectorAll(".home-doc-fact")].map((row) => [row.querySelector("dt").textContent, row.querySelector("dd").textContent])),
+      action: card.querySelector(".home-doc-open").textContent})),
+    searchVisible: !document.getElementById("home-material-search").hidden,
+    text: document.getElementById("overview-view").textContent,
+  };
+  out.overflow.homeCards = noOverflow();
 
   await openStudySession("mkt.pdf", "progress"); await sleep(600);
   out.mkt = {state: lines("session-progress-state"), quiz: lines("session-progress-quiz"), plan: lines("session-progress-plan"),
     coverage: [...document.querySelectorAll("#session-coverage-list .mastery-card span")].map((el) => el.textContent),
-    headings: [...document.querySelectorAll('[data-session-pane="progress"] h2')].map((h) => h.textContent)};
+    headings: [...document.querySelectorAll('[data-session-pane="progress"] h2')].map((h) => h.textContent),
+    pack: pack(), details: details(), paneText: document.querySelector('[data-session-pane="progress"]').textContent};
   out.overflow.progress = noOverflow();
 
   await openStudySession("stats.pdf", "progress"); await sleep(600);
-  out.stats = {state: lines("session-progress-state"), quiz: lines("session-progress-quiz"), plan: lines("session-progress-plan")};
+  out.stats = {state: lines("session-progress-state"), quiz: lines("session-progress-quiz"), plan: lines("session-progress-plan"),
+    pack: pack(), details: details()};
   await openStudySession("pbi.pdf", "progress"); await sleep(600);
   out.pbi = {quiz: lines("session-progress-quiz")};
   out.overflow.empty = noOverflow();
@@ -112,17 +130,31 @@ class ProgressUiAssertions:
         self.assertNotIn("fatal", self.out)
         self.assertEqual(self.out["errors"], [])
 
-    def test_home_shows_current_quiz_performance_not_overall_accuracy(self):
-        labels = {card[0]: card[1:] for card in self.out["kpis"]}
-        self.assertEqual(list(labels), ["Learning materials", "Quiz performance", "Topics mastered"])
-        self.assertEqual(labels["Quiz performance"], ["73%", "Latest quiz across 2 documents"])
-        self.assertEqual(labels["Topics mastered"], ["0 / 2", "1 of 2 assessed so far"])
+    def test_home_has_no_cross_document_headline_metrics(self):
+        text = self.out["home"]["text"]
+        for removed in ("Topics assessed", "Topics mastered", "Quiz performance", "Learning materials", "accuracy", "Search by title"):
+            self.assertNotIn(removed, text)
+        self.assertFalse(self.out["home"]["searchVisible"])   # a small library needs no search
+
+    def test_home_continue_studying_cards_use_real_document_state(self):
+        cards = {card["title"]: card for card in self.out["home"]["cards"]}
+        self.assertEqual([card["title"] for card in self.out["home"]["cards"]], ["Marketing", "Statistics", "PowerBI"])   # planned first
+        mkt = cards["Marketing"]
+        self.assertEqual((mkt["state"], mkt["action"]), ("Learning", "Continue"))
+        self.assertRegex(mkt["facts"]["Latest quiz"], r"^70% · 7/10 · ")
+        self.assertEqual(mkt["facts"]["Study Pack"], "Summary ready · 12 flashcards · 2 quizzes")
+        self.assertRegex(mkt["facts"]["Next session"], r"^Quiz · .*, 18:00$")
+        self.assertIn("Deadline", mkt["facts"])
+        stats = cards["Statistics"]
+        self.assertEqual((stats["state"], stats["action"]), ("Not started", "Open"))
+        self.assertEqual(stats["facts"], {"Study Pack": "Not generated yet"})   # no quiz yet -> no fake 0%
+        self.assertEqual(list(cards["PowerBI"]["facts"]), ["Latest quiz"])
 
     def test_progress_panels_show_real_values(self):
         mkt = self.out["mkt"]
-        self.assertEqual(mkt["headings"], ["Where you are", "Quiz results", "This document in your plan", "Topic mastery",
-                                           "Quiz coverage", "Needs attention", "Suggested next steps"])
-        self.assertEqual(mkt["state"], ["Learning", "Latest quiz score 7/10 (70%); keep practicing.", "12 flashcards ready"])
+        self.assertEqual(mkt["headings"], ["Where you are", "Quiz results", "Study Pack", "This document in your plan", "Quiz details"])
+        self.assertEqual(mkt["state"], ["Learning", "Latest quiz score 7/10 (70%); keep practicing."])
+        self.assertEqual(mkt["pack"], [["Summary", "Ready"], ["Flashcards", "12 cards"], ["Quiz", "Ready · 2 quizzes"]])
         self.assertEqual(mkt["quiz"][0], "70%")
         self.assertRegex(mkt["quiz"][1], r"^7/10 correct · ")
         self.assertEqual(mkt["quiz"][2], "Up 15 points from your previous attempt")
@@ -135,8 +167,16 @@ class ProgressUiAssertions:
         for text in mkt["state"] + mkt["quiz"] + mkt["plan"]:
             self.assertNotRegex(text.lower(), r"mastery \d|priority|flashcards? (mastered|progress)")
 
+    def test_topic_detail_is_a_secondary_collapsed_quiz_details_section(self):
+        self.assertEqual(self.out["mkt"]["details"], {"hidden": False, "open": False,
+            "sections": ["Topic mastery", "Quiz coverage", "Needs attention", "Suggested next steps"]})
+        self.assertTrue(self.out["stats"]["details"]["hidden"])   # no quiz evidence -> no topic detail at all
+
+    def test_never_claims_flashcard_mastery_or_cross_document_accuracy(self):
+        text = self.out["mkt"]["paneText"].lower()
+        self.assertNotRegex(text, r"flashcards? (mastered|mastery|progress)|overall accuracy|across \d+ documents")
+
     def test_quiz_coverage_uses_the_real_ratio(self):
-        self.assertIn("Quiz coverage", self.out["mkt"]["headings"])
         self.assertEqual(self.out["mkt"]["coverage"], [
             "60% of this topic's key concepts covered by your quizzes",
             "25% of this topic's key concepts covered by your quizzes · a few more questions give a reliable picture"])
@@ -147,6 +187,7 @@ class ProgressUiAssertions:
         self.assertEqual(stats["state"], ["Not started", "Not studied yet."])
         self.assertEqual(stats["quiz"], ["No quiz results yet. Take a quiz to see your score here."])
         self.assertEqual(stats["plan"], ["Not in an active study plan. Add it in Study Planner to schedule sessions."])
+        self.assertEqual(stats["pack"], [["Summary", "Not generated yet"], ["Flashcards", "Not generated yet"], ["Quiz", "Not generated yet"]])
 
     def test_one_attempt_is_not_interpreted_as_a_trend(self):
         quiz = self.out["pbi"]["quiz"]

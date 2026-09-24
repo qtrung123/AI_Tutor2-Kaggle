@@ -127,7 +127,7 @@ const toast = document.getElementById("toast");
 const messageList = document.getElementById("message-list");
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
-chatInput.placeholder = "Ask AI assistant...";
+chatInput.placeholder = "Ask a question...";
 const confidenceLabel = document.getElementById("confidence-label");
 const confidenceBar = document.getElementById("confidence-bar");
 const confidencePill = document.getElementById("confidence-pill");
@@ -180,6 +180,7 @@ const uploadStatus = document.getElementById("upload-status");
             <span id="quiz-player-answered-count"></span>
           </div>
           <div class="quiz-player-progress-track"><span id="quiz-player-progress-bar"></span></div>
+          <nav class="quiz-player-nav" id="quiz-player-nav" aria-label="Jump to question"></nav>
           <span class="quiz-player-save-status" id="quiz-player-save-status" hidden></span>
         </div>
         <article class="quiz-player-card" id="quiz-player-card">
@@ -315,10 +316,28 @@ const toggleConversationSourcesButton = document.getElementById("toggle-conversa
 const closeConversationSourcesButton = document.getElementById("close-conversation-sources-button");
 const sourcesDrawerBackdrop = document.getElementById("sources-drawer-backdrop");
 const conversationSourcesPanel = document.getElementById("conversation-sources-panel");
+// Desktop (>=1024px): the AI Tutor is a slide-over opened from "Ask AI Tutor" instead of a permanent
+// column, so the learning content keeps its full width. It is only hidden/shown -- never re-rendered --
+// so the conversation, draft and sources survive close/reopen. Below 1024px it stays inline as before.
+const tutorOverlayQuery = window.matchMedia("(min-width: 1024px)");
+const tutorLaunchButton = document.getElementById("tutor-launch-button");
+function tutorOverlayOpen() {
+  return document.body.classList.contains("tutor-overlay-open");
+}
+function setTutorOverlayOpen(open, { focus = true } = {}) {
+  const wasFocusedInside = tutorLayout.contains(document.activeElement);
+  document.body.classList.toggle("tutor-overlay-open", open);
+  tutorLaunchButton?.setAttribute("aria-expanded", String(open));
+  if (open && focus) chatInput.focus({ preventScroll: true });
+  if (!open && wasFocusedInside) tutorLaunchButton?.focus({ preventScroll: true });
+}
+// Callers that want the tutor visible (Overview's AI Tutor tool, "Explain" on a quiz answer).
+function revealTutor(options) {
+  if (tutorOverlayQuery.matches) setTutorOverlayOpen(true, options);
+}
 // Keep the source control in the Tutor footer while retaining the existing IDs/handlers.
 tutorLayout.insertBefore(toggleConversationSourcesButton, conversationSourcesPanel);
 setSourcesDrawerOpen(false);
-const overviewKpis = document.getElementById("overview-kpis");
 const overviewMaterialsList = document.getElementById("overview-materials-list");
 const sessionDocumentName = document.getElementById("session-document-name");
 const sessionDocumentStatus = document.getElementById("session-document-status");
@@ -327,6 +346,8 @@ const sessionCoverageList = document.getElementById("session-coverage-list");
 const sessionProgressState = document.getElementById("session-progress-state");
 const sessionProgressQuiz = document.getElementById("session-progress-quiz");
 const sessionProgressPlan = document.getElementById("session-progress-plan");
+const sessionProgressPack = document.getElementById("session-progress-pack");
+const sessionQuizDetails = document.getElementById("session-quiz-details");
 const PROGRESS_API_BASE_URL = apiUrl("/api/progress/documents");
 const sessionKnowledgeGapsList = document.getElementById("session-knowledge-gaps-list");
 const sessionRecommendationsList = document.getElementById("session-recommendations-list");
@@ -517,7 +538,7 @@ const profileEmail = document.getElementById("profile-email");
 const profileAvatar = document.getElementById("profile-avatar");
 const homeGreeting = document.getElementById("home-greeting");
 const sessionSearchInput = document.getElementById("session-search-input");
-const sessionSortSelect = document.getElementById("session-sort-select");
+const homeMaterialSearch = document.getElementById("home-material-search");
 const sidebarRecentDocuments = document.getElementById("sidebar-recent-documents");
 
 function setAuthMode(mode) {
@@ -995,6 +1016,7 @@ function openOverviewTool(tab) {
     // The AI Tutor lives in the persistent side panel next to every tab: land on the material
     // with the chat focused (same as the Library's AI Tutor quick action).
     setSessionTab("material");
+    revealTutor();
     chatInput?.focus();
     return;
   }
@@ -1415,6 +1437,8 @@ function renderSessionProgress(documentId) {
   sessionRecommendationsList.innerHTML = "";
   if (!next.length) sessionRecommendationsList.innerHTML = '<div class="empty-state">Suggestions appear after a few quiz answers.</div>';
   next.forEach((recommendation) => { const button = document.createElement("button"); button.className = "continue-item"; button.type = "button"; button.textContent = recommendation.action || recommendation.topic_name; button.addEventListener("click", () => openStudySession(documentId, "quiz", recommendation.topic_id)); sessionRecommendationsList.appendChild(button); });
+  // Topic-level detail is secondary and only shown when real quiz evidence backs it.
+  if (sessionQuizDetails) sessionQuizDetails.hidden = !(assessed.length || gaps.length || next.length);
   loadDocumentProgress(documentId);
 }
 
@@ -1433,7 +1457,7 @@ let documentProgressRequest = 0;
 async function loadDocumentProgress(documentId) {
   if (!sessionProgressState) return;
   const request = ++documentProgressRequest;
-  [sessionProgressState, sessionProgressQuiz, sessionProgressPlan].forEach((element) => {
+  [sessionProgressState, sessionProgressQuiz, sessionProgressPack, sessionProgressPlan].forEach((element) => {
     element.innerHTML = '<p class="empty-state">Loading…</p>';
   });
   try {
@@ -1442,7 +1466,7 @@ async function loadDocumentProgress(documentId) {
     renderDocumentProgress(progress);
   } catch (error) {
     if (request !== documentProgressRequest) return;
-    [sessionProgressState, sessionProgressQuiz, sessionProgressPlan].forEach((element) => {
+    [sessionProgressState, sessionProgressQuiz, sessionProgressPack, sessionProgressPlan].forEach((element) => {
       element.innerHTML = '<p class="empty-state">Progress could not be loaded right now.</p>';
     });
   }
@@ -1466,9 +1490,26 @@ function renderDocumentProgress(progress) {
   const badge = progressLine(sessionProgressState, progress.learning.label, `progress-state progress-state--${progress.learning.state}`);
   badge.setAttribute("data-state", progress.learning.state);
   progressLine(sessionProgressState, progress.learning.explanation, "progress-note");
-  if (progress.flashcards.card_count) {
-    progressLine(sessionProgressState, `${progress.flashcards.card_count} flashcard${progress.flashcards.card_count === 1 ? "" : "s"} ready`, "progress-note");
-  }
+
+  // Study Pack: what exists for this document. Flashcards are a card count only -- there is no
+  // review data, so nothing here claims flashcard progress or mastery.
+  sessionProgressPack.innerHTML = "";
+  const pack = progress.study_pack || { summary_ready: false, flashcard_count: progress.flashcards?.card_count || 0, quiz_count: 0 };
+  const cards = Number(pack.flashcard_count) || 0;
+  const quizzes = Number(pack.quiz_count) || 0;
+  const packList = document.createElement("dl");
+  packList.className = "progress-pack";
+  [["Summary", pack.summary_ready ? "Ready" : "Not generated yet"],
+   ["Flashcards", cards ? `${cards} card${cards === 1 ? "" : "s"}` : "Not generated yet"],
+   ["Quiz", quizzes ? `Ready · ${quizzes} quiz${quizzes === 1 ? "" : "zes"}` : "Not generated yet"]].forEach(([label, value]) => {
+    const row = document.createElement("div");
+    row.className = `progress-pack-row${value === "Not generated yet" ? " is-missing" : ""}`;
+    const term = document.createElement("dt"); term.textContent = label;
+    const detail = document.createElement("dd"); detail.textContent = value;
+    row.append(term, detail);
+    packList.appendChild(row);
+  });
+  sessionProgressPack.appendChild(packList);
 
   sessionProgressQuiz.innerHTML = "";
   const quiz = progress.quiz;
@@ -2285,13 +2326,9 @@ function renderMasteryList(container, masteries, options = {}) {
 
 function applySessionLibraryFilters() {
   const query = (sessionSearchInput?.value || "").trim().toLowerCase();
-  const rows = [...overviewMaterialsList.querySelectorAll(".subject-card")];
-  rows.forEach((row) => { row.hidden = Boolean(query && !row.dataset.title.includes(query)); });
-  const sortMode = sessionSortSelect?.value || "name";
-  rows.sort((a, b) => sortMode === "topics"
-    ? Number(b.dataset.topicCount || 0) - Number(a.dataset.topicCount || 0)
-    : a.dataset.title.localeCompare(b.dataset.title)
-  ).forEach((row) => overviewMaterialsList.appendChild(row));
+  overviewMaterialsList.querySelectorAll(".home-doc-card").forEach((row) => {
+    row.hidden = Boolean(query && !row.dataset.title.includes(query));
+  });
 }
 
 function renderSidebarRecentDocuments(materials) {
@@ -2340,132 +2377,134 @@ function setSidebarOpen(open) {
   else if (wasOpen && document.getElementById("app-sidebar")?.contains(document.activeElement)) sidebarMenuButton.focus();
 }
 
+// ---- Home: Continue studying ------------------------------------------------------------------
+// One card per document, built only from /api/progress/documents (DocumentStudyState + the active
+// plan): learning state, the latest completed quiz (only when there is one -- never a fake 0%),
+// what the Study Pack holds, the next planned session and the deadline. Cross-document headline
+// metrics (topics mastered, overall accuracy) are intentionally not shown on Home.
+const HOME_SEARCH_MIN_MATERIALS = 7;   // search only helps once the library is large
+let homeDocStates = new Map();   // document id -> progress payload
+let homeDocStatesLoad = 0;
+
 function renderDashboard() {
   if (!dashboardData) return;
-  const metrics = dashboardData.metrics || {};
-  const documentCount = Number(metrics.documents || 0);
-  const totalTopics = Number(metrics.total_topics || 0);
-  const assessedTopics = Number(metrics.topics_assessed || 0);
-  const masteredTopics = Number(metrics.topics_mastered || 0);
-  const performance = metrics.current_quiz_performance || {};
-  const assessedDocuments = Number(performance.assessed_documents || 0);
-  const kpis = [
-    ["Learning materials", String(documentCount), documentCount ? "Ready to study" : "Upload a PDF or TXT file"],
-    ["Quiz performance", performance.average_percentage == null ? "—" : `${Math.round(performance.average_percentage)}%`,
-      assessedDocuments ? `Latest quiz across ${assessedDocuments} document${assessedDocuments === 1 ? "" : "s"}` : "No quiz results yet"],
-    ["Topics mastered", `${masteredTopics} / ${totalTopics}`, totalTopics ? `${assessedTopics} of ${totalTopics} assessed so far` : "No topics yet"],
-  ];
-  overviewKpis.innerHTML = "";
-  kpis.forEach(([label, value, note]) => {
-    const card = document.createElement("article");
-    card.className = "stat-card";
-    const labelElement = document.createElement("span"); labelElement.textContent = label;
-    const valueElement = document.createElement("strong"); valueElement.textContent = value;
-    const noteElement = document.createElement("small"); noteElement.textContent = note;
-    card.append(labelElement, valueElement, noteElement);
-    overviewKpis.appendChild(card);
-  });
-
   const materials = dashboardData.materials || [];
-  renderSubjectCards(dashboardData.subjects || []);
   renderSidebarRecentDocuments(materials);
-  applySessionLibraryFilters();
+  if (homeMaterialSearch) homeMaterialSearch.hidden = materials.length < HOME_SEARCH_MIN_MATERIALS;
+  renderHomeDocumentCards();
+  loadHomeDocumentStates(materials.map((material) => material.document_id));
 }
 
-function subjectQuickActionButton(label, onClick, title) {
-  const button = document.createElement("button");
-  button.className = "text-button subject-quick-action";
-  button.type = "button";
-  button.textContent = label;
-  if (title) button.title = title;
-  button.addEventListener("click", (event) => { event.stopPropagation(); onClick(); });
-  return button;
+async function loadHomeDocumentStates(documentIds) {
+  const load = ++homeDocStatesLoad;
+  const states = new Map();
+  await Promise.all(documentIds.map(async (id) => {
+    try {
+      const progress = await plannerRequest(`${PROGRESS_API_BASE_URL}/${encodeURIComponent(id)}?utc_offset_minutes=${plannerUtcOffsetMinutes()}`);
+      if (progress?.learning) states.set(id, progress);
+    } catch (error) {
+      // no state for this document: its card simply shows fewer details
+    }
+  }));
+  if (load !== homeDocStatesLoad) return;
+  homeDocStates = states;
+  renderHomeDocumentCards();
 }
 
-function renderSubjectCards(subjects) {
+// What a document's Study Pack holds right now; missing parts are said plainly, never assumed.
+function studyPackText(pack) {
+  if (!pack) return "";
+  const cards = Number(pack.flashcard_count) || 0;
+  const quizzes = Number(pack.quiz_count) || 0;
+  const parts = [pack.summary_ready && "Summary ready", cards && `${cards} flashcard${cards === 1 ? "" : "s"}`,
+    quizzes && `${quizzes} quiz${quizzes === 1 ? "" : "zes"}`].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "Not generated yet";
+}
+
+function nextSessionText(session) {
+  if (!session) return "";
+  const activity = PLANNER_ACTIVITY_LABELS[session.activity_type] || session.activity_type;
+  if (session.status === "in_progress") return `${activity} · in progress`;
+  return `${activity} · ${plannerDayLabel(session.scheduled_start.slice(0, 10))}, ${session.scheduled_start.slice(11, 16)}`;
+}
+
+function homeDocumentFact(label, value) {
+  const row = document.createElement("div");
+  row.className = "home-doc-fact";
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const detail = document.createElement("dd");
+  detail.textContent = value;
+  row.append(term, detail);
+  return row;
+}
+
+function renderHomeDocumentCards() {
+  const materials = dashboardData?.materials || [];
   overviewMaterialsList.innerHTML = "";
-  if (!subjects.length) {
+  if (!materials.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "No indexed documents yet.";
+    empty.textContent = "No study materials yet. Upload a PDF or TXT file to start.";
     overviewMaterialsList.appendChild(empty);
     return;
   }
-  subjects.forEach((subject) => {
+  // Documents with a planned session come first (soonest first); the rest keep their order.
+  const nextStart = (id) => homeDocStates.get(id)?.plan?.next_session?.scheduled_start || "￿";
+  const ordered = materials.map((material, index) => ({ material, index }))
+    .sort((a, b) => nextStart(a.material.document_id).localeCompare(nextStart(b.material.document_id)) || a.index - b.index);
+  ordered.forEach(({ material }) => {
+    const documentId = material.document_id;
+    const progress = homeDocStates.get(documentId);
     const card = document.createElement("article");
-    card.className = "subject-card";
-    card.dataset.title = (subject.subject_name || "").toLowerCase();
-    card.dataset.topicCount = String(subject.topic_count || 0);
+    card.className = "home-doc-card";
+    card.dataset.documentId = documentId;
+    card.dataset.title = (material.document_name || documentId).toLowerCase();
 
     const header = document.createElement("div");
-    header.className = "subject-card-header";
-    const title = document.createElement("strong");
-    title.textContent = subject.subject_name;
-    const meta = document.createElement("span");
-    const documentCount = subject.document_count || 0;
-    const topicCount = subject.topic_count || 0;
-    meta.textContent = `${documentCount} document${documentCount === 1 ? "" : "s"} · ${topicCount} topic${topicCount === 1 ? "" : "s"}`;
-    header.append(title, meta);
-
-    const progress = document.createElement("div");
-    progress.className = "subject-progress";
-    if (subject.progress_percent == null) {
-      progress.textContent = "No assessed topics yet";
-    } else {
-      const percent = Math.round(subject.progress_percent);
-      const track = document.createElement("div"); track.className = "subject-progress-track";
-      const bar = document.createElement("span"); bar.className = "subject-progress-bar"; bar.style.width = `${percent}%`;
-      track.appendChild(bar);
-      const label = document.createElement("small"); label.textContent = `${percent}% assessed`;
-      progress.append(track, label);
+    header.className = "home-doc-header";
+    const title = document.createElement("h3");
+    title.textContent = material.document_name || progress?.title || documentId;
+    header.appendChild(title);
+    if (progress) {
+      const state = document.createElement("span");
+      state.className = `progress-state progress-state--${progress.learning.state} home-doc-state`;
+      state.textContent = progress.learning.label;
+      header.appendChild(state);
     }
 
-    const primaryDocumentId = subject.primary_document_id;
-    const primaryMaterial = (dashboardData.materials || []).find((item) => item.document_id === primaryDocumentId);
-    const primaryDocumentLabel = primaryMaterial ? primaryMaterial.document_name : primaryDocumentId;
-    // Quiz/Flashcards/AI Tutor are intentionally document-scoped -- they open the existing,
-    // unmodified per-document session for this subject's primary (most recently updated)
-    // document. There is no subject-wide generation; the tooltip makes that scoping explicit
-    // when a subject groups more than one document.
+    const facts = document.createElement("dl");
+    facts.className = "home-doc-facts";
+    const latest = progress?.quiz?.latest;
+    if (latest) {
+      facts.appendChild(homeDocumentFact("Latest quiz", `${Math.round(latest.percentage)}% · ${latest.score}/${latest.total} · ${progressDate(latest.completed_at)}`));
+    }
+    if (progress?.study_pack) facts.appendChild(homeDocumentFact("Study Pack", studyPackText(progress.study_pack)));
+    if (progress?.plan?.next_session) facts.appendChild(homeDocumentFact("Next session", nextSessionText(progress.plan.next_session)));
+    if (progress?.plan?.deadline) facts.appendChild(homeDocumentFact("Deadline", plannerDayLabel(progress.plan.deadline)));
+
     const actions = document.createElement("div");
-    actions.className = "subject-quick-actions";
-    actions.append(
-      subjectQuickActionButton("Quiz", () => openStudySession(primaryDocumentId, "quiz"),
-        `Opens Quiz for ${primaryDocumentLabel}`),
-      subjectQuickActionButton("Flashcards", () => openStudySession(primaryDocumentId, "flashcards"),
-        `Opens Flashcards for ${primaryDocumentLabel}`),
-      subjectQuickActionButton("AI Tutor", () => openStudySession(primaryDocumentId, "material"),
-        `Opens AI Tutor for ${primaryDocumentLabel}`),
-      subjectQuickActionButton("Study Planner", () => setPage("planner")),
-    );
+    actions.className = "home-doc-actions";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "primary-button home-doc-open";
+    open.textContent = progress && progress.learning.state !== "new" ? "Continue" : "Open";
+    open.setAttribute("aria-label", `${open.textContent} ${title.textContent}`);
+    open.addEventListener("click", () => openStudySession(documentId));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "text-button danger-button home-doc-delete";
+    remove.textContent = "Delete";
+    remove.setAttribute("aria-label", `Delete ${title.textContent}`);
+    remove.addEventListener("click", () => deleteUploadedSource({ title: documentId }, remove));
+    actions.append(open, remove);
 
-    const documentsList = document.createElement("div");
-    documentsList.className = "subject-documents";
-    (subject.document_ids || []).forEach((documentId) => {
-      const material = (dashboardData.materials || []).find((item) => item.document_id === documentId);
-      const row = document.createElement("div");
-      row.className = "subject-document-row";
-      const label = document.createElement("span");
-      label.textContent = material ? material.document_name : documentId;
-      const openButton = document.createElement("button");
-      openButton.className = "text-button"; openButton.type = "button"; openButton.textContent = "Open →";
-      openButton.addEventListener("click", (event) => { event.stopPropagation(); openStudySession(documentId); });
-      const deleteButton = document.createElement("button");
-      deleteButton.className = "text-button danger-button"; deleteButton.type = "button"; deleteButton.textContent = "Delete";
-      deleteButton.addEventListener("click", (event) => {
-        event.stopPropagation();
-        deleteUploadedSource({ title: documentId }, deleteButton);
-      });
-      row.append(label, openButton, deleteButton);
-      documentsList.appendChild(row);
-    });
-
-    card.append(header, progress, actions, documentsList);
-    card.addEventListener("click", (event) => {
-      if (!event.target.closest("button") && primaryDocumentId) openStudySession(primaryDocumentId);
-    });
+    card.append(header);
+    if (facts.children.length) card.append(facts);
+    card.append(actions);
     overviewMaterialsList.appendChild(card);
   });
+  applySessionLibraryFilters();
 }
 
 async function loadDashboard() {
@@ -2474,7 +2513,7 @@ async function loadDashboard() {
     renderDashboard();
   } catch (error) {
     dashboardData = null;
-    overviewKpis.innerHTML = '<div class="empty-state">Dashboard data is unavailable.</div>';
+    overviewMaterialsList.innerHTML = '<div class="empty-state">Your materials could not be loaded right now.</div>';
   }
 }
 
@@ -3270,7 +3309,10 @@ async function showQuizHistoryDetail(attemptId) {
       question.textContent = `${index + 1}. ${result.question || `Question ${result.question_id}`}`;
       const options = document.createElement("div");
       options.className = "review-answer-list";
-      (result.options || []).forEach((option) => {
+      if (result.question_type === "fill_blank") {
+        options.append(...fillBlankReviewRows(result.selected_answer || "", result.correct_answers || [result.correct_answer], result.is_correct, "review-answer-option"));
+      }
+      (result.question_type === "fill_blank" ? [] : result.options || []).forEach((option) => {
         const letter = option.trim().charAt(0).toUpperCase();
         const row = document.createElement("div");
         row.className = "review-answer-option";
@@ -3702,7 +3744,10 @@ function createAssessmentReviewCard(question, result, index, total) {
   questionText.textContent = question.question;
   const options = document.createElement("div");
   options.className = "review-answer-list";
-  question.options.forEach((option) => {
+  if (isFillBlankQuestion(question)) {
+    options.append(...fillBlankReviewRows(result.selected_answer || "", result.correct_answers || [result.correct_answer], result.is_correct, "review-answer-option"));
+  }
+  (isFillBlankQuestion(question) ? [] : question.options).forEach((option) => {
     const letter = option.trim().charAt(0).toUpperCase();
     const row = document.createElement("div");
     row.className = "review-answer-option";
@@ -3736,6 +3781,7 @@ async function explainReviewedQuestion(question, result, button) {
   button.textContent = "Explaining...";
   tutorLayout.hidden = false;
   tutorLayout.classList.add("quiz-explanation-open");
+  revealTutor({ focus: false });
   document.getElementById("session-tutor-toggle")?.setAttribute("aria-expanded", "true");
   if (window.matchMedia("(max-width: 1050px)").matches) {
     tutorLayout.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -3868,7 +3914,7 @@ function renderAttemptSummary() {
 }
 
 function quizTypeLabel(questionType) {
-  return { single_choice: "Multiple Choice", true_false: "True/False", multi_select: "Multiple Select" }[questionType]
+  return { single_choice: "Multiple Choice", true_false: "True/False", multi_select: "Multiple Select", fill_blank: "Fill in the Blank" }[questionType]
     || questionType;
 }
 
@@ -3923,7 +3969,7 @@ function assessmentTitleText(quiz) {
     + (mismatch ? " · Current settings differ: press Regenerate Quiz to use them" : "");
   if (quiz.assessment_scope === "document") {
     const distribution = documentQuizTypeBreakdown(quiz);
-    const parts = ["single_choice", "true_false", "multi_select"]
+    const parts = ["single_choice", "true_false", "multi_select", "fill_blank"]
       .filter((questionType) => distribution[questionType])
       .map((questionType) => `${distribution[questionType]} ${quizTypeLabel(questionType)}`);
     return `${quizName} · ${quiz.questions.length} questions · ${parts.join(" · ")}` + partialSuffix;
@@ -3981,6 +4027,7 @@ function renderQuizPlayer() {
     document.getElementById("quiz-player-answers").innerHTML = "";
     document.getElementById("quiz-player-position").textContent = "";
     document.getElementById("quiz-player-answered-count").textContent = "";
+    document.getElementById("quiz-player-nav").innerHTML = "";
     document.getElementById("quiz-player-difficulty").textContent = "";
     document.getElementById("quiz-player-model").hidden = true;
     return;
@@ -4013,12 +4060,14 @@ function renderQuizPlayerQuestion() {
   document.getElementById("quiz-player-answered-count").textContent = `${answeredCount} answered`;
   document.getElementById("quiz-player-progress-bar").style.width = `${Math.round(((quizQuestionIndex + 1) / total) * 100)}%`;
   document.getElementById("quiz-player-question").textContent = question.question;
+  renderQuizPlayerNav();
 
   const isMultiSelect = question.question_type === "multi_select";
   const selected = quizAnswers[String(question.id)];
   const answersEl = document.getElementById("quiz-player-answers");
   answersEl.innerHTML = "";
-  (question.options || []).forEach((option) => {
+  if (isFillBlankQuestion(question)) answersEl.appendChild(createQuizPlayerFillBlank(question, selected));
+  (isFillBlankQuestion(question) ? [] : question.options || []).forEach((option) => {
     const letter = option.trim().charAt(0).toUpperCase();
     const isSelected = Array.isArray(selected) ? selected.includes(letter) : selected === letter;
     const button = document.createElement("button");
@@ -4047,6 +4096,35 @@ function renderQuizPlayerQuestion() {
   nextButton.onclick = isLast ? handleQuizPlayerFinish : () => moveQuizPlayerQuestion(1);
 }
 
+// Compact question navigator: one button per question (current / answered / unanswered), built from
+// the same local quizAnswers + quizQuestionIndex the rest of the player uses -- a jump is just
+// navigation (like Previous/Next), never an answer or a submit.
+function renderQuizPlayerNav() {
+  const nav = document.getElementById("quiz-player-nav");
+  const hadFocus = nav.contains(document.activeElement);
+  nav.innerHTML = "";
+  let currentButton = null;
+  currentQuiz.questions.forEach((question, index) => {
+    const answered = Boolean(quizAnswers[String(question.id)]);
+    const isCurrent = index === quizQuestionIndex;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `quiz-player-nav-item${answered ? " is-answered" : ""}${isCurrent ? " is-current" : ""}`;
+    button.textContent = String(index + 1);
+    button.dataset.index = String(index);
+    button.setAttribute("aria-label", `Question ${index + 1}, ${answered ? "answered" : "unanswered"}`);
+    if (isCurrent) { button.setAttribute("aria-current", "step"); currentButton = button; }
+    button.addEventListener("click", () => jumpToQuizPlayerQuestion(index));
+    nav.appendChild(button);
+  });
+  if (!currentButton) return;
+  // Keep keyboard focus on the navigator across the re-render, and keep the current item visible
+  // when the row scrolls horizontally (narrow screens) -- without scrolling the page itself.
+  if (hadFocus) currentButton.focus({ preventScroll: true });
+  const left = currentButton.offsetLeft - nav.offsetLeft;
+  if (left < nav.scrollLeft) nav.scrollLeft = left;
+  else if (left + currentButton.offsetWidth > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = left + currentButton.offsetWidth - nav.clientWidth;
+}
 
 // ---- Quiz Results + Review Answers ------------------------------------------------------------------
 // Built only from the persisted, server-graded attempt (question_results: is_correct, selected and
@@ -4077,11 +4155,19 @@ function buildQuizResult(attempt, quiz, fallback = {}) {
   }
   const items = results.map((result) => {
     const question = questionsById.get(String(result.question_id)) || {};
-    const selected = quizResultLetters(result.selected_answers?.length ? result.selected_answers : [result.selected_answer]);
-    const correct = quizResultLetters(result.correct_answers?.length ? result.correct_answers : [result.correct_answer]);
+    const questionType = result.question_type || question.question_type || "single_choice";
+    const fillBlank = questionType === "fill_blank";
+    // fill_blank answers are text, shown as written (never upper-cased or sorted like option letters).
+    const selected = fillBlank
+      ? [String((result.selected_answers?.length ? result.selected_answers[0] : result.selected_answer) || "").trim()].filter(Boolean)
+      : quizResultLetters(result.selected_answers?.length ? result.selected_answers : [result.selected_answer]);
+    const correct = fillBlank
+      ? (result.correct_answers?.length ? result.correct_answers : [result.correct_answer]).map((value) => String(value || "").trim()).filter(Boolean)
+      : quizResultLetters(result.correct_answers?.length ? result.correct_answers : [result.correct_answer]);
     const unanswered = selected.length === 0;
     return {
       questionId: result.question_id,
+      questionType,
       question: result.question || question.question || `Question ${result.question_id}`,
       options: result.options?.length ? result.options : (question.options || []),
       selected,
@@ -4200,7 +4286,8 @@ function renderQuizReview() {
 
   const options = document.getElementById("quiz-review-options");
   options.innerHTML = "";
-  item.options.forEach((option, optionIndex) => {
+  if (item.questionType === "fill_blank") options.append(...fillBlankReviewRows(item.selected[0] || "", item.correct, item.isCorrect));
+  (item.questionType === "fill_blank" ? [] : item.options).forEach((option, optionIndex) => {
     const letter = QUIZ_OPTION_LETTERS[optionIndex];
     const isSelected = item.selected.includes(letter);
     const isCorrect = item.correct.includes(letter);
@@ -4257,6 +4344,63 @@ function moveQuizReview(direction) {
 
 // ---- Quiz Player: answering and navigation -------------------------------------------------------
 
+function isFillBlankQuestion(question) {
+  return question?.question_type === "fill_blank";
+}
+
+// Fill-in-the-blank: a plain text field. Typing only updates local state, the answered count and the
+// navigator (no full re-render, so focus and caret stay put) and autosaves like any other answer;
+// a blank/whitespace-only field counts as unanswered.
+function createQuizPlayerFillBlank(question, value) {
+  const wrapper = document.createElement("label");
+  wrapper.className = "quiz-player-fill-blank";
+  const caption = document.createElement("span");
+  caption.className = "quiz-player-fill-caption";
+  caption.textContent = "Fill in the blank";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.id = "quiz-player-fill-input";
+  input.className = "quiz-player-fill-input";
+  input.maxLength = 200;
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.placeholder = "Type your answer";
+  input.value = typeof value === "string" ? value : "";
+  input.addEventListener("input", () => updateQuizPlayerFillBlank(question, input.value));
+  wrapper.append(caption, input);
+  return wrapper;
+}
+
+function updateQuizPlayerFillBlank(question, value) {
+  const key = String(question.id);
+  if (value.trim()) quizAnswers[key] = value;
+  else delete quizAnswers[key];
+  document.getElementById("quiz-player-answered-count").textContent = `${Object.keys(quizAnswers).length} answered`;
+  renderQuizPlayerNav();
+  scheduleQuizAutosave();
+}
+
+// Review rows for a fill_blank result: the learner's text and the stored accepted answer(s).
+function fillBlankReviewRows(selectedText, correctAnswers, isCorrect, rowClass = "quiz-review-option") {
+  const rows = [];
+  const row = (label, text, classes) => {
+    const element = document.createElement("div");
+    element.className = [rowClass, "is-fill-blank", ...classes].join(" ");
+    const tag = document.createElement("span");
+    tag.className = `${rowClass}-tag`;
+    tag.textContent = label;
+    const body = document.createElement("span");
+    body.className = `${rowClass}-label`;
+    body.textContent = text;
+    element.append(tag, body);
+    rows.push(element);
+  };
+  row("Your answer", selectedText || "No answer", selectedText ? ["is-selected", isCorrect ? "is-correct" : "is-wrong"] : []);
+  const [canonical, ...alternatives] = correctAnswers;
+  row("Correct answer", alternatives.length ? `${canonical} (also accepted: ${alternatives.join(", ")})` : (canonical || ""), ["is-correct"]);
+  return rows;
+}
+
 function selectQuizPlayerAnswer(question, letter, isMultiSelect) {
   const key = String(question.id);
   if (isMultiSelect) {
@@ -4275,6 +4419,13 @@ function moveQuizPlayerQuestion(direction) {
   if (!currentQuiz?.questions?.length) return;
   const total = currentQuiz.questions.length;
   quizQuestionIndex = Math.max(0, Math.min(total - 1, quizQuestionIndex + direction));
+  renderQuizPlayerQuestion();
+  scheduleQuizAutosave();
+}
+
+function jumpToQuizPlayerQuestion(index) {
+  if (!currentQuiz?.questions?.length || index === quizQuestionIndex) return;
+  quizQuestionIndex = Math.max(0, Math.min(currentQuiz.questions.length - 1, index));
   renderQuizPlayerQuestion();
   scheduleQuizAutosave();
 }
@@ -4432,7 +4583,24 @@ function renderAssessmentQuiz() {
   }
   const options = document.createElement("div");
   options.className = "answer-list";
-  question.options.forEach((option) => {
+  if (isFillBlankQuestion(question)) {
+    // Older inline view: a plain text field committed on change (the focused player autosaves per keystroke).
+    const field = document.createElement("input");
+    field.type = "text";
+    field.className = "quiz-player-fill-input";
+    field.maxLength = 200;
+    field.placeholder = "Type your answer";
+    field.setAttribute("aria-label", "Your answer");
+    field.value = typeof quizAnswers[String(question.id)] === "string" ? quizAnswers[String(question.id)] : "";
+    field.addEventListener("change", () => {
+      if (currentAttempt?.completed) return;
+      if (field.value.trim()) quizAnswers[String(question.id)] = field.value.trim();
+      else delete quizAnswers[String(question.id)];
+      renderAssessmentQuiz();
+    });
+    options.appendChild(field);
+  }
+  (isFillBlankQuestion(question) ? [] : question.options).forEach((option) => {
     const button = document.createElement("button");
     button.className = `answer-option ${isMultiSelect ? "answer-option--checkbox" : "answer-option--radio"}`;
     button.type = "button";
@@ -4613,7 +4781,6 @@ resetButton.addEventListener("click", resetApp);
 uploadSourceButton.addEventListener("click", () => sourceFileInput.click());
 sourceFileInput.addEventListener("change", () => uploadSourceFiles(sourceFileInput.files));
 sessionSearchInput?.addEventListener("input", applySessionLibraryFilters);
-sessionSortSelect?.addEventListener("change", applySessionLibraryFilters);
 newConversationButton.addEventListener("click", createChatConversation);
 applyConversationSourcesButton.addEventListener("click", applyConversationSources);
 toggleConversationSourcesButton.addEventListener("click", () => {
@@ -4622,11 +4789,16 @@ toggleConversationSourcesButton.addEventListener("click", () => {
 closeConversationSourcesButton.addEventListener("click", closeSourcesDrawer);
 sourcesDrawerBackdrop.addEventListener("click", closeSourcesDrawer);
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && tutorLayout.classList.contains("sources-open")) {
+  if (event.key !== "Escape") return;
+  if (tutorLayout.classList.contains("sources-open")) {
     closeSourcesDrawer();
     toggleConversationSourcesButton.focus();
+  } else if (tutorOverlayOpen()) {
+    setTutorOverlayOpen(false);
   }
 });
+tutorLaunchButton?.addEventListener("click", () => setTutorOverlayOpen(!tutorOverlayOpen()));
+document.getElementById("tutor-close-button")?.addEventListener("click", () => setTutorOverlayOpen(false));
 generateQuizButton.addEventListener("click", generateAssessmentQuiz);
 document.getElementById("quiz-sheet-retry-button")?.addEventListener("click", () => generateAssessmentQuiz());
 document.addEventListener("keydown", (event) => {

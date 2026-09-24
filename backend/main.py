@@ -356,7 +356,7 @@ class QuizQuestion(BaseModel):
     question: str
     options: list[str]
     correct_answer: str
-    question_type: Literal["single_choice", "true_false", "multi_select"] = "single_choice"
+    question_type: Literal["single_choice", "true_false", "multi_select", "fill_blank"] = "single_choice"
     correct_answers: list[str] = Field(default_factory=list)
     topic_id: str
     topic_name: str = ""

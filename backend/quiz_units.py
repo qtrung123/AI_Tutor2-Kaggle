@@ -1060,3 +1060,217 @@ def finalize_questions(selected: list[dict]) -> tuple[list[dict], list[dict]]:
             "answer_in_evidence": meta["answer_in_evidence"],
         })
     return questions, evidence
+
+
+# ---------------------------------------------------------------------------------------------
+# Fill-in-the-blank (safe, objective subset)
+# ---------------------------------------------------------------------------------------------
+# A fill_blank question is a sentence from the document with ONE short key term replaced by a
+# blank. It is only accepted when the completed sentence is found in the excerpts the model was
+# shown and the answer is written in its evidence quote, so the answer is objective and grounded in
+# the original document (never in flashcards or outside knowledge). Grading is deterministic
+# (normalize_fill_blank_answer): no fuzzy matching and no LLM. Alternative answers are accepted only
+# when they are explicitly stored with the question (correct_answers) and are themselves written in
+# the material.
+
+FILL_BLANK_MARKER = "____"
+QUIZ_FILL_BLANK_MAX_ANSWER_WORDS = 4
+QUIZ_FILL_BLANK_MAX_ANSWER_CHARS = 40
+QUIZ_FILL_BLANK_MAX_ALTERNATIVES = 3
+QUIZ_FILL_BLANK_MAX_CALLS = 2         # one call plus one retry when the output is malformed / yields nothing
+_BLANK_RUN = re.compile(r"_{3,}")
+_SURROUNDING_PUNCTUATION = re.compile(r"^[\s.,;:!?\"'`“”‘’«»()\[\]{}<>…]+|[\s.,;:!?\"'`“”‘’«»()\[\]{}<>…]+$")
+
+QUIZ_FILL_BLANK_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "questions": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "evidence_quote": {"type": "string"},
+                    "sentence": {"type": "string"},
+                    "answer": {"type": "string"},
+                    "accepted_answers": {"type": "array", "items": {"type": "string"}, "maxItems": QUIZ_FILL_BLANK_MAX_ALTERNATIVES},
+                    "explanation": {"type": "string"},
+                },
+                "required": ["evidence_quote", "sentence", "answer", "explanation"],
+            },
+        }
+    },
+    "required": ["questions"],
+}
+
+
+def fill_blank_target(question_count: int) -> int:
+    """How many fill_blank questions a quiz aims for: 12/15 -> 2, 18/20 -> 3. A target only: the
+    quiz stays all multiple-choice when no fill_blank candidate passes validation."""
+    return max(0, question_count // 6)
+
+
+def normalize_fill_blank_answer(value) -> str:
+    """The ONLY comparison used to grade a fill_blank answer: Unicode-normalized, casefolded,
+    inner whitespace collapsed and surrounding punctuation/quotes/brackets removed."""
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    text = re.sub(r"\s+", " ", text).strip()
+    return _SURROUNDING_PUNCTUATION.sub("", text).strip()
+
+
+def fill_blank_is_correct(selected, correct_answers: list[str]) -> bool:
+    answer = normalize_fill_blank_answer(selected)
+    return bool(answer) and answer in {normalize_fill_blank_answer(value) for value in correct_answers}
+
+
+def fill_blank_output_schema(ask: int) -> dict:
+    schema = copy.deepcopy(QUIZ_FILL_BLANK_OUTPUT_SCHEMA)
+    schema["properties"]["questions"]["minItems"] = 1
+    schema["properties"]["questions"]["maxItems"] = ask + QUIZ_MAX_ITEMS_EXTRA
+    return schema
+
+
+def build_fill_blank_prompt(
+    scope_name: str,
+    difficulty: str,
+    units: list[dict],
+    count: int,
+    avoid_stems: list[str] | None = None,
+) -> str:
+    excerpts = "\n\n".join(f"[{unit['unit_id']}]\n{unit['evidence_excerpt']}" for unit in units)
+    avoid = ""
+    if avoid_stems:
+        avoid = ("Questions that already exist (do not test the same facts):\n"
+                 + "\n".join(f"- {stem}" for stem in avoid_stems) + "\n")
+    return (
+        f"Write exactly {count} {difficulty} fill-in-the-blank revision questions about \"{scope_name}\", "
+        "using ONLY the excerpts below.\n"
+        'Return JSON only: {"questions":[{"evidence_quote":"...","sentence":"...","answer":"...",'
+        '"accepted_answers":[],"explanation":"..."}]}\n'
+        "Rules:\n"
+        "- First choose evidence_quote: one sentence (about 8-30 words) copied exactly as written from an excerpt.\n"
+        f"- sentence: that same sentence, copied exactly, with ONE key term replaced by {FILL_BLANK_MARKER} "
+        f"(four underscores). Exactly one {FILL_BLANK_MARKER} per sentence.\n"
+        f"- answer: the exact removed term as written in the quote: a name, term, number or short phrase of 1-"
+        f"{QUIZ_FILL_BLANK_MAX_ANSWER_WORDS} words. Never an opinion, explanation or a whole clause.\n"
+        "- Choose a term that only one answer can fill; the rest of the sentence must not already contain it.\n"
+        "- accepted_answers: other spellings of the SAME answer that the excerpts also use (for example an "
+        "acronym and its full form). Leave it empty when there are none.\n"
+        "- Each question tests a different fact. Write in the main language of the excerpts. "
+        "Explanation <=25 words. No markdown, no extra fields.\n"
+        f"{avoid}"
+        f"EXCERPTS:\n{excerpts}"
+    )
+
+
+def _fill_blank_answer_shape_ok(answer: str) -> bool:
+    words = answer.split()
+    return (
+        0 < len(words) <= QUIZ_FILL_BLANK_MAX_ANSWER_WORDS
+        and len(answer) <= QUIZ_FILL_BLANK_MAX_ANSWER_CHARS
+        and bool(re.search(r"\w", answer))
+        and not _BLANK_RUN.search(answer)
+    )
+
+
+def validate_fill_blank_candidate(
+    raw,
+    units: list[dict],
+    accepted: list[dict],
+    difficulty: str,
+    question_id: int,
+    scope_topic: dict,
+    generation_index: int,
+) -> tuple[dict, list[str]]:
+    """Validate one fill_blank candidate against the excerpts the model saw and every question
+    accepted so far (multiple-choice and fill_blank). Hard failures raise CandidateRejected."""
+    if not isinstance(raw, dict):
+        raise CandidateRejected("structure", "Question must be a JSON object.")
+    sentence = _BLANK_RUN.sub(FILL_BLANK_MARKER, _clean_inline(raw.get("sentence")))
+    if sentence.count(FILL_BLANK_MARKER) != 1:
+        raise CandidateRejected("structure", "A fill_blank sentence must contain exactly one blank.", "fill_blank_marker")
+    if len(sentence) < QUIZ_MIN_STEM_CHARS or len(sentence) > QUIZ_MAX_STEM_CHARS or _SCAFFOLDING.search(sentence):
+        raise CandidateRejected("structure", "Fill-blank sentence is too short/long or contains scaffolding.", "stem")
+    if _NEGATIVE_EMPHASIS.search(sentence) or _NEGATIVE_PHRASES.search(sentence):
+        raise CandidateRejected("structure", "Negative sentences cannot be verified against the material.", "negative_polarity")
+    answer = _SURROUNDING_PUNCTUATION.sub("", _clean_inline(raw.get("answer")))
+    if not _fill_blank_answer_shape_ok(answer):
+        raise CandidateRejected("structure", "A fill_blank answer must be a short term of 1-4 words.", "fill_blank_answer")
+    answer_squashed = squash(answer)
+    if not answer_squashed or answer_squashed in squash(sentence.replace(FILL_BLANK_MARKER, " ")):
+        raise CandidateRejected("structure", "The sentence already contains its answer.", "fill_blank_giveaway")
+
+    quote = _clean_inline(raw.get("evidence_quote"))
+    located = locate_evidence(quote, units)
+    if located is None:
+        code = "quote_too_short" if len(squash(quote)) < QUIZ_MIN_QUOTE_CHARS else "quote_not_found"
+        raise CandidateRejected("grounding", "evidence_quote was not found in the provided context.", code)
+    unit, alignment = located
+    if answer_squashed not in squash(quote):
+        raise CandidateRejected("grounding", "The answer is not written in the evidence quote.", "answer_not_in_context")
+    completed = sentence.replace(FILL_BLANK_MARKER, answer)
+    if locate_evidence(completed, [unit]) is None:
+        raise CandidateRejected("grounding", "The completed sentence is not stated in the provided context.", "question_not_supported")
+    link, _ = context_support(sentence.replace(FILL_BLANK_MARKER, " "), answer, unit, units)
+
+    # Alternatives only when explicitly given AND written in the material themselves.
+    alternatives: list[str] = []
+    seen = {normalize_fill_blank_answer(answer)}
+    raw_alternatives = raw.get("accepted_answers")
+    for value in raw_alternatives if isinstance(raw_alternatives, list) else []:
+        alternative = _SURROUNDING_PUNCTUATION.sub("", _clean_inline(value))
+        key = normalize_fill_blank_answer(alternative)
+        if (not key or key in seen or not _fill_blank_answer_shape_ok(alternative)
+                or not any(squash(alternative) in context["_squashed"] for context in units)):
+            continue
+        seen.add(key)
+        alternatives.append(alternative)
+        if len(alternatives) >= QUIZ_FILL_BLANK_MAX_ALTERNATIVES:
+            break
+
+    stem_key = squash(sentence)
+    spans = evidence_spans(quote, unit)
+    answer_tokens = content_tokens(answer)
+    for existing in accepted:
+        existing_key = squash(existing["question"])
+        if stem_key == existing_key or difflib.SequenceMatcher(None, stem_key, existing_key).ratio() >= QUIZ_STEM_DUPLICATE_RATIO:
+            raise CandidateRejected("duplicate", "Question duplicates an accepted question.", "duplicate_stem")
+        meta = existing["_meta"]
+        if (_evidence_overlap(spans, meta.get("spans", ())) >= QUIZ_EVIDENCE_OVERLAP_MAX
+                and _same_target(answer_tokens, answer_squashed, meta["answer_tokens"], meta["answer_key"])):
+            raise CandidateRejected("duplicate", "Question tests the same fact as an accepted question on the same evidence.", "duplicate_evidence")
+
+    explanation = _clean_inline(raw.get("explanation"))
+    warnings: list[str] = []
+    if alignment < 1.0:
+        warnings.append("quote_not_verbatim")
+    if len(explanation.split()) < 3:
+        warnings.append("short_explanation")
+    normalized = {
+        "id": question_id,
+        "question": sentence,
+        "options": [],
+        "correct_answer": answer,
+        "question_type": "fill_blank",
+        # For fill_blank, correct_answers is the explicit list of accepted answers (any one is correct).
+        "correct_answers": [answer, *alternatives],
+        "topic_id": str(scope_topic["topic_id"]),
+        "topic_name": str(scope_topic.get("name") or scope_topic["topic_id"]),
+        "concept_id": unit["unit_id"],
+        "concept_name": unit["name"],
+        "source_subtopic_ids": [],
+        "concept_origin": "study_unit",
+        "concept_plan_id": QUIZ_ENGINE_VERSION,
+        "assessment_capacity": len(units),
+        "difficulty": difficulty,
+        "explanation": explanation,
+        "source_chunk_ids": list(unit["source_chunk_ids"]),
+        "validation_outcome": "accepted_quality_warning" if warnings else "accepted",
+        "_meta": {
+            "index": generation_index, "unit_index": unit["index"],
+            "signature": content_tokens(f"{sentence} {answer}"), "quote_shingles": _shingles(squash(quote)),
+            "quote": quote, "alignment": alignment, "link": link, "answer_in_evidence": True, "spans": spans,
+            "answer_tokens": answer_tokens, "answer_key": answer_squashed,
+        },
+    }
+    return normalized, sorted(set(warnings))

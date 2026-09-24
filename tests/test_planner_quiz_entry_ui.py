@@ -60,7 +60,9 @@ const state = () => ({
   legacyInline: $("quiz-list").querySelectorAll(".quiz-question-card").length > 0,
   quizId: currentQuiz?.quiz_id || null, title: $("quiz-player-title").textContent,
   position: $("quiz-player-position").textContent, answered: $("quiz-player-answered-count").textContent,
-  answers: {...quizAnswers}, resultsVisible: !$("quiz-results-view").hidden, questionVisible: !$("quiz-player-question-view").hidden,
+  answers: {...quizAnswers},
+  nav: [...$("quiz-player-nav").querySelectorAll(".quiz-player-nav-item")].map((b) => (b.classList.contains("is-current") ? "C" : "") + (b.classList.contains("is-answered") ? "A" : "") || "-"),
+  resultsVisible: !$("quiz-results-view").hidden, questionVisible: !$("quiz-player-question-view").hidden,
 });
 const plannerOpen = async (session) => {
   // The planner's own session card and its Start/Resume button (the same element Home and the
@@ -180,6 +182,7 @@ class PlannerQuizEntryTests(unittest.TestCase):
         self.assertRegex(resume["position"], r"3\D+3")          # on question 3 of 3
         self.assertRegex(resume["answered"], r"^2\D")            # 2 answered
         self.assertTrue(resume["questionVisible"])
+        self.assertEqual(resume["nav"], ["A", "A", "C"])   # the same question navigator as the Library entry
 
     def test_exit_returns_to_the_quiz_library(self):
         after = self.out["afterExit"]
@@ -211,6 +214,8 @@ class PlannerQuizEntryTests(unittest.TestCase):
 
     def test_normal_library_entry_still_opens_the_player(self):
         self.assertInPlayer(self.out["libraryEntry"], "quiz-c")
+        self.assertEqual(len(self.out["libraryEntry"]["nav"]), 3)   # the same question navigator
+        self.assertEqual(sum("C" in item for item in self.out["libraryEntry"]["nav"]), 1)
 
     def test_planner_path_never_loads_the_default_quiz(self):
         self.assertEqual(self.out["startCalls"], ["s-resume", "s-start", "s-retry", "s-none", "s-lib"])

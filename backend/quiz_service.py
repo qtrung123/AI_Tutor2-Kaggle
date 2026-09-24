@@ -3,6 +3,7 @@ import json
 import math
 import re
 import time
+from collections import Counter
 from pathlib import Path
 from uuid import uuid4
 
@@ -50,8 +51,16 @@ from backend.quiz_units import (
     QUIZ_TOKENS_PER_QUESTION,
     QUIZ_UNUSED_CHARS_PER_QUESTION,
     QUIZ_TOTAL_DEADLINE_S,
+    QUIZ_FILL_BLANK_MAX_CALLS,
+    QUIZ_FOLLOWUP_MIN_BUFFER,
+    build_fill_blank_prompt,
     build_generation_prompt,
     build_study_units,
+    fill_blank_is_correct,
+    fill_blank_output_schema,
+    fill_blank_target,
+    normalize_fill_blank_answer,
+    validate_fill_blank_candidate,
     candidate_target,
     context_budget,
     finalize_questions,
@@ -168,11 +177,52 @@ def _question_type(question: dict) -> str:
     return str(question.get("question_type") or "single_choice")
 
 
+def _fill_blank_correct_answers(question: dict) -> list[str]:
+    """A fill_blank question's accepted answers, canonical first, text kept as written."""
+    values = question.get("correct_answers")
+    if not isinstance(values, list) or not values:
+        values = [question.get("correct_answer", "")]
+    canonical = str(question.get("correct_answer") or "").strip()
+    ordered = ([canonical] if canonical else []) + [str(value).strip() for value in values]
+    unique, seen = [], set()
+    for value in ordered:
+        key = normalize_fill_blank_answer(value)
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(value)
+    return unique
+
+
 def _correct_answers(question: dict) -> list[str]:
     values = question.get("correct_answers")
     if not isinstance(values, list) or not values:
         values = [question.get("correct_answer", "")]
     return list(dict.fromkeys(str(value).strip().upper() for value in values if str(value).strip()))
+
+
+def _fill_blank_answer(value) -> str:
+    """A learner's fill_blank answer as saved: the text itself (trimmed, inner whitespace collapsed).
+    Case and punctuation are kept for display; grading normalizes (normalize_fill_blank_answer)."""
+    if isinstance(value, list) and len(value) <= 1:
+        value = value[0] if value else ""
+    if value is None:
+        value = ""
+    if not isinstance(value, str):
+        raise ValueError("A fill-in-the-blank answer must be text.")
+    text = re.sub(r"\s+", " ", value).strip()
+    if len(text) > 200:
+        raise ValueError("A fill-in-the-blank answer must be at most 200 characters.")
+    return text
+
+
+def _saved_answer(question: dict, value):
+    """Normalize one submitted/autosaved answer for its question type (None = unanswered)."""
+    if _question_type(question) == "fill_blank":
+        return _fill_blank_answer(value) or None
+    if value in (None, "", []):
+        return None
+    selected = _selected_answers(value)
+    return selected if _question_type(question) == "multi_select" else selected[0]
 
 
 def _selected_answers(value) -> list[str]:
@@ -2022,8 +2072,13 @@ def _generate_quiz_from_units(
     question_count: int = 12,
     quiz_title: str | None = None,
     retrieval_ms: int = 0,
+    fill_blank_count: int = 0,
 ) -> dict:
     """Live Quiz generation: one simple pipeline for ANY document.
+
+    With `fill_blank_count` > 0 a bounded fill_blank step runs after the multiple-choice pool
+    (see _generate_fill_blank_pool): up to that many validated fill_blank questions replace the
+    lowest-ranked multiple-choice ones. The live entry point asks for fill_blank_target(count).
 
         chunks -> excerpts -> context that fits a fixed budget
         -> call 1 writes a surplus of candidates (12 -> 15, 15 -> 18, 18 -> 22, 20 -> 24)
@@ -2319,8 +2374,21 @@ def _generate_quiz_from_units(
             failure_summary=summary,
         )
 
+    fill_pool, fill_info = [], None
+    if fill_blank_count > 0:
+        fill_pool, fill_info = _generate_fill_blank_pool(
+            model_id=model_id, scope_label=scope_label, difficulty=difficulty,
+            units=units, accepted=accepted,
+            scope_topic=scope_topic, target=fill_blank_count, first_index=candidate_counter,
+            deadline_s=QUIZ_TOTAL_DEADLINE_S - (time.perf_counter() - total_started),
+        )
+        llm_calls += fill_info["calls"]
+
     # final_count = min(valid candidates, requested_count). Short is "partial", never a failure.
-    selected, question_evidence = finalize_questions(select_questions(accepted, question_count))
+    fill_selected = select_questions(fill_pool, fill_blank_count) if fill_pool else []
+    combined = select_questions(accepted, question_count - len(fill_selected)) + fill_selected
+    combined.sort(key=lambda question: (question["_meta"]["unit_index"], question["_meta"]["index"]))
+    selected, question_evidence = finalize_questions(combined)
     actual_count = len(selected)
     missing_count = max(0, question_count - actual_count)
     status = "complete" if actual_count >= question_count else "partial"
@@ -2357,7 +2425,8 @@ def _generate_quiz_from_units(
             "missing_count": missing_count,
             "candidate_pool_size": len(accepted),
             "partial": status == "partial",
-            "type_distribution": {"single_choice": actual_count},
+            "type_distribution": dict(Counter(question["question_type"] for question in selected)),
+            **({"fill_blank": fill_info} if fill_info else {}),
             "generation_warnings": validation_results["reasons"],
             "validation_results": validation_results,
             "question_evidence": question_evidence,
@@ -2383,6 +2452,70 @@ def _generate_quiz_from_units(
     print(f"[quiz-units-timing] {json.dumps({**timings, 'llm_calls': llm_calls, 'questions': actual_count})}")
     diag.absorb_pipeline_timings({**timings, "llm_calls": llm_calls})
     return saved
+
+
+def _generate_fill_blank_pool(
+    *, model_id: str, scope_label: str, difficulty: str, units: list[dict], accepted: list[dict],
+    scope_topic: dict, target: int, first_index: int, deadline_s: float,
+) -> tuple[list[dict], dict]:
+    """The bounded fill_blank step of the live pipeline, run after the multiple-choice pool exists.
+
+    One call asks for `target` + a small surplus of fill_blank candidates from the least-used
+    excerpts; ONE retry follows only when that output was malformed or yielded fewer valid
+    candidates than `target`. Every candidate goes through validate_fill_blank_candidate
+    (grounded in the original document excerpts, short objective answer, no duplicate of an
+    accepted question). Never raises: a failed step simply leaves the quiz multiple-choice only.
+    """
+    diag = quiz_diagnostics.get_current()
+    started = time.perf_counter()
+    pool: list[dict] = []
+    info = {"target": target, "calls": 0, "accepted": 0, "rejected": 0, "rejected_by": {}, "errors": []}
+    index = first_index
+    for call_number in range(1, QUIZ_FILL_BLANK_MAX_CALLS + 1):
+        remaining_s = deadline_s - (time.perf_counter() - started)
+        if len(pool) >= target or remaining_s < QUIZ_MIN_CALL_S:
+            break
+        ask = target - len(pool) + QUIZ_FOLLOWUP_MIN_BUFFER
+        budget = context_budget(ask)
+        shown = followup_units(units, accepted + pool, budget, QUIZ_UNUSED_CHARS_PER_QUESTION * ask)
+        if not shown:
+            break
+        prompt = build_fill_blank_prompt(scope_label, difficulty, shown, ask, [q["question"] for q in accepted + pool])
+        llm = ChatOllama(
+            model=model_id, reasoning=False, temperature=0.1 if call_number == 1 else 0.3,
+            format=fill_blank_output_schema(ask), num_ctx=QUIZ_NUM_CTX,
+            num_predict=min(QUIZ_MAX_NEW_TOKENS, max(600, (ask + QUIZ_MAX_ITEMS_EXTRA) * QUIZ_TOKENS_PER_QUESTION)),
+            keep_alive=QUIZ_GENERATION_KEEP_ALIVE,
+            client_kwargs={"timeout": min(QUIZ_LLM_TIMEOUT_S, max(30, remaining_s))},
+        )
+        info["calls"] += 1
+        invocation_started = time.perf_counter()
+        try:
+            response_text, metadata, _cut = _generate_with_deadline(llm, prompt, min(QUIZ_FOLLOWUP_DEADLINE_S, remaining_s))
+            candidates = parse_candidates(response_text)
+            diag.record_llm_call(stage="fill_blank", model=model_id, success=True, attempt=call_number,
+                                 elapsed_ms=(time.perf_counter() - invocation_started) * 1000)
+        except Exception as error:  # malformed / failed output: retry once, then give up quietly
+            info["errors"].append(f"call {call_number}: {type(error).__name__}: {error}"[:200])
+            diag.record_llm_call(stage="fill_blank", model=model_id, success=False, attempt=call_number,
+                                 elapsed_ms=(time.perf_counter() - invocation_started) * 1000,
+                                 exception_type=type(error).__name__, reason=str(error)[:200])
+            continue
+        for raw in candidates:
+            index += 1
+            try:
+                question, _warnings = validate_fill_blank_candidate(
+                    raw, shown, accepted + pool, difficulty, 0, scope_topic, index,
+                )
+            except (ValueError, TypeError, KeyError, AttributeError) as error:
+                code = getattr(error, "code", None) or "structure"
+                info["rejected"] += 1
+                info["rejected_by"][code] = info["rejected_by"].get(code, 0) + 1
+                continue
+            pool.append(question)
+    info["accepted"] = len(pool)
+    print(f"[quiz-units-fill-blank] {json.dumps(info)}")
+    return pool, info
 
 
 def _build_document_slot(
@@ -4700,6 +4833,7 @@ def _generate_quiz(
     retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000)
 
     return _generate_quiz_from_units(
+        fill_blank_count=fill_blank_target(question_count),
         document=document,
         scope=assessment_scope,
         scope_topic_id=scope_topic_id,
@@ -4756,7 +4890,9 @@ def load_quiz_with_attempt(
 
 def _quiz_from_attempt_snapshot(attempt: dict) -> dict | None:
     results = list(attempt.get("question_results") or [])
-    if not results or any(len(result.get("options") or []) != 4 for result in results):
+    if not results or any(
+        len(result.get("options") or []) != 4 and result.get("question_type") != "fill_blank" for result in results
+    ):
         return None
     topic_id = str(attempt.get("topic_id") or "document")
     questions = [{
@@ -4871,10 +5007,9 @@ def update_quiz_progress(
             question = questions_by_id.get(str(key))
             if not question:
                 raise ValueError("question_id was not found in this quiz.")
-            if value in (None, "", []):
-                continue
-            selected = _selected_answers(value)
-            snapshot[str(key)] = selected if _question_type(question) == "multi_select" else selected[0]
+            saved_answer = _saved_answer(question, value)
+            if saved_answer is not None:
+                snapshot[str(key)] = saved_answer
         answers = snapshot
     else:
         answers = {str(key): value for key, value in (previous.get("answers") or {}).items()}
@@ -4886,10 +5021,11 @@ def update_quiz_progress(
         )
         if not target_question:
             raise ValueError("question_id was not found in this quiz.")
-        selected_answers = _selected_answers(selected_answer)
-        answers[str(question_id)] = (
-            selected_answers if _question_type(target_question) == "multi_select" else selected_answers[0]
-        )
+        saved_answer = _saved_answer(target_question, selected_answer)
+        if saved_answer is None:
+            answers.pop(str(question_id), None)
+        else:
+            answers[str(question_id)] = saved_answer
 
     total = len(questions)
     now = utc_now_iso()
@@ -4932,11 +5068,19 @@ def submit_quiz_attempt(
         raise ValueError("The persisted quiz questions are no longer available.")
     if quiz.get("document_id") != document_id or quiz.get("difficulty") != difficulty or quiz.get("topic_id") != topic_id:
         raise ValueError("The submitted quiz identity does not match its persisted questions.")
-    normalized_answers = {
-        str(key): _selected_answers(value) for key, value in answers.items()
-        if not (allow_unanswered and value in (None, "", []))
-    }
     questions = list(quiz.get("questions") or [])
+    questions_by_id = {str(question.get("id")): question for question in questions}
+    normalized_answers = {}
+    for key, value in answers.items():
+        question = questions_by_id.get(str(key))
+        if question is not None and _question_type(question) == "fill_blank":
+            text = _fill_blank_answer(value)
+            if text:
+                normalized_answers[str(key)] = [text]
+            elif not allow_unanswered:
+                raise ValueError("Every quiz question must be answered exactly once before submission.")
+        elif not (allow_unanswered and value in (None, "", [])):
+            normalized_answers[str(key)] = _selected_answers(value)
     expected_ids = {str(question.get("id")) for question in questions}
     if allow_unanswered:
         if not set(normalized_answers) <= expected_ids:
@@ -4948,6 +5092,8 @@ def submit_quiz_attempt(
             continue
         selected = normalized_answers[str(question.get("id"))]
         question_type = _question_type(question)
+        if question_type == "fill_blank":
+            continue
         valid_letters = set("ABCD"[:len(question.get("options") or [])])
         if any(answer not in valid_letters for answer in selected):
             raise ValueError("A selected answer does not exist for its question.")
@@ -4958,8 +5104,14 @@ def submit_quiz_attempt(
     results = []
     for question in questions:
         question_id = str(question.get("id"))
-        correct_answers = sorted(_correct_answers(question))
         selected_answers = normalized_answers.get(question_id, [])
+        if _question_type(question) == "fill_blank":
+            # Deterministic: normalized exact match against the explicitly stored accepted answers.
+            correct_answers = _fill_blank_correct_answers(question)
+            is_correct = bool(selected_answers) and fill_blank_is_correct(selected_answers[0], correct_answers)
+        else:
+            correct_answers = sorted(_correct_answers(question))
+            is_correct = selected_answers == correct_answers
         results.append({
             "question_id": int(question_id),
             "question": question.get("question", ""),
@@ -4969,7 +5121,7 @@ def submit_quiz_attempt(
             "correct_answer": correct_answers[0],
             "correct_answers": correct_answers,
             "question_type": _question_type(question),
-            "is_correct": selected_answers == correct_answers,
+            "is_correct": is_correct,
             "question_difficulty": question.get("difficulty", difficulty),
             "validation_outcome": question.get("validation_outcome", "accepted"),
             "topic_id": question.get("topic_id", topic_id),
@@ -5229,7 +5381,8 @@ def explain_quiz_question(
         document_id=document_id,
         question=question["question"],
         options=question["options"],
-        correct_answer=_correct_answers(question),
+        correct_answer=(_fill_blank_correct_answers(question) if _question_type(question) == "fill_blank"
+                        else _correct_answers(question)),
     )
     saved = {
         "document_id": document_id,

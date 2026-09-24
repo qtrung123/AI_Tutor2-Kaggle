@@ -433,7 +433,9 @@ def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: s
                 question_id,
                 position,
                 str(question.get("question", "")),
-                str(question.get("correct_answer", "")).upper(),
+                # fill_blank answers are text (kept as written); option answers are letters.
+                (str(question.get("correct_answer", "")).strip() if question.get("question_type") == "fill_blank"
+                 else str(question.get("correct_answer", "")).upper()),
                 str(question.get("topic_id") or stored["topic_id"]),
                 str(question.get("difficulty") or difficulty),
                 str(question.get("explanation", "")),

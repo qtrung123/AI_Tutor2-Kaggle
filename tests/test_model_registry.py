@@ -132,9 +132,9 @@ class ModelRegistryTests(unittest.TestCase):
         startup = (ROOT / "deployment" / "start_kaggle.sh").read_text(encoding="utf-8")
         notebook = (ROOT / "kaggle_run.ipynb").read_text(encoding="utf-8")
 
-        self.assertEqual(quiz.count("reasoning=False"), 7)
+        self.assertEqual(quiz.count("reasoning=False"), 8)   # incl. the fill_blank step's call
         self.assertIn('QUIZ_GENERATION_KEEP_ALIVE = "5m"', quiz)
-        self.assertEqual(quiz.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 7)
+        self.assertEqual(quiz.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 8)
         self.assertIn('OLLAMA_DEEPSEEK_R1_14B_MODEL="${OLLAMA_DEEPSEEK_R1_14B_MODEL:-hf.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q4_K_M}"', startup)
         self.assertIn('"keep_alive": 0', startup)
         self.assertIn('OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL = \\"qwen-2.5-7b\\"', notebook)

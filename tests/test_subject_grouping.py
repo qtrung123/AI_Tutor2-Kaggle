@@ -114,36 +114,20 @@ class SubjectOverviewIntegrationTests(unittest.TestCase):
         self.assertEqual(by_name["Embedded Systems"]["document_count"], 1)
 
 
-class SubjectOverviewFrontendTests(unittest.TestCase):
-    def test_overview_renders_subject_cards_not_bare_document_cards(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
-        self.assertIn("function renderSubjectCards", script)
-        self.assertIn("dashboardData.subjects", script)
-        self.assertIn("subject-card", script)
-        self.assertIn("subject-quick-actions", script)
+class HomeDocumentCardsFrontendTests(unittest.TestCase):
+    """Home is document-centric: subjects stay a backend read model, the page shows one card per document."""
 
-    def test_quick_actions_reuse_existing_document_session_flow(self):
+    def test_home_renders_one_card_per_document_from_real_progress(self):
         script = Path("frontend/app.js").read_text(encoding="utf-8")
-        # Existing document flow (openStudySession/setPage) is reused, never replaced.
-        self.assertIn('openStudySession(primaryDocumentId, "quiz")', script)
-        self.assertIn('openStudySession(primaryDocumentId, "flashcards")', script)
-        self.assertIn('openStudySession(primaryDocumentId, "material")', script)
-        self.assertIn('setPage("planner")', script)
+        self.assertIn("function renderHomeDocumentCards", script)
+        self.assertIn("home-doc-card", script)
+        self.assertIn("PROGRESS_API_BASE_URL", script)
+        self.assertNotIn("function renderSubjectCards", script)
 
-    def test_each_document_within_a_subject_can_still_be_opened_individually(self):
+    def test_each_document_can_still_be_opened_and_deleted(self):
         script = Path("frontend/app.js").read_text(encoding="utf-8")
-        self.assertIn("subject-document-row", script)
         self.assertIn("openStudySession(documentId)", script)
-
-    def test_quick_actions_are_labeled_as_document_scoped_not_subject_wide(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
-        # Quiz/Flashcards/AI Tutor tooltips must name the specific (primary) document they act
-        # on, never imply a subject-wide generation across every document in the group.
-        self.assertIn("`Opens Quiz for ${primaryDocumentLabel}`", script)
-        self.assertIn("`Opens Flashcards for ${primaryDocumentLabel}`", script)
-        self.assertIn("`Opens AI Tutor for ${primaryDocumentLabel}`", script)
-        self.assertNotIn("all documents in this subject", script.lower())
-        self.assertNotIn("every document in this subject", script.lower())
+        self.assertIn("deleteUploadedSource({ title: documentId }, remove)", script)
 
 
 if __name__ == "__main__":

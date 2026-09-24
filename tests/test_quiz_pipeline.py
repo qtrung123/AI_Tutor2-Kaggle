@@ -39,6 +39,11 @@ DOCUMENT = {"id": "lecture.pdf", "title": "Lecture", "hash": "hash", "topic_sche
 SCOPE = {"topic_id": "document", "name": "Entire document"}
 
 
+def mcq_prompts() -> list[str]:
+    """The multiple-choice calls only (the live entry point also runs the bounded fill_blank step)."""
+    return [prompt for prompt in FakeModel.prompts if "fill-in-the-blank" not in prompt]
+
+
 def validate(raw, units, accepted=None, difficulty="easy"):
     return validate_candidate(raw, units, accepted or [], difficulty, len(accepted or []) + 1, SCOPE, 1)
 
@@ -1075,7 +1080,7 @@ class CacheAndMetadataTests(unittest.TestCase):
                     "context_group_v3_no_planner", "legacy", ""):
             result = self.call(self.saved_quiz(old))
             self.assertEqual(result["assessment_plan"]["planner_version"], quiz_units.QUIZ_ENGINE_VERSION, old)
-            self.assertEqual(len(FakeModel.prompts), 1)
+            self.assertEqual(len(mcq_prompts()), 1)
 
     def test_a_quiz_from_the_current_engine_is_reused_even_when_it_is_partial(self):
         for requested, actual in ((12, 12), (18, 16), (20, 17)):
@@ -1087,9 +1092,9 @@ class CacheAndMetadataTests(unittest.TestCase):
     def test_a_different_requested_count_or_regeneration_generates_again(self):
         saved = self.saved_quiz(quiz_units.QUIZ_ENGINE_VERSION, 12, 12)
         self.call(saved, count=18)
-        self.assertEqual(len(FakeModel.prompts), 1)
+        self.assertEqual(len(mcq_prompts()), 1)
         self.call(saved, count=12, regenerate=True)
-        self.assertEqual(len(FakeModel.prompts), 1)
+        self.assertEqual(len(mcq_prompts()), 1)
 
     def test_engine_version_is_distinct_from_every_earlier_engine(self):
         self.assertNotIn(quiz_units.QUIZ_ENGINE_VERSION, {"study_units_v6", "study_units_v5", "study_units_v4", "context_group_v3_no_planner", "legacy"})
@@ -1228,7 +1233,7 @@ class PersistenceRoundTripTests(unittest.TestCase):
             self.assertIn(question["correct_answer"], "ABCD")
             self.assertEqual(question["correct_answers"], [question["correct_answer"]])
             self.assertTrue(question["source_chunk_ids"])
-        self.assertEqual(len(FakeModel.prompts), 3)  # call 1, then two follow-ups that added nothing (stall guard)
+        self.assertEqual(len(mcq_prompts()), 3)  # call 1, then two follow-ups that added nothing (stall guard)
         again = self.generate(18, candidates(range(16)))            # the same request is served from the database
         self.assertEqual(again["quiz_id"], first["quiz_id"])
         self.assertEqual(len(FakeModel.prompts), 0)
