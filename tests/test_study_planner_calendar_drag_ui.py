@@ -249,7 +249,9 @@ const drag = async (element, date, minute, {inspect} = {}) => {
   out.liveQueue = queued().map((li) => [li.dataset.candidateKey, li.classList.contains("is-draggable")]);
   await drag(queued()[0], "2026-09-30", 18 * 60);
   await sleep(500);
-  out.livePlaced = {calls: P.placeCalls, events: describe(), queue: queued().length};
+  out.livePlaced = {calls: P.placeCalls, events: describe(), queue: queued().length,
+    empty: document.querySelector("#pcal-queue .pcal-queue-empty")?.textContent || null,
+    queueButtons: document.querySelectorAll("#pcal-queue button").length};
 
   // 8. Reload: the resulting schedule, solid, with the moved session in its new place.
   await loadPlannerData(); await sleep(400);
@@ -339,7 +341,9 @@ class CalendarDragAssertions:
         self.assertEqual({k: v for k, v in placed["calls"][0].items() if k != "utc_offset_minutes"},
                          {"candidate_key": "stats.pdf|quiz|0", "scheduled_start": "2026-09-30T18:00:00"})
         self.assertIn(["2026-09-30", "confirmed", "Statistics", "Quiz · 18:00–18:30"], placed["events"])
-        self.assertEqual(placed["queue"], 0)
+        self.assertEqual(placed["queue"], 0)   # placed: gone from the queue, now on the calendar
+        self.assertEqual(placed["empty"], "All caught upEverything that needs attention is already on your calendar.")
+        self.assertEqual(placed["queueButtons"], 0)
 
     def test_reload_preserves_the_resulting_schedule(self):
         reloaded = self.out["reloaded"]

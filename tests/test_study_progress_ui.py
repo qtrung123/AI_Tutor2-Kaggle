@@ -84,8 +84,10 @@ const noOverflow = () => document.documentElement.scrollWidth <= window.innerWid
     activity_type: "quiz", scheduled_start: "2026-09-25T18:00:00", scheduled_end: "2026-09-25T18:30:00", duration_minutes: 30,
     status: "scheduled", reason: {code: "new_material", message: "New material to learn"}, artifact_id: null}]};
   setPage("planner"); await sleep(700);
-  const progressLine = document.getElementById(window.innerWidth >= 1024 ? "pcal-progress" : "planner-plan-progress");
+  // Phone/tablet: the step flow's saved plan shows it. Desktop: progress is on Home, not in the planner.
+  const progressLine = document.getElementById("planner-plan-progress");
   out.planProgress = progressLine.hidden ? null : progressLine.textContent;
+  out.desktopPlannerText = window.innerWidth >= 1024 ? document.getElementById("planner-workspace").textContent : null;
   out.overflow.planner = noOverflow();
   setPage("overview"); await sleep(500);
   out.todayProgress = document.querySelector("#today-plan .today-plan-progress")?.textContent || null;
@@ -152,10 +154,6 @@ class ProgressUiAssertions:
         self.assertEqual(quiz[2], "One completed attempt so far. A later attempt will show how your score changes.")
         self.assertEqual(len(quiz), 3)
 
-    def test_planner_shows_plan_progress(self):
-        self.assertEqual(self.out["planProgress"],
-                         "3 of 8 sessions done · 1h 30m studied, 2h 30m still planned · quiz performance 73% across 2 of 3 documents")
-
     def test_today_shows_one_plan_progress_line(self):
         self.assertEqual(self.out["todayProgress"], "3 of 8 sessions done · 1h 30m studied · 2h 30m to go")
 
@@ -169,6 +167,9 @@ class ProgressUiDesktopTests(ProgressUiAssertions, unittest.TestCase):
     def setUpClass(cls):
         cls.out = run_at_width(1280, 900)
 
+    def test_calendar_planner_has_no_progress_summary(self):
+        self.assertNotRegex(self.out["desktopPlannerText"], r"sessions done|studied|still planned|quiz performance")
+
 
 @unittest.skipUnless(find_chrome(), "Chrome is not installed")
 class ProgressUiPhoneTests(ProgressUiAssertions, unittest.TestCase):
@@ -178,6 +179,10 @@ class ProgressUiPhoneTests(ProgressUiAssertions, unittest.TestCase):
 
     def test_runs_at_phone_width(self):
         self.assertEqual(self.out["width"], 390)
+
+    def test_planner_shows_plan_progress(self):
+        self.assertEqual(self.out["planProgress"],
+                         "3 of 8 sessions done · 1h 30m studied, 2h 30m still planned · quiz performance 73% across 2 of 3 documents")
 
 
 if __name__ == "__main__":

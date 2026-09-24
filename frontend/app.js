@@ -439,7 +439,6 @@ if (plannerView) {
   </section>
   <aside class="pcal-rail pcal-queue" aria-labelledby="pcal-queue-title">
     <div class="pcal-queue-head"><h3 class="pcal-rail-title" id="pcal-queue-title">Study queue</h3><span class="pcal-queue-count" id="pcal-queue-count"></span></div>
-    <p class="pcal-progress" id="pcal-progress" hidden></p>
     <ol class="pcal-queue-list" id="pcal-queue"></ol>
   </aside>
   <section class="pcal-sheet" id="pcal-sheet" role="dialog" aria-labelledby="pcal-sheet-title" hidden>
@@ -490,7 +489,6 @@ const pcal = {
   body: document.getElementById("pcal-body"),
   queue: document.getElementById("pcal-queue"),
   queueCount: document.getElementById("pcal-queue-count"),
-  progress: document.getElementById("pcal-progress"),
   sheet: document.getElementById("pcal-sheet"),
   sheetList: document.getElementById("pcal-sheet-list"),
   sheetClose: document.getElementById("pcal-sheet-close"),
@@ -5816,7 +5814,6 @@ function renderPlannerPlan() {
 
 async function loadPlannerPlanProgress(planId) {
   if (!plannerPlanProgress) return;
-  if (pcal.progress) pcal.progress.hidden = true;
   try {
     const progress = await plannerRequest(plannerPlanUrl(`/progress?utc_offset_minutes=${plannerUtcOffsetMinutes()}`));
     if (plannerPlan?.plan_id !== planId) return;
@@ -5827,10 +5824,6 @@ async function loadPlannerPlanProgress(planId) {
     plannerPlanProgress.textContent = `${progress.completed_sessions} of ${progress.planned_sessions} sessions done · `
       + `${plannerFormatDuration(progress.completed_minutes)} studied, ${plannerFormatDuration(progress.remaining_minutes)} still planned · ${quizText}`;
     plannerPlanProgress.hidden = false;
-    if (pcal.progress) {
-      pcal.progress.textContent = plannerPlanProgress.textContent;
-      pcal.progress.hidden = false;
-    }
   } catch (error) {
     plannerPlanProgress.hidden = true;
   }
@@ -6670,85 +6663,48 @@ function pcalRenderSheet() {
 
 // -- study queue ----------------------------------------------------------------------
 
-function pcalQueueSessionItem(session, kind) {
-  const item = plannerSessionItem(session, "li", { action: kind === "live" && Boolean(session.session_id) });
-  item.classList.add("pcal-queue-item", `pcal-queue-item--${kind}`);
-  item.querySelector(".planner-session-time").textContent = `${pcalShortDay(session.scheduled_start.slice(0, 10))} · ${pcalSessionTimes(session)}`;
-  item.addEventListener("click", (event) => {
-    if (event.target.closest("button")) return;
-    pcalReveal(session);
-  });
-  return item;
-}
-
-function pcalQueueUnscheduledItem(entry, kind = "suggested") {
-  // Work the scheduler could not place (or a material with nothing planned yet): stays visible.
-  // With a candidate key it can be dragged onto the calendar (a server-validated placement).
-  const item = pcalEl("li", "planner-session pcal-queue-item pcal-queue-item--unscheduled");
+function pcalQueueItem(entry, kind) {
+  // One activity the scheduler still wants that has no calendar slot. Dragging it onto the
+  // calendar places it (a server-validated placement); it has no lifecycle actions of its own.
+  const title = entry.document_title || plannerDocumentTitle(entry.document_id);
+  const item = pcalEl("li", "pcal-queue-item pcal-queue-item--unscheduled");
+  item.append(pcalEl("strong", "pcal-queue-title", title),
+    pcalEl("span", "pcal-queue-meta", `${pcalActivity(entry.activity_type)} · ${plannerFormatDuration(entry.estimated_minutes || 0)}`));
+  if (entry.reason?.message) item.appendChild(pcalEl("small", "pcal-queue-reason", entry.reason.message));
+  const due = entry.deadline
+    ? `Due ${new Date(`${entry.deadline}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })} · ` : "";
+  item.appendChild(pcalEl("span", "pcal-queue-need", `${due}Needs a time slot`));
   if (entry.candidate_key && entry.estimated_minutes) {
     item.classList.add("is-draggable");
     item.dataset.candidateKey = entry.candidate_key;
+    item.setAttribute("aria-label", `${pcalActivity(entry.activity_type)} · ${title}, needs a time slot`);
     item.addEventListener("pointerdown", (event) => pcalBeginMove(event, {
       kind: kind === "live" ? "candidate" : "unscheduled", key: entry.candidate_key, element: item,
       documentId: entry.document_id, duration: entry.estimated_minutes, deadline: entry.deadline,
-      title: entry.document_title || plannerDocumentTitle(entry.document_id), activity: entry.activity_type,
-      grabMinutes: 0,
+      title, activity: entry.activity_type, grabMinutes: 0,
     }));
   }
-  item.appendChild(pcalEl("span", "planner-session-time", "Not scheduled"));
-  const content = pcalEl("div", "planner-session-body");
-  content.appendChild(pcalEl("strong", "", entry.document_title || plannerDocumentTitle(entry.document_id)));
-  if (entry.activity_type) {
-    const meta = pcalEl("span", "planner-session-meta");
-    meta.append(pcalEl("span", "planner-activity-chip", pcalActivity(entry.activity_type)),
-      pcalEl("span", "", plannerFormatDuration(entry.estimated_minutes)));
-    content.appendChild(meta);
-  }
-  content.appendChild(pcalEl("small", "planner-session-reason", entry.reason?.message || ""));
-  item.appendChild(content);
   return item;
 }
 
 function pcalRenderQueue() {
+  // The queue holds only work without a calendar slot: scheduled, suggested and past sessions are
+  // on the calendar, and their actions live in its popovers (and on Home).
   pcal.queue.innerHTML = "";
-  const entries = [];
-  const byTime = (left, right) => left.scheduled_start.localeCompare(right.scheduled_start);
-  if (plannerHasLivePlan()) {
-    const nowIso = plannerLocalIso(plannerNow());
-    plannerSessions.filter((session) => plannerIsOverdue(session)).sort(byTime)
-      .forEach((session) => entries.push(pcalQueueSessionItem(session, "live")));
-    plannerSessions.filter((session) => !plannerIsOverdue(session) && (session.status === "in_progress" || session.scheduled_end > nowIso))
-      .sort(byTime).forEach((session) => entries.push(pcalQueueSessionItem(session, "live")));
-    plannerLiveCandidates.forEach((candidate) => entries.push(pcalQueueUnscheduledItem(candidate, "live")));
-  } else if (plannerPreview) {
-    [...plannerPreview.sessions].sort(byTime).forEach((session) => entries.push(pcalQueueSessionItem(session, "suggested")));
-    plannerPreview.capacity.unscheduled.forEach((entry) => entries.push(pcalQueueUnscheduledItem(entry)));
-  }
-  entries.forEach((entry) => pcal.queue.appendChild(entry));
-  pcal.queueCount.textContent = entries.length ? String(entries.length) : "";
-  if (!entries.length) {
-    const empty = !plannerMaterials.length ? "Your study sessions will appear here."
-      : !plannerAvailability.length ? "Mark some free time to see suggested sessions."
-        : plannerPreviewing ? "Finding the best times…" : "Nothing waiting. You’re all set.";
-    pcal.queue.appendChild(pcalEl("li", "pcal-queue-empty", empty));
-  }
-}
-
-function pcalReveal(session) {
-  const key = session.scheduled_start.slice(0, 10);
-  const [year, month, day] = key.split("-").map(Number);
-  const monday = plannerMondayOf(new Date(year, month - 1, day));
-  if (plannerDateKey(monday) !== plannerDateKey(pcalWeekDates()[0])) {
-    plannerCalWeekStart = monday;
-    renderPlannerWorkspace();
-  }
-  const block = [...pcal.body.querySelectorAll(".pcal-event")].find((element) => element.dataset.start === session.scheduled_start
-    && (!session.session_id || element.dataset.sessionId === session.session_id));
-  if (!block) return;
-  pcal.scroll.scrollTop = Math.max(0, block.offsetTop - 2 * PCAL_HOUR_PX);
-  block.classList.remove("is-flash");
-  void block.offsetWidth;
-  block.classList.add("is-flash");
+  const waiting = plannerHasLivePlan()
+    ? plannerLiveCandidates.map((candidate) => pcalQueueItem(candidate, "live"))
+    : (plannerPreview?.capacity.unscheduled || []).map((entry) => pcalQueueItem(entry, "suggested"));
+  waiting.forEach((item) => pcal.queue.appendChild(item));
+  pcal.queueCount.textContent = waiting.length ? String(waiting.length) : "";
+  if (waiting.length) return;
+  const empty = pcalEl("li", "pcal-queue-empty");
+  const live = plannerHasLivePlan();
+  if (!live && !plannerMaterials.length) empty.appendChild(pcalEl("span", "", "Add materials to get started."));
+  else if (!live && !plannerAvailability.length) empty.appendChild(pcalEl("span", "", "Mark some free time to see what fits."));
+  else if (!live && plannerPreviewing) empty.appendChild(pcalEl("span", "", "Finding the best times…"));
+  else empty.append(pcalEl("strong", "", "All caught up"),
+    pcalEl("span", "", "Everything that needs attention is already on your calendar."));
+  pcal.queue.appendChild(empty);
 }
 
 function pcalShiftWeek(days) {

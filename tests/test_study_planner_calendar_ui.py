@@ -42,12 +42,15 @@ const describeEvent = (e) => ({date: e.closest(".pcal-col").dataset.date, kind: 
 const availability = () => [...document.querySelectorAll("#pcal-body .pcal-avail")].map((a) => ({date: a.closest(".pcal-col").dataset.date,
   text: a.textContent, top: a.style.top, height: a.style.height, recurring: a.dataset.recurring,
   background: getComputedStyle(a).backgroundColor, z: Number(getComputedStyle(a).zIndex)}));
-const queue = () => [...document.querySelectorAll("#pcal-queue .planner-session")].map((li) => ({
-  time: li.querySelector(".planner-session-time").textContent, title: li.querySelector("strong").textContent,
-  activity: li.querySelector(".planner-activity-chip")?.textContent || null,
-  duration: li.querySelector(".planner-session-meta span:last-child")?.textContent || null,
-  reason: li.querySelector(".planner-session-reason").textContent,
-  buttons: [...li.querySelectorAll("button")].map((b) => b.textContent)}));
+// The Study Queue: only work with no calendar slot (title, activity · duration, reason, "Needs a time slot").
+const queue = () => ({items: [...document.querySelectorAll("#pcal-queue .pcal-queue-item")].map((li) => ({
+  title: li.querySelector(".pcal-queue-title").textContent, meta: li.querySelector(".pcal-queue-meta").textContent,
+  reason: li.querySelector(".pcal-queue-reason")?.textContent || null, need: li.querySelector(".pcal-queue-need").textContent,
+  buttons: [...li.querySelectorAll("button")].map((b) => b.textContent)})),
+  empty: document.querySelector("#pcal-queue .pcal-queue-empty")?.textContent || null,
+  sessionCards: document.querySelectorAll("#pcal-queue .planner-session").length,
+  buttonCount: $("pcal-queue").closest(".pcal-queue").querySelectorAll("button").length,
+  text: $("pcal-queue").closest(".pcal-queue").textContent});
 const toolbar = () => ({range: $("pcal-range").textContent, status: $("pcal-status").textContent,
   acceptShown: visible($("pcal-accept")), acceptDisabled: $("pcal-accept").disabled, acceptText: $("pcal-accept").textContent,
   autoPlanShown: visible($("pcal-auto-plan")), notice: $("pcal-notice").hidden ? null : $("pcal-notice").textContent});
@@ -266,7 +269,7 @@ class CalendarPlannerAssertions:
         # Materials but no availability: prompt to drag, no preview yet.
         self.assertEqual(materials["notice"], "Drag on the calendar to mark when you could study.")
         self.assertEqual(materials["previews"], 0)
-        self.assertEqual(materials["queueEmpty"], "Mark some free time to see suggested sessions.")
+        self.assertEqual(materials["queueEmpty"], "Mark some free time to see what fits.")
 
     def test_drag_creates_weekly_availability_with_the_existing_api(self):
         self.assertEqual(self.out["firstSlot"]["saved"], [[0, "18:00", "18:30", True]])
@@ -277,9 +280,9 @@ class CalendarPlannerAssertions:
         self.assertEqual(at_risk["previews"], 1)
         self.assertEqual(at_risk["status"], "1 suggested session · 45m · 1h 15m doesn’t fit")
         self.assertIsNone(at_risk["notice"])
-        self.assertRegex(at_risk["queue"][0]["time"], r"28 · 18:00–18:45$")
-        self.assertEqual([q["time"] for q in at_risk["queue"][1:]], ["Not scheduled", "Not scheduled"])
-        self.assertEqual(at_risk["queue"][1]["title"], "Statistics")   # unscheduled work stays visible
+        # the one suggestion that fits is on the calendar; only what could not be placed is queued
+        self.assertEqual([(q["title"], q["meta"]) for q in at_risk["queue"]["items"]],
+                         [("Statistics", "Summary · 45m"), ("Marketing", "Quiz · 30m")])
         on_track = self.out["onTrack"]
         self.assertEqual(on_track["previews"], 2)   # one debounced preview per change
         self.assertEqual(on_track["status"], "3 suggested sessions · 2h")
@@ -287,14 +290,19 @@ class CalendarPlannerAssertions:
         self.assertTrue(on_track["autoPlanShown"])
         self.assertEqual(on_track["thisWeekEvents"], 0)   # the sessions land next week
 
-    def test_study_queue_shows_real_scheduler_work(self):
-        queue = self.out["onTrack"]["queue"]
-        self.assertEqual([(q["title"], q["activity"], q["duration"]) for q in queue], [
-            ("Marketing", "Summary", "45m"), ("Statistics", "Summary", "45m"), ("Marketing", "Quiz", "30m")])
-        for entry, when in zip(queue, ("28 · 18:00–18:45", "28 · 18:55–19:40", "29 · 20:00–20:30")):
-            self.assertRegex(entry["time"], when + "$")   # the planned day and time
-        self.assertEqual(queue[0]["reason"], '"Marketing" is due 2026-10-01: read the summary.')
-        self.assertEqual([q["buttons"] for q in queue], [[], [], []])   # suggestions have no lifecycle actions
+    def test_study_queue_holds_only_unscheduled_work(self):
+        at_risk = self.out["atRisk"]["queue"]
+        self.assertEqual(at_risk["items"][0], {"title": "Statistics", "meta": "Summary · 45m",
+                                               "reason": 'Start "Statistics": read the summary.', "need": "Needs a time slot",
+                                               "buttons": []})
+        self.assertEqual(at_risk["sessionCards"], 0)
+        # everything fits: the suggestions are on the calendar and the queue is quietly empty
+        on_track = self.out["onTrack"]["queue"]
+        self.assertEqual(on_track["items"], [])
+        self.assertEqual(on_track["empty"], "All caught upEverything that needs attention is already on your calendar.")
+        for state in (at_risk, on_track, self.out["accepted"]["queue"]):
+            self.assertEqual(state["buttonCount"], 0)   # no Start / Resume / Complete / Skip in the queue
+            self.assertNotRegex(state["text"], r"sessions done|studied|still planned|quiz performance")
 
     def test_ghost_sessions_render_on_the_right_day_and_time(self):
         next_week = self.out["nextWeek"]
@@ -361,7 +369,7 @@ class CalendarPlannerAssertions:
         self.assertEqual(accepted["status"], "3 planned sessions this week · 2h")
         self.assertFalse(accepted["acceptShown"])
         self.assertFalse(accepted["autoPlanShown"])
-        self.assertEqual([q["buttons"] for q in accepted["queue"]], [["Start"]] * 3)
+        self.assertEqual((accepted["queue"]["items"], accepted["queue"]["sessionCards"]), ([], 0))   # confirmed sessions live on the calendar
         self.assertEqual(self.out["confirmedPopover"], ["×", "Start"])
 
     def test_reload_opens_the_confirmed_calendar(self):

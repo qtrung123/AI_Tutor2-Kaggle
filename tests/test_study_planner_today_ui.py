@@ -113,8 +113,10 @@ const week = () => desktop ? ({
   sessions: calendarEvents().map((e) => e.querySelector(".pcal-event-title").textContent),
   kinds: calendarEvents().map((e) => e.dataset.kind),
   status: document.getElementById("pcal-status").textContent,
-  queue: [...document.querySelectorAll("#pcal-queue .planner-session")].map((li) => li.querySelector("strong").textContent
-    + " " + li.querySelector(".planner-session-time").textContent),
+  // the Study Queue holds only unscheduled work: scheduled sessions are on the calendar
+  queue: [...document.querySelectorAll("#pcal-queue .pcal-queue-item")].map((li) => li.querySelector(".pcal-queue-title").textContent),
+  queueEmpty: document.querySelector("#pcal-queue .pcal-queue-empty")?.textContent || null,
+  queueButtons: document.querySelectorAll("#pcal-queue button").length,
   wizardHidden: document.querySelector(".planner-shell").hidden,
 }) : ({
   step: visibleStep(),
@@ -128,6 +130,11 @@ const week = () => desktop ? ({
 const opened = () => ({page: document.body.dataset.page, tab: document.body.dataset.sessionTab, document: activeDocumentId,
   summaryGenerateShown: !document.getElementById("summary-generate").hidden,
   flashcardsGenerateShown: !document.getElementById("flashcards-generate").hidden});
+// Desktop: open a session's calendar popover (where its Start / Reschedule / Skip live).
+const weekSession = (s) => {
+  document.querySelector(`.pcal-event[data-session-id="${s.session_id}"]`)?.click();
+  return document.querySelector("#pcal-popover .pcal-popover-session");
+};
 const startButton = (title, activity) => [...document.querySelectorAll(".planner-session")]
   .find((el) => el.offsetParent !== null && el.querySelector("strong").textContent === title
     && el.querySelector(".planner-activity-chip").textContent === activity)?.querySelector(".planner-session-start");
@@ -192,7 +199,8 @@ const startButton = (title, activity) => [...document.querySelectorAll(".planner
   const retry = session("stats.pdf", "quiz_retry", "2026-09-25T20:00:00", "2026-09-25T20:30:00", 30);
   P.sessionsByPlan["plan-1"].push(retry);
   await loadPlannerData(); await sleep(200);
-  startButton("Statistics", "Quiz retry").click(); await sleep(1500);
+  (desktop ? weekSession(retry).querySelector(".planner-session-start") : startButton("Statistics", "Quiz retry")).click();
+  await sleep(1500);
   out.weekStart = {...opened(), calls: [...P.startCalls]};
   out.overflow.sessionAfterWeekStart = noOverflow();
 
@@ -254,8 +262,11 @@ const startButton = (title, activity) => [...document.querySelectorAll(".planner
 
   // Week view shows the same states.
   setPage("planner"); await sleep(500);
-  out.lifecycleWeek = {overdue: describe(item("Marketing", "Summary")), running: describe(item("Statistics", "Quiz")),
-    later: describe(item("PowerBI", "Flashcards"))};
+  // (desktop: each session's actions are in its calendar popover)
+  const inWeek = (s, title, activity) => desktop ? weekSession(s) : item(title, activity);
+  out.lifecycleWeek = {overdue: describe(inWeek(overdue, "Marketing", "Summary")), running: describe(inWeek(running, "Statistics", "Quiz")),
+    later: describe(inWeek(later, "PowerBI", "Flashcards"))};
+  document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape"}));
   out.overflow.weekLifecycle = noOverflow();
 
   // Complete (double click -> one request), from Home.
@@ -284,7 +295,8 @@ const startButton = (title, activity) => [...document.querySelectorAll(".planner
   setPage("planner"); await sleep(500);
   out.weekAfter = desktop
     ? {calendar: calendarEvents().map((e) => [e.querySelector(".pcal-event-title").textContent, e.querySelector(".pcal-event-meta").textContent, e.dataset.kind]),
-       moved: describe(item("Marketing", "Summary")), queue: week().queue}
+       moved: describe(weekSession(P.sessionsByPlan["plan-1"].find((s) => s.rescheduled_from === overdue.session_id))),
+       queue: week().queue}
     : {running: describe(item("Statistics", "Quiz")), skipped: describe(item("Statistics", "Review")),
        moved: describe(item("Marketing", "Summary")), days: week().days.length};
   out.overflow.weekHistory = noOverflow();
@@ -465,12 +477,13 @@ class DesktopCalendarWeekAssertions:
         self.assertEqual((len(next_week["days"]), next_week["sessions"]), (2, ["Statistics", "Marketing"]))
         empty = self.out["weekEmpty"]
         self.assertEqual((empty["sessions"], empty["status"]), ([], "No sessions this week"))
-        self.assertRegex(empty["queue"][-1], r"^Marketing .*12 · 19:00–19:30$")   # the queue still shows what is next
         self.assertEqual(self.out["weekBack"], this_week)
 
-    def test_queue_lists_upcoming_work_with_actions(self):
-        self.assertEqual(len(self.out["weekThis"]["queue"]), 4)
-        self.assertRegex(self.out["weekThis"]["queue"][0], r"^Marketing .*25 · 18:00–18:45$")
+    def test_queue_does_not_repeat_scheduled_sessions(self):
+        # every session of this plan has a calendar slot: nothing is waiting, no lifecycle buttons
+        for week in (self.out["weekThis"], self.out["weekEmpty"]):
+            self.assertEqual((week["queue"], week["queueButtons"]), ([], 0))
+            self.assertEqual(week["queueEmpty"], "All caught upEverything that needs attention is already on your calendar.")
 
     def test_week_keeps_history_and_shows_moved_session(self):
         after = self.out["weekAfter"]
@@ -480,7 +493,7 @@ class DesktopCalendarWeekAssertions:
         self.assertEqual(calendar[("PowerBI", "Flashcards")], "confirmed")   # later today
         self.assertEqual(calendar[("Marketing", "Summary")], "confirmed")   # the moved session, on its new day
         self.assertEqual(after["moved"], {"note": None, "status": None, "buttons": ["Start"]})
-        self.assertFalse(any(entry.startswith("Statistics") for entry in after["queue"]))   # history is not queued work
+        self.assertEqual(after["queue"], [])   # neither history nor scheduled sessions are queued work
 
 
 @unittest.skipUnless(find_chrome(), "Chrome is not installed")

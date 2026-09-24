@@ -3332,8 +3332,6 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-event--completed .pcal-event-title::before{content:"\2713  "}
 .pcal-event--skipped{background:#fff;border:1px dashed #d4d8de;color:#8b939c}
 .pcal-event--skipped .pcal-event-title{text-decoration:line-through;text-decoration-color:rgba(139,147,156,.6)}
-.pcal-event.is-flash{animation:pcal-flash .6s var(--pcal-ease)}
-@keyframes pcal-flash{0%,50%{box-shadow:0 0 0 3px rgba(104,118,245,.4)}100%{box-shadow:none}}
 .pcal-now{position:absolute;left:-1px;right:0;height:2px;margin-top:-1px;background:#e5484d;z-index:5;pointer-events:none}
 .pcal-now::before{content:"";position:absolute;left:-5px;top:-4px;width:10px;height:10px;border-radius:50%;background:#e5484d}
 .pcal-drag{position:absolute;left:2px;right:2px;z-index:4;box-sizing:border-box;border:1px dashed var(--pcal-avail-ink);background:rgba(181,220,194,.35);border-radius:4px;color:var(--pcal-avail-ink);font-size:11px;font-weight:600;padding:2px 6px;pointer-events:none}
@@ -3358,27 +3356,16 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-queue-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .pcal-queue-count{min-width:18px;padding:0 6px;border-radius:999px;background:#eef0f5;font-size:10.5px;font-weight:700;line-height:17px;color:var(--pcal-ink-2);text-align:center}
 .pcal-queue-count:empty{display:none}
-.pcal-progress{margin:0 0 2px;font-size:11.5px;color:var(--muted);line-height:1.4}
 .pcal-queue-list{list-style:none;margin:0;padding:0;display:grid;gap:6px}
-.pcal-queue .planner-session,.pcal-queue .planner-session--actionable,.pcal-queue .planner-session--done{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"time actions" "body actions";column-gap:8px;row-gap:1px;padding:8px 10px;border:1px solid var(--pcal-line);border-radius:10px;background:#fff;align-items:center;box-shadow:none;transition:border-color .15s var(--pcal-ease),background-color .15s var(--pcal-ease)}
-.pcal-queue .planner-session:hover{border-color:#d6d9e6}
-.pcal-queue .planner-session-time{grid-area:time;font-size:11px;color:var(--muted);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pcal-queue .planner-session-body{grid-area:body;gap:1px}
-.pcal-queue .planner-session-body strong{font-size:12.5px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pcal-queue .planner-session-meta{gap:6px;font-size:11px}
-.pcal-queue .planner-activity-chip{padding:0 6px;font-size:10.5px;line-height:16px}
-.pcal-queue .planner-session-reason{font-size:10.5px;line-height:1.35;color:#8b93a1;overflow:hidden;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical}
-.pcal-queue .planner-session-note{font-size:10.5px}
-.pcal-queue .planner-session-actions{grid-area:actions;display:flex;flex-direction:column;align-items:stretch;gap:4px}
-.pcal-queue .planner-session-action{padding:4px 10px;font-size:11.5px;border-radius:7px}
-.pcal-queue .planner-session-status{grid-area:actions;font-size:11px;color:var(--muted)}
-.pcal-queue-item{cursor:pointer}
-.pcal-queue-item--suggested{border-left:2px dashed var(--pcal-ghost-edge)!important}
-.pcal-queue-item--unscheduled{background:var(--pcal-warn-bg)!important;border-color:var(--pcal-warn-edge)!important;cursor:default}
-.pcal-queue-item--unscheduled.is-draggable{cursor:grab}
-.pcal-queue-item--unscheduled .planner-session-time{color:var(--pcal-warn-ink)}
-.pcal-queue-item.is-draggable:hover{border-color:var(--session-accent)!important}
-.pcal-queue-empty{font-size:12px;color:var(--muted);padding:18px 4px;text-align:center;border:1px dashed var(--pcal-line);border-radius:10px}
+/* each queue item: an activity with no calendar slot yet (drag it onto the calendar) */
+.pcal-queue-item{display:grid;gap:1px;padding:8px 10px;border:1px solid var(--pcal-line);border-left:2px solid var(--pcal-warn-edge);border-radius:10px;background:#fff;min-width:0;transition:border-color .15s var(--pcal-ease),box-shadow .15s var(--pcal-ease)}
+.pcal-queue-item.is-draggable:hover{border-color:#d6d9e6;border-left-color:var(--session-accent);box-shadow:0 2px 6px rgba(30,36,70,.08)}
+.pcal-queue-title{font-size:12.5px;font-weight:600;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pcal-queue-meta{font-size:11.5px;color:var(--pcal-ink-2)}
+.pcal-queue-reason{font-size:11px;line-height:1.35;color:#8b93a1;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.pcal-queue-need{margin-top:2px;font-size:10.5px;font-weight:600;color:var(--pcal-warn-ink)}
+.pcal-queue-empty{display:grid;gap:3px;padding:18px 10px;text-align:center;font-size:12px;color:var(--muted);border:1px dashed var(--pcal-line);border-radius:10px}
+.pcal-queue-empty strong{font-size:12.5px;color:var(--pcal-ink-2);font-weight:600}
 
 /* popover + add-materials sheet */
 .pcal-popover{position:absolute;z-index:30;width:272px;box-sizing:border-box;padding:14px 16px;background:#fff;border-radius:12px;box-shadow:0 12px 32px rgba(20,24,60,.16),0 0 0 1px rgba(20,24,60,.06);display:grid;gap:8px;animation:pcal-pop .14s var(--pcal-ease)}
