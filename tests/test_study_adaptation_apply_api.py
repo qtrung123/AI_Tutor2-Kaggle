@@ -242,7 +242,8 @@ class StudyAdaptationApplyTests(PlannerDatabaseMixin, unittest.TestCase):
         self.apply({"kind": "quiz_completed", "document_id": "mkt"})
         self.assertEqual(self.rows()[retry["session_id"]]["status"], "cancelled")
         for action in ("start", "complete", "skip"):
-            response = self.client.post(f"/api/planner/sessions/{retry['session_id']}/{action}")
+            response = self.client.post(f"/api/planner/sessions/{retry['session_id']}/{action}",
+                                        json={"utc_offset_minutes": 0, "local_now": NOW})
             self.assertEqual(response.status_code, 409, action)
         response = self.client.post(f"/api/planner/sessions/{retry['session_id']}/reschedule",
                                     json={"utc_offset_minutes": 0, "local_now": NOW})

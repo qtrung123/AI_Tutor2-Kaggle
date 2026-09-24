@@ -12,6 +12,7 @@ from backend import study_planner_store
 from backend.main import app
 
 PASSWORD = "long-password-x"
+EARLY = "2026-09-24T09:00:00"   # the learner's local now: before the 10:00+ sessions below
 
 
 class StudySessionStartApiTests(PlannerDatabaseMixin, unittest.TestCase):
@@ -38,8 +39,42 @@ class StudySessionStartApiTests(PlannerDatabaseMixin, unittest.TestCase):
                 for document_id, activity, hour in specs]
         return study_planner_store.create_sessions(self.alice, plan_id or self.plan["plan_id"], rows)
 
-    def start(self, session_id, client=None):
-        return (client or self.client).post(f"/api/planner/sessions/{session_id}/start")
+    def start(self, session_id, client=None, local_now=EARLY):
+        return (client or self.client).post(f"/api/planner/sessions/{session_id}/start",
+                                            json={"utc_offset_minutes": 0, "local_now": local_now})
+
+    # -- a missed session (its time is over on the learner's clock) is not startable ----------------
+
+    def test_missed_session_cannot_be_started(self):
+        (missed,) = self.sessions(("mkt", "quiz", "10"))   # 10:00-10:30
+        for now in ("2026-09-24T10:30:00", "2026-09-24T12:00:00", "2026-09-25T08:00:00"):
+            with self.subTest(now=now):
+                response = self.start(missed["session_id"], local_now=now)
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json()["detail"], {"code": "session_missed", "status": "scheduled",
+                                                             "message": "This session's time has passed. Reschedule it instead."})
+        stored = study_planner_store.get_session(self.alice, missed["session_id"])
+        self.assertEqual((stored["status"], stored["started_at"]), ("scheduled", None))
+
+    def test_session_in_its_window_or_ahead_can_be_started(self):
+        current, ahead = self.sessions(("mkt", "summary", "10"), ("stats", "summary", "11"))
+        now_in_window = "2026-09-24T10:15:00"
+        for session in (current, ahead):
+            response = self.start(session["session_id"], local_now=now_in_window)
+            self.assertEqual((response.status_code, response.json()["started"]), (200, True), response.text)
+
+    def test_resume_of_an_in_progress_session_is_unchanged_after_its_window(self):
+        (session,) = self.sessions(("mkt", "summary", "10"))
+        first = self.start(session["session_id"], local_now="2026-09-24T10:10:00").json()
+        later = self.start(session["session_id"], local_now="2026-09-24T18:00:00")   # well after 10:30
+        self.assertEqual(later.status_code, 200, later.text)
+        self.assertEqual((later.json()["started"], later.json()["session"]["started_at"]),
+                         (False, first["session"]["started_at"]))
+
+    def test_the_learner_offset_is_required(self):
+        (session,) = self.sessions(("mkt", "summary", "10"))
+        self.assertEqual(self.client.post(f"/api/planner/sessions/{session['session_id']}/start").status_code, 422)
+        self.assertEqual(study_planner_store.get_session(self.alice, session["session_id"])["status"], "scheduled")
 
     def test_starts_exactly_that_session(self):
         first, second = self.sessions(("mkt", "summary", "10"), ("stats", "summary", "11"))

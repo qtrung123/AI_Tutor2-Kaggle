@@ -5379,7 +5379,7 @@ async function plannerSessionAction(session, kind, button, group) {
       return;
     }
     const url = `${PLANNER_SESSIONS_API_URL}/${encodeURIComponent(session.session_id)}/${kind}`;
-    const body = kind === "reschedule" ? { utc_offset_minutes: plannerUtcOffsetMinutes() } : undefined;
+    const body = kind === "reschedule" || kind === "start" ? { utc_offset_minutes: plannerUtcOffsetMinutes() } : undefined;
     const result = await plannerRequest(url, { method: "POST", body });
     if (kind === "start") {
       Object.assign(session, result.session);
@@ -6067,7 +6067,9 @@ async function pcalSetDeadline(material, input) {
 
 async function pcalChangeAvailability(action, payload) {
   const url = action === "remove" ? `${PLANNER_AVAILABILITY_API_URL}/remove` : PLANNER_AVAILABILITY_API_URL;
-  plannerAvailability = await plannerRequest(url, { method: "POST", body: payload });
+  // The learner's offset lets the server refuse a dated slot in the past (it never guesses the timezone).
+  const body = action === "remove" ? payload : { ...payload, utc_offset_minutes: plannerUtcOffsetMinutes() };
+  plannerAvailability = await plannerRequest(url, { method: "POST", body });
 }
 
 function pcalSlotPayload(slot, dateKey) {
@@ -6296,6 +6298,24 @@ function pcalRenderNotice() {
   notice.hidden = !text;
 }
 
+function pcalNowMinutes() {
+  const now = plannerNow();
+  return now.getHours() * 60 + now.getMinutes();
+}
+
+function pcalFirstOpenMinute(dateKey, step = PLANNER_CELL_MINUTES) {
+  // Past days are read-only; today opens at the next grid step after "now"; later days are open.
+  const todayKey = plannerDateKey(plannerNow());
+  if (dateKey < todayKey) return Infinity;
+  if (dateKey > todayKey) return 0;
+  return Math.ceil(pcalNowMinutes() / step) * step;
+}
+
+function pcalSlotIsPast(slot, dateKey) {
+  const todayKey = plannerDateKey(plannerNow());
+  return dateKey < todayKey || (dateKey === todayKey && plannerToMinutes(slot.end_at) <= pcalNowMinutes());
+}
+
 function pcalAvailabilityFor(dateKey, weekday) {
   return plannerAvailability.filter((slot) => plannerAvailabilityCoversDate(slot, dateKey, weekday));
 }
@@ -6358,6 +6378,10 @@ function pcalRenderGrid() {
     pcalAvailabilityFor(key, weekday).forEach((slot) => column.appendChild(pcalAvailabilityBlock(slot, key, busy)));
     dayItems.forEach((item) => column.appendChild(pcalEventBlock(item)));
     if (key === todayKey) {
+      const shade = pcalEl("div", "pcal-past-shade");   // the part of today that has passed
+      shade.style.height = `${(now.getHours() * 60 + now.getMinutes()) * PCAL_MINUTE_PX}px`;
+      shade.setAttribute("aria-hidden", "true");
+      column.appendChild(shade);
       const line = pcalEl("div", "pcal-now");
       line.style.top = `${(now.getHours() * 60 + now.getMinutes()) * PCAL_MINUTE_PX}px`;
       line.setAttribute("aria-hidden", "true");
@@ -6395,6 +6419,7 @@ function pcalAvailabilityBlock(slot, dateKey, busy = []) {
   block.setAttribute("aria-label", `Available ${slot.start_at}–${slot.end_at}${slot.is_recurring ? ", every week" : ""}`);
   pcalPlace(block, start, end);
   block.classList.toggle("is-short", end - start < 60);
+  block.classList.toggle("is-past", pcalSlotIsPast(slot, dateKey));
   // The label goes where no session covers it: the bottom of the window, else the top, else none.
   const free = (from, to) => !busy.some(([s, e]) => s < to && e > from);
   const room = 30;
@@ -6457,9 +6482,15 @@ function pcalStartDrag(event, column, from) {
   event.preventDefault();
   pcalClosePopover();
   const anchor = pcalMinuteAt(column, event.clientY);
+  const firstOpen = pcalFirstOpenMinute(column.dataset.date);
+  if (anchor < firstOpen) {
+    // Past time is read-only: a click on past availability still shows its details.
+    if (from) pcalOpenAvailabilityPopover(from.slot, from.dateKey, from.block);
+    return;
+  }
   const ghost = pcalEl("div", "pcal-drag");
   column.appendChild(ghost);
-  pcalDrag = { column, anchor, start: anchor, end: anchor + PLANNER_CELL_MINUTES, moved: false, from, ghost };
+  pcalDrag = { column, anchor, start: anchor, end: anchor + PLANNER_CELL_MINUTES, moved: false, from, ghost, firstOpen };
   pcalUpdateDragGhost();
 }
 
@@ -6472,7 +6503,7 @@ function pcalUpdateDragGhost() {
 
 function pcalMoveDrag(event) {
   if (!pcalDrag) return;
-  const minute = pcalMinuteAt(pcalDrag.column, event.clientY);
+  const minute = Math.max(pcalDrag.firstOpen, pcalMinuteAt(pcalDrag.column, event.clientY));
   if (minute !== pcalDrag.anchor) pcalDrag.moved = true;
   pcalDrag.start = Math.min(pcalDrag.anchor, minute);
   pcalDrag.end = Math.max(pcalDrag.anchor, minute) + PLANNER_CELL_MINUTES;
@@ -6537,6 +6568,7 @@ function pcalOpenAvailabilityPopover(slot, dateKey, block) {
     const start = plannerToMinutes(slot.start_at), end = plannerToMinutes(slot.end_at);
     popover.append(pcalEl("h4", "pcal-popover-title", "Available"),
       pcalEl("p", "pcal-popover-when", `${plannerDayLabel(dateKey)} · ${slot.start_at}–${slot.end_at} (${plannerFormatDuration(end - start)})`));
+    if (pcalSlotIsPast(slot, dateKey)) return;   // history: shown, not editable
     const repeat = pcalEl("label", "pcal-popover-toggle");
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
@@ -6731,7 +6763,10 @@ setInterval(() => {
   if (!plannerWorkspace || plannerWorkspace.hidden || document.body.dataset.page !== "planner" || pcalDrag) return;
   const line = pcal.body.querySelector(".pcal-now");
   const now = plannerNow();
-  if (line) line.style.top = `${(now.getHours() * 60 + now.getMinutes()) * PCAL_MINUTE_PX}px`;
+  const passed = `${(now.getHours() * 60 + now.getMinutes()) * PCAL_MINUTE_PX}px`;
+  if (line) line.style.top = passed;
+  const shade = pcal.body.querySelector(".pcal-past-shade");
+  if (shade) shade.style.height = passed;
 }, 60 * 1000);
 
 // -- direct manipulation: drag a session / queue item to a time (Phase 7B) ------------------

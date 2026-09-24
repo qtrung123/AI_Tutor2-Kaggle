@@ -194,6 +194,10 @@ class AvailabilityChangeRequest(BaseModel):
     date: Optional[str] = None
     is_recurring: bool = False
     day_of_week: Optional[int] = Field(default=None, ge=0, le=6)
+    # The learner's UTC offset (and optional naive local "now"): when given, a dated slot that
+    # starts in the learner's past is refused. The server never infers the learner's timezone.
+    utc_offset_minutes: Optional[int] = None
+    local_now: Optional[str] = None
 
 
 class StudyBlockUpdateRequest(BaseModel):
@@ -1280,10 +1284,15 @@ def planner_list_availability(current_user: dict = Depends(require_current_user)
 def planner_add_availability(request: AvailabilityChangeRequest,
                              current_user: dict = Depends(require_current_user)) -> list[dict]:
     try:
+        if request.utc_offset_minutes is not None:
+            study_plan_api_service.check_availability_not_past(
+                request.date, request.start_at, request.is_recurring, request.utc_offset_minutes, request.local_now)
         return study_planner_store.add_availability(
             current_user["id"], request.start_at, request.end_at, date=request.date,
             is_recurring=request.is_recurring, day_of_week=request.day_of_week,
         )
+    except PlanValidationError as error:
+        raise HTTPException(status_code=400, detail=error.payload) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -1583,8 +1592,11 @@ def _session_action(action, *args) -> dict:
 
 
 @app.post("/api/planner/sessions/{session_id}/start")
-def planner_v2_start_session(session_id: str, current_user: dict = Depends(require_current_user)) -> dict:
-    return _session_action(study_plan_api_service.start_session, current_user["id"], session_id)
+def planner_v2_start_session(session_id: str, request: PlanPreviewRequest,
+                             current_user: dict = Depends(require_current_user)) -> dict:
+    # The learner's offset (as for reschedule/preview): a session whose time has passed is missed, not startable.
+    return _session_action(study_plan_api_service.start_session, current_user["id"], session_id,
+                           request.utc_offset_minutes, request.local_now)
 
 
 @app.post("/api/planner/sessions/{session_id}/complete")

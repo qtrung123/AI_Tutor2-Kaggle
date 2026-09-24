@@ -162,6 +162,22 @@ def _parse_local_now(local_now: str | None, offset: timedelta) -> datetime:
     return parsed
 
 
+def check_availability_not_past(date_value: str | None, start_at: str, is_recurring: bool, utc_offset_minutes: int,
+                                local_now: str | None = None) -> None:
+    """A dated availability slot may not start in the learner's past (their local now comes from
+    the UTC offset, as everywhere in the planner). A weekly rule has no date: it only ever applies
+    from now on, so it is not checked here."""
+    if is_recurring or not date_value:
+        return
+    now = _parse_local_now(local_now, _validate_utc_offset(utc_offset_minutes))
+    try:
+        start = datetime.fromisoformat(f"{date_value}T{start_at}")
+    except ValueError as error:
+        raise PlanValidationError("invalid_time", "start_at must be HH:MM and date YYYY-MM-DD.") from error
+    if start < now.replace(second=0, microsecond=0):
+        raise PlanValidationError("availability_in_past", "That time has already passed.")
+
+
 def _schedule_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None, placements=()):
     """Shared by preview and confirm: validate the learner time context and the plan, run the
     deterministic scheduler, then apply the learner's validated placements (study_placement).
@@ -359,8 +375,16 @@ def _transition(owner_id: str, session_id: str, action: str) -> tuple[dict, bool
         raise PlanNotFoundError(str(error)) from error
 
 
-def start_session(owner_id: str, session_id: str) -> dict:
-    """Start (or resume) one session and say which tool to open for it."""
+def start_session(owner_id: str, session_id: str, utc_offset_minutes: int, local_now: str | None = None) -> dict:
+    """Start (or resume) one session and say which tool to open for it. A scheduled session whose
+    time is over on the learner's clock (scheduled_end <= local now -- the same boundary the page
+    uses for "Session not completed") is missed: it can be rescheduled or skipped, not started.
+    Resuming an in-progress session is unaffected."""
+    now = _parse_local_now(local_now, _validate_utc_offset(utc_offset_minutes))
+    current = study_planner_store.get_session(owner_id, session_id)
+    if current and current["status"] == "scheduled" and current["scheduled_end"] <= now.isoformat():
+        raise SessionConflictError("session_missed", "This session's time has passed. Reschedule it instead.",
+                                   status=current["status"])
     session, started = _transition(owner_id, session_id, "start")
     tool, artifact_available = _session_tool(owner_id, session)
     return {"session": _saved_session(session, _document_titles(owner_id)), "started": started,

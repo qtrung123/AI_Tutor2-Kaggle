@@ -3,7 +3,8 @@ v2 API from tests/test_study_planner_v2_ui.py). At >=1024px the planner is one w
 add materials (optional inline deadline) -> drag availability -> the preview endpoint runs by itself
 (debounced) and its sessions appear as dashed ghost events -> Accept plan confirms once and the same
 events turn solid in place -> reload opens straight into the confirmed week. "Now" is pinned to
-Thu 2026-09-24 12:00 browser-local; the mocked schedule lands on Mon 28 / Tue 29 September.
+Mon 2026-09-21 08:00 browser-local (the week's Monday evening is still ahead, so it can be marked
+available); the mocked schedule lands on Mon 28 / Tue 29 September.
 Runs at 1280px (three columns) and 1100px (calendar + one side column); 900px keeps the step flow.
 Skipped when Chrome is not installed.
 """
@@ -72,7 +73,7 @@ const clickBlock = async (block) => {
 (async () => {
   await sleep(1500);
   const noMotion = document.createElement("style"); noMotion.textContent = "*,*::before,*::after{transition:none!important;animation:none!important}"; document.head.appendChild(noMotion);
-  plannerNow = () => new Date(2026, 8, 24, 12, 0, 0);   // Thu 24 Sep 2026, 12:00
+  plannerNow = () => new Date(2026, 8, 21, 8, 0, 0);   // Mon 21 Sep 2026, 08:00
   out.desktop = innerWidth >= 1024;
   setPage("planner"); await sleep(500);
   if (!out.desktop) {
@@ -87,8 +88,8 @@ const clickBlock = async (block) => {
     stepsVisible: [...document.querySelectorAll("[data-step-indicator]")].some(visible),
     columns: [...document.querySelectorAll("#pcal-body .pcal-col")].map((c) => c.dataset.date),
     dayHeads: [...document.querySelectorAll(".pcal-dayhead")].map((h) => h.textContent),
-    today: document.querySelector(".pcal-dayhead.is-today")?.textContent, nowLine: !!column("2026-09-24").querySelector(".pcal-now"),
-    nowTop: column("2026-09-24").querySelector(".pcal-now")?.style.top,
+    today: document.querySelector(".pcal-dayhead.is-today")?.textContent, nowLine: !!column("2026-09-21").querySelector(".pcal-now"),
+    nowTop: column("2026-09-21").querySelector(".pcal-now")?.style.top,
     hours: document.querySelectorAll(".pcal-hour").length, stickyHead: getComputedStyle($("pcal-head")).position,
     innerScroll: $("pcal-scroll").scrollHeight > $("pcal-scroll").clientHeight, scrolledTo: $("pcal-scroll").scrollTop,
     queueEmpty: document.querySelector(".pcal-queue-empty")?.textContent, plans: P.plans.length,
@@ -240,9 +241,9 @@ class CalendarPlannerAssertions:
         self.assertTrue(first["topbarHidden"])
         self.assertEqual(first["columns"], [f"2026-09-{day}" for day in range(21, 28)])
         self.assertEqual(first["dayHeads"], ["Mon21", "Tue22", "Wed23", "Thu24", "Fri25", "Sat26", "Sun27"])
-        self.assertEqual(first["today"], "Thu24")
+        self.assertEqual(first["today"], "Mon21")
         self.assertRegex(first["range"], r"^21\D.*27, 2026$")
-        self.assertEqual((first["nowLine"], first["nowTop"]), (True, "576px"))   # 12:00 on a 48px/hour grid
+        self.assertEqual((first["nowLine"], first["nowTop"]), (True, "384px"))   # 08:00 on a 48px/hour grid
         self.assertEqual(first["hours"], 23)
         self.assertEqual(first["stickyHead"], "sticky")
         self.assertTrue(first["innerScroll"])

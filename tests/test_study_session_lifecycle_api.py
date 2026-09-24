@@ -45,8 +45,10 @@ class StudySessionLifecycleApiTests(PlannerDatabaseMixin, unittest.TestCase):
             "start_at": start, "end_at": end, "is_recurring": True, "day_of_week": day})
         self.assertEqual(response.status_code, 200, response.text)
 
-    def act(self, action, session_id, client=None):
-        return (client or self.client).post(f"/api/planner/sessions/{session_id}/{action}")
+    def act(self, action, session_id, client=None, local_now=NOW):
+        # Start takes the learner's clock (a missed session cannot be started); the others take no body.
+        body = {"utc_offset_minutes": 0, "local_now": local_now} if action == "start" else None
+        return (client or self.client).post(f"/api/planner/sessions/{session_id}/{action}", json=body)
 
     def reschedule(self, session_id, client=None, local_now=NOW):
         return (client or self.client).post(f"/api/planner/sessions/{session_id}/reschedule",
@@ -76,7 +78,7 @@ class StudySessionLifecycleApiTests(PlannerDatabaseMixin, unittest.TestCase):
         session, other = self.session(), self.session("stats", "2026-09-24T14:00:00", "2026-09-24T14:30:00")
         early = self.act("complete", session["session_id"])
         self.assertEqual((early.status_code, early.json()["detail"]["code"]), (409, "session_not_started"))
-        started = self.act("start", session["session_id"]).json()["session"]
+        started = self.act("start", session["session_id"], local_now="2026-09-24T10:05:00").json()["session"]   # during its window
         done = self.act("complete", session["session_id"])
         self.assertEqual(done.status_code, 200, done.text)
         body = done.json()
@@ -182,7 +184,7 @@ class StudySessionLifecycleApiTests(PlannerDatabaseMixin, unittest.TestCase):
 
     def test_in_progress_session_is_not_rescheduled(self):
         session = self.session()
-        self.act("start", session["session_id"])
+        self.act("start", session["session_id"], local_now="2026-09-24T10:05:00")   # started during its window
         self.weekly(THU, "18:00", "20:00")
         response = self.reschedule(session["session_id"])
         self.assertEqual((response.status_code, response.json()["detail"]["code"]), (409, "session_not_reschedulable"))

@@ -3297,6 +3297,10 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-hour{position:absolute;right:8px;transform:translateY(-50%);font-size:10.5px;color:#8b93a1;font-variant-numeric:tabular-nums}
 .pcal-col{position:relative;border-left:1px solid var(--pcal-line);cursor:crosshair;touch-action:none;background-image:linear-gradient(to bottom,var(--pcal-line) 1px,transparent 1px);background-size:100% 48px}
 .pcal-col.is-today{background-color:#fbfbff}
+/* the past is read-only history: muted, no create cursor */
+.pcal-col.is-past{background-color:#f8f9fb;cursor:default}
+.pcal-past-shade{position:absolute;left:0;right:0;top:0;z-index:2;background:rgba(244,245,248,.62);cursor:default}
+.pcal-avail.is-past{opacity:.5}
 
 /* availability: pale allowed time with a thin edge; never a card */
 .pcal-avail{position:absolute;left:0;right:0;z-index:1;box-sizing:border-box;padding:2px 6px 3px 6px;background:var(--pcal-avail);border-left:2px solid var(--pcal-avail-edge);color:var(--pcal-avail-ink);display:flex;flex-direction:column;justify-content:flex-end;gap:0;overflow:hidden;cursor:pointer;outline:none;transition:background-color .15s var(--pcal-ease),border-color .15s var(--pcal-ease)}
