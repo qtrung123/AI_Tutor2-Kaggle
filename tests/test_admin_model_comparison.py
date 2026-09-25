@@ -7,7 +7,6 @@ the admin-only API routes, and frontend wiring (nav visibility, a real
 The benchmark runner itself is covered by tests/test_quiz_model_benchmark.py.
 """
 
-import json
 import tempfile
 import unittest
 from pathlib import Path

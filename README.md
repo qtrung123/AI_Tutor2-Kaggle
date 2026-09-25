@@ -13,7 +13,7 @@ Documents, vectors, conversations, quizzes, answers, and learning history are st
 - Store vectors in Chroma.
 - Skip unchanged files by comparing content hashes.
 - Display each indexed document and its chunk count.
-- Delete documents from `data/`, Chroma, and `indexed_files.json`.
+- Delete documents from `data/`, Chroma, and the indexed-document registry.
 - Remove deleted documents from conversation scopes and delete their quiz data.
 
 ### Grounded Chat
@@ -74,7 +74,6 @@ FastAPI (127.0.0.1:8000)
         |
         +-- Materials and ingestion
         |     +-- data/
-        |     +-- indexed_files.json
         |     +-- Chroma vectorstore/
         |
         +-- Chat RAG
@@ -113,7 +112,6 @@ python-ollama-rag/
 │   └── quiz_prompt.txt         # Quiz generation instructions
 ├── data/                       # Uploaded documents and persistent application data
 ├── vectorstore/                # Chroma database
-├── indexed_files.json          # Indexed-document metadata
 ├── config.py                   # Paths, models, and retrieval settings
 ├── requirements.txt
 └── README.md
@@ -125,7 +123,7 @@ python-ollama-rag/
 | --- | --- |
 | Uploaded PDF/TXT files | `data/` |
 | Document vectors and chunk metadata | `vectorstore/` |
-| Indexed-document registry | `indexed_files.json` |
+| Indexed-document registry | `data/conversations.db` (legacy `indexed_files.json` is migrated once, if present) |
 | Conversations, messages, sources, and citations | `data/conversations.db` |
 | Generated quizzes and questions | `data/conversations.db` |
 | Current quiz progress and completed attempts | `data/conversations.db` |

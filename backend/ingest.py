@@ -24,7 +24,6 @@ from config import (
     CHAT_MODEL,
     CHUNK_SIZE,
     CHUNK_OVERLAP,
-    INDEXED_FILES_PATH,
 )
 
 
@@ -46,26 +45,13 @@ def calculate_file_hash(file_path: Path) -> str:
 
 def load_indexed_files(owner_id: str = LEGACY_USER_ID) -> dict:
     """
-    Load the list of files that have already been indexed.
+    Load the owner's already-indexed documents, keyed by document id.
 
-    The indexed_files.json file stores information about indexed documents,
-    such as file hash, number of chunks, and file path.
-
-    If the file does not exist, it means no document has been indexed yet,
-    so the function returns an empty dictionary.
+    Metadata (file hash, chunk count, storage path, topics) lives in the
+    indexed_documents SQLite table (backend/indexed_document_store.py); an empty
+    dictionary means nothing has been indexed yet.
     """
     return {document["document_id"]: document for document in list_indexed_documents(owner_id)}
-
-
-def save_indexed_files(indexed_files: dict, owner_id: str = LEGACY_USER_ID):
-    """
-    Save indexing history to indexed_files.json.
-
-    This function is used after indexing finishes.
-    It stores information about indexed files, such as hash, chunks, and path.
-    """
-    for document_id, info in indexed_files.items():
-        upsert_indexed_document(owner_id, document_id, info)
 
 
 def load_single_file(file_path: Path):
@@ -257,7 +243,7 @@ def delete_indexed_file(file_name: str, owner_id: str = LEGACY_USER_ID) -> dict:
 
     This deletes three things that belong together:
     - Chroma vectors created for the file,
-    - the metadata entry in indexed_files.json,
+    - the document's row in the indexed_documents table,
     - the original uploaded file in data/ when it exists there.
     """
     indexed_files = load_indexed_files(owner_id)

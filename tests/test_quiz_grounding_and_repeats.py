@@ -12,7 +12,6 @@
 Everything here is deterministic (a fake model, no Ollama); the real-model validation is done on Kaggle.
 """
 
-import re
 import unittest
 from unittest.mock import patch
 

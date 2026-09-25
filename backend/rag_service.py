@@ -15,7 +15,6 @@ from config import (
     CHAT_MODEL,
     COLLECTION_NAME,
     EMBEDDING_MODEL,
-    INDEXED_FILES_PATH,
     PROMPT_PATH,
     TOP_K,
     VECTORSTORE_DIR,
@@ -296,7 +295,7 @@ def list_uploaded_sources(owner_id: str) -> list[dict]:
     """
     Return the indexed document summary shown in the frontend source panel.
 
-    This reads indexed_files.json, which is written by backend/ingest.py after
+    This reads the indexed_documents table, which backend/ingest.py updates after
     documents are chunked and saved into Chroma.
     """
     sources = []

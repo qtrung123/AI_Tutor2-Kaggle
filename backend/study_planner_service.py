@@ -546,10 +546,6 @@ def build_scheduling_context(owner_id: str, plan_id: str, now: datetime | None =
     )
 
 
-def study_buffer_status(study_buffer: int) -> str:
-    return "on_track" if study_buffer >= 0 else "schedule_risk"
-
-
 # ---------------------------------------------------------------------------
 # Completion tracking (Phase 3: progress tracking, prep for adaptive scheduling)
 # ---------------------------------------------------------------------------

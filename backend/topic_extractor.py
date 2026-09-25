@@ -62,9 +62,6 @@ def _structure(line: str) -> tuple[str, tuple[int, ...], int]:
         return "dotted", path, len(path)
     return "unnumbered", (), 1
 
-def _heading_level(line: str) -> int:
-    return min(_structure(line)[2], 4)
-
 def _looks_like_heading(line: str) -> bool:
     text = _display_heading(line)
     words = text.split()

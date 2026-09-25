@@ -1996,10 +1996,6 @@ function formatBackendAnswer(data) {
   return data.answer || "I could not generate an answer from the current materials.";
 }
 
-function getFallbackAnswer() {
-  return "Mock response: Start by identifying the key concept from your Net-centric material, then compare it with one short example.";
-}
-
 async function requestTutorAnswer(userText) {
   const conversation = await ensureStudySessionConversation();
   const modelId = await ensureSelectedModelReady();
@@ -2775,22 +2771,6 @@ function renderQuizDifficultySegments() {
   });
 }
 
-function formatQuizStatus(status) {
-  const levelIsSaved = (status?.variants || []).some(
-    (variant) => variant.topic_id === selectedTopicId() && variant.difficulty === selectedDifficulty() && variantMatchesSettings(variant)
-  );
-  if (!levelIsSaved && !currentQuiz) {
-    return "Not generated";
-  }
-  if (currentAttempt?.completed) {
-    return "Completed";
-  }
-  if (currentQuiz || levelIsSaved) {
-    return "Ready";
-  }
-  return "Not generated";
-}
-
 async function loadQuizStatuses() {
   try {
     const response = await fetch(QUIZZES_API_URL);
@@ -3123,31 +3103,6 @@ function resetQuizAutosave() {
   quizAutosaveDirty = false;
   quizAutosaveSeq += 1;
   setQuizPlayerSaveStatus(null);
-}
-
-async function requestQuizExplanation(questionId) {
-  const response = await fetch(
-    `${QUIZ_API_BASE_URL}/${encodeURIComponent(currentQuiz.document_id)}/questions/${questionId}/explain`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        difficulty: currentQuiz.difficulty,
-        topic_id: currentQuiz.topic_id
-      })
-    }
-  );
-  if (!response.ok) {
-    let detail = `Explain API returned ${response.status}`;
-    try {
-      const errorData = await response.json();
-      detail = errorData.detail || detail;
-    } catch (error) {
-      // Keep the status message when the backend response is not JSON.
-    }
-    throw new Error(detail);
-  }
-  return response.json();
 }
 
 async function loadQuizHistory(documentId = quizDocumentSelect?.value || activeDocumentId || "") {
@@ -3755,115 +3710,6 @@ async function regenerateHistoryQuiz(attempt) {
   }
 }
 
-function renderAssessmentQuizLegacy() {
-  const quizPane = document.querySelector('[data-session-pane="quiz"]');
-  quizPane?.classList.toggle("quiz-active", Boolean(currentQuiz?.questions?.length));
-  quizPane?.classList.toggle("quiz-landing", !currentQuiz?.questions?.length);
-  updateQuizLandingLayout();
-  quizList.innerHTML = "";
-  assessmentTitle.textContent = currentQuiz
-    ? `${currentQuiz.questions.length} ${currentQuiz.difficulty} questions from ${currentQuiz.document_id}`
-    : "Assessment Agent";
-
-  if (!currentQuiz?.questions?.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.textContent = "Choose a document, then generate or start its saved quiz.";
-    quizList.appendChild(empty);
-    updateAssessmentSummary();
-    return;
-  }
-
-  quizQuestionIndex = Math.max(0, Math.min(quizQuestionIndex, currentQuiz.questions.length - 1));
-  const question = currentQuiz.questions[quizQuestionIndex];
-  {
-    const card = document.createElement("article");
-    card.className = "quiz-question-card";
-    card.dataset.questionId = question.id;
-
-    const heading = document.createElement("div");
-    heading.className = "quiz-question-heading";
-
-    const number = document.createElement("span");
-    number.textContent = `Question ${quizQuestionIndex + 1} of ${currentQuiz.questions.length}`;
-    heading.appendChild(number);
-
-    const questionText = document.createElement("h3");
-    questionText.textContent = question.question;
-    const questionResult = currentAttempt?.question_results?.find(
-      (result) => result.question_id === question.id
-    );
-
-    const options = document.createElement("div");
-    options.className = "answer-list";
-
-    question.options.forEach((option) => {
-      const button = document.createElement("button");
-      button.className = "answer-option";
-      button.type = "button";
-      button.textContent = option;
-      const selectedLetter = quizAnswers[String(question.id)] || quizAnswers[question.id];
-      const optionLetter = option.trim().charAt(0).toUpperCase();
-      if (selectedLetter === optionLetter) {
-        button.classList.add("selected");
-      }
-      if (questionResult) {
-        button.disabled = true;
-        if (optionLetter === questionResult.correct_answer) {
-          button.classList.add("correct");
-        }
-        if (selectedLetter === optionLetter && !questionResult.is_correct) {
-          button.classList.add("incorrect");
-        }
-      }
-      button.addEventListener("click", () => selectAssessmentAnswer(question, option, card));
-      options.appendChild(button);
-    });
-
-    const feedback = document.createElement("div");
-    feedback.className = "feedback";
-    if (questionResult) {
-      feedback.className = `feedback ${questionResult.is_correct ? "good" : "bad"}`;
-      feedback.textContent = questionResult.is_correct ? "Correct." : "Incorrect.";
-    }
-
-    const explainButton = document.createElement("button");
-    explainButton.className = "text-button explain-button";
-    explainButton.type = "button";
-    explainButton.textContent = "Explain";
-    explainButton.hidden = !questionResult;
-    explainButton.addEventListener("click", () => explainAssessmentQuestion(question, explainButton));
-
-    const explanation = document.createElement("div");
-    explanation.className = "quiz-explanation";
-    explanation.hidden = !quizExplanations[String(question.id)];
-    explanation.textContent = quizExplanations[String(question.id)] || "";
-
-    const navigation = document.createElement("div");
-    navigation.className = "quiz-navigation";
-
-    const previousButton = document.createElement("button");
-    previousButton.className = "secondary-button quiz-nav-button";
-    previousButton.type = "button";
-    previousButton.textContent = "Previous";
-    previousButton.disabled = quizQuestionIndex === 0;
-    previousButton.addEventListener("click", () => moveQuizQuestion(-1));
-
-    const nextButton = document.createElement("button");
-    nextButton.className = "primary-button quiz-nav-button";
-    nextButton.type = "button";
-    nextButton.textContent = quizQuestionIndex === currentQuiz.questions.length - 1 ? "Finish" : "Next";
-    nextButton.disabled = !questionResult;
-    nextButton.addEventListener("click", () => moveQuizQuestion(1));
-
-    navigation.append(previousButton, nextButton);
-    card.append(heading, questionText, options, feedback, explainButton, explanation, navigation);
-    quizList.appendChild(card);
-  }
-
-  updateAssessmentSummary();
-}
-
 function moveQuizQuestion(direction) {
   if (!currentQuiz?.questions?.length) {
     return;
@@ -3893,29 +3739,6 @@ async function resetAssessmentQuiz() {
     showToast("Quiz progress reset");
   } catch (error) {
     showToast(error.message || "Could not reset quiz progress");
-  }
-}
-
-async function explainAssessmentQuestion(question, button) {
-  const selectedAnswer = quizAnswers[String(question.id)];
-  if (!selectedAnswer || button.disabled) {
-    return;
-  }
-  const card = button.closest(".quiz-question-card");
-  const explanation = card.querySelector(".quiz-explanation");
-  button.disabled = true;
-  button.textContent = "Explaining...";
-  explanation.hidden = false;
-  explanation.textContent = "Generating a short explanation from the selected lecture...";
-  try {
-    const result = await requestQuizExplanation(question.id);
-    quizExplanations[String(question.id)] = result.explanation;
-    explanation.textContent = result.explanation;
-    button.textContent = result.cache_hit ? "Explanation loaded" : "Explained";
-  } catch (error) {
-    explanation.textContent = error.message || "Could not generate an explanation.";
-    button.disabled = false;
-    button.textContent = "Try Explain Again";
   }
 }
 
@@ -4843,11 +4666,6 @@ function renderAssessmentQuiz() {
   card.append(heading, questionText, ...(multiSelectHelper ? [multiSelectHelper] : []), options, navigator, navigation);
   quizList.appendChild(card);
   updateAssessmentSummary();
-}
-
-function moveQuizQuestionLegacy(direction) {
-  quizQuestionIndex = Math.max(0, Math.min(currentQuiz.questions.length - 1, quizQuestionIndex + direction));
-  renderAssessmentQuiz();
 }
 
 function selectAssessmentAnswer(question, option) {

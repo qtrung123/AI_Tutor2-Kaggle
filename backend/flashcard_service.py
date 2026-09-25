@@ -1,12 +1,12 @@
 """Grounded one-call flashcard generation over existing owner-scoped topic chunks."""
 
-import json
 import re
 
 from langchain_ollama import ChatOllama
 
 from backend.flashcard_store import get_compatible_flashcards, save_flashcards
 from backend.indexed_document_store import get_indexed_document
+from backend.llm_json import parse_json_object
 from backend.model_registry import resolve_generation_model
 # Read-only reuse of already-proven, generic (non-document-specific) text-quality helpers --
 # quiz_service.py itself is not modified by the flashcard fix.
@@ -62,20 +62,6 @@ _MIN_WORDS_FOR_LANGUAGE_SIGNAL = 3
 _URL_LIKE = re.compile(r"^[a-z][a-z0-9+.-]*://|^www\.", re.IGNORECASE)
 _IDENTIFIER_SIGNAL = re.compile(r"[0-9_]|[a-z][A-Z]")
 _MIN_CORRUPTION_LENGTH = 24
-
-
-def _json_object(content: str) -> dict:
-    cleaned = str(content).strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    try:
-        value = json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if not match:
-            raise ValueError("Flashcard model did not return valid JSON.")
-        value = json.loads(match.group(0))
-    if not isinstance(value, dict):
-        raise ValueError("Flashcard model did not return a JSON object.")
-    return value
 
 
 def _looks_vietnamese(text: str) -> bool:
@@ -276,7 +262,7 @@ def generate_flashcards(owner_id: str, document_id: str, topic_ids: list[str] | 
             response = ChatOllama(
                 model=runtime_model, format="json", **_generation_kwargs(attempt_index),
             ).invoke(_prompt(document_id, groups, requested_language))
-            raw_topics = _json_object(response.content).get("topics")
+            raw_topics = parse_json_object(response.content, "Flashcard").get("topics")
         except Exception as error:  # malformed output or a raised model/runtime failure
             generation_errors.append(f"attempt {attempt_index + 1}: {error}")
             print(f"[flashcards] generation attempt {attempt_index + 1} failed: {error}")

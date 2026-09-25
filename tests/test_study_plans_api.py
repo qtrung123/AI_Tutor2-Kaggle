@@ -1,7 +1,7 @@
 """Study Planner v2 HTTP API: plans, plan materials, and the read-only schedule preview."""
 
 import unittest
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient

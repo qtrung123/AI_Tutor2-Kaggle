@@ -24,7 +24,7 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from quiz_fixtures import FACT_COUNT, FakeModel, candidates, fact_sentence, make_chunks, raw_candidate
+from quiz_fixtures import FakeModel, candidates, fact_sentence, make_chunks, raw_candidate
 
 from backend import quiz_service, quiz_units
 from backend.main import QuizGenerateRequest, QuizGenerateResponse, QuizRegenerateRequest
@@ -458,14 +458,12 @@ class ValidationTests(unittest.TestCase):
         self.rejected({**good, "options": ["Priority", "The priority", "orders tasks", "maps names"]}, "structure")
 
     def test_good_distractors_that_only_look_alike_are_kept(self):
-        good = raw_candidate(0)
         for options in (
             ["Increases the execution time of short jobs", "Decreases the execution time of short jobs", "Has no effect", "Is random"],
             ["Non-preemptive", "Preemptive", "Clock driven", "Feedback based"],
             ["CPU-bound processes", "I/O-bound processes", "Both equally", "Neither"],
             ["Scheduler", "Scheduling", "Dispatcher", "Loader"],
         ):
-            raw = {**good, "options": options, "answer_index": 0}
             self.assertTrue(quiz_units._options_too_similar(options) is False, options)
 
     def test_option_labels_are_stripped_but_articles_are_kept(self):

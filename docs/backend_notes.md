@@ -53,8 +53,7 @@ This module owns the document lifecycle from raw upload to searchable Chroma chu
 | Function | Responsibility |
 | --- | --- |
 | `calculate_file_hash()` | Calculate a SHA-256 content hash for duplicate and change detection. |
-| `load_indexed_files()` | Read indexed-document metadata from `indexed_files.json`. |
-| `save_indexed_files()` | Persist indexed-document metadata to `indexed_files.json`. |
+| `load_indexed_files()` | Read the owner's indexed-document metadata (SQLite `indexed_documents` table). |
 | `load_single_file()` | Load one supported PDF or TXT file into LangChain documents. |
 | `clean_documents()` | Remove pages/documents that contain no usable text. |
 | `split_documents()` | Divide documents into overlapping chunks using the configured chunk settings. |
@@ -78,7 +77,7 @@ This module owns retrieval, prompt assembly, model calls, and citation construct
 | `_history_for_prompt()` | Format the most recent conversation messages for follow-up understanding. |
 | `answer_conversation_message()` | Orchestrate source-scoped conversational RAG and persist both sides of the exchange. |
 | `explain_quiz_answer()` | Generate a short grounded explanation of why a quiz answer is correct. |
-| `list_uploaded_sources()` | Convert `indexed_files.json` metadata into source summaries for the UI. |
+| `list_uploaded_sources()` | Convert indexed-document metadata into source summaries for the UI. |
 
 ## `backend/conversation_store.py`
 

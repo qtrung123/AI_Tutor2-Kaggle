@@ -114,14 +114,6 @@ class QuizRunDiagnostics:
     def set_stage_ms(self, name: str, ms: float) -> None:
         self.stage_ms[name] = max(0.0, ms)
 
-    @contextmanager
-    def timed_stage(self, name: str):
-        started = time.perf_counter()
-        try:
-            yield
-        finally:
-            self.add_stage_ms(name, (time.perf_counter() - started) * 1000)
-
     def absorb_pipeline_timings(self, timings: dict) -> None:
         """Pull the standardized stage buckets out of an existing quiz_service.py
         `timings` dict (document- or topic-scope shape) without assuming every
@@ -332,10 +324,6 @@ class _NullDiagnostics:
 
     def add_stage_ms(self, *_args, **_kwargs) -> None: ...
     def set_stage_ms(self, *_args, **_kwargs) -> None: ...
-
-    @contextmanager
-    def timed_stage(self, *_args, **_kwargs):
-        yield
 
     def absorb_pipeline_timings(self, *_args, **_kwargs) -> None: ...
     def record_context(self, *_args, **_kwargs) -> None: ...

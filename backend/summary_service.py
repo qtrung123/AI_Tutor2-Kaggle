@@ -7,6 +7,7 @@ import time
 from langchain_ollama import ChatOllama
 
 from backend.indexed_document_store import get_indexed_document
+from backend.llm_json import parse_json_object
 from backend.model_registry import resolve_generation_model
 from backend.quiz_service import get_schema_topic_evidence, get_topic_chunks
 from backend.summary_store import get_compatible_summary, save_summary
@@ -35,20 +36,6 @@ _TRIVIAL_SUBTOPIC_WORDS = {
     "concept", "concepts", "covered", "covers", "described", "describes", "details", "discussed",
     "discusses", "explained", "explains", "important", "information", "overview", "section",
 }
-
-
-def _json_object(content: str) -> dict:
-    cleaned = str(content).strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    try:
-        value = json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if not match:
-            raise ValueError("Summary model did not return valid JSON.")
-        value = json.loads(match.group(0))
-    if not isinstance(value, dict):
-        raise ValueError("Summary model did not return a JSON object.")
-    return value
 
 
 def _usage(response) -> dict:
@@ -340,13 +327,13 @@ def generate_document_summary(owner_id: str, document_id: str, model_id: str | N
     llm = ChatOllama(model=runtime_model, temperature=0, format="json", num_ctx=32768)
     topic_started = time.perf_counter()
     topic_response = llm.invoke(_topic_prompt(document_id, evidence))
-    raw_topics = _json_object(topic_response.content).get("topics")
+    raw_topics = parse_json_object(topic_response.content, "Summary").get("topics")
     topic_summaries = _validated_topic_summaries(raw_topics, topics, evidence)
     topic_ms = round((time.perf_counter() - topic_started) * 1000)
 
     synthesis_started = time.perf_counter()
     synthesis_response = llm.invoke(_synthesis_prompt(document_id, topic_summaries))
-    final_summary = _json_object(synthesis_response.content)
+    final_summary = parse_json_object(synthesis_response.content, "Summary")
     if not str(final_summary.get("overview") or "").strip():
         raise ValueError("Summary model omitted the final overview.")
     final_takeaways = [str(value).strip() for value in final_summary.get("key_takeaways") or [] if str(value).strip()]

@@ -578,14 +578,6 @@ def list_plan_items(owner_id: str, task_id: str) -> list[dict]:
     return [_plan_item(row) for row in rows]
 
 
-def delete_plan_items_for_task(owner_id: str, task_id: str) -> None:
-    initialize_study_planner_store()
-    with _connect() as connection:
-        connection.execute(
-            "DELETE FROM study_plan_items WHERE owner_id=? AND task_id=?", (owner_id, task_id),
-        )
-
-
 def decrement_plan_item_remaining_minutes(owner_id: str, task_id: str, document_id: str, topic_id: str,
                                            minutes: int) -> dict | None:
     """Roll a completed block's actual_minutes off its matching study_plan_item's

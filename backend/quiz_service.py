@@ -52,7 +52,6 @@ from backend.quiz_units import (
     QUIZ_UNUSED_CHARS_PER_QUESTION,
     QUIZ_TOTAL_DEADLINE_S,
     QUIZ_FILL_BLANK_MAX_CALLS,
-    QUIZ_FOLLOWUP_MIN_BUFFER,
     build_fill_blank_prompt,
     build_generation_prompt,
     flashcard_hint_terms,
@@ -81,7 +80,6 @@ from backend.flashcard_store import get_latest_flashcard_set_info, list_flashcar
 from backend.assessment_planner import (
     CONCEPT_PLANNER_PROMPT_VERSION,
     PLANNER_VERSION,
-    allocate_document_topics,
     build_topic_plan,
     is_valid_concept_plan,
     resolve_concept_evidence, resolve_topic_evidence,
@@ -99,7 +97,6 @@ from config import (
     CHAT_MODEL,
     COLLECTION_NAME,
     EMBEDDING_MODEL,
-    INDEXED_FILES_PATH,
     QUIZ_PROMPT_PATH,
     QUIZ_GENERATION_RETRY_LIMIT,
     QUIZ_QUALITY_RETRY_LIMIT,
@@ -256,7 +253,6 @@ GENERIC_OPTION_PATTERNS = [
 # lecture. Individual chunk text is still bounded so one unusually large chunk
 # cannot dominate the prompt.
 MAX_CHARS_PER_CHUNK = 900
-MAX_QUESTIONS_PER_BATCH = 8
 QUIZ_CONTEXT_WINDOWS = (4096, 8192, 16384, 32768)
 
 
@@ -1097,46 +1093,6 @@ def _select_v2_evidence_groups(
             "evidence_excerpt": " ".join(excerpts)[:560],
         })
     return planned_groups
-
-    topic_name = str(topic.get("name") or topic.get("topic_id") or "Topic")
-    candidates = []
-    for chunk in usable:
-        content = re.sub(r"\s+", " ", str(chunk.get("content") or "")).strip()
-        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\s*[;•]\s*", content) if len(part.split()) >= 3]
-        if not sentences:
-            sentences = [_v2_excerpt(content, 0, 1)]
-        candidates.extend((chunk, sentence[:280]) for sentence in sentences)
-    if len(candidates) < target:
-        # Add deterministic windows for compact chunks that contain several facts
-        # but little punctuation. Provenance remains the canonical parent chunk.
-        for chunk in usable:
-            words = re.sub(r"\s+", " ", str(chunk.get("content") or "")).strip().split()
-            window_size = max(12, min(45, math.ceil(len(words) / max(1, target))))
-            for start in range(0, len(words), window_size):
-                excerpt = " ".join(words[start:start + window_size]).strip()
-                if len(excerpt.split()) >= 5 and all(excerpt != item[1] for item in candidates):
-                    candidates.append((chunk, excerpt))
-                if len(candidates) >= target:
-                    break
-            if len(candidates) >= target:
-                break
-
-    group_count = min(max(1, target), len(candidates))
-    groups = []
-    for slot in range(group_count):
-        candidate_index = round((len(candidates) - 1) * slot / max(1, group_count - 1)) if len(candidates) > 1 else 0
-        chunk, excerpt = candidates[candidate_index]
-        chunk_id = str(chunk["metadata"]["chunk_id"])
-        label_words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'/-]*", excerpt)[:8]
-        label = " ".join(label_words) or f"focus {slot + 1}"
-        groups.append({
-            "slot_id": f"S{slot + 1}",
-            "concept_id": f"concept_{slot + 1:03d}",
-            "name": f"{topic_name}: {label}",
-            "source_chunk_ids": [chunk_id],
-            "evidence_excerpt": excerpt,
-        })
-    return groups
 
 
 _TRUE_FALSE_INTERROGATIVE_START = re.compile(
@@ -2587,84 +2543,6 @@ def _select_fill_blank(pool: list[dict], target: int) -> list[dict]:
     return sorted(pool, key=lambda question: (not question["_meta"].get("hinted"), _rank_question(question)))[:max(0, target)]
 
 
-def _build_document_slot(
-    topic_plan: dict, topic: dict, chunks: list[dict], concept: dict, slot_id: str,
-    evidence_cache: dict[tuple[str, str], list[dict]] | None = None,
-) -> dict | None:
-    """Build one backend-owned document slot for a single concept, or None without evidence.
-
-    Shared by the normal allocation-order slot build and by feasibility reselection, which
-    needs to materialize an alternate, not-yet-selected concept's evidence on demand.
-    """
-    topic_id = str(topic_plan["topic_id"])
-    cache_key = (topic_id, str(concept["concept_id"]))
-    cache = evidence_cache if evidence_cache is not None else {}
-    if cache_key not in cache:
-        cache[cache_key] = resolve_concept_evidence(topic, chunks, concept)
-    evidence_chunks = cache[cache_key]
-    if not evidence_chunks:
-        return None
-    excerpts = [
-        _v2_excerpt(chunk.get("content", ""), index, len(evidence_chunks))
-        for index, chunk in enumerate(evidence_chunks)
-    ]
-    evidence_variants = []
-    for chunk, excerpt in zip(evidence_chunks, excerpts):
-        chunk_id = str((chunk.get("metadata") or {}).get("chunk_id") or "").strip()
-        if not chunk_id:
-            continue
-        content = re.sub(r"\s+", " ", str(chunk.get("content") or "")).strip()
-        angles = [
-            part.strip()[:280]
-            for part in re.split(r"(?<=[.!?])\s+|\s*[;•]\s*", content)
-            if len(part.split()) >= 5
-        ]
-        for angle in angles or [excerpt]:
-            if angle and all(angle != variant["evidence_excerpt"] for variant in evidence_variants):
-                evidence_variants.append({
-                    "evidence_excerpt": angle, "source_chunk_ids": [chunk_id],
-                })
-    resolved_ids = {chunk_id for variant in evidence_variants for chunk_id in variant["source_chunk_ids"]}
-    topic_evidence_variants = []
-    for chunk_index, chunk in enumerate(chunks):
-        chunk_id = str((chunk.get("metadata") or {}).get("chunk_id") or "").strip()
-        excerpt = _v2_excerpt(chunk.get("content", ""), chunk_index, len(chunks))
-        if chunk_id and chunk_id not in resolved_ids and excerpt:
-            topic_evidence_variants.append({
-                "evidence_excerpt": excerpt, "source_chunk_ids": [chunk_id],
-            })
-    return {
-        **concept,
-        "slot_id": slot_id,
-        "topic_id": topic_id,
-        "topic_name": str(topic_plan.get("topic_name") or topic.get("name") or topic_id),
-        "concept_plan_id": str(topic_plan["concept_plan_id"]),
-        "assessment_capacity": int(topic_plan["assessment_capacity"]),
-        "evidence_excerpt": " ".join(excerpts)[:560],
-        "evidence_variants": evidence_variants,
-        "topic_evidence_variants": topic_evidence_variants,
-    }
-
-
-def _document_v2_slots(
-    planned_topics: list[dict], topic_lookup: dict[str, dict], topic_chunks: dict[str, list[dict]],
-) -> list[dict]:
-    """Materialize allocated document slots with backend-owned hierarchy and evidence."""
-    slots = []
-    evidence_cache: dict[tuple[str, str], list[dict]] = {}
-    for topic_plan in planned_topics:
-        topic_id = str(topic_plan["topic_id"])
-        topic = topic_lookup[topic_id]
-        chunks = topic_chunks.get(topic_id, [])
-        for concept in topic_plan.get("selected_concepts") or []:
-            slot = _build_document_slot(
-                topic_plan, topic, chunks, concept, f"S{len(slots) + 1}", evidence_cache,
-            )
-            if slot is not None:
-                slots.append(slot)
-    return slots
-
-
 _DOCUMENT_LIST_MARKER = re.compile(r"(?:^|\n|\s{2,})(?:[•\-\*]|\d{1,2}[.)])\s+\S")
 _DOCUMENT_HEADING_PREFIX = re.compile(r"^(?:chapter|section|table|figure|appendix)\s+[\divxlc]+\b", re.IGNORECASE)
 
@@ -2744,9 +2622,6 @@ def _rank_document_slots_by_type(slots: list[dict]) -> dict[str, list[str]]:
         "multi_select": [slot_id for slot_id, ms, _tf in sorted(scored, key=lambda item: (-item[1], item[0]))],
         "true_false": [slot_id for slot_id, _ms, tf in sorted(scored, key=lambda item: (-item[2], item[0]))],
     }
-
-
-DOCUMENT_TYPE_PLANNER_PROMPT_VERSION = "document_type_planner_v2_rankings"
 
 
 def _document_type_planner_schema() -> dict:
@@ -2890,36 +2765,6 @@ def _validate_document_structural_problems(slots: list[dict]) -> None:
         + "; ".join(problems),
         stage="blueprint",
         valid_questions=0,
-        target_questions=DOCUMENT_QUIZ_QUESTION_COUNT,
-        failure_summary=problems,
-    )
-
-
-def _verify_final_document_quiz_contract(questions: list[dict]) -> None:
-    """Last gate before persistence: the accepted questions must still satisfy the exact
-    document blueprint contract (unique slot_ids, exactly 10/3/2) after special-first generation,
-    repair, and fallback -- never persist a quiz that drifted from it.
-    """
-    problems = []
-    if len(questions) != DOCUMENT_QUIZ_QUESTION_COUNT:
-        problems.append(f"expected {DOCUMENT_QUIZ_QUESTION_COUNT} questions, found {len(questions)}")
-    slot_ids = [str(question.get("slot_id")) for question in questions]
-    if len(set(slot_ids)) != len(slot_ids):
-        problems.append("slot_ids are not unique")
-    counts: dict[str, int] = {}
-    for question in questions:
-        question_type = str(question.get("question_type") or "")
-        counts[question_type] = counts.get(question_type, 0) + 1
-    for question_type, needed in DOCUMENT_QUIZ_TYPE_COUNTS:
-        found = counts.get(question_type, 0)
-        if found != needed:
-            problems.append(f"expected {needed} {question_type} questions, found {found}")
-    if not problems:
-        return
-    raise QuizGenerationError(
-        "Final document quiz contract violated before persistence: " + "; ".join(problems),
-        stage="generation",
-        valid_questions=len(questions),
         target_questions=DOCUMENT_QUIZ_QUESTION_COUNT,
         failure_summary=problems,
     )
@@ -3596,63 +3441,6 @@ def _run_document_single_choice_batch(
             run_sc_call([groups_by_id[slot_id] for slot_id in missing_slot_ids], phase, f"sc-{phase}-{retry_index}")
 
     return len(accepted_by_slot) - accepted_before_call, timings
-
-
-def _validate_document_slot_structure(slots: list[dict], question_count: int) -> None:
-    """Structural-only pre-generation gate for the homogeneous single_choice document quiz:
-    exact slot count, unique ids, and authoritative evidence/provenance on every slot. Never
-    rejects a document for "unsuitable" evidence -- that is decided by which candidates are
-    genuinely constructible during generation, not here.
-    """
-    problems = []
-    if len(slots) != question_count:
-        problems.append(f"expected {question_count} slots, found {len(slots)}")
-    slot_ids = [str(slot.get("slot_id")) for slot in slots]
-    if len(set(slot_ids)) != len(slot_ids):
-        problems.append("slot_ids are not unique")
-    for slot in slots:
-        if not slot.get("source_chunk_ids"):
-            problems.append(f"{slot.get('slot_id')} has no authoritative source_chunk_ids")
-        if not str(slot.get("evidence_excerpt") or "").strip():
-            problems.append(f"{slot.get('slot_id')} has no evidence")
-    if not problems:
-        return
-    raise QuizGenerationError(
-        f"The document quiz's {question_count} content slots are structurally invalid: "
-        + "; ".join(problems),
-        stage="blueprint",
-        valid_questions=0,
-        target_questions=question_count,
-        failure_summary=problems,
-    )
-
-
-def _verify_final_single_choice_document_quiz(questions: list[dict], question_count: int) -> None:
-    """Last gate before persistence: the accepted questions must be exactly `question_count`
-    single_choice questions with unique slot_ids -- never persist a quiz that drifted from the
-    homogeneous single_choice contract.
-    """
-    problems = []
-    if len(questions) != question_count:
-        problems.append(f"expected {question_count} questions, found {len(questions)}")
-    slot_ids = [str(question.get("slot_id")) for question in questions]
-    if len(set(slot_ids)) != len(slot_ids):
-        problems.append("slot_ids are not unique")
-    non_single_choice = [
-        str(question.get("slot_id")) for question in questions
-        if str(question.get("question_type") or "") != "single_choice"
-    ]
-    if non_single_choice:
-        problems.append(f"non single_choice questions present: {non_single_choice}")
-    if not problems:
-        return
-    raise QuizGenerationError(
-        "Final document quiz contract violated before persistence: " + "; ".join(problems),
-        stage="generation",
-        valid_questions=len(questions),
-        target_questions=question_count,
-        failure_summary=problems,
-    )
 
 
 def _run_document_single_choice_quiz(
