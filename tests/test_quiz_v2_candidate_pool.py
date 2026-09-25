@@ -15,7 +15,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend import quiz_store
-from backend.quiz_service import QuizGenerationError, _generate_topic_quiz_v2
+from backend.quiz_legacy_v2 import _generate_topic_quiz_v2
+from backend.quiz_service import QuizGenerationError
 
 
 CHUNK = {
@@ -89,11 +90,11 @@ class QuizV2CandidatePoolTests(unittest.TestCase):
         saved = []
         with (
             patch("backend.document_retrieval.get_topic_chunks", return_value=[CHUNK]),
-            patch("backend.quiz_service.ChatOllama", FakeBatchModel),
-            patch("backend.quiz_service.get_cached_concept_plan", return_value=None),
-            patch("backend.quiz_service.save_cached_concept_plan"),
-            patch("backend.quiz_service.save_quiz_validation_event"),
-            patch("backend.quiz_service.save_quiz", side_effect=lambda _d, _x, quiz, _o: saved.append(quiz) or quiz),
+            patch("backend.quiz_legacy_v2.ChatOllama", FakeBatchModel),
+            patch("backend.quiz_legacy_v2.get_cached_concept_plan", return_value=None),
+            patch("backend.quiz_legacy_v2.save_cached_concept_plan"),
+            patch("backend.quiz_legacy_v2.save_quiz_validation_event"),
+            patch("backend.quiz_legacy_v2.save_quiz", side_effect=lambda _d, _x, quiz, _o: saved.append(quiz) or quiz),
         ):
             result = _generate_topic_quiz_v2(
                 DOCUMENT, TOPIC, "easy", "owner", "qwen-2.5-3b-runtime", False, question_count,
@@ -162,11 +163,11 @@ class QuizV2CandidatePoolTests(unittest.TestCase):
     def test_case_e_zero_valid_candidates_fails_without_persisting(self):
         with (
             patch("backend.document_retrieval.get_topic_chunks", return_value=[CHUNK]),
-            patch("backend.quiz_service.ChatOllama", FakeBatchModel),
-            patch("backend.quiz_service.get_cached_concept_plan", return_value=None),
-            patch("backend.quiz_service.save_cached_concept_plan"),
-            patch("backend.quiz_service.save_quiz_validation_event"),
-            patch("backend.quiz_service.save_quiz") as save_quiz_mock,
+            patch("backend.quiz_legacy_v2.ChatOllama", FakeBatchModel),
+            patch("backend.quiz_legacy_v2.get_cached_concept_plan", return_value=None),
+            patch("backend.quiz_legacy_v2.save_cached_concept_plan"),
+            patch("backend.quiz_legacy_v2.save_quiz_validation_event"),
+            patch("backend.quiz_legacy_v2.save_quiz") as save_quiz_mock,
         ):
             FakeBatchModel.payloads = [{"questions": []}]
             with self.assertRaises(QuizGenerationError) as failure:
@@ -207,10 +208,10 @@ class QuizV2CandidatePoolTests(unittest.TestCase):
                 patch.object(quiz_store, "LEGACY_QUIZ_ATTEMPTS_PATH", temp_path / "missing-attempts.json"),
                 patch.object(quiz_store, "LEGACY_QUIZ_EXPLANATIONS_PATH", temp_path / "missing-explanations.json"),
                 patch("backend.document_retrieval.get_topic_chunks", return_value=[CHUNK]),
-                patch("backend.quiz_service.ChatOllama", FakeBatchModel),
-                patch("backend.quiz_service.get_cached_concept_plan", return_value=None),
-                patch("backend.quiz_service.save_cached_concept_plan"),
-                patch("backend.quiz_service.save_quiz_validation_event"),
+                patch("backend.quiz_legacy_v2.ChatOllama", FakeBatchModel),
+                patch("backend.quiz_legacy_v2.get_cached_concept_plan", return_value=None),
+                patch("backend.quiz_legacy_v2.save_cached_concept_plan"),
+                patch("backend.quiz_legacy_v2.save_quiz_validation_event"),
             ):
                 quiz_store.initialize_quiz_store()
                 FakeBatchModel.payloads = [

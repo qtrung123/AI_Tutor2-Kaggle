@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend import quiz_store
-from backend.quiz_service import _generate_quiz_batch
+from backend.quiz_legacy_v2 import _generate_quiz_batch
 from backend.quiz_validation import SemanticValidationResult, validate_question_semantics
 
 
@@ -99,9 +99,9 @@ class QuizSemanticValidationTests(unittest.TestCase):
     def test_hard_rejection_retries_then_accepts(self):
         events = []
         verdicts = [result(hard=("correct_answer_supported",)), result()]
-        with patch("backend.quiz_service.ChatOllama", FakeGenerator), \
-             patch("backend.quiz_service.validate_question_semantics", side_effect=verdicts), \
-             patch("backend.quiz_service.save_quiz_validation_event", side_effect=lambda event: events.append(event)):
+        with patch("backend.quiz_legacy_v2.ChatOllama", FakeGenerator), \
+             patch("backend.quiz_legacy_v2.validate_question_semantics", side_effect=verdicts), \
+             patch("backend.quiz_legacy_v2.save_quiz_validation_event", side_effect=lambda event: events.append(event)):
             questions = _generate_quiz_batch(
                 "lecture.pdf", 1, "easy", [CHUNK], 1, "topic_001", "TCP", [], "run-hard", 1, "doc-hash", 2
             )
@@ -111,9 +111,9 @@ class QuizSemanticValidationTests(unittest.TestCase):
         self.assertEqual(events[1]["outcome"], "accepted")
 
     def test_semantic_validator_receives_exact_backend_evidence_batch(self):
-        with patch("backend.quiz_service.ChatOllama", FakeGenerator), \
-             patch("backend.quiz_service.validate_question_semantics", return_value=result()) as validator, \
-             patch("backend.quiz_service.save_quiz_validation_event"):
+        with patch("backend.quiz_legacy_v2.ChatOllama", FakeGenerator), \
+             patch("backend.quiz_legacy_v2.validate_question_semantics", return_value=result()) as validator, \
+             patch("backend.quiz_legacy_v2.save_quiz_validation_event"):
             question = _generate_quiz_batch(
                 "lecture.pdf", 1, "easy", [CHUNK], 1, "topic_001", "TCP"
             )[0]
@@ -122,7 +122,7 @@ class QuizSemanticValidationTests(unittest.TestCase):
 
     def test_missing_canonical_metadata_fails_before_llm_retry(self):
         chunk = {"content": "Evidence", "metadata": {"vector_id": "owner_hash_1"}}
-        with patch("backend.quiz_service.ChatOllama") as generator:
+        with patch("backend.quiz_legacy_v2.ChatOllama") as generator:
             with self.assertRaisesRegex(ValueError, "canonical chunk provenance"):
                 _generate_quiz_batch("lecture.pdf", 1, "easy", [chunk], 1)
         generator.assert_not_called()
@@ -130,9 +130,9 @@ class QuizSemanticValidationTests(unittest.TestCase):
     def test_quality_failure_has_one_retry_then_accepts_warning(self):
         events = []
         verdicts = [result(quality=("meaningful_concept",)), result(quality=("meaningful_concept",))]
-        with patch("backend.quiz_service.ChatOllama", FakeGenerator), \
-             patch("backend.quiz_service.validate_question_semantics", side_effect=verdicts), \
-             patch("backend.quiz_service.save_quiz_validation_event", side_effect=lambda event: events.append(event)):
+        with patch("backend.quiz_legacy_v2.ChatOllama", FakeGenerator), \
+             patch("backend.quiz_legacy_v2.validate_question_semantics", side_effect=verdicts), \
+             patch("backend.quiz_legacy_v2.save_quiz_validation_event", side_effect=lambda event: events.append(event)):
             questions = _generate_quiz_batch(
                 "lecture.pdf", 1, "easy", [CHUNK], 1, "topic_001", "TCP", [], "run-quality", 1, "doc-hash", 2
             )

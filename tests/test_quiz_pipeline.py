@@ -1063,7 +1063,6 @@ class CacheAndMetadataTests(unittest.TestCase):
             patch.object(quiz_service, "ChatOllama", FakeModel),
             patch.object(quiz_service, "save_quiz_validation_event"),
             patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _o: quiz),
-            patch.object(quiz_service, "delete_document_attempts"),
         ):
             fn = quiz_service.generate_quiz if public else quiz_service._generate_quiz
             return fn(DOCUMENT["id"], "easy", "document", question_count=count, regenerate=regenerate)

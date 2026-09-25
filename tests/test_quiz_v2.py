@@ -9,10 +9,14 @@ from backend.main import QuizGenerateRequest, QuizRegenerateRequest
 from backend import quiz_store
 from backend.mastery_service import calculate_mastery
 from backend.quiz_options import strip_leading_option_label
-from backend.quiz_service import (
-    QuizGenerationError, _build_v2_prompt, _generate_topic_quiz_v2, _run_document_v2_batch, _validate_quiz_batch,
+from backend.quiz_legacy_v2 import (
+    _build_v2_prompt,
+    _generate_topic_quiz_v2,
+    _run_document_v2_batch,
+    _validate_quiz_batch,
     _validate_v2_question,
 )
+from backend.quiz_service import QuizGenerationError
 
 
 CHUNK = {
@@ -100,12 +104,12 @@ class QuizV2Tests(unittest.TestCase):
         saved = []
         with (
             patch("backend.document_retrieval.get_topic_chunks", return_value=[CHUNK]),
-            patch("backend.quiz_service.ChatOllama", FakeBatchModel),
-            patch("backend.quiz_service.get_cached_concept_plan", return_value=None),
-            patch("backend.quiz_service.save_cached_concept_plan"),
-            patch("backend.quiz_service.validate_question_semantics") as semantic,
-            patch("backend.quiz_service.save_quiz_validation_event"),
-            patch("backend.quiz_service.save_quiz", side_effect=lambda _d, _x, quiz, _o: saved.append(quiz) or quiz),
+            patch("backend.quiz_legacy_v2.ChatOllama", FakeBatchModel),
+            patch("backend.quiz_legacy_v2.get_cached_concept_plan", return_value=None),
+            patch("backend.quiz_legacy_v2.save_cached_concept_plan"),
+            patch("backend.quiz_legacy_v2.validate_question_semantics") as semantic,
+            patch("backend.quiz_legacy_v2.save_quiz_validation_event"),
+            patch("backend.quiz_legacy_v2.save_quiz", side_effect=lambda _d, _x, quiz, _o: saved.append(quiz) or quiz),
         ):
             result = _generate_topic_quiz_v2(
                 DOCUMENT, TOPIC, "easy", "owner", "qwen-2.5-3b-runtime", False, question_count
@@ -127,8 +131,8 @@ class QuizV2Tests(unittest.TestCase):
                 "evidence_excerpt": f"Grounded evidence supports reliable communication for topic {topic_number} and slot {index + 1}.",
             })
         with (
-            patch("backend.quiz_service.ChatOllama", FakeBatchModel),
-            patch("backend.quiz_service.save_quiz_validation_event"),
+            patch("backend.quiz_legacy_v2.ChatOllama", FakeBatchModel),
+            patch("backend.quiz_legacy_v2.save_quiz_validation_event"),
         ):
             questions, validation, timings = _run_document_v2_batch(
                 {**DOCUMENT, "id": document_id, "title": Path(document_id).stem}, difficulty, slots, "owner",
@@ -573,9 +577,9 @@ class QuizV2Tests(unittest.TestCase):
         ]
         with (
             patch("backend.document_retrieval.get_topic_chunks", return_value=[CHUNK]),
-            patch("backend.quiz_service.ChatOllama", FakeBatchModel),
-            patch("backend.quiz_service.save_quiz_validation_event"),
-            patch("backend.quiz_service.save_quiz", side_effect=lambda _d, _v, quiz, _o: quiz) as save,
+            patch("backend.quiz_legacy_v2.ChatOllama", FakeBatchModel),
+            patch("backend.quiz_legacy_v2.save_quiz_validation_event"),
+            patch("backend.quiz_legacy_v2.save_quiz", side_effect=lambda _d, _v, quiz, _o: quiz) as save,
         ):
             result = _generate_topic_quiz_v2(DOCUMENT, TOPIC, "easy", "owner", "qwen-3b", False)
         self.assertEqual(len(result["questions"]), 8)
@@ -601,9 +605,9 @@ class QuizV2Tests(unittest.TestCase):
         FakeBatchModel.payloads = [{"questions": questions}]
         with (
             patch("backend.document_retrieval.get_topic_chunks", return_value=[CHUNK]),
-            patch("backend.quiz_service.ChatOllama", FakeBatchModel),
-            patch("backend.quiz_service.save_quiz_validation_event"),
-            patch("backend.quiz_service.save_quiz", side_effect=lambda _d, _x, quiz, _o: quiz) as save,
+            patch("backend.quiz_legacy_v2.ChatOllama", FakeBatchModel),
+            patch("backend.quiz_legacy_v2.save_quiz_validation_event"),
+            patch("backend.quiz_legacy_v2.save_quiz", side_effect=lambda _d, _x, quiz, _o: quiz) as save,
         ):
             with self.assertRaises(QuizGenerationError) as failure:
                 _generate_topic_quiz_v2(DOCUMENT, TOPIC, "easy", "owner", "qwen-3b", False)

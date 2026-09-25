@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from quiz_fixtures import candidates, make_chunks, spread_facts
 
-from backend import assessment_planner, quiz_service, quiz_store
+from backend import assessment_planner, quiz_legacy_v2, quiz_service, quiz_store
 from backend.assessment_planner import (
     PLANNER_VERSION,
     allocate_document_topics,
@@ -16,7 +16,8 @@ from backend.assessment_planner import (
     validate_and_deduplicate_concepts,
 )
 from backend.mastery_service import recompute_topic_mastery
-from backend.quiz_service import _select_v2_evidence_groups, submit_quiz_attempt
+from backend.quiz_legacy_v2 import _select_v2_evidence_groups
+from backend.quiz_service import submit_quiz_attempt
 
 
 TOPIC = {
@@ -258,10 +259,10 @@ class TopicV2Phase2Tests(unittest.TestCase):
             {"name": "Configuration", "source_subtopic_ids": ["sub_b"], "source_chunk_ids": ["c3"]},
         ]
         with patch("backend.assessment_planner._plan_seeds", return_value=planned), \
-             patch.object(quiz_service, "build_topic_plan", wraps=assessment_planner.build_topic_plan) as build:
-            first, first_timing = quiz_service._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
+             patch.object(quiz_legacy_v2, "build_topic_plan", wraps=assessment_planner.build_topic_plan) as build:
+            first, first_timing = quiz_legacy_v2._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
             # Difficulty and requested count are intentionally absent from the planning identity.
-            second, second_timing = quiz_service._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
+            second, second_timing = quiz_legacy_v2._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
         self.assertEqual(first["concept_plan_id"], second["concept_plan_id"])
         self.assertFalse(first_timing["cache_hit"])
         self.assertTrue(second_timing["cache_hit"])
@@ -272,27 +273,27 @@ class TopicV2Phase2Tests(unittest.TestCase):
         planned = [{"name": "Scheduling", "source_subtopic_ids": ["sub_a"], "source_chunk_ids": ["c1"]}]
         changed_chunks = [{**item, "content": item["content"] + " changed"} if item["metadata"]["chunk_id"] == "c1" else item for item in CHUNKS]
         with patch("backend.assessment_planner._plan_seeds", return_value=planned), \
-             patch.object(quiz_service, "build_topic_plan", wraps=assessment_planner.build_topic_plan) as build:
-            quiz_service._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
-            quiz_service._get_or_build_topic_plan({**document, "topic_schema_version": 4}, TOPIC, CHUNKS, "owner-a")
-            quiz_service._get_or_build_topic_plan(document, TOPIC, changed_chunks, "owner-a")
-            with patch.object(quiz_service, "PLANNER_VERSION", "hierarchy_concepts_v-next"), \
+             patch.object(quiz_legacy_v2, "build_topic_plan", wraps=assessment_planner.build_topic_plan) as build:
+            quiz_legacy_v2._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
+            quiz_legacy_v2._get_or_build_topic_plan({**document, "topic_schema_version": 4}, TOPIC, CHUNKS, "owner-a")
+            quiz_legacy_v2._get_or_build_topic_plan(document, TOPIC, changed_chunks, "owner-a")
+            with patch.object(quiz_legacy_v2, "PLANNER_VERSION", "hierarchy_concepts_v-next"), \
                  patch.object(assessment_planner, "PLANNER_VERSION", "hierarchy_concepts_v-next"):
-                quiz_service._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
-            with patch.object(quiz_service, "CONCEPT_PLANNER_PROMPT_VERSION", "concept_planner_v-next"):
-                quiz_service._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
-            with patch.object(quiz_service, "CHAT_MODEL", "planner-model-next"):
-                quiz_service._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
+                quiz_legacy_v2._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
+            with patch.object(quiz_legacy_v2, "CONCEPT_PLANNER_PROMPT_VERSION", "concept_planner_v-next"):
+                quiz_legacy_v2._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
+            with patch.object(quiz_legacy_v2, "CHAT_MODEL", "planner-model-next"):
+                quiz_legacy_v2._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
         self.assertEqual(build.call_count, 6)
 
     def test_concept_plan_cache_is_owner_isolated(self):
         document = {"id": "doc.pdf", "hash": "hash-v1", "topic_schema_version": 3}
         planned = [{"name": "Scheduling", "source_subtopic_ids": ["sub_a"], "source_chunk_ids": ["c1"]}]
         with patch("backend.assessment_planner._plan_seeds", return_value=planned), \
-             patch.object(quiz_service, "build_topic_plan", wraps=assessment_planner.build_topic_plan) as build:
-            quiz_service._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
-            quiz_service._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-b")
-            _plan, timing = quiz_service._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
+             patch.object(quiz_legacy_v2, "build_topic_plan", wraps=assessment_planner.build_topic_plan) as build:
+            quiz_legacy_v2._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
+            quiz_legacy_v2._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-b")
+            _plan, timing = quiz_legacy_v2._get_or_build_topic_plan(document, TOPIC, CHUNKS, "owner-a")
         self.assertEqual(build.call_count, 2)
         self.assertTrue(timing["cache_hit"])
 
@@ -302,10 +303,10 @@ class TopicV2Phase2Tests(unittest.TestCase):
         document = {"id": "doc.pdf", "hash": "hash-v1", "topic_schema_version": 3}
         planned = [{"name": "Scheduling", "source_subtopic_ids": ["sub_a"], "source_chunk_ids": ["c1"]}]
         with patch("backend.assessment_planner._plan_seeds", return_value=planned), \
-             patch.object(quiz_service, "build_topic_plan", wraps=assessment_planner.build_topic_plan) as build:
-            quiz_service._get_or_build_topic_plan(document, TOPIC, CHUNKS, "local_student")
+             patch.object(quiz_legacy_v2, "build_topic_plan", wraps=assessment_planner.build_topic_plan) as build:
+            quiz_legacy_v2._get_or_build_topic_plan(document, TOPIC, CHUNKS, "local_student")
             quiz_store.delete_document_quiz_data("doc.pdf", "local_student")
-            quiz_service._get_or_build_topic_plan(document, TOPIC, CHUNKS, "local_student")
+            quiz_legacy_v2._get_or_build_topic_plan(document, TOPIC, CHUNKS, "local_student")
         self.assertEqual(build.call_count, 2)
 
     def test_stale_plan_rows_do_not_affect_historical_quiz_reads(self):
@@ -313,8 +314,8 @@ class TopicV2Phase2Tests(unittest.TestCase):
         document = {"id": "doc.pdf", "hash": "hash-v1", "topic_schema_version": 3}
         planned = [{"name": "Scheduling", "source_subtopic_ids": ["sub_a"], "source_chunk_ids": ["c1"]}]
         with patch("backend.assessment_planner._plan_seeds", return_value=planned):
-            quiz_service._get_or_build_topic_plan(document, TOPIC, CHUNKS, "local_student")
-            quiz_service._get_or_build_topic_plan({**document, "hash": "hash-v2"}, TOPIC, CHUNKS, "local_student")
+            quiz_legacy_v2._get_or_build_topic_plan(document, TOPIC, CHUNKS, "local_student")
+            quiz_legacy_v2._get_or_build_topic_plan({**document, "hash": "hash-v2"}, TOPIC, CHUNKS, "local_student")
         historical = quiz_store.get_quiz_by_id("historical-quiz", "local_student")
         self.assertIsNotNone(historical)
         self.assertEqual(historical["questions"][0]["concept_plan_id"], "historical-plan")

@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 from quiz_fixtures import candidates, make_chunks
 
-from backend import quiz_service, quiz_store
-from backend.quiz_service import (
+from backend import quiz_legacy_v2, quiz_service, quiz_store
+from backend.quiz_legacy_v2 import (
     DOCUMENT_QUIZ_QUESTION_COUNT,
     _build_document_single_choice_prompt,
     _deterministic_multi_select_candidate,
@@ -136,8 +136,8 @@ class SequencedOllama:
 
 def run_blueprint(slots, respond, type_rankings=None):
     SequencedOllama.respond = respond
-    with patch.object(quiz_service, "ChatOllama", SequencedOllama), \
-         patch.object(quiz_service, "save_quiz_validation_event"):
+    with patch.object(quiz_legacy_v2, "ChatOllama", SequencedOllama), \
+         patch.object(quiz_legacy_v2, "save_quiz_validation_event"):
         return _run_document_v2_batch(
             DOCUMENT, "medium", slots, "owner", "model", DOCUMENT_QUIZ_QUESTION_COUNT, "run-id",
             special_first=True, type_rankings=type_rankings,
@@ -321,9 +321,9 @@ class RejectionHistoryScopingTests(unittest.TestCase):
 
 class NoAcceptedSingleChoiceInvalidatedTests(unittest.TestCase):
     def test_no_post_hoc_type_swap_machinery_remains(self):
-        self.assertFalse(hasattr(quiz_service, "DOCUMENT_TYPE_SWAP_BUDGET"))
-        self.assertFalse(hasattr(quiz_service, "_is_type_specific_rejection_reason"))
-        self.assertFalse(hasattr(quiz_service, "DOCUMENT_QUIZ_BATCH_PLAN"))
+        self.assertFalse(hasattr(quiz_legacy_v2, "DOCUMENT_TYPE_SWAP_BUDGET"))
+        self.assertFalse(hasattr(quiz_legacy_v2, "_is_type_specific_rejection_reason"))
+        self.assertFalse(hasattr(quiz_legacy_v2, "DOCUMENT_QUIZ_BATCH_PLAN"))
 
     def test_accepted_single_choice_questions_are_never_removed_when_special_types_struggle(self):
         """Even when both special types must fall all the way through to deterministic fallback,
@@ -689,7 +689,7 @@ class TypePlannerOverridesWeakHeuristicTests(unittest.TestCase):
         weak_slots = self._all_heading_slots()
         planner_result = {"multi_select": ["S1", "S2"], "true_false": ["S3", "S4", "S5"]}
         with patch.object(
-            quiz_service, "_plan_document_slot_rankings",
+            quiz_legacy_v2, "_plan_document_slot_rankings",
             return_value=(planner_result, {"type_planning_llm_calls": 1, "type_planning_ms": 5}),
         ):
             slots, type_rankings, timings = _prepare_document_slot_rankings(weak_slots, "model")
@@ -710,7 +710,7 @@ class TypePlannerOverridesWeakHeuristicTests(unittest.TestCase):
         slots = fifteen_slots()
         planner_result = {"multi_select": ["S3", "S4"], "true_false": ["S5", "S6", "S7"]}
         with patch.object(
-            quiz_service, "_plan_document_slot_rankings",
+            quiz_legacy_v2, "_plan_document_slot_rankings",
             return_value=(planner_result, {"type_planning_llm_calls": 1, "type_planning_ms": 5}),
         ):
             planned_slots, type_rankings, _timings = _prepare_document_slot_rankings(slots, "model")
@@ -750,7 +750,7 @@ class TypePlannerFallbackTests(unittest.TestCase):
     def test_malformed_planner_json_falls_back_to_full_ranking_without_blocking(self):
         weak_slots = self._all_heading_slots()
         with patch.object(
-            quiz_service, "_plan_document_slot_rankings",
+            quiz_legacy_v2, "_plan_document_slot_rankings",
             return_value=(None, {"type_planning_llm_calls": 1, "type_planning_ms": 3}),
         ):
             slots, type_rankings, _timings = _prepare_document_slot_rankings(weak_slots, "model")
@@ -769,7 +769,7 @@ class TypePlannerFallbackTests(unittest.TestCase):
             def invoke(self, _prompt):
                 raise RuntimeError("model unavailable")
 
-        with patch.object(quiz_service, "ChatOllama", RaisingOllama):
+        with patch.object(quiz_legacy_v2, "ChatOllama", RaisingOllama):
             slots, type_rankings, timings = _prepare_document_slot_rankings(weak_slots, "model")
         self.assertEqual(len(slots), 15)
         self.assertEqual(len(type_rankings["multi_select"]), 15)
@@ -780,7 +780,7 @@ class TypePlannerFallbackTests(unittest.TestCase):
         weak_slots = self._all_heading_slots()
         bad_result = {"multi_select": ["S99", "S100"], "true_false": ["S101"]}
         with patch.object(
-            quiz_service, "_plan_document_slot_rankings",
+            quiz_legacy_v2, "_plan_document_slot_rankings",
             return_value=(bad_result, {"type_planning_llm_calls": 1, "type_planning_ms": 2}),
         ):
             _slots, type_rankings, _timings = _prepare_document_slot_rankings(weak_slots, "model")
@@ -797,7 +797,7 @@ class NoRawMultiSelectFallbackJunkTests(unittest.TestCase):
         rich_slot = slot(1, 1, "Retransmission", 3)
         forbidden = ("documented term", "evidence angle", "selected concept", "first option matches")
 
-        single_choice_raw = quiz_service._deterministic_grounded_candidate(rich_slot, 0)
+        single_choice_raw = quiz_legacy_v2._deterministic_grounded_candidate(rich_slot, 0)
         multi_select_raw = _deterministic_multi_select_candidate({**rich_slot, "question_type": "multi_select"}, 0)
         true_false_raw = _deterministic_true_false_candidate({**rich_slot, "question_type": "true_false"}, 0)
 
@@ -996,7 +996,7 @@ class SpecialQuotaGateHardeningTests(unittest.TestCase):
                 return [candidate_for(s, "multi_select") for s in requested if s["slot_id"] == "S1"]
             return []  # true_false and single_choice must never even be usable here
 
-        with self.assertRaises(quiz_service.QuizGenerationError) as raised:
+        with self.assertRaises(quiz_legacy_v2.QuizGenerationError) as raised:
             run_blueprint(slots, respond)
 
         self.assertNotIn("single_choice", call_order)
@@ -1021,7 +1021,7 @@ class SpecialQuotaGateHardeningTests(unittest.TestCase):
                 return [candidate_for(s, "true_false") for s in requested if s["slot_id"] in {"S3", "S4"}]
             return []  # single_choice must never even be requested
 
-        with self.assertRaises(quiz_service.QuizGenerationError) as raised:
+        with self.assertRaises(quiz_legacy_v2.QuizGenerationError) as raised:
             run_blueprint(slots, respond)
 
         self.assertNotIn("single_choice", call_order)
@@ -1060,7 +1060,7 @@ class SpecialQuotaGateHardeningTests(unittest.TestCase):
         slots = fifteen_slots()
 
         with patch.object(
-            quiz_service, "_plan_document_slot_rankings",
+            quiz_legacy_v2, "_plan_document_slot_rankings",
             return_value=(None, {"type_planning_llm_calls": 1, "type_planning_ms": 1}),
         ):
             planned_slots, type_rankings, planning_timings = _prepare_document_slot_rankings(slots, "model")
@@ -1113,8 +1113,8 @@ def run_sc_batch(sc_slots, respond, authoritative_slots=None):
         "hard_rejections": 0, "quality_warnings": 0, "reasons": [],
     }
     slot_positions = {s["slot_id"]: index for index, s in enumerate(sc_slots)}
-    with patch.object(quiz_service, "ChatOllama", SequencedOllama), \
-         patch.object(quiz_service, "save_quiz_validation_event"):
+    with patch.object(quiz_legacy_v2, "ChatOllama", SequencedOllama), \
+         patch.object(quiz_legacy_v2, "save_quiz_validation_event"):
         accepted_count, sc_timings = _run_document_single_choice_batch(
             DOCUMENT, "medium", sc_slots, "owner", "model", "run-id",
             accepted_by_slot, accepted_stems, remaining_slot_ids, rejection_reasons_by_slot,
@@ -1372,8 +1372,8 @@ class DocumentSingleChoiceOrchestratorBatchingTests(unittest.TestCase):
 
     def _run(self, slots, question_count, respond):
         SequencedOllama.respond = respond
-        with patch.object(quiz_service, "ChatOllama", SequencedOllama), \
-             patch.object(quiz_service, "save_quiz_validation_event"):
+        with patch.object(quiz_legacy_v2, "ChatOllama", SequencedOllama), \
+             patch.object(quiz_legacy_v2, "save_quiz_validation_event"):
             return _run_document_single_choice_quiz(
                 DOCUMENT, "medium", slots, "owner", "model", question_count, "run-id",
             )

@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend import quiz_store
-from backend.quiz_service import _parse_quiz_response, _validate_quiz_batch
+from backend.quiz_legacy_v2 import _parse_quiz_response, _validate_quiz_batch
 
 
 def sample_quiz(topic_id: str, schema_version: int = 2) -> dict:

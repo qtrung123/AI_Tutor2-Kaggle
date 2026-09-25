@@ -21,8 +21,8 @@ from unittest.mock import patch
 
 from quiz_fixtures import candidates, make_chunks, spread_facts
 
-from backend import assessment_planner, quiz_diagnostics, quiz_service, quiz_store
-from backend.quiz_service import _run_document_single_choice_batch
+from backend import assessment_planner, quiz_diagnostics, quiz_legacy_v2, quiz_service, quiz_store
+from backend.quiz_legacy_v2 import _run_document_single_choice_batch
 
 
 DOCUMENT = {"id": "lecture.pdf", "title": "Lecture", "hash": "hash", "topic_schema_version": 2}
@@ -90,8 +90,8 @@ def run_sc_batch(sc_slots, respond, response_metadata_factory=None):
     }
     slot_positions = {s["slot_id"]: index for index, s in enumerate(sc_slots)}
     with quiz_diagnostics.start_run(request_id="test-request") as diag, \
-         patch.object(quiz_service, "ChatOllama", SequencedOllama), \
-         patch.object(quiz_service, "save_quiz_validation_event"):
+         patch.object(quiz_legacy_v2, "ChatOllama", SequencedOllama), \
+         patch.object(quiz_legacy_v2, "save_quiz_validation_event"):
         accepted_count, sc_timings = _run_document_single_choice_batch(
             DOCUMENT, "medium", sc_slots, "owner", "model", "run-id",
             accepted_by_slot, accepted_stems, remaining_slot_ids, rejection_reasons_by_slot,
@@ -274,8 +274,8 @@ class SingleChoiceBatchDiagnosticsTests(unittest.TestCase):
         diagnostics captured on top of that unchanged behavior."""
         slots = [make_slot(1, "Item1")]
         with quiz_diagnostics.start_run(request_id="test-raising") as diag, \
-             patch.object(quiz_service, "ChatOllama", RaisingOllama), \
-             patch.object(quiz_service, "save_quiz_validation_event"):
+             patch.object(quiz_legacy_v2, "ChatOllama", RaisingOllama), \
+             patch.object(quiz_legacy_v2, "save_quiz_validation_event"):
             accepted_by_slot: dict = {}
             accepted_stems: list = []
             remaining_slot_ids = {s["slot_id"] for s in slots}

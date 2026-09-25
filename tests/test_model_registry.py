@@ -129,12 +129,20 @@ class ModelRegistryTests(unittest.TestCase):
 
     def test_quiz_calls_disable_reasoning_and_kaggle_prepares_without_residency(self):
         quiz = (ROOT / "backend" / "quiz_service.py").read_text(encoding="utf-8")
+        legacy = (ROOT / "backend" / "quiz_legacy_v2.py").read_text(encoding="utf-8")
         startup = (ROOT / "deployment" / "start_kaggle.sh").read_text(encoding="utf-8")
         notebook = (ROOT / "kaggle_run.ipynb").read_text(encoding="utf-8")
 
-        self.assertEqual(quiz.count("reasoning=False"), 8)   # incl. the fill_blank step's call
+        # Live pipeline (incl. the fill_blank step's call) plus the legacy V2 engines.
+        self.assertEqual(quiz.count("reasoning=False"), 2)
+        self.assertEqual(legacy.count("reasoning=False"), 6)
+        self.assertEqual(quiz.count("reasoning=False") + legacy.count("reasoning=False"), 8)
         self.assertIn('QUIZ_GENERATION_KEEP_ALIVE = "5m"', quiz)
-        self.assertEqual(quiz.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 8)
+        self.assertEqual(quiz.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 2)
+        self.assertEqual(legacy.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 6)
+        self.assertEqual(
+            quiz.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE") + legacy.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 8
+        )
         self.assertIn('OLLAMA_DEEPSEEK_R1_14B_MODEL="${OLLAMA_DEEPSEEK_R1_14B_MODEL:-hf.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q4_K_M}"', startup)
         self.assertIn('"keep_alive": 0', startup)
         self.assertIn('OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL = \\"qwen-2.5-7b\\"', notebook)

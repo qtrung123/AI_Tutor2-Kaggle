@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from backend import quiz_service
+from backend import quiz_legacy_v2
 
 
 def candidate(slot_id, stem):
@@ -56,9 +56,9 @@ class MissingSlotRecoveryTests(unittest.TestCase):
     def run_batch(self, slots, responses, difficulty="easy"):
         SequencedOllama.responses = list(responses)
         SequencedOllama.prompts = []
-        with patch.object(quiz_service, "ChatOllama", SequencedOllama), \
-             patch.object(quiz_service, "save_quiz_validation_event"):
-            result = quiz_service._run_document_v2_batch(
+        with patch.object(quiz_legacy_v2, "ChatOllama", SequencedOllama), \
+             patch.object(quiz_legacy_v2, "save_quiz_validation_event"):
+            result = quiz_legacy_v2._run_document_v2_batch(
                 {"id": "doc.pdf", "hash": "hash"}, difficulty, slots,
                 "owner", "model", len(slots), "run",
             )
@@ -110,7 +110,7 @@ class MissingSlotRecoveryTests(unittest.TestCase):
     def test_medium_does_not_run_easy_only_validation(self):
         group = slot("S1", "topic-a", "Evidence supports Alpha fact.", "a1")
         raw = candidate("S1", "Which mechanism is not changed by the documented relationship?")
-        normalized, warnings = quiz_service._validate_v2_question(
+        normalized, warnings = quiz_legacy_v2._validate_v2_question(
             raw, {"S1": group}, {"S1"}, [], "medium", 1,
             {"topic_id": "document", "name": "Entire document"}, 1,
         )
@@ -135,13 +135,13 @@ class MissingSlotRecoveryTests(unittest.TestCase):
 
     def test_exact_duplicate_fallback_candidate_is_still_rejected(self):
         group = slot("S1", "topic-a", "Alpha evidence supports the mechanism.", "a1")
-        raw = quiz_service._deterministic_grounded_candidate(group, 0, [
+        raw = quiz_legacy_v2._deterministic_grounded_candidate(group, 0, [
             "Beta evidence supports flow control.",
             "Gamma evidence supports ordering.",
             "Delta evidence supports recovery.",
         ])
         with self.assertRaisesRegex(ValueError, "duplicates an accepted question"):
-            quiz_service._validate_v2_question(
+            quiz_legacy_v2._validate_v2_question(
                 raw, {"S1": group}, {"S1"}, [raw["question"]], "easy", 1,
                 {"topic_id": "document", "name": "Entire document"}, 1,
             )

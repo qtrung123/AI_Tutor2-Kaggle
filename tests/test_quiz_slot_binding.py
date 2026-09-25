@@ -2,8 +2,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from backend import quiz_service
-from backend.quiz_service import _run_document_v2_batch, _validate_v2_question
+from backend import quiz_legacy_v2
+from backend.quiz_legacy_v2 import _run_document_v2_batch, _validate_v2_question
 
 
 DOCUMENT = {"id": "lecture.pdf", "title": "Lecture", "hash": "hash", "topic_schema_version": 2}
@@ -46,8 +46,8 @@ class SequencedOllama:
 
 def run_batch(slots, responses, question_count=None):
     SequencedOllama.responses = list(responses)
-    with patch.object(quiz_service, "ChatOllama", SequencedOllama), \
-         patch.object(quiz_service, "save_quiz_validation_event"):
+    with patch.object(quiz_legacy_v2, "ChatOllama", SequencedOllama), \
+         patch.object(quiz_legacy_v2, "save_quiz_validation_event"):
         return _run_document_v2_batch(
             DOCUMENT, "medium", slots, "owner", "model", question_count or len(slots), "run-id",
         )

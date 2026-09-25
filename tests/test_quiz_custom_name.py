@@ -15,14 +15,11 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from backend import document_retrieval, quiz_service, quiz_store
+from backend import document_retrieval, quiz_legacy_v2, quiz_service, quiz_store
 from backend.auth_store import LEGACY_USER_ID
 from backend.main import QuizGenerateRequest, QuizRegenerateRequest, app
-from backend.quiz_service import (
-    _generate_topic_quiz_v2,
-    _resolve_quiz_title,
-    list_completed_quiz_attempts,
-)
+from backend.quiz_legacy_v2 import _generate_topic_quiz_v2
+from backend.quiz_service import _resolve_quiz_title, list_completed_quiz_attempts
 
 
 # ---------------------------------------------------------------------------
@@ -109,11 +106,11 @@ def run_v2(quiz_title, question_count=10):
     FakeBatchModel.payloads = [{"questions": [raw_question(index) for index in range(question_count)]}]
     with (
         patch.object(document_retrieval, "get_topic_chunks", return_value=[CHUNK]),
-        patch.object(quiz_service, "ChatOllama", FakeBatchModel),
-        patch.object(quiz_service, "get_cached_concept_plan", return_value=None),
-        patch.object(quiz_service, "save_cached_concept_plan"),
-        patch.object(quiz_service, "validate_question_semantics") as semantic,
-        patch.object(quiz_service, "save_quiz_validation_event"),
+        patch.object(quiz_legacy_v2, "ChatOllama", FakeBatchModel),
+        patch.object(quiz_legacy_v2, "get_cached_concept_plan", return_value=None),
+        patch.object(quiz_legacy_v2, "save_cached_concept_plan"),
+        patch.object(quiz_legacy_v2, "validate_question_semantics") as semantic,
+        patch.object(quiz_legacy_v2, "save_quiz_validation_event"),
     ):
         result = _generate_topic_quiz_v2(
             DOCUMENT, TOPIC, "easy", "owner", "qwen-test", False, question_count, quiz_title=quiz_title,

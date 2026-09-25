@@ -1,6 +1,6 @@
 import unittest
 
-from backend.quiz_service import _build_v2_prompt, _validate_v2_question
+from backend.quiz_legacy_v2 import _build_v2_prompt, _validate_v2_question
 
 
 GROUP = {

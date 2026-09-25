@@ -1,10 +1,7 @@
 import unittest
 
-from backend.quiz_service import (
-    _deterministic_grounded_candidate,
-    _looks_like_raw_chunk,
-    _validate_v2_question,
-)
+from backend.quiz_legacy_v2 import _deterministic_grounded_candidate, _validate_v2_question
+from backend.text_safety import _looks_like_raw_chunk
 
 
 def slot(evidence, slot_id="S1"):
