@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.api.auth import router as auth_router
 from backend.api.conversations import router as conversations_router
+from backend.api.learning import router as learning_router
 from backend.api.deps import require_admin_user, require_current_user
 from backend.ingest import delete_indexed_file, index_files
 from backend.quiz_attempt_service import (
@@ -29,12 +30,8 @@ from backend.quiz_service import (
     delete_quiz,
     generate_quiz,
     list_quiz_statuses,
-    build_learning_dashboard,
 )
 from backend.quiz_store import delete_document_quiz_data
-from backend.mastery_service import recompute_all_mastery, recompute_topic_mastery
-from backend.knowledge_gap_service import detect_knowledge_gaps
-from backend.recommendation_service import generate_recommendations
 from backend.conversation_store import remove_source_from_conversations
 from backend.rag_service import list_uploaded_sources
 from backend.model_registry import list_generation_models, prepare_generation_model, resolve_generation_model
@@ -42,10 +39,9 @@ from backend.summary_service import generate_document_summary
 from backend.summary_store import delete_document_summaries
 from backend.flashcard_service import FlashcardGenerationError, authoritative_card_fields, generate_flashcards
 from backend.flashcard_store import add_flashcard, delete_document_flashcards, delete_flashcard, update_flashcard
-from backend import study_plan_api_service, study_planner_service, study_planner_store, study_progress
+from backend import study_plan_api_service, study_planner_service, study_planner_store
 from backend.study_plan_api_service import (PlanConflictError, PlanNotFoundError, PlanValidationError,
                                             SessionConflictError)
-from backend.subject_grouping import group_documents_into_subjects
 from backend.model_comparison_service import get_quiz_model_comparison
 from backend.model_benchmark_service import DEFAULT_RUNS as BENCHMARK_DEFAULT_RUNS, BenchmarkAlreadyRunning, start_benchmark
 from config import CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL, QUIZ_DEFAULT_GENERATION_MODEL
@@ -310,11 +306,6 @@ class QuizProgressRequest(BaseModel):
     current_question_index: Optional[int] = Field(default=None, ge=0)
     # The Quiz Player's full local answer snapshot; replaces the saved answers when given.
     answers: Optional[dict[str, str | list[str]]] = None
-
-
-class MasteryRecomputeRequest(BaseModel):
-    document_id: Optional[str] = None
-    topic_id: Optional[str] = None
 
 
 class QuizExplainRequest(BaseModel):
@@ -1000,77 +991,7 @@ def quiz_regenerate(document_id: str, request: QuizRegenerateRequest, current_us
         ) from error
 
 
-@app.get("/api/mastery/{document_id}/{topic_id}")
-def topic_mastery(
-    document_id: str, topic_id: str, current_user: dict = Depends(require_current_user)
-) -> dict:
-    """Return mastery rebuilt from completed attempt-answer snapshots."""
-    try:
-        return recompute_topic_mastery(current_user["id"], document_id, topic_id)
-    except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Could not compute mastery: {error}") from error
-
-
-@app.get("/api/dashboard")
-def learning_dashboard(current_user: dict = Depends(require_current_user)) -> dict:
-    """Return the real project state used by the Overview and mastery UI. Adds a subject-grouped
-    view of the existing "materials" rows for the Overview's subject cards -- a pure, read-only
-    aggregation; build_learning_dashboard's own quiz/mastery computation is untouched."""
-    try:
-        dashboard = build_learning_dashboard(current_user["id"])
-        dashboard["subjects"] = group_documents_into_subjects(dashboard.get("materials") or [])
-        # Current quiz performance: latest completed quiz per assessed document (unassessed ones left out).
-        dashboard["metrics"]["current_quiz_performance"] = study_progress.current_quiz_performance({
-            row["document_id"]: study_progress.latest_quiz_percentage(current_user["id"], row["document_id"])
-            for row in dashboard.get("materials") or []
-        })
-        return dashboard
-    except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Could not load dashboard: {error}") from error
-
-
-@app.get("/api/knowledge-gaps")
-def knowledge_gaps(current_user: dict = Depends(require_current_user)) -> list[dict]:
-    """Return reliable mastery-derived gaps for the authenticated user."""
-    return detect_knowledge_gaps(current_user["id"])
-
-
-@app.get("/api/knowledge-gaps/{document_id}")
-def document_knowledge_gaps(
-    document_id: str, current_user: dict = Depends(require_current_user)
-) -> list[dict]:
-    """Return reliable mastery-derived gaps for one owned assessment history."""
-    return detect_knowledge_gaps(current_user["id"], document_id)
-
-
-@app.get("/api/recommendations")
-def recommendations(current_user: dict = Depends(require_current_user)) -> list[dict]:
-    """Return ranked next actions derived from the authenticated user's current state."""
-    return generate_recommendations(current_user["id"])
-
-
-@app.get("/api/recommendations/{document_id}")
-def document_recommendations(
-    document_id: str, current_user: dict = Depends(require_current_user)
-) -> list[dict]:
-    return generate_recommendations(current_user["id"], document_id)
-
-
-@app.post("/api/mastery/recompute")
-def mastery_recompute(request: MasteryRecomputeRequest, current_user: dict = Depends(require_current_user)) -> list[dict] | dict:
-    """Rebuild one topic or every historical mastery cache entry."""
-    try:
-        if request.document_id or request.topic_id:
-            if not request.document_id or not request.topic_id:
-                raise ValueError("document_id and topic_id are both required for one-topic recomputation.")
-            return recompute_topic_mastery(
-                current_user["id"], request.document_id, request.topic_id
-            )
-        return recompute_all_mastery(current_user["id"])
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Could not rebuild mastery: {error}") from error
+app.include_router(learning_router)
 
 
 app.include_router(conversations_router)
