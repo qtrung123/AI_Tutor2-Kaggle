@@ -521,10 +521,7 @@ class GenerateQuizDocumentContractTests(unittest.TestCase):
         self.assertEqual(result["question_count"], 12)
         self.assertEqual(result["assessment_plan"]["target_questions"], 12)
         self.assertEqual(result["assessment_plan"]["status"], "complete")
-        # One multiple-choice call; the fill_blank step then tries once + one retry (the mock
-        # returns no fill_blank output), so the quiz stays all single_choice.
-        fill_calls = result["assessment_plan"]["fill_blank"]["calls"]
-        self.assertEqual((result["assessment_plan"]["llm_calls"] - fill_calls, fill_calls), (1, 2))
+        self.assertEqual(result["assessment_plan"]["llm_calls"], 1)
         self.assertGreater(result["assessment_plan"]["context_group_count"], 1)
         self.assertEqual(result["assessment_plan"]["type_distribution"], {"single_choice": 12})
         self.assertTrue(all(q["question_type"] == "single_choice" for q in result["questions"]))

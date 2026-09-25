@@ -1136,8 +1136,13 @@ def build_fill_blank_prompt(
     units: list[dict],
     count: int,
     avoid_stems: list[str] | None = None,
+    preferred_terms: list[str] | None = None,
 ) -> str:
     excerpts = "\n\n".join(f"[{unit['unit_id']}]\n{unit['evidence_excerpt']}" for unit in units)
+    preferred = ""
+    if preferred_terms:
+        preferred = ("Preferred terms to blank out (use one only where an excerpt states it; the excerpts are the "
+                     "only source): " + "; ".join(preferred_terms) + "\n")
     avoid = ""
     if avoid_stems:
         avoid = ("Questions that already exist (do not test the same facts):\n"
@@ -1158,6 +1163,7 @@ def build_fill_blank_prompt(
         "acronym and its full form). Leave it empty when there are none.\n"
         "- Each question tests a different fact. Write in the main language of the excerpts. "
         "Explanation <=25 words. No markdown, no extra fields.\n"
+        f"{preferred}"
         f"{avoid}"
         f"EXCERPTS:\n{excerpts}"
     )
@@ -1274,3 +1280,46 @@ def validate_fill_blank_candidate(
         },
     }
     return normalized, sorted(set(warnings))
+
+
+# Flashcards as COVERAGE HINTS only. A persisted flashcard of the document can suggest WHICH short
+# term is worth a blank; it is never evidence. A hint is kept only when the term is written in the
+# document's own excerpts, and every fill_blank question is still validated against those excerpts
+# (validate_fill_blank_candidate) exactly like one without a hint.
+QUIZ_FILL_BLANK_MAX_HINTS = 8
+_HINT_QUESTION_START = re.compile(
+    r"^(?:what|which|who|whom|whose|why|how|when|where|define|describe|explain|name|list|give)\b", re.IGNORECASE,
+)
+_HINT_ARTICLE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)
+
+
+def flashcard_hint_terms(cards: list[dict]) -> list[str]:
+    """Compact concept/answer terms (1-4 words) from flashcard fronts/backs, in card order.
+    Questions, sentences and long answers are skipped: they are not a short, objective target."""
+    terms, seen = [], set()
+    for card in cards or []:
+        for side in (card.get("front"), card.get("back")):
+            text = _clean_inline(side)
+            if not text or "?" in text or _HINT_QUESTION_START.match(text):
+                continue
+            term = _HINT_ARTICLE.sub("", _SURROUNDING_PUNCTUATION.sub("", text))
+            key = squash(term)
+            if len(key) < 3 or key in seen or not _fill_blank_answer_shape_ok(term):
+                continue
+            seen.add(key)
+            terms.append(term)
+    return terms
+
+
+def ground_fill_blank_hints(terms: list[str], units: list[dict]) -> list[dict]:
+    """The hint terms actually written in the document excerpts, with the excerpts that state them.
+    A term found in no excerpt is ignored (a flashcard cannot introduce outside content)."""
+    grounded = []
+    for term in terms or []:
+        key = squash(term)
+        unit_ids = [unit["unit_id"] for unit in units if key and key in unit["_squashed"]]
+        if unit_ids:
+            grounded.append({"term": term, "key": key, "unit_ids": unit_ids})
+        if len(grounded) >= QUIZ_FILL_BLANK_MAX_HINTS:
+            break
+    return grounded

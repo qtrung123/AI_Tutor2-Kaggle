@@ -453,9 +453,8 @@ class GenerateQuizWrapperBehaviorTests(unittest.TestCase):
         self.assertEqual(summary["requested_questions"], 12)
         self.assertEqual(summary["generated_questions"], 12)
         self.assertEqual(summary["validated_questions"], 12)
-        # One initial call already supplies all 12 valid candidates -- no repair/fill needed. The
-        # fill_blank step then makes its call + one retry (the mock returns no fill_blank output).
-        self.assertEqual(summary["llm_calls"], 1 + 2)
+        # One initial call already supplies all 12 valid candidates -- no repair/fill needed.
+        self.assertEqual(summary["llm_calls"], 1)
         self.assertEqual(summary["cache_hit"], False)
 
     def test_cache_hit_path_still_logs_a_summary(self):

@@ -172,8 +172,7 @@ class TopicV2Phase2Tests(unittest.TestCase):
             self.assertEqual(result["question_count"], expected_count)
             self.assertEqual(result["assessment_plan"]["target_questions"], expected_count)
             self.assertEqual(result["assessment_plan"]["status"], "complete")
-            fill_calls = result["assessment_plan"]["fill_blank"]["calls"]   # no fill_blank output from the mock
-            self.assertEqual(result["assessment_plan"]["llm_calls"] - fill_calls, 1)
+            self.assertEqual(result["assessment_plan"]["llm_calls"], 1)
             self.assertTrue(all(question["question_type"] == "single_choice" for question in result["questions"]))
             self.assertGreater(result["assessment_plan"]["context_group_count"], 1)
             timings = result["assessment_plan"]["timings_ms"]

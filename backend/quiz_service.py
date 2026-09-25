@@ -55,6 +55,8 @@ from backend.quiz_units import (
     QUIZ_FOLLOWUP_MIN_BUFFER,
     build_fill_blank_prompt,
     build_generation_prompt,
+    flashcard_hint_terms,
+    ground_fill_blank_hints,
     build_study_units,
     fill_blank_is_correct,
     fill_blank_output_schema,
@@ -73,7 +75,9 @@ from backend.quiz_units import (
     select_context_units,
     select_questions,
     validate_candidate,
+    _rank as _rank_question,
 )
+from backend.flashcard_store import get_latest_flashcard_set_info, list_flashcards
 from backend.assessment_planner import (
     CONCEPT_PLANNER_PROMPT_VERSION,
     PLANNER_VERSION,
@@ -2073,12 +2077,16 @@ def _generate_quiz_from_units(
     quiz_title: str | None = None,
     retrieval_ms: int = 0,
     fill_blank_count: int = 0,
+    fill_blank_hints: list[str] | None = None,
 ) -> dict:
     """Live Quiz generation: one simple pipeline for ANY document.
 
-    With `fill_blank_count` > 0 a bounded fill_blank step runs after the multiple-choice pool
+    With `fill_blank_count` > 0 AND `fill_blank_hints` (flashcard terms) of which at least one is
+    written in the document's excerpts, a bounded fill_blank step runs after the multiple-choice pool
     (see _generate_fill_blank_pool): up to that many validated fill_blank questions replace the
-    lowest-ranked multiple-choice ones. The live entry point asks for fill_blank_target(count).
+    lowest-ranked multiple-choice ones, so the total question count is unchanged. Without grounded
+    hints no fill_blank call is made. The live entry point asks for fill_blank_target(count) with
+    the document's persisted flashcards as hints.
 
         chunks -> excerpts -> context that fits a fixed budget
         -> call 1 writes a surplus of candidates (12 -> 15, 15 -> 18, 18 -> 22, 20 -> 24)
@@ -2375,17 +2383,19 @@ def _generate_quiz_from_units(
         )
 
     fill_pool, fill_info = [], None
-    if fill_blank_count > 0:
+    grounded_hints = ground_fill_blank_hints(fill_blank_hints or [], units) if fill_blank_count > 0 else []
+    if grounded_hints:
         fill_pool, fill_info = _generate_fill_blank_pool(
             model_id=model_id, scope_label=scope_label, difficulty=difficulty,
-            units=units, accepted=accepted,
-            scope_topic=scope_topic, target=fill_blank_count, first_index=candidate_counter,
+            units=units, accepted=accepted, hints=grounded_hints,
+            scope_topic=scope_topic, target=min(fill_blank_count, len(grounded_hints)), first_index=candidate_counter,
             deadline_s=QUIZ_TOTAL_DEADLINE_S - (time.perf_counter() - total_started),
         )
         llm_calls += fill_info["calls"]
 
     # final_count = min(valid candidates, requested_count). Short is "partial", never a failure.
-    fill_selected = select_questions(fill_pool, fill_blank_count) if fill_pool else []
+    # Fill_blank questions REPLACE multiple-choice ones, so the requested total is unchanged.
+    fill_selected = _select_fill_blank(fill_pool, fill_blank_count) if fill_pool else []
     combined = select_questions(accepted, question_count - len(fill_selected)) + fill_selected
     combined.sort(key=lambda question: (question["_meta"]["unit_index"], question["_meta"]["index"]))
     selected, question_evidence = finalize_questions(combined)
@@ -2454,33 +2464,68 @@ def _generate_quiz_from_units(
     return saved
 
 
+def _flashcard_coverage_hints(document: dict, owner_id: str) -> list[str]:
+    """Compact terms from the document's current persisted flashcards (coverage hints only; see
+    quiz_units.flashcard_hint_terms). No flashcards, or any read problem -> no hints."""
+    try:
+        from backend.flashcard_service import FLASHCARD_VERSION   # flashcard_service imports this module
+        info = get_latest_flashcard_set_info(
+            owner_id, document["id"], str(document.get("hash") or ""), int(document.get("topic_schema_version") or 0),
+            FLASHCARD_VERSION,
+        )
+        cards = list_flashcards(owner_id, document["id"], info["set_id"]) if info else []
+    except Exception as error:
+        print(f"[quiz-units-fill-blank] flashcard hints unavailable: {type(error).__name__}: {error}")
+        return []
+    return flashcard_hint_terms(cards)
+
+
+def _fill_blank_context(units: list[dict], hints: list[dict], used: list[dict], budget_chars: int) -> list[dict]:
+    """Excerpts for the fill_blank call: those stating a hinted term first, then the least-used rest,
+    within the call's evidence budget."""
+    hinted_ids = {unit_id for hint in hints for unit_id in hint["unit_ids"]}
+    ordered = [unit for unit in units if unit["unit_id"] in hinted_ids]
+    ordered += [unit for unit in followup_units(units, used, budget_chars, QUIZ_UNUSED_CHARS_PER_QUESTION)
+                if unit["unit_id"] not in hinted_ids]
+    shown, total = [], 0
+    for unit in ordered:
+        if shown and total + unit["char_count"] > budget_chars:
+            break
+        shown.append(unit)
+        total += unit["char_count"]
+    return shown
+
+
 def _generate_fill_blank_pool(
     *, model_id: str, scope_label: str, difficulty: str, units: list[dict], accepted: list[dict],
-    scope_topic: dict, target: int, first_index: int, deadline_s: float,
+    scope_topic: dict, target: int, first_index: int, deadline_s: float, hints: list[dict],
 ) -> tuple[list[dict], dict]:
-    """The bounded fill_blank step of the live pipeline, run after the multiple-choice pool exists.
+    """The bounded fill_blank step of the live pipeline, run after the multiple-choice pool exists
+    and only when there are grounded flashcard hints (the reason to ask for fill_blank at all).
 
-    One call asks for `target` + a small surplus of fill_blank candidates from the least-used
-    excerpts; ONE retry follows only when that output was malformed or yielded fewer valid
-    candidates than `target`. Every candidate goes through validate_fill_blank_candidate
-    (grounded in the original document excerpts, short objective answer, no duplicate of an
-    accepted question). Never raises: a failed step simply leaves the quiz multiple-choice only.
+    The call is shown the excerpts that state the hinted terms and told to prefer them. It stops
+    after the first call that parses and yields a valid candidate, and after a valid EMPTY answer
+    ({"questions": []}); exactly ONE retry follows only malformed output (unparseable) or output
+    whose candidates were all invalid. A transport/model failure is not retried. Every candidate
+    goes through validate_fill_blank_candidate against the document excerpts (a hint never
+    authorizes a question). Never raises: without a valid candidate the quiz stays multiple-choice.
     """
     diag = quiz_diagnostics.get_current()
     started = time.perf_counter()
     pool: list[dict] = []
-    info = {"target": target, "calls": 0, "accepted": 0, "rejected": 0, "rejected_by": {}, "errors": []}
+    hint_keys = {hint["key"] for hint in hints}
+    info = {"target": target, "hint_terms": len(hints), "calls": 0, "accepted": 0, "hinted_accepted": 0,
+            "rejected": 0, "rejected_by": {}, "errors": [], "stop": ""}
     index = first_index
     for call_number in range(1, QUIZ_FILL_BLANK_MAX_CALLS + 1):
         remaining_s = deadline_s - (time.perf_counter() - started)
-        if len(pool) >= target or remaining_s < QUIZ_MIN_CALL_S:
+        if remaining_s < QUIZ_MIN_CALL_S:
+            info["stop"] = "time budget used up"
             break
-        ask = target - len(pool) + QUIZ_FOLLOWUP_MIN_BUFFER
-        budget = context_budget(ask)
-        shown = followup_units(units, accepted + pool, budget, QUIZ_UNUSED_CHARS_PER_QUESTION * ask)
-        if not shown:
-            break
-        prompt = build_fill_blank_prompt(scope_label, difficulty, shown, ask, [q["question"] for q in accepted + pool])
+        ask = target + 1
+        shown = _fill_blank_context(units, hints, accepted + pool, context_budget(ask))
+        prompt = build_fill_blank_prompt(scope_label, difficulty, shown, ask, [q["question"] for q in accepted + pool],
+                                         [hint["term"] for hint in hints])
         llm = ChatOllama(
             model=model_id, reasoning=False, temperature=0.1 if call_number == 1 else 0.3,
             format=fill_blank_output_schema(ask), num_ctx=QUIZ_NUM_CTX,
@@ -2491,16 +2536,26 @@ def _generate_fill_blank_pool(
         info["calls"] += 1
         invocation_started = time.perf_counter()
         try:
-            response_text, metadata, _cut = _generate_with_deadline(llm, prompt, min(QUIZ_FOLLOWUP_DEADLINE_S, remaining_s))
-            candidates = parse_candidates(response_text)
-            diag.record_llm_call(stage="fill_blank", model=model_id, success=True, attempt=call_number,
-                                 elapsed_ms=(time.perf_counter() - invocation_started) * 1000)
-        except Exception as error:  # malformed / failed output: retry once, then give up quietly
+            response_text, _metadata, _cut = _generate_with_deadline(llm, prompt, min(QUIZ_FOLLOWUP_DEADLINE_S, remaining_s))
+        except Exception as error:   # the model/runtime failed: no retry, no extra latency
             info["errors"].append(f"call {call_number}: {type(error).__name__}: {error}"[:200])
+            info["stop"] = "model call failed"
             diag.record_llm_call(stage="fill_blank", model=model_id, success=False, attempt=call_number,
                                  elapsed_ms=(time.perf_counter() - invocation_started) * 1000,
                                  exception_type=type(error).__name__, reason=str(error)[:200])
+            break
+        diag.record_llm_call(stage="fill_blank", model=model_id, success=True, attempt=call_number,
+                             elapsed_ms=(time.perf_counter() - invocation_started) * 1000)
+        try:
+            candidates = parse_candidates(response_text)
+        except ValueError as error:   # malformed output: retry once
+            info["errors"].append(f"call {call_number}: malformed output: {error}"[:200])
+            info["stop"] = "malformed output"
             continue
+        if not candidates:            # a valid, empty answer: the excerpts hold nothing suitable
+            info["stop"] = "empty result"
+            break
+        added = 0
         for raw in candidates:
             index += 1
             try:
@@ -2512,10 +2567,22 @@ def _generate_fill_blank_pool(
                 info["rejected"] += 1
                 info["rejected_by"][code] = info["rejected_by"].get(code, 0) + 1
                 continue
+            question["_meta"]["hinted"] = question["_meta"]["answer_key"] in hint_keys
             pool.append(question)
+            added += 1
+        if added:
+            info["stop"] = "valid candidates"
+            break
+        info["stop"] = "all candidates invalid"   # invalid output: retry once
     info["accepted"] = len(pool)
+    info["hinted_accepted"] = sum(bool(question["_meta"].get("hinted")) for question in pool)
     print(f"[quiz-units-fill-blank] {json.dumps(info)}")
     return pool, info
+
+
+def _select_fill_blank(pool: list[dict], target: int) -> list[dict]:
+    """Flashcard-covered (hinted) candidates first, then the usual quality ranking."""
+    return sorted(pool, key=lambda question: (not question["_meta"].get("hinted"), _rank_question(question)))[:max(0, target)]
 
 
 def _build_document_slot(
@@ -4834,6 +4901,7 @@ def _generate_quiz(
 
     return _generate_quiz_from_units(
         fill_blank_count=fill_blank_target(question_count),
+        fill_blank_hints=_flashcard_coverage_hints(document, owner_id),
         document=document,
         scope=assessment_scope,
         scope_topic_id=scope_topic_id,
