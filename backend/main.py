@@ -3,12 +3,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.api.auth import router as auth_router
+from backend.api.deps import require_admin_user, require_current_user
 from backend.ingest import delete_indexed_file, index_files
 from backend.quiz_attempt_service import (
     clear_quiz_progress,
@@ -53,15 +55,7 @@ from backend.study_plan_api_service import (PlanConflictError, PlanNotFoundError
 from backend.subject_grouping import group_documents_into_subjects
 from backend.model_comparison_service import get_quiz_model_comparison
 from backend.model_benchmark_service import DEFAULT_RUNS as BENCHMARK_DEFAULT_RUNS, BenchmarkAlreadyRunning, start_benchmark
-from config import AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE, AUTH_SESSION_DAYS, CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL, QUIZ_DEFAULT_GENERATION_MODEL
-from backend.auth_store import (
-    authenticate_user,
-    create_session,
-    create_user,
-    get_user_for_session,
-    is_admin_email,
-    revoke_session,
-)
+from config import CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL, QUIZ_DEFAULT_GENERATION_MODEL
 
 
 class ConversationCreateRequest(BaseModel):
@@ -407,55 +401,6 @@ class QuizGenerateResponse(BaseModel):
     questions: list[QuizQuestion]
 
 
-class SignupRequest(BaseModel):
-    display_name: str = Field(min_length=1, max_length=100)
-    email: str = Field(min_length=5, max_length=254)
-    password: str = Field(min_length=10, max_length=128)
-
-
-class LoginRequest(BaseModel):
-    email: str = Field(min_length=5, max_length=254)
-    password: str = Field(min_length=1, max_length=128)
-
-
-def require_current_user(request: Request) -> dict:
-    user = get_user_for_session(request.cookies.get(AUTH_COOKIE_NAME))
-    if not user:
-        raise HTTPException(status_code=401, detail="Authentication required.")
-    return user
-
-
-def require_admin_user(current_user: dict = Depends(require_current_user)) -> dict:
-    if not is_admin_email(current_user["email"]):
-        raise HTTPException(status_code=403, detail="Admin access required.")
-    return current_user
-
-
-def _with_admin_flag(user: dict) -> dict:
-    """Attach the (env-configured, never stored) admin flag to a public user payload."""
-    return {**user, "is_admin": is_admin_email(user["email"])}
-
-
-def _validate_email(email: str) -> str:
-    import re
-    normalized = email.strip().lower()
-    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", normalized):
-        raise HTTPException(status_code=422, detail="Enter a valid email address.")
-    return normalized
-
-
-def _set_session_cookie(response: Response, token: str) -> None:
-    response.set_cookie(
-        key=AUTH_COOKIE_NAME,
-        value=token,
-        max_age=AUTH_SESSION_DAYS * 86400,
-        httponly=True,
-        secure=AUTH_COOKIE_SECURE,
-        samesite="lax",
-        path="/",
-    )
-
-
 # FastAPI application object. Uvicorn imports this as backend.main:app.
 app = FastAPI(title="Tutoring Backend")
 
@@ -477,40 +422,7 @@ app.add_middleware(
 )
 
 
-@app.post("/api/auth/signup", status_code=201)
-def auth_signup(request: SignupRequest, response: Response) -> dict:
-    display_name = request.display_name.strip()
-    if not display_name:
-        raise HTTPException(status_code=422, detail="Display name cannot be blank.")
-    try:
-        user = create_user(display_name, _validate_email(request.email), request.password)
-        token, _session = create_session(user["id"])
-        _set_session_cookie(response, token)
-        return _with_admin_flag(user)
-    except ValueError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
-
-@app.post("/api/auth/login")
-def auth_login(request: LoginRequest, response: Response) -> dict:
-    user = authenticate_user(_validate_email(request.email), request.password)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
-    token, _session = create_session(user["id"])
-    _set_session_cookie(response, token)
-    return _with_admin_flag(user)
-
-
-@app.post("/api/auth/logout")
-def auth_logout(request: Request, response: Response) -> dict:
-    revoke_session(request.cookies.get(AUTH_COOKIE_NAME))
-    response.delete_cookie(AUTH_COOKIE_NAME, path="/", secure=AUTH_COOKIE_SECURE, samesite="lax")
-    return {"signed_out": True}
-
-
-@app.get("/api/auth/me")
-def auth_me(current_user: dict = Depends(require_current_user)) -> dict:
-    return _with_admin_flag(current_user)
+app.include_router(auth_router)
 
 
 @app.get("/api/admin/quiz-model-comparison")
