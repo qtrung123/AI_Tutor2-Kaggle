@@ -1,5 +1,5 @@
 """Quiz Results backend: the Quiz Player's "Submit Anyway" (allow_unanswered) and the completed-
-attempt payload the Results/Review screen reads (backend/quiz_service.load_completed_quiz_attempt).
+attempt payload the Results/Review screen reads (backend/quiz_attempt_service.load_completed_quiz_attempt).
 Real SQLite database throughout, matching tests/test_quiz_player_progress.py.
 """
 
@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from backend import quiz_service, quiz_store
+from backend import quiz_attempt_service, quiz_store
 from tests.test_quiz_player_progress import DOCUMENT_ID, two_question_quiz
 
 
@@ -40,7 +40,7 @@ class QuizResultsBackendTests(unittest.TestCase):
         self.temp.cleanup()
 
     def submit(self, quiz_id, answers, **kwargs):
-        return quiz_service.submit_quiz_attempt(
+        return quiz_attempt_service.submit_quiz_attempt(
             DOCUMENT_ID, "easy", "document", answers, self.owner, quiz_id=quiz_id, **kwargs,
         )
 
@@ -75,7 +75,7 @@ class QuizResultsBackendTests(unittest.TestCase):
 
     def test_completed_attempt_carries_its_own_quiz_metadata(self):
         saved = self.submit("quiz-a", {"1": "A", "2": "C"})
-        loaded = quiz_service.load_completed_quiz_attempt(saved["attempt_id"], self.owner)
+        loaded = quiz_attempt_service.load_completed_quiz_attempt(saved["attempt_id"], self.owner)
         self.assertEqual(loaded["quiz_id"], "quiz-a")
         self.assertEqual(loaded["quiz"]["title"], "Quiz A")
         self.assertEqual(loaded["quiz"]["generation_model"]["name"], "Qwen 2.5 7B")
@@ -93,8 +93,8 @@ class QuizResultsBackendTests(unittest.TestCase):
     def test_sibling_attempts_each_resolve_their_own_quiz(self):
         attempt_a = self.submit("quiz-a", {"1": "A", "2": "B"})
         attempt_b = self.submit("quiz-b", {"1": "B", "2": "B"})
-        loaded_a = quiz_service.load_completed_quiz_attempt(attempt_a["attempt_id"], self.owner)
-        loaded_b = quiz_service.load_completed_quiz_attempt(attempt_b["attempt_id"], self.owner)
+        loaded_a = quiz_attempt_service.load_completed_quiz_attempt(attempt_a["attempt_id"], self.owner)
+        loaded_b = quiz_attempt_service.load_completed_quiz_attempt(attempt_b["attempt_id"], self.owner)
         self.assertEqual((loaded_a["quiz_id"], loaded_a["quiz"]["title"], loaded_a["score"]), ("quiz-a", "Quiz A", 2))
         self.assertEqual((loaded_b["quiz_id"], loaded_b["quiz"]["title"], loaded_b["score"]), ("quiz-b", "Quiz B", 1))
         self.assertEqual(loaded_b["quiz"]["generation_model"]["name"], "Gemma 3 12B")
@@ -102,9 +102,9 @@ class QuizResultsBackendTests(unittest.TestCase):
     def test_unknown_or_foreign_attempt_is_not_found(self):
         saved = self.submit("quiz-a", {"1": "A", "2": "B"})
         with self.assertRaises(ValueError):
-            quiz_service.load_completed_quiz_attempt("does-not-exist", self.owner)
+            quiz_attempt_service.load_completed_quiz_attempt("does-not-exist", self.owner)
         with self.assertRaises(ValueError):
-            quiz_service.load_completed_quiz_attempt(saved["attempt_id"], "someone-else")
+            quiz_attempt_service.load_completed_quiz_attempt(saved["attempt_id"], "someone-else")
 
     def test_submit_request_model_accepts_allow_unanswered(self):
         from backend.main import QuizSubmitRequest

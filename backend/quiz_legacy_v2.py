@@ -33,11 +33,11 @@ from backend.assessment_planner import (
     resolve_concept_evidence,
     planner_input_fingerprint,
 )
-from backend.quiz_options import canonicalize_option, strip_leading_option_label
+from backend.quiz_options import OPTION_LETTERS, canonicalize_option, strip_leading_option_label
 from backend import quiz_diagnostics
 from backend.auth_store import LEGACY_USER_ID
 from backend.document_retrieval import get_schema_topic_evidence
-from backend.quiz_service import OPTION_LETTERS, QUIZ_GENERATION_KEEP_ALIVE, QuizGenerationError
+from backend.quiz_service import QUIZ_GENERATION_KEEP_ALIVE, QuizGenerationError
 from backend.text_safety import (
     _RAW_EMAIL,
     _RAW_MESSAGE_HEADER,

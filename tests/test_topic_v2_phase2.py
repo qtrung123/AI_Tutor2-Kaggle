@@ -17,7 +17,7 @@ from backend.assessment_planner import (
 )
 from backend.mastery_service import recompute_topic_mastery
 from backend.quiz_legacy_v2 import _select_v2_evidence_groups
-from backend.quiz_service import submit_quiz_attempt
+from backend.quiz_attempt_service import submit_quiz_attempt
 
 
 TOPIC = {

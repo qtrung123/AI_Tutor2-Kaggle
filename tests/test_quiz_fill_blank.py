@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from quiz_fixtures import FakeModel, candidates, fact_sentence, make_chunks, raw_candidate
 
-from backend import quiz_service, quiz_store, quiz_units
+from backend import quiz_attempt_service, quiz_service, quiz_store, quiz_units
 from backend.main import QuizQuestion
 from backend.quiz_service import _generate_quiz_from_units
 from backend.quiz_units import (
@@ -310,7 +310,7 @@ class PersistenceTests(unittest.TestCase):
         self.temp.cleanup()
 
     def save(self, answers, index=0):
-        return quiz_service.update_quiz_progress("lecture.pdf", "easy", "document", self.owner, quiz_id="quiz-f",
+        return quiz_attempt_service.update_quiz_progress("lecture.pdf", "easy", "document", self.owner, quiz_id="quiz-f",
                                                  answers=answers, current_question_index=index)
 
     def test_stored_fill_blank_keeps_its_text_answer_and_accepted_answers(self):
@@ -330,7 +330,7 @@ class PersistenceTests(unittest.TestCase):
             self.save({"2": ["A", "B"]})
 
     def test_submit_grades_deterministically_and_keeps_the_learner_text(self):
-        attempt = quiz_service.submit_quiz_attempt("lecture.pdf", "easy", "document",
+        attempt = quiz_attempt_service.submit_quiz_attempt("lecture.pdf", "easy", "document",
                                                    {"1": "A", "2": "scheduler.", "3": "semafore"}, self.owner, quiz_id="quiz-f")
         results = {result["question_id"]: result for result in attempt["question_results"]}
         self.assertEqual((attempt["score"], attempt["total"]), (2, 3))
@@ -344,18 +344,18 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual((stored[3]["selected_answer"], stored[3]["question_type"]), ("semafore", "fill_blank"))
 
     def test_unanswered_fill_blank_can_be_submitted_anyway(self):
-        attempt = quiz_service.submit_quiz_attempt("lecture.pdf", "easy", "document", {"1": "A", "2": "", "3": "semaphore"},
+        attempt = quiz_attempt_service.submit_quiz_attempt("lecture.pdf", "easy", "document", {"1": "A", "2": "", "3": "semaphore"},
                                                    self.owner, quiz_id="quiz-f", allow_unanswered=True)
         results = {result["question_id"]: result for result in attempt["question_results"]}
         self.assertEqual((results[2]["is_correct"], results[2]["selected_answers"]), (False, []))
         with self.assertRaises(ValueError):
-            quiz_service.submit_quiz_attempt("lecture.pdf", "easy", "document", {"1": "A", "2": " ", "3": "x"},
+            quiz_attempt_service.submit_quiz_attempt("lecture.pdf", "easy", "document", {"1": "A", "2": " ", "3": "x"},
                                              self.owner, quiz_id="quiz-f")
 
     def test_retake_snapshot_keeps_fill_blank_questions(self):
-        attempt = quiz_service.submit_quiz_attempt("lecture.pdf", "easy", "document",
+        attempt = quiz_attempt_service.submit_quiz_attempt("lecture.pdf", "easy", "document",
                                                    {"1": "B", "2": "Scheduler", "3": "semaphore"}, self.owner, quiz_id="quiz-f")
-        snapshot = quiz_service._quiz_from_attempt_snapshot(quiz_store.get_quiz_history_attempt(attempt["attempt_id"], self.owner))
+        snapshot = quiz_attempt_service._quiz_from_attempt_snapshot(quiz_store.get_quiz_history_attempt(attempt["attempt_id"], self.owner))
         self.assertEqual([question["question_type"] for question in snapshot["questions"]], ["single_choice", "fill_blank", "fill_blank"])
 
 

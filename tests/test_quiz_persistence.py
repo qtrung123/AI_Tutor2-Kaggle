@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from quiz_fixtures import FakeModel, candidates, make_chunks
 
-from backend import main, quiz_service, quiz_store
+from backend import main, quiz_attempt_service, quiz_service, quiz_store
 
 QWEN = "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"
 GEMMA = "gemma3:12b-it-q4_K_M"
@@ -99,7 +99,7 @@ class QuizPersistenceTests(unittest.TestCase):
     def test_existing_progress_stays_attached_to_its_own_quiz_id(self):
         first = self.generate(QWEN)
         answers = {str(question["id"]): question["correct_answer"] for question in first["questions"]}
-        quiz_service.submit_quiz_attempt(
+        quiz_attempt_service.submit_quiz_attempt(
             DOCUMENT["id"], "easy", "document", answers, student_id=self.owner, quiz_id=first["quiz_id"],
         )
         second = self.generate(GEMMA, regenerate=True)   # a sibling quiz at the same slot
@@ -152,8 +152,8 @@ class OpeningAQuizByIdTests(unittest.TestCase):
             )
 
     def open_by_id(self, quiz_id):
-        with patch.object(quiz_service, "_document_lookup", return_value={DOCUMENT["id"]: DOCUMENT}):
-            return quiz_service.load_quiz_with_attempt(DOCUMENT["id"], "easy", "document", self.owner, quiz_id=quiz_id)
+        with patch.object(quiz_attempt_service, "_document_lookup", return_value={DOCUMENT["id"]: DOCUMENT}):
+            return quiz_attempt_service.load_quiz_with_attempt(DOCUMENT["id"], "easy", "document", self.owner, quiz_id=quiz_id)
 
     def test_clicking_the_qwen_card_then_the_gemma_card_opens_each_ones_own_quiz_id(self):
         qwen_quiz = self.generate(QWEN)
@@ -177,7 +177,7 @@ class OpeningAQuizByIdTests(unittest.TestCase):
     def test_the_api_route_accepts_a_quiz_id_query_parameter(self):
         qwen_quiz = self.generate(QWEN)
         self.generate(GEMMA, regenerate=True)
-        with patch.object(quiz_service, "_document_lookup", return_value={DOCUMENT["id"]: DOCUMENT}):
+        with patch.object(quiz_attempt_service, "_document_lookup", return_value={DOCUMENT["id"]: DOCUMENT}):
             result = main.quiz_detail(DOCUMENT["id"], topic_id="document", difficulty="easy",
                                       quiz_id=qwen_quiz["quiz_id"], current_user={"id": self.owner})
         self.assertEqual(result["quiz"]["quiz_id"], qwen_quiz["quiz_id"])

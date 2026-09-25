@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from backend import quiz_service, quiz_store
+from backend import quiz_attempt_service, quiz_store
 
 
 SCRIPT = (Path(__file__).parents[1] / "frontend" / "app.js").read_text(encoding="utf-8")
@@ -71,7 +71,7 @@ class QuizStudySessionScopingTests(unittest.TestCase):
     def test_a_to_b_to_a_lists_only_persisted_quizzes_for_current_document(self):
         owner_id = "owner-1"
         quiz_store.save_quiz("A.pdf", "easy", saved_quiz("A.pdf", "quiz-a"), owner_id)
-        quiz_service.submit_quiz_attempt(
+        quiz_attempt_service.submit_quiz_attempt(
             "A.pdf", "easy", "topic_1", {"1": "A"}, owner_id, quiz_id="quiz-a"
         )
 

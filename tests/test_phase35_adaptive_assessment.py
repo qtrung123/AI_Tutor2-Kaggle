@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from quiz_fixtures import candidates, make_chunks, spread_facts
 
-from backend import quiz_store, quiz_units
+from backend import quiz_attempt_service, quiz_store, quiz_units
 from backend.assessment_planner import allocate_document_topics, validate_and_deduplicate_concepts
 from backend.main import QuizGenerateRequest, QuizRegenerateRequest
 from backend.mastery_service import calculate_mastery
@@ -163,7 +163,7 @@ class AdaptiveAssessmentTests(unittest.TestCase):
             "assessment_scope": "document", "assessment_plan": {"planner_version": "assessment_capacity_v1"},
             "questions": questions,
         }, "student")
-        completed = quiz_service.submit_quiz_attempt(
+        completed = quiz_attempt_service.submit_quiz_attempt(
             "doc.pdf", "easy", "document", {"1": "A", "2": "A"}, student_id="student", quiz_id="document-quiz",
         )
         self.assertEqual(set(completed["mastery_by_topic"]), {"topic_a", "topic_b"})

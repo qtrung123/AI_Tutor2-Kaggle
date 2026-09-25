@@ -42,9 +42,8 @@ from backend.model_benchmark_store import load_benchmark_state, save_benchmark_s
 from backend.model_registry import (
     describe_generation_model, prepare_generation_model, resolve_generation_model, warm_generation_model,
 )
-from backend.quiz_service import (
-    QUIZ_DIFFICULTIES, QUIZ_GENERATION_KEEP_ALIVE, QUIZ_V2_ALLOWED_QUESTION_COUNTS, _document_lookup, generate_quiz,
-)
+from backend.quiz_common import QUIZ_DIFFICULTIES, _document_lookup
+from backend.quiz_service import QUIZ_GENERATION_KEEP_ALIVE, QUIZ_V2_ALLOWED_QUESTION_COUNTS, generate_quiz
 from backend.quiz_store import saving_benchmark_quizzes
 from backend.quiz_units import QUIZ_ENGINE_VERSION, QUIZ_NUM_CTX, QUIZ_PROMPT_VERSION, flashcard_hint_terms
 

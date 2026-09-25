@@ -10,20 +10,22 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.ingest import delete_indexed_file, index_files
-from backend.quiz_service import (
-    QuizGenerationError,
+from backend.quiz_attempt_service import (
     clear_quiz_progress,
-    delete_quiz,
     explain_quiz_question,
-    generate_quiz,
-    list_indexed_documents,
     list_completed_quiz_attempts,
-    list_quiz_statuses,
     load_quiz_with_attempt,
     load_completed_quiz_attempt,
     load_quiz_for_retake,
     update_quiz_progress,
     submit_quiz_attempt,
+)
+from backend.quiz_common import list_indexed_documents
+from backend.quiz_service import (
+    QuizGenerationError,
+    delete_quiz,
+    generate_quiz,
+    list_quiz_statuses,
     build_learning_dashboard,
 )
 from backend.quiz_store import delete_document_quiz_data
@@ -328,7 +330,7 @@ class QuizProgressRequest(BaseModel):
     """Autosave payload for the Quiz Player: an answer, a position, or both.
 
     `quiz_id` is optional in the schema only for backward compatibility with any non-live caller --
-    the live Quiz Player always sends it (see backend/quiz_service.update_quiz_progress, which never
+    the live Quiz Player always sends it (see backend/quiz_attempt_service.update_quiz_progress, which never
     falls back to "the newest quiz in this slot" once quiz_id is given).
     """
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
@@ -747,7 +749,7 @@ def documents(current_user: dict = Depends(require_current_user)) -> list[Docume
     """
     Return indexed documents for the Practice quiz dropdown.
 
-    This endpoint intentionally uses quiz_service.list_indexed_documents() so
+    This endpoint intentionally uses quiz_common.list_indexed_documents() so
     the quiz feature owns the shape it needs.
     """
     try:

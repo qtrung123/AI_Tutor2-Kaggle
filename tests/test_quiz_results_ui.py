@@ -45,7 +45,7 @@ window.__quizzes = {
   "quiz-y": makeQuiz("quiz-y", "Quiz Y", "gemma3-12b", "Gemma 3 12B", false),
   "quiz-z": makeQuiz("quiz-z", "Quiz Z", "qwen-2.5-7b", "Qwen 2.5 7B", false),
 };
-// Server-side grading, as backend/quiz_service.submit_quiz_attempt persists it (unanswered ->
+// Server-side grading, as backend/quiz_attempt_service.submit_quiz_attempt persists it (unanswered ->
 // empty selection, not correct).
 function grade(quiz, answers, attemptId, attemptNumber) {
   let score = 0;

@@ -1,6 +1,6 @@
 """Quiz Player progress persistence: every live progress operation is scoped to an exact quiz_id.
 
-Root cause this covers: backend/quiz_service.update_quiz_progress and clear_quiz_progress used to
+Root cause this covers: backend/quiz_attempt_service.update_quiz_progress and clear_quiz_progress used to
 resolve "the quiz" via the (document, topic, difficulty) SLOT only (backend/quiz_store.get_quiz's
 "newest quiz here" lookup) -- once several quizzes can share that slot (see
 tests/test_quiz_persistence.py), autosaving or resetting one quiz's progress could silently read or
@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from backend import quiz_service, quiz_store
+from backend import quiz_attempt_service, quiz_store
 
 DOCUMENT_ID = "lecture.pdf"
 
@@ -57,7 +57,7 @@ class QuizPlayerProgressScopingTests(unittest.TestCase):
         self.temp.cleanup()
 
     def answer(self, quiz_id, question_id, letter, index=None):
-        return quiz_service.update_quiz_progress(
+        return quiz_attempt_service.update_quiz_progress(
             DOCUMENT_ID, "easy", "document", self.owner,
             quiz_id=quiz_id, question_id=question_id, selected_answer=letter,
             current_question_index=index,
@@ -97,9 +97,9 @@ class QuizPlayerProgressScopingTests(unittest.TestCase):
         self.answer("quiz-gemma", 1, "B", index=0)
         self.answer("quiz-gemma", 2, "C", index=1)
 
-        with patch.object(quiz_service, "_document_lookup", return_value={DOCUMENT_ID: {"id": DOCUMENT_ID}}):
-            resumed_qwen = quiz_service.load_quiz_with_attempt(DOCUMENT_ID, "easy", "document", self.owner, quiz_id="quiz-qwen")
-            resumed_gemma = quiz_service.load_quiz_with_attempt(DOCUMENT_ID, "easy", "document", self.owner, quiz_id="quiz-gemma")
+        with patch.object(quiz_attempt_service, "_document_lookup", return_value={DOCUMENT_ID: {"id": DOCUMENT_ID}}):
+            resumed_qwen = quiz_attempt_service.load_quiz_with_attempt(DOCUMENT_ID, "easy", "document", self.owner, quiz_id="quiz-qwen")
+            resumed_gemma = quiz_attempt_service.load_quiz_with_attempt(DOCUMENT_ID, "easy", "document", self.owner, quiz_id="quiz-gemma")
 
         self.assertEqual(resumed_qwen["latest_attempt"]["answers"], {"1": "A"})
         self.assertEqual(resumed_gemma["latest_attempt"]["answers"], {"1": "B", "2": "C"})
@@ -120,7 +120,7 @@ class QuizPlayerProgressScopingTests(unittest.TestCase):
         before = self.answer("quiz-a", 1, "A", index=0)
         self.answer("quiz-b", 1, "B", index=0)
 
-        quiz_service.clear_quiz_progress(DOCUMENT_ID, "easy", "document", self.owner, quiz_id="quiz-a")
+        quiz_attempt_service.clear_quiz_progress(DOCUMENT_ID, "easy", "document", self.owner, quiz_id="quiz-a")
 
         # The old attempt row is demoted (is_latest = 0) by the reset, so the next autosave for
         # quiz-a starts a brand-new attempt_id rather than continuing the reset one.
@@ -133,12 +133,12 @@ class QuizPlayerProgressScopingTests(unittest.TestCase):
 
     def test_reset_progress_with_unknown_quiz_id_raises(self):
         with self.assertRaises(ValueError):
-            quiz_service.clear_quiz_progress(DOCUMENT_ID, "easy", "document", self.owner, quiz_id="does-not-exist")
+            quiz_attempt_service.clear_quiz_progress(DOCUMENT_ID, "easy", "document", self.owner, quiz_id="does-not-exist")
 
     # An attempt that already completed cannot be edited via autosave -- Retake starts a fresh
     # attempt_id instead (see submit_quiz_attempt, which always saves under a new attempt_id).
     def test_autosave_after_completion_is_rejected(self):
-        quiz_service.submit_quiz_attempt(
+        quiz_attempt_service.submit_quiz_attempt(
             DOCUMENT_ID, "easy", "document", {"1": "A", "2": "B"}, self.owner, quiz_id="quiz-a",
         )
         with self.assertRaises(ValueError):
@@ -148,7 +148,7 @@ class QuizPlayerProgressScopingTests(unittest.TestCase):
     # navigation save can never drop an earlier answer) and carries the position in the same call.
     def test_answer_snapshot_replaces_saved_answers_and_position_together(self):
         self.answer("quiz-a", 1, "A", index=0)
-        saved = quiz_service.update_quiz_progress(
+        saved = quiz_attempt_service.update_quiz_progress(
             DOCUMENT_ID, "easy", "document", self.owner,
             quiz_id="quiz-a", answers={"2": "c"}, current_question_index=1,
         )
@@ -159,18 +159,18 @@ class QuizPlayerProgressScopingTests(unittest.TestCase):
         self.assertIsNone(quiz_store.get_latest_attempt(DOCUMENT_ID, "easy", "document", self.owner, quiz_id="quiz-b"))
 
     def test_answer_snapshot_skips_cleared_answers_and_rejects_unknown_questions(self):
-        saved = quiz_service.update_quiz_progress(
+        saved = quiz_attempt_service.update_quiz_progress(
             DOCUMENT_ID, "easy", "document", self.owner, quiz_id="quiz-a", answers={"1": "A", "2": []},
         )
         self.assertEqual(saved["answers"], {"1": "A"})
         with self.assertRaises(ValueError):
-            quiz_service.update_quiz_progress(
+            quiz_attempt_service.update_quiz_progress(
                 DOCUMENT_ID, "easy", "document", self.owner, quiz_id="quiz-a", answers={"99": "A"},
             )
 
     def test_position_only_save_keeps_answers_and_is_clamped(self):
         self.answer("quiz-a", 1, "A", index=0)
-        saved = quiz_service.update_quiz_progress(
+        saved = quiz_attempt_service.update_quiz_progress(
             DOCUMENT_ID, "easy", "document", self.owner, quiz_id="quiz-a", current_question_index=50,
         )
         self.assertEqual(saved["answers"], {"1": "A"})
@@ -179,10 +179,10 @@ class QuizPlayerProgressScopingTests(unittest.TestCase):
     # Retake semantics: a completed attempt stays in history; the same quiz_id then gets a fresh
     # in-progress attempt once its progress is reset.
     def test_completed_attempt_stays_historical_and_retake_starts_fresh_for_same_quiz_id(self):
-        completed = quiz_service.submit_quiz_attempt(
+        completed = quiz_attempt_service.submit_quiz_attempt(
             DOCUMENT_ID, "easy", "document", {"1": "A", "2": "B"}, self.owner, quiz_id="quiz-a",
         )
-        quiz_service.clear_quiz_progress(DOCUMENT_ID, "easy", "document", self.owner, quiz_id="quiz-a")
+        quiz_attempt_service.clear_quiz_progress(DOCUMENT_ID, "easy", "document", self.owner, quiz_id="quiz-a")
         retake = self.answer("quiz-a", 1, "C", index=0)
         self.assertNotEqual(retake["attempt_id"], completed["attempt_id"])
         self.assertEqual(retake["quiz_id"], "quiz-a")

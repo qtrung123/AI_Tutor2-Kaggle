@@ -6,7 +6,7 @@ from unittest.mock import patch
 from backend import quiz_service, quiz_store
 from backend.auth_store import LEGACY_USER_ID
 from backend.mastery_service import recompute_topic_mastery
-from backend.quiz_service import load_quiz_for_retake, submit_quiz_attempt
+from backend.quiz_attempt_service import load_quiz_for_retake, submit_quiz_attempt
 
 
 def saved_quiz():

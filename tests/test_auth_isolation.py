@@ -18,7 +18,7 @@ from backend.auth_store import LEGACY_USER_ID
 from backend.ingest import migrate_legacy_vector_ownership
 from backend.main import QuizProgressRequest, app
 from backend.rag_service import _chroma_filter
-from backend.quiz_service import submit_quiz_attempt
+from backend.quiz_attempt_service import submit_quiz_attempt
 from backend.mastery_service import recompute_topic_mastery
 
 

@@ -15,11 +15,12 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from backend import document_retrieval, quiz_legacy_v2, quiz_service, quiz_store
+from backend import document_retrieval, quiz_attempt_service, quiz_legacy_v2, quiz_store
 from backend.auth_store import LEGACY_USER_ID
 from backend.main import QuizGenerateRequest, QuizRegenerateRequest, app
 from backend.quiz_legacy_v2 import _generate_topic_quiz_v2
-from backend.quiz_service import _resolve_quiz_title, list_completed_quiz_attempts
+from backend.quiz_attempt_service import list_completed_quiz_attempts
+from backend.quiz_service import _resolve_quiz_title
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +359,7 @@ class QuizNameHistoryDisplayTests(unittest.TestCase):
 
     def test_custom_name_appears_in_quiz_history_summary(self):
         quiz_store.save_quiz("lecture.pdf", "easy", self.named_quiz("quiz-a", "Embedded Systems Midterm"), LEGACY_USER_ID)
-        quiz_service.submit_quiz_attempt(
+        quiz_attempt_service.submit_quiz_attempt(
             "lecture.pdf", "easy", "topic_1", {"1": "A", "2": "B", "3": "C"},
             LEGACY_USER_ID, quiz_id="quiz-a",
         )
@@ -370,7 +371,7 @@ class QuizNameHistoryDisplayTests(unittest.TestCase):
         # Simulates a completed attempt whose quiz row is no longer resolvable
         # (e.g. an old legacy-imported attempt) -- history must still render.
         quiz_store.save_quiz("lecture.pdf", "easy", self.named_quiz("quiz-orphan", "Temporary Name"), LEGACY_USER_ID)
-        quiz_service.submit_quiz_attempt(
+        quiz_attempt_service.submit_quiz_attempt(
             "lecture.pdf", "easy", "topic_1", {"1": "A", "2": "B", "3": "C"}, LEGACY_USER_ID, quiz_id="quiz-orphan",
         )
         with quiz_store._connect() as connection:
@@ -383,8 +384,8 @@ class QuizNameHistoryDisplayTests(unittest.TestCase):
     def test_multiple_quizzes_from_same_document_get_distinct_names(self):
         quiz_store.save_quiz("lecture.pdf", "easy", self.named_quiz("quiz-a", "Midterm Review", "topic_1"), LEGACY_USER_ID)
         quiz_store.save_quiz("lecture.pdf", "medium", self.named_quiz("quiz-b", "Final Exam Prep", "topic_2"), LEGACY_USER_ID)
-        quiz_service.submit_quiz_attempt("lecture.pdf", "easy", "topic_1", {"1": "A", "2": "B", "3": "C"}, LEGACY_USER_ID, quiz_id="quiz-a")
-        quiz_service.submit_quiz_attempt("lecture.pdf", "medium", "topic_2", {"1": "A", "2": "B", "3": "C"}, LEGACY_USER_ID, quiz_id="quiz-b")
+        quiz_attempt_service.submit_quiz_attempt("lecture.pdf", "easy", "topic_1", {"1": "A", "2": "B", "3": "C"}, LEGACY_USER_ID, quiz_id="quiz-a")
+        quiz_attempt_service.submit_quiz_attempt("lecture.pdf", "medium", "topic_2", {"1": "A", "2": "B", "3": "C"}, LEGACY_USER_ID, quiz_id="quiz-b")
         titles = {summary["title"] for summary in list_completed_quiz_attempts(student_id=LEGACY_USER_ID)}
         self.assertEqual(titles, {"Midterm Review", "Final Exam Prep"})
 

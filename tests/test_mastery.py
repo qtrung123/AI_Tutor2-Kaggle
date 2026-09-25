@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from backend import quiz_store
 from backend.mastery_service import calculate_mastery, recompute_topic_mastery
-from backend.quiz_service import submit_quiz_attempt
+from backend.quiz_attempt_service import submit_quiz_attempt
 
 
 def answer(correct: bool, difficulty: str = "easy", outcome: str = "accepted", question_id: int = 1):

@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from quiz_fixtures import FakeModel, candidates, make_chunks
 
-from backend import model_registry, quiz_service
+from backend import model_registry, quiz_attempt_service, quiz_service
 from backend.main import QuizGenerateResponse
 from backend.model_registry import describe_generation_model
 from backend.quiz_service import _generate_quiz_from_units
@@ -109,8 +109,8 @@ class ModelSurvivesRegenerationTests(unittest.TestCase):
         self.assertEqual(active["generation_model"], QWEN_INFO)
         self.assertEqual(active["assessment_plan"]["generation_model"], QWEN_INFO)
         self.assertEqual(self.store.get_quiz_by_id(first["quiz_id"])["generation_model"], QWEN_INFO)
-        with patch.object(quiz_service, "_document_lookup", return_value={DOCUMENT["id"]: DOCUMENT}):
-            self.assertEqual(quiz_service.load_quiz_with_attempt(DOCUMENT["id"], "easy", "document")["quiz"]["generation_model"], QWEN_INFO)
+        with patch.object(quiz_attempt_service, "_document_lookup", return_value={DOCUMENT["id"]: DOCUMENT}):
+            self.assertEqual(quiz_attempt_service.load_quiz_with_attempt(DOCUMENT["id"], "easy", "document")["quiz"]["generation_model"], QWEN_INFO)
         self.assertEqual(self.generate(QWEN)["generation_model"], QWEN_INFO)          # cache hit keeps it
         self.assertEqual(len(FakeModel.prompts), 0)
 

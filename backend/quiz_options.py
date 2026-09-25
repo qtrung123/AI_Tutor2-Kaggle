@@ -3,6 +3,9 @@
 import re
 
 
+OPTION_LETTERS = {"A", "B", "C", "D"}
+
+
 _LEADING_OPTION_LABEL = re.compile(
     r"^\s*[ABCD](?:\s*[.):]\s*|\s*-\s*|\s+)(?=\S)",
     flags=re.IGNORECASE,
