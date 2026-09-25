@@ -50,6 +50,7 @@ from backend.study_plan_api_service import (PlanConflictError, PlanNotFoundError
                                             SessionConflictError)
 from backend.subject_grouping import group_documents_into_subjects
 from backend.model_comparison_service import get_quiz_model_comparison
+from backend.model_benchmark_service import DEFAULT_RUNS as BENCHMARK_DEFAULT_RUNS, BenchmarkAlreadyRunning, start_benchmark
 from config import AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE, AUTH_SESSION_DAYS, CHAT_MODEL, DATA_DIR, EMBEDDING_MODEL, OLLAMA_BASE_URL, QUIZ_DEFAULT_GENERATION_MODEL
 from backend.auth_store import (
     authenticate_user,
@@ -512,11 +513,32 @@ def auth_me(current_user: dict = Depends(require_current_user)) -> dict:
 
 @app.get("/api/admin/quiz-model-comparison")
 def admin_quiz_model_comparison(_admin: dict = Depends(require_admin_user)) -> dict:
-    """Admin-only: the latest offline Quiz model benchmark results.
+    """Admin-only: the latest stored Quiz model benchmark (config, progress, aggregates, raw runs)."""
+    return get_quiz_model_comparison()
 
-    Reads whatever was last stored by the benchmark script/notebook. Never
-    runs a benchmark and never touches the Quiz generation pipeline.
+
+class QuizModelBenchmarkRequest(BaseModel):
+    document_ids: list[str] = Field(min_length=1)
+    difficulty: Literal["easy", "medium", "difficult"] = "medium"
+    question_count: int = 12
+    runs: int = BENCHMARK_DEFAULT_RUNS
+
+
+@app.post("/api/admin/quiz-model-benchmark", status_code=202)
+def admin_run_quiz_model_benchmark(
+    request: QuizModelBenchmarkRequest, admin: dict = Depends(require_admin_user),
+) -> dict:
+    """Admin-only: start one sequential Qwen vs Gemma benchmark in the background.
+
+    Uses the admin's own documents and flashcards; benchmark quizzes are saved to the admin's
+    library (titled "[Benchmark] ...") so each run's quiz_id can be opened. 409 while one runs.
     """
+    try:
+        start_benchmark(admin["id"], request.document_ids, request.difficulty, request.question_count, request.runs)
+    except BenchmarkAlreadyRunning as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     return get_quiz_model_comparison()
 
 

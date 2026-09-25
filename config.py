@@ -31,8 +31,8 @@ LEGACY_GENERATED_QUIZZES_PATH = DATA_DIR / "generated_quizzes.json"
 LEGACY_QUIZ_ATTEMPTS_PATH = DATA_DIR / "quiz_attempts.json"
 LEGACY_QUIZ_EXPLANATIONS_PATH = DATA_DIR / "quiz_explanations.json"
 
-# Written offline by the Quiz model benchmark script/notebook, never by a live
-# web request. The admin Model Comparison tab only reads this file.
+# Latest admin Quiz model benchmark (Qwen 2.5 7B vs Gemma 3 12B): config, warm-ups, raw runs and
+# per-model aggregates. Written by backend/model_benchmark_service.py, read by Model Comparison.
 QUIZ_MODEL_BENCHMARK_RESULTS_PATH = _env_path(
     "AI_TUTOR_QUIZ_MODEL_BENCHMARK_RESULTS_PATH", DATA_DIR / "quiz_model_benchmark_results.json"
 )

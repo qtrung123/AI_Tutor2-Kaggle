@@ -2206,10 +2206,11 @@ def _generate_quiz_from_units(
         candidates_requested_total += requested
         # One fixed context window for every call so Ollama never reloads the model between them;
         # the evidence per call is bounded by context_budget whatever the document size.
+        temperature = 0.1 if first_call else 0.25
         llm = ChatOllama(
             model=model_id,
             reasoning=False,
-            temperature=0.1 if first_call else 0.25,
+            temperature=temperature,
             format=output_schema,
             num_ctx=QUIZ_NUM_CTX,
             num_predict=num_predict,
@@ -2322,7 +2323,8 @@ def _generate_quiz_from_units(
             "returned": len(candidates), "valid_added": added,
             "rejected": rejected_here, "rejected_by": codes_here,
             "excerpts": len(shown_units), "material_chars": material_chars, "prompt_chars": len(prompt),
-            "num_predict": num_predict,
+            "num_predict": num_predict, "temperature": temperature, "num_ctx": QUIZ_NUM_CTX,
+            "keep_alive": QUIZ_GENERATION_KEEP_ALIVE,
             "prompt_tokens": metadata.get("prompt_eval_count"), "generated_tokens": eval_count,
             "done_reason": metadata.get("done_reason"), "cut": cut,
             "salvaged": parse_report.get("salvaged"), "quote_keys": parse_report.get("quote_keys"),

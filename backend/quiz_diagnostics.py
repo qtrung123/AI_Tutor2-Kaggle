@@ -298,6 +298,9 @@ class QuizRunDiagnostics:
 
     def log_summary(self) -> dict:
         data = self.summary()
+        sink = _summary_sink.get()
+        if sink is not None:
+            sink.append(data)
         print(
             "[QUIZ][SUMMARY]\n"
             f"  request={self.request_id}\n"
@@ -357,6 +360,9 @@ class _NullDiagnostics:
 
 _NULL = _NullDiagnostics()
 _current: ContextVar[Any] = ContextVar("quiz_diagnostics_current", default=_NULL)
+# Optional in-memory collector for finished run summaries (used by the admin Quiz model benchmark,
+# see backend/model_benchmark_service.py). Unset by default, so normal requests only log.
+_summary_sink: ContextVar[list | None] = ContextVar("quiz_diagnostics_summary_sink", default=None)
 
 
 def get_current() -> "QuizRunDiagnostics | _NullDiagnostics":
@@ -375,3 +381,14 @@ def start_run(request_id: str, **meta: Any):
         yield diag
     finally:
         _current.reset(token)
+
+
+@contextmanager
+def capture_summaries():
+    """Collect the summary() dict of every run that finishes (success or failure) inside this block."""
+    collected: list[dict] = []
+    token = _summary_sink.set(collected)
+    try:
+        yield collected
+    finally:
+        _summary_sink.reset(token)

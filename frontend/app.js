@@ -756,6 +756,11 @@ async function setSelectedModel(modelId) {
   catch (error) { showToast(error.message || "Model could not be prepared."); }
 }
 
+const ADMIN_QUIZ_MODEL_BENCHMARK_API_URL = apiUrl("/api/admin/quiz-model-benchmark");
+const BENCHMARK_QUESTION_COUNTS = [12, 15, 18, 20];
+let benchmarkPollTimer = null;
+const benchmarkOpenRawRuns = new Set();
+
 function formatBenchmarkPercent(value) {
   return typeof value === "number" ? `${Math.round(value * 100)}%` : "—";
 }
@@ -768,17 +773,45 @@ function formatBenchmarkNumber(value, digits = 1) {
   return typeof value === "number" ? value.toFixed(digits) : "—";
 }
 
-function formatBenchmarkVram(value) {
-  return typeof value === "number" ? `${Math.round(value).toLocaleString()} MB` : "—";
+function formatBenchmarkMs(value) {
+  return typeof value === "number" ? formatBenchmarkSeconds(value / 1000) : "—";
+}
+
+function benchmarkCell(row, text, tag = "td") {
+  const cell = document.createElement(tag);
+  cell.textContent = text;
+  row.appendChild(cell);
+  return cell;
+}
+
+function benchmarkTable(headers) {
+  const wrap = document.createElement("div");
+  wrap.className = "summary-table-wrap";
+  const table = document.createElement("table");
+  table.className = "summary-table";
+  const headRow = document.createElement("tr");
+  headers.forEach((header) => benchmarkCell(headRow, header, "th"));
+  const thead = document.createElement("thead");
+  thead.appendChild(headRow);
+  const tbody = document.createElement("tbody");
+  table.append(thead, tbody);
+  wrap.appendChild(table);
+  return { wrap, tbody };
 }
 
 async function loadQuizModelComparison() {
   const view = document.getElementById("model-comparison-view");
   if (!view) return;
-  view.innerHTML = '<div class="empty-state">Loading benchmark results…</div>';
+  clearTimeout(benchmarkPollTimer);
+  if (!view.querySelector(".model-comparison-panel")) {
+    view.innerHTML = '<div class="empty-state">Loading benchmark results…</div>';
+  }
   try {
     const data = await fetchJson(ADMIN_QUIZ_MODEL_COMPARISON_API_URL);
     renderQuizModelComparison(view, data);
+    if (data.benchmark_status === "running" && document.body.dataset.page === "model-comparison") {
+      benchmarkPollTimer = setTimeout(loadQuizModelComparison, 5000);
+    }
   } catch (error) {
     view.innerHTML = "";
     const empty = document.createElement("div");
@@ -789,75 +822,229 @@ async function loadQuizModelComparison() {
 }
 
 function renderQuizModelComparison(view, data) {
-  view.innerHTML = "";
-  const panel = document.createElement("article");
-  panel.className = "panel model-comparison-panel";
+  let panel = view.querySelector(".model-comparison-panel");
+  if (!panel) {
+    view.innerHTML = "";
+    panel = document.createElement("article");
+    panel.className = "panel model-comparison-panel";
+    const heading = document.createElement("div");
+    heading.className = "panel-heading";
+    heading.innerHTML = "<div><p>Admin only</p><h2>Quiz Model Comparison</h2></div>";
+    const form = buildBenchmarkForm(data);
+    const results = document.createElement("div");
+    results.className = "model-comparison-results";
+    panel.append(heading, form, results);
+    view.appendChild(panel);
+  }
+  panel.querySelector(".benchmark-run-button").disabled = data.benchmark_status === "running";
+  renderBenchmarkResults(panel.querySelector(".model-comparison-results"), data);
+}
 
-  const heading = document.createElement("div");
-  heading.className = "panel-heading";
-  heading.innerHTML = "<div><p>Admin only</p><h2>Quiz Model Comparison</h2></div>";
-  panel.appendChild(heading);
-
-  const lastRun = document.createElement("p");
-  lastRun.className = "muted";
-  lastRun.textContent = data.generated_at
-    ? `Last benchmark: ${new Date(data.generated_at).toLocaleString()}`
-    : "Last benchmark: not run yet";
-  panel.appendChild(lastRun);
-
-  const wrap = document.createElement("div");
-  wrap.className = "summary-table-wrap";
-  const table = document.createElement("table");
-  table.className = "summary-table";
-  const thead = document.createElement("thead");
-  thead.innerHTML = (
-    "<tr><th>Model</th><th>Success Rate</th><th>Valid Question Rate</th><th>Grounding</th>"
-    + "<th>Avg Latency</th><th>Avg Retry</th><th>VRAM</th><th>Questions/min</th></tr>"
+function buildBenchmarkForm(data) {
+  const form = document.createElement("form");
+  form.className = "benchmark-form";
+  form.innerHTML = (
+    '<fieldset class="benchmark-documents"><legend>Documents</legend><p class="muted">Loading documents…</p></fieldset>'
+    + '<label>Difficulty <select name="difficulty"><option value="easy">Easy</option>'
+    + '<option value="medium" selected>Medium</option><option value="difficult">Difficult</option></select></label>'
+    + '<label>Questions <select name="question_count">'
+    + BENCHMARK_QUESTION_COUNTS.map((count) => `<option value="${count}">${count}</option>`).join("")
+    + "</select></label>"
+    + `<label>Runs per model per document <input name="runs" type="number" min="1" max="${data.defaults?.max_runs || 10}" value="${data.defaults?.runs || 3}"></label>`
+    + '<button class="primary-button benchmark-run-button" type="submit">Run benchmark</button>'
+    + '<p class="muted benchmark-form-status" role="status"></p>'
   );
-  table.appendChild(thead);
+  const fieldset = form.querySelector(".benchmark-documents");
+  fetchJson(DOCUMENTS_API_URL).then((documents) => {
+    fieldset.querySelector("p").remove();
+    if (!documents.length) {
+      const note = document.createElement("p");
+      note.className = "muted";
+      note.textContent = "No indexed documents. Upload one first.";
+      fieldset.appendChild(note);
+    }
+    documents.forEach((doc) => {
+      const label = document.createElement("label");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.name = "document_ids";
+      box.value = doc.id;
+      label.append(box, document.createTextNode(` ${doc.title || doc.id}`));
+      fieldset.appendChild(label);
+    });
+  }).catch((error) => { fieldset.querySelector("p").textContent = error.message || "Could not load documents."; });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const status = form.querySelector(".benchmark-form-status");
+    const documentIds = [...form.querySelectorAll('input[name="document_ids"]:checked')].map((box) => box.value);
+    if (!documentIds.length) { status.textContent = "Choose at least one document."; return; }
+    const button = form.querySelector(".benchmark-run-button");
+    button.disabled = true;
+    status.textContent = "Starting benchmark…";
+    try {
+      await fetchJson(ADMIN_QUIZ_MODEL_BENCHMARK_API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          document_ids: documentIds,
+          difficulty: form.elements.difficulty.value,
+          question_count: Number(form.elements.question_count.value),
+          runs: Number(form.elements.runs.value),
+        }),
+      });
+      status.textContent = "";
+      loadQuizModelComparison();
+    } catch (error) {
+      status.textContent = error.message || "Could not start the benchmark.";
+      button.disabled = false;
+    }
+  });
+  return form;
+}
 
-  const tbody = document.createElement("tbody");
+function renderBenchmarkResults(container, data) {
+  container.innerHTML = "";
+  const statusLine = document.createElement("p");
+  statusLine.className = "muted";
+  const progress = data.progress ? ` (${data.progress.completed}/${data.progress.total} runs)` : "";
+  const statusText = {
+    running: `Benchmark running${progress}…`,
+    interrupted: `Last benchmark was interrupted${progress}.`,
+    failed: `Last benchmark stopped early${progress}: ${data.error?.message || "unknown error"}`,
+  }[data.benchmark_status];
+  statusLine.textContent = statusText || (data.generated_at
+    ? `Last benchmark: ${new Date(data.generated_at).toLocaleString()}${progress}`
+    : "Last benchmark: not run yet");
+  container.appendChild(statusLine);
+
+  const config = data.config;
+  if (config) {
+    const summary = document.createElement("p");
+    summary.className = "muted benchmark-config";
+    const docs = (config.documents || []).map((doc) => `${doc.title} (${doc.flashcard_count} flashcards)`).join(", ");
+    summary.textContent = `Same inputs for every model: ${docs} · ${config.difficulty} · ${config.question_count} questions · `
+      + `${config.runs_per_model_per_document} runs/model/document · engine ${config.quiz_engine_version} · prompt ${config.quiz_prompt_version}`;
+    container.appendChild(summary);
+  }
+
+  const { wrap, tbody } = benchmarkTable([
+    "Model", "Runs", "Success Rate", "Final-question Rate", "Grounding", "Avg Latency", "p50", "p95",
+    "Avg Retries", "Avg tokens/s", "Failures", "Questions/min",
+  ]);
   (data.models || []).forEach((model) => {
     const row = document.createElement("tr");
-
-    const nameCell = document.createElement("td");
-    nameCell.appendChild(document.createTextNode(`${model.label} `));
+    const nameCell = benchmarkCell(row, `${model.label} `);
     const badge = document.createElement("span");
     const isProduction = model.status === "current_production";
     badge.className = `soft-badge ${isProduction ? "production" : "candidate"}`;
     badge.textContent = isProduction ? "Current Production" : "Benchmark Candidate";
     nameCell.appendChild(badge);
-    row.appendChild(nameCell);
-
     [
+      formatBenchmarkNumber(model.runs, 0),
       formatBenchmarkPercent(model.success_rate),
-      formatBenchmarkPercent(model.valid_question_rate),
+      formatBenchmarkPercent(model.final_question_rate),
       formatBenchmarkPercent(model.grounding_rate),
       formatBenchmarkSeconds(model.avg_latency_seconds),
+      formatBenchmarkSeconds(model.p50_latency_seconds),
+      formatBenchmarkSeconds(model.p95_latency_seconds),
       formatBenchmarkNumber(model.avg_retries),
-      formatBenchmarkVram(model.vram_mb),
+      formatBenchmarkNumber(model.avg_tokens_per_second),
+      formatBenchmarkNumber(model.failures, 0),
       formatBenchmarkNumber(model.questions_per_minute),
-    ].forEach((text) => {
-      const cell = document.createElement("td");
-      cell.textContent = text;
-      row.appendChild(cell);
-    });
-
+    ].forEach((text) => benchmarkCell(row, text));
     if (!model.measured) row.classList.add("model-comparison-unmeasured");
     tbody.appendChild(row);
   });
-  table.appendChild(tbody);
-  wrap.appendChild(table);
-  panel.appendChild(wrap);
+  container.appendChild(wrap);
 
-  if (!(data.models || []).some((model) => model.measured)) {
-    const note = document.createElement("p");
-    note.className = "muted";
-    note.textContent = "No benchmark data yet. Run the offline Quiz model benchmark script to populate this table.";
-    panel.appendChild(note);
+  const legend = document.createElement("p");
+  legend.className = "muted benchmark-legend";
+  legend.textContent = "Final-question rate = final questions / requested (failed runs count as 0). "
+    + "Grounding = validated candidates / (validated + grounding rejections). "
+    + "Latency = quiz pipeline time of successful measured runs; each model is pulled and loaded before its runs, "
+    + "and that cold start is shown separately below, never inside latency. No overall score is computed.";
+  container.appendChild(legend);
+
+  const warmups = data.warmups || [];
+  if (warmups.length) {
+    const title = document.createElement("h3");
+    title.className = "benchmark-subheading";
+    title.textContent = "Cold start (warm-up before measured runs)";
+    container.appendChild(title);
+    const cold = benchmarkTable(["Model", "Prepare / pull", "Load into memory", "Ollama load", "Cold start total", "Result"]);
+    warmups.forEach((warmup) => {
+      const row = document.createElement("tr");
+      const label = (data.models || []).find((model) => model.model_id === warmup.model_id)?.label || warmup.model_id;
+      [
+        label,
+        `${formatBenchmarkMs(warmup.model_prepare_ms)}${warmup.pulled ? " (pulled)" : ""}`,
+        formatBenchmarkMs(warmup.warm_ms),
+        formatBenchmarkMs(warmup.ollama_load_ms),
+        formatBenchmarkMs(warmup.cold_start_ms),
+        warmup.success ? "Ready" : `Failed: ${warmup.error?.message || "unknown error"}`,
+      ].forEach((text) => benchmarkCell(row, text));
+      if (!warmup.success) row.classList.add("benchmark-run-failed");
+      cold.tbody.appendChild(row);
+    });
+    container.appendChild(cold.wrap);
   }
 
-  view.appendChild(panel);
+  if (!(data.models || []).some((model) => model.measured) && data.benchmark_status !== "running") {
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent = "No benchmark data yet. Choose documents above and run the benchmark.";
+    container.appendChild(note);
+  }
+
+  (data.models || []).forEach((model) => {
+    const runs = (data.runs || []).filter((run) => run.model_id === model.model_id);
+    if (!runs.length) return;
+    const details = document.createElement("details");
+    details.className = "benchmark-raw-runs";
+    details.open = benchmarkOpenRawRuns.has(model.model_id);
+    details.addEventListener("toggle", () => {
+      if (details.open) benchmarkOpenRawRuns.add(model.model_id);
+      else benchmarkOpenRawRuns.delete(model.model_id);
+    });
+    const summary = document.createElement("summary");
+    summary.textContent = `Raw runs — ${model.label} (${runs.length})`;
+    details.appendChild(summary);
+    const raw = benchmarkTable([
+      "Document", "Run", "Result", "Final / Requested", "Validated", "Rejected", "Latency", "Retries",
+      "LLM calls", "Tokens in / out", "tokens/s", "Load in run", "Quiz", "Error",
+    ]);
+    runs.forEach((run) => {
+      const row = document.createElement("tr");
+      [
+        run.document_title || run.document_id,
+        run.run_number,
+        run.success ? "Success" : "Failed",
+        `${run.final_count ?? "—"} / ${run.requested_count ?? "—"}`,
+        run.validated_count ?? "—",
+        run.rejected_count ?? "—",
+        typeof run.total_ms === "number" ? formatBenchmarkSeconds(run.total_ms / 1000) : "—",
+        run.retries ?? "—",
+        run.llm_calls ?? "—",
+        `${run.prompt_tokens ?? "—"} / ${run.generated_tokens ?? "—"}`,
+        formatBenchmarkNumber(run.tokens_per_second),
+        typeof run.ollama_load_ms === "number" ? `${run.ollama_load_ms} ms` : "—",
+        run.quiz_id || "—",
+        run.error ? `${run.error.type}: ${run.error.message}` : "",
+      ].forEach((text) => benchmarkCell(row, String(text)));
+      if (!run.success) row.classList.add("benchmark-run-failed");
+      raw.tbody.appendChild(row);
+    });
+    details.appendChild(raw.wrap);
+    const json = document.createElement("details");
+    const jsonSummary = document.createElement("summary");
+    jsonSummary.textContent = "All recorded fields (JSON)";
+    const pre = document.createElement("pre");
+    pre.className = "benchmark-raw-json";
+    pre.textContent = JSON.stringify(runs, null, 2);
+    json.append(jsonSummary, pre);
+    details.appendChild(json);
+    container.appendChild(details);
+  });
 }
 
 function setSessionTab(tab) {

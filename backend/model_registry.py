@@ -247,3 +247,31 @@ def prepare_generation_model(model_id: str | None) -> dict:
         "model_id": model_id, "status": "ready", "ready": True, "model_prepare_ms": prepare_ms,
         **({"prepared": True} if prepared else {}),
     }
+
+
+def warm_generation_model(model_id: str, num_ctx: int, keep_alive: str) -> dict:
+    """Load the resolved (already pulled) model into memory without generating anything.
+
+    Ollama loads a model on an empty-prompt /api/generate request. `num_ctx` must match what the
+    following generation calls send: Ollama reloads the runner when the context size changes, which
+    would move load time back into the first measured call. Used by the admin Quiz model benchmark
+    so load time is measured here, separately, and never inside a measured run. Raises on failure.
+    `warm_ms` is wall-clock time; `ollama_load_ms` is Ollama's own load_duration, or None when the
+    response does not report it.
+    """
+    model = resolve_generation_model(model_id)
+    started = time.perf_counter()
+    with httpx.Client(timeout=900) as client:
+        response = client.post(f"{OLLAMA_BASE_URL}/api/generate", json={
+            "model": model, "prompt": "", "stream": False, "keep_alive": keep_alive,
+            "options": {"num_ctx": num_ctx},
+        })
+        response.raise_for_status()
+        body = response.json()
+    warm_ms = round((time.perf_counter() - started) * 1000)
+    load_duration = body.get("load_duration") if isinstance(body, dict) else None
+    print(f"[model-warm] model_id={model_id} num_ctx={num_ctx} warm_ms={warm_ms}")
+    return {
+        "model_id": model_id, "warm_ms": warm_ms,
+        "ollama_load_ms": round(load_duration / 1_000_000) if isinstance(load_duration, (int, float)) else None,
+    }

@@ -2355,6 +2355,16 @@ body[data-page="session"] .session-pane.active[data-session-pane="material"] #or
 .soft-badge.production{background:#e1f5e7;color:var(--navy-2);margin-left:8px}
 .soft-badge.candidate{background:#eef2ef;color:var(--muted);margin-left:8px}
 .model-comparison-unmeasured td{color:var(--muted)}
+.benchmark-form{display:flex;flex-wrap:wrap;gap:12px 18px;align-items:flex-end;margin:0 0 18px}
+.benchmark-form label{display:flex;flex-direction:column;gap:4px;font-size:13px}
+.benchmark-documents{flex-basis:100%;display:flex;flex-wrap:wrap;gap:8px 16px;border:1px solid var(--session-line);border-radius:10px;padding:10px 12px;margin:0}
+.benchmark-documents label{flex-direction:row;align-items:center;gap:6px}
+.benchmark-form-status{flex-basis:100%;margin:0}
+.benchmark-raw-runs{margin-top:14px}
+.benchmark-subheading{margin:18px 0 8px;font-size:15px}
+.benchmark-raw-runs summary{cursor:pointer;font-weight:700}
+.benchmark-run-failed td{color:#b42318}
+.benchmark-raw-json{max-height:360px;overflow:auto;font-size:12px;background:#f5f6fb;padding:10px;border-radius:8px;white-space:pre-wrap;word-break:break-word}
 
 /* Flashcards: iOS-inspired -- white surfaces, large rounded shapes, generous whitespace, one
    clearly-lit state visible at a time (empty / preparing-generating / ready deck / error). */
