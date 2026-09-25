@@ -4,13 +4,13 @@ import re
 
 from langchain_ollama import ChatOllama
 
+from backend.document_retrieval import get_topic_chunks
 from backend.flashcard_store import get_compatible_flashcards, save_flashcards
 from backend.indexed_document_store import get_indexed_document
 from backend.llm_json import parse_json_object
 from backend.model_registry import resolve_generation_model
-# Read-only reuse of already-proven, generic (non-document-specific) text-quality helpers --
-# quiz_service.py itself is not modified by the flashcard fix.
-from backend.quiz_service import _clean_inline_text, _reject_unsafe_final_text, get_topic_chunks
+# Generic (non-document-specific) text-quality helpers shared with the Quiz pipeline.
+from backend.text_safety import _clean_inline_text, _reject_unsafe_final_text
 from config import DEFAULT_GENERATION_MODEL, FLASHCARD_GENERATION_RETRY_LIMIT, FLASHCARD_MAX_CARDS_PER_TOPIC
 
 # v2: fixes the English-front/Vietnamese-back bilingual bug, the whitespace-corruption bug, and

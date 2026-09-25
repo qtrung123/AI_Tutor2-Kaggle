@@ -11,7 +11,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from backend.topic_extractor import TopicExtractor, normalize_heading
 from backend.ingest import add_topic_metadata, clean_documents, delete_stale_source_vectors, load_single_file, split_documents
 from backend.rag_service import _chroma_filter
-from backend.quiz_service import _result_to_chunks
+from backend.document_retrieval import _result_to_chunks
 from config import CHUNK_OVERLAP, CHUNK_SIZE
 
 

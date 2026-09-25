@@ -99,7 +99,7 @@ class QuizV2Tests(unittest.TestCase):
         FakeBatchModel.payloads = list(payloads)
         saved = []
         with (
-            patch("backend.quiz_service.get_topic_chunks", return_value=[CHUNK]),
+            patch("backend.document_retrieval.get_topic_chunks", return_value=[CHUNK]),
             patch("backend.quiz_service.ChatOllama", FakeBatchModel),
             patch("backend.quiz_service.get_cached_concept_plan", return_value=None),
             patch("backend.quiz_service.save_cached_concept_plan"),
@@ -572,7 +572,7 @@ class QuizV2Tests(unittest.TestCase):
             {"questions": []}, {"questions": []},
         ]
         with (
-            patch("backend.quiz_service.get_topic_chunks", return_value=[CHUNK]),
+            patch("backend.document_retrieval.get_topic_chunks", return_value=[CHUNK]),
             patch("backend.quiz_service.ChatOllama", FakeBatchModel),
             patch("backend.quiz_service.save_quiz_validation_event"),
             patch("backend.quiz_service.save_quiz", side_effect=lambda _d, _v, quiz, _o: quiz) as save,
@@ -600,7 +600,7 @@ class QuizV2Tests(unittest.TestCase):
             question["slot_id"] = "invented_slot"
         FakeBatchModel.payloads = [{"questions": questions}]
         with (
-            patch("backend.quiz_service.get_topic_chunks", return_value=[CHUNK]),
+            patch("backend.document_retrieval.get_topic_chunks", return_value=[CHUNK]),
             patch("backend.quiz_service.ChatOllama", FakeBatchModel),
             patch("backend.quiz_service.save_quiz_validation_event"),
             patch("backend.quiz_service.save_quiz", side_effect=lambda _d, _x, quiz, _o: quiz) as save,

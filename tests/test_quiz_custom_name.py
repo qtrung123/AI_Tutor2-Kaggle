@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from backend import quiz_service, quiz_store
+from backend import document_retrieval, quiz_service, quiz_store
 from backend.auth_store import LEGACY_USER_ID
 from backend.main import QuizGenerateRequest, QuizRegenerateRequest, app
 from backend.quiz_service import (
@@ -108,7 +108,7 @@ def run_v2(quiz_title, question_count=10):
     LLM and concept-plan cache mocked out."""
     FakeBatchModel.payloads = [{"questions": [raw_question(index) for index in range(question_count)]}]
     with (
-        patch.object(quiz_service, "get_topic_chunks", return_value=[CHUNK]),
+        patch.object(document_retrieval, "get_topic_chunks", return_value=[CHUNK]),
         patch.object(quiz_service, "ChatOllama", FakeBatchModel),
         patch.object(quiz_service, "get_cached_concept_plan", return_value=None),
         patch.object(quiz_service, "save_cached_concept_plan"),

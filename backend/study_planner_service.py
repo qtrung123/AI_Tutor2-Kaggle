@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from backend import quiz_store, study_planner_store
 from backend.document_study_state import get_document_study_state
 from backend.indexed_document_store import get_indexed_document
-from backend.quiz_service import get_topic_chunks
+from backend.document_retrieval import get_topic_chunks
 from backend.study_scheduler_contracts import MaterialContext, SchedulingContext
 
 MIN_BLOCK_MINUTES = 30

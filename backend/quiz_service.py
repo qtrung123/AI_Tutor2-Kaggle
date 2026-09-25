@@ -7,8 +7,7 @@ from collections import Counter
 from pathlib import Path
 from uuid import uuid4
 
-from langchain_chroma import Chroma
-from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_ollama import ChatOllama
 
 from backend.quiz_store import (
     delete_document_attempts,
@@ -82,7 +81,7 @@ from backend.assessment_planner import (
     PLANNER_VERSION,
     build_topic_plan,
     is_valid_concept_plan,
-    resolve_concept_evidence, resolve_topic_evidence,
+    resolve_concept_evidence,
     planner_input_fingerprint,
 )
 from backend.model_registry import describe_generation_model
@@ -92,15 +91,19 @@ from backend.rag_service import explain_quiz_answer
 from backend import quiz_diagnostics
 from backend.auth_store import LEGACY_USER_ID
 from backend.indexed_document_store import list_indexed_documents as load_owned_documents
-from backend.ingest import migrate_legacy_vector_ownership
+from backend.document_retrieval import get_document_chunks, get_schema_topic_evidence, get_topic_chunks
+from backend.text_safety import (
+    _RAW_EMAIL,
+    _RAW_MESSAGE_HEADER,
+    _clean_inline_text,
+    _looks_like_raw_chunk,
+    _reject_unsafe_final_text,
+)
 from config import (
     CHAT_MODEL,
-    COLLECTION_NAME,
-    EMBEDDING_MODEL,
     QUIZ_PROMPT_PATH,
     QUIZ_GENERATION_RETRY_LIMIT,
     QUIZ_QUALITY_RETRY_LIMIT,
-    VECTORSTORE_DIR,
 )
 
 GENERATION_PROMPT_VERSION = "topic_mcq_v2_backend_evidence"
@@ -334,110 +337,6 @@ def _get_or_build_topic_plan(document: dict, topic: dict, chunks: list[dict], ow
     return plan, {"cache_hit": False, "lookup_ms": lookup_ms, "build_ms": build_ms}
 
 
-def _load_vectorstore() -> Chroma:
-    embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
-    store = Chroma(
-        persist_directory=str(VECTORSTORE_DIR),
-        collection_name=COLLECTION_NAME,
-        embedding_function=embeddings,
-    )
-    migrate_legacy_vector_ownership(store)
-    return store
-
-
-def _source_matches(source: str, document_id: str) -> bool:
-    return Path(str(source)).name == document_id or str(source) == document_id
-
-
-def _chunk_index_from_id(raw_id: str, fallback: int) -> int:
-    match = re.search(r"_(\d+)$", str(raw_id))
-    if match:
-        return int(match.group(1))
-    return fallback
-
-
-def _result_to_chunks(result: dict, document_id: str, filter_source: bool) -> list[dict]:
-    chunks = []
-    ids = result.get("ids", []) or []
-    documents = result.get("documents", []) or []
-    metadatas = result.get("metadatas", []) or []
-
-    for fallback_index, (raw_id, content, metadata) in enumerate(zip(ids, documents, metadatas)):
-        metadata = metadata or {}
-        if filter_source and not _source_matches(metadata.get("source", ""), document_id):
-            continue
-
-        chunk_index = _chunk_index_from_id(raw_id, fallback_index)
-        chunks.append(
-            {
-                "content": content,
-                "metadata": {
-                    **metadata,
-                    "chunk": chunk_index,
-                    # vector_id is internal; chunk_id is the canonical persisted provenance ID.
-                    "vector_id": str(raw_id),
-                    "chunk_id": metadata.get("chunk_id"),
-                },
-            }
-        )
-
-    return sorted(chunks, key=lambda item: int((item.get("metadata") or {}).get("chunk", 0)))
-
-
-def get_topic_chunks(document_id: str, topic_id: str, owner_id: str = LEGACY_USER_ID) -> list[dict]:
-    """
-    Load all chunks for the selected document.
-
-    Quiz generation intentionally does not use semantic top-k retrieval. It
-    fetches the selected document's chunks and samples from the whole ordered
-    list so the quiz can cover beginning, middle, and end material.
-    """
-    vectorstore = _load_vectorstore()
-
-    try:
-        result = vectorstore.get(
-            where={"$and": [{"owner_id": owner_id}, {"document_id": document_id}, {"topic_id": topic_id}]}
-        )
-        chunks = _result_to_chunks(result, document_id, filter_source=False)
-        if chunks:
-            return chunks
-    except Exception:
-        pass
-
-    result = vectorstore.get(where={"owner_id": owner_id}, limit=10000)
-    return [
-        chunk for chunk in _result_to_chunks(result, document_id, filter_source=True)
-        if chunk["metadata"].get("owner_id") == owner_id
-        and chunk["metadata"].get("document_id", chunk["metadata"].get("source")) == document_id
-        and chunk["metadata"].get("topic_id") == topic_id
-    ]
-
-
-def get_document_chunks(document_id: str, owner_id: str = LEGACY_USER_ID) -> list[dict]:
-    """Load ordered document chunks for boundary-overlap evidence membership."""
-    vectorstore = _load_vectorstore()
-    try:
-        result = vectorstore.get(where={"$and": [{"owner_id": owner_id}, {"document_id": document_id}]})
-        chunks = _result_to_chunks(result, document_id, filter_source=False)
-        if chunks:
-            return chunks
-    except Exception:
-        pass
-    result = vectorstore.get(where={"owner_id": owner_id}, limit=10000)
-    return [
-        chunk for chunk in _result_to_chunks(result, document_id, filter_source=True)
-        if chunk["metadata"].get("owner_id") == owner_id
-        and chunk["metadata"].get("document_id", chunk["metadata"].get("source")) == document_id
-    ]
-
-
-def get_schema_topic_evidence(document_id: str, topic: dict, owner_id: str = LEGACY_USER_ID) -> list[dict]:
-    """Retrieve owner/document-scoped evidence and isolate it to one schema boundary."""
-    if not isinstance(topic.get("boundary"), dict):
-        return get_topic_chunks(document_id, str(topic["topic_id"]), owner_id)
-    return resolve_topic_evidence(topic, get_document_chunks(document_id, owner_id))
-
-
 def _format_context(chunks: list[dict]) -> str:
     parts = []
     for index, chunk in enumerate(chunks, start=1):
@@ -655,11 +554,6 @@ def _normalize_options(raw_options) -> list[str]:
     raise ValueError("options must be a list or object")
 
 
-def _clean_inline_text(value: str) -> str:
-    """Collapse model/newline artifacts while keeping code-like text readable."""
-    return re.sub(r"\s+", " ", str(value or "")).strip()
-
-
 def _option_text(option: str) -> str:
     return strip_leading_option_label(option)
 
@@ -677,38 +571,6 @@ def _normalize_true_false_label(option: str) -> str:
     if lowered == "false":
         return "False"
     return option
-
-
-def _looks_like_raw_chunk(option: str) -> bool:
-    text = _option_text(option)
-    words = text.split()
-    if len(words) > 32:
-        return True
-    if len(text) > 190:
-        return True
-    if text.count(".") >= 3 and len(words) > 22:
-        return True
-    return False
-
-
-_FORBIDDEN_FINAL_PHRASES = ("evidence angle", "selected concept", "source-backed")
-_RAW_MESSAGE_HEADER = re.compile(
-    r"(?:^|\s)(?:from|to|cc|bcc|subject|date|reply-to|message-id)\s*:\s*\S+",
-    flags=re.IGNORECASE,
-)
-_RAW_EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", flags=re.IGNORECASE)
-
-
-def _reject_unsafe_final_text(value: str, *, field: str) -> None:
-    """Keep prompt scaffolding and copied message/evidence artifacts out of saved quizzes."""
-    text = _clean_inline_text(value)
-    lowered = text.lower()
-    if any(phrase in lowered for phrase in _FORBIDDEN_FINAL_PHRASES):
-        raise ValueError(f"{field} contains forbidden generation scaffolding.")
-    if _RAW_MESSAGE_HEADER.search(text) or _RAW_EMAIL.search(text):
-        raise ValueError(f"{field} contains a raw header or email address.")
-    if _looks_like_raw_chunk(text):
-        raise ValueError(f"{field} contains long or malformed raw evidence text.")
 
 
 def _validate_question_quality(

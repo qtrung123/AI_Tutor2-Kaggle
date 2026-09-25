@@ -9,7 +9,7 @@ from langchain_ollama import ChatOllama
 from backend.indexed_document_store import get_indexed_document
 from backend.llm_json import parse_json_object
 from backend.model_registry import resolve_generation_model
-from backend.quiz_service import get_schema_topic_evidence, get_topic_chunks
+from backend.document_retrieval import get_schema_topic_evidence, get_topic_chunks
 from backend.summary_store import get_compatible_summary, save_summary
 from config import DEFAULT_GENERATION_MODEL
 

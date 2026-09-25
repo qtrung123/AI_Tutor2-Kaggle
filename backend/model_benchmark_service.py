@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from backend import quiz_diagnostics
+from backend.flashcard_service import FLASHCARD_VERSION
 from backend.flashcard_store import get_latest_flashcard_set_info, list_flashcards
 from backend.model_benchmark_store import load_benchmark_state, save_benchmark_state
 from backend.model_registry import (
@@ -92,8 +93,6 @@ def _sha256(value) -> str:
 def flashcard_snapshot(document: dict, owner_id: str) -> dict:
     """The flashcards the live pipeline reads for this document (same lookup as
     quiz_service._flashcard_coverage_hints), reduced to a count and a content hash."""
-    from backend.flashcard_service import FLASHCARD_VERSION   # flashcard_service imports quiz_service
-
     info = get_latest_flashcard_set_info(
         owner_id, document["id"], str(document.get("hash") or ""), int(document.get("topic_schema_version") or 0),
         FLASHCARD_VERSION,
