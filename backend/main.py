@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import httpx
@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from backend.api.auth import router as auth_router
 from backend.api.conversations import router as conversations_router
+from backend.api.flashcards import router as flashcards_router
 from backend.api.learning import router as learning_router
 from backend.api.planner_legacy import router as planner_legacy_router
 from backend.api.planner_v2 import router as planner_v2_router
@@ -38,8 +39,7 @@ from backend.conversation_store import remove_source_from_conversations
 from backend.rag_service import list_uploaded_sources
 from backend.model_registry import list_generation_models, prepare_generation_model, resolve_generation_model
 from backend.summary_store import delete_document_summaries
-from backend.flashcard_service import FlashcardGenerationError, authoritative_card_fields, generate_flashcards
-from backend.flashcard_store import add_flashcard, delete_document_flashcards, delete_flashcard, update_flashcard
+from backend.flashcard_store import delete_document_flashcards
 from backend import study_planner_store
 from backend.model_comparison_service import get_quiz_model_comparison
 from backend.model_benchmark_service import DEFAULT_RUNS as BENCHMARK_DEFAULT_RUNS, BenchmarkAlreadyRunning, start_benchmark
@@ -112,25 +112,6 @@ class DocumentSummary(BaseModel):
     title: str
     chunks: int
     topics: list[dict] = Field(default_factory=list)
-
-
-class FlashcardGenerateRequest(BaseModel):
-    model_id: Optional[str] = None
-    language: Optional[str] = None
-
-
-class FlashcardCreateRequest(BaseModel):
-    set_id: str
-    topic_id: str
-    subtopic_id: Optional[str] = None
-    front: str = Field(min_length=1, max_length=1000)
-    back: str = Field(min_length=1, max_length=4000)
-
-
-class FlashcardUpdateRequest(BaseModel):
-    front: Optional[str] = Field(default=None, min_length=1, max_length=1000)
-    back: Optional[str] = Field(default=None, min_length=1, max_length=4000)
-    is_favorite: Optional[bool] = None
 
 
 class QuizGenerateRequest(BaseModel):
@@ -548,80 +529,7 @@ def quiz_delete(quiz_id: str, current_user: dict = Depends(require_current_user)
 app.include_router(summary_router)
 
 
-@app.get("/api/flashcards/{document_id}")
-def flashcards_detail(document_id: str, topic_ids: list[str] | None = Query(default=None),
-                      model_id: Optional[str] = None, language: Optional[str] = None, cache_only: bool = False,
-                      current_user: dict = Depends(require_current_user)) -> dict:
-    """Reuse or generate grounded cards from existing owner-scoped indexed chunks.
-
-    With cache_only=true nothing is generated: missing cards are reported as status "not_generated".
-    """
-    try:
-        if cache_only:
-            # A pure existence check never prepares/pulls anything.
-            return generate_flashcards(current_user["id"], document_id, topic_ids=topic_ids, model_id=model_id,
-                                       language=language, cache_only=True)
-        prepare_generation_model(model_id)
-        return generate_flashcards(current_user["id"], document_id, topic_ids=topic_ids, model_id=model_id, language=language)
-    except FlashcardGenerationError as error:
-        # Technical detail (model/runtime failure, e.g. an Ollama repeat-limit abort or malformed
-        # JSON) stays server-side; the client only ever sees the safe, model-agnostic message.
-        print(f"[flashcards] generation failed for document_id={document_id}: {error.technical_message}")
-        raise HTTPException(status_code=502, detail=error.safe_message) from error
-    except ValueError as error:
-        raise HTTPException(status_code=404 if str(error) == "Document not found." else 400, detail=str(error)) from error
-    except Exception as error:
-        print(f"[flashcards] unexpected failure for document_id={document_id}: {error}")
-        raise HTTPException(status_code=500, detail=FlashcardGenerationError.SAFE_MESSAGE) from error
-
-
-@app.post("/api/flashcards/{document_id}/regenerate")
-def flashcards_regenerate(document_id: str, request: FlashcardGenerateRequest,
-                          current_user: dict = Depends(require_current_user)) -> dict:
-    """Explicitly generate and persist a fresh flashcard set (bypasses the cache lookup)."""
-    try:
-        prepare_generation_model(request.model_id)
-        return generate_flashcards(current_user["id"], document_id, model_id=request.model_id,
-                                   language=request.language, regenerate=True)
-    except FlashcardGenerationError as error:
-        print(f"[flashcards] regeneration failed for document_id={document_id}: {error.technical_message}")
-        raise HTTPException(status_code=502, detail=error.safe_message) from error
-    except ValueError as error:
-        raise HTTPException(status_code=404 if str(error) == "Document not found." else 400, detail=str(error)) from error
-    except Exception as error:
-        print(f"[flashcards] unexpected regeneration failure for document_id={document_id}: {error}")
-        raise HTTPException(status_code=500, detail=FlashcardGenerationError.SAFE_MESSAGE) from error
-
-
-@app.post("/api/flashcards/{document_id}/cards")
-def flashcard_create(document_id: str, request: FlashcardCreateRequest,
-                     current_user: dict = Depends(require_current_user)) -> dict:
-    try:
-        identity = authoritative_card_fields(current_user["id"], document_id, request.topic_id, request.subtopic_id)
-        return add_flashcard(current_user["id"], document_id, request.set_id, {
-            **identity, "front": request.front.strip(), "back": request.back.strip(), "source_chunk_ids": [],
-        })
-    except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-
-
-@app.patch("/api/flashcards/{document_id}/cards/{flashcard_id}")
-def flashcard_update(document_id: str, flashcard_id: str, request: FlashcardUpdateRequest,
-                     current_user: dict = Depends(require_current_user)) -> dict:
-    try:
-        return update_flashcard(current_user["id"], document_id, flashcard_id, request.model_dump(exclude_none=True))
-    except ValueError as error:
-        raise HTTPException(status_code=404 if str(error) == "Flashcard not found." else 400, detail=str(error)) from error
-
-
-@app.delete("/api/flashcards/{document_id}/cards/{flashcard_id}")
-def flashcard_delete(document_id: str, flashcard_id: str,
-                     current_user: dict = Depends(require_current_user)) -> dict:
-    try:
-        delete_flashcard(current_user["id"], document_id, flashcard_id)
-        return {"deleted": flashcard_id}
-    except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
+app.include_router(flashcards_router)
 
 
 @app.get("/api/quiz-history")

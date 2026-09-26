@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import patch
 
-from backend import main
+from backend.api import flashcards as flashcards_api
 from backend.api import summary as summary_api
 
 USER = {"id": "user-1"}
@@ -23,14 +23,14 @@ class OnDemandEndpointTests(unittest.TestCase):
             prepare.assert_called_once_with("qwen-2.5-7b")
 
     def test_flashcards_lookup_is_cache_only_and_plain_get_still_generates(self):
-        with patch.object(main, "generate_flashcards", return_value={"status": "not_generated"}) as service, \
-             patch.object(main, "prepare_generation_model") as prepare:
-            main.flashcards_detail("doc.pdf", topic_ids=None, model_id="qwen-2.5-7b", language="auto", cache_only=True, current_user=USER)
+        with patch.object(flashcards_api, "generate_flashcards", return_value={"status": "not_generated"}) as service, \
+             patch.object(flashcards_api, "prepare_generation_model") as prepare:
+            flashcards_api.flashcards_detail("doc.pdf", topic_ids=None, model_id="qwen-2.5-7b", language="auto", cache_only=True, current_user=USER)
             service.assert_called_once_with("user-1", "doc.pdf", topic_ids=None, model_id="qwen-2.5-7b", language="auto", cache_only=True)
             prepare.assert_not_called()   # a pure existence check never prepares/pulls anything
-        with patch.object(main, "generate_flashcards", return_value={}) as service, \
-             patch.object(main, "prepare_generation_model") as prepare:
-            main.flashcards_detail("doc.pdf", topic_ids=None, model_id="qwen-2.5-7b", language="auto", current_user=USER)
+        with patch.object(flashcards_api, "generate_flashcards", return_value={}) as service, \
+             patch.object(flashcards_api, "prepare_generation_model") as prepare:
+            flashcards_api.flashcards_detail("doc.pdf", topic_ids=None, model_id="qwen-2.5-7b", language="auto", current_user=USER)
             service.assert_called_once_with("user-1", "doc.pdf", topic_ids=None, model_id="qwen-2.5-7b", language="auto")
             prepare.assert_called_once_with("qwen-2.5-7b")
 
@@ -48,10 +48,10 @@ class OnDemandEndpointTests(unittest.TestCase):
         anyway with a different model."""
         for route_module, endpoint_call in (
             (summary_api, lambda: summary_api.summary_detail("doc.pdf", model_id="gemma3-12b", current_user=USER)),
-            (main, lambda: main.flashcards_detail("doc.pdf", topic_ids=None, model_id="glm4-9b", language="auto", current_user=USER)),
+            (flashcards_api, lambda: flashcards_api.flashcards_detail("doc.pdf", topic_ids=None, model_id="glm4-9b", language="auto", current_user=USER)),
         ):
             with patch.object(summary_api, "generate_document_summary", return_value={}), \
-                 patch.object(main, "generate_flashcards", return_value={}), \
+                 patch.object(flashcards_api, "generate_flashcards", return_value={}), \
                  patch.object(route_module, "prepare_generation_model", side_effect=ValueError("boom")) as prepare:
                 with self.assertRaises(Exception):
                     endpoint_call()
