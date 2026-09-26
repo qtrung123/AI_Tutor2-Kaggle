@@ -538,7 +538,7 @@ def _flashcard_coverage_hints(document: dict, owner_id: str) -> list[str]:
     """Compact terms from the document's current persisted flashcards (coverage hints only; see
     quiz_units.flashcard_hint_terms). No flashcards, or any read problem -> no hints."""
     try:
-        from backend.flashcard_service import FLASHCARD_VERSION   # flashcard_service imports this module
+        from backend.flashcard_service import FLASHCARD_VERSION   # inside the try: any failure means no hints
         info = get_latest_flashcard_set_info(
             owner_id, document["id"], str(document.get("hash") or ""), int(document.get("topic_schema_version") or 0),
             FLASHCARD_VERSION,

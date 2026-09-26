@@ -39,7 +39,7 @@ class FlashcardGenerationError(ValueError):
     """Structured flashcard-generation failure.
 
     `str(error)` stays the precise technical message (existing callers/tests match on it, e.g. a
-    missing topic_id), but it is never sent to the client as-is: backend/main.py catches this type
+    missing topic_id), but it is never sent to the client as-is: backend/api/flashcards.py catches this type
     and responds with `SAFE_MESSAGE` instead, keeping `technical_message` (and `reason`) for
     logs/debugging only.
     """

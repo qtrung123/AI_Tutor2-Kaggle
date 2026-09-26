@@ -94,19 +94,22 @@ FastAPI (127.0.0.1:8000)
 ```text
 python-ollama-rag/
 ├── backend/
-│   ├── main.py                 # FastAPI request models and routes
+│   ├── main.py                 # FastAPI app: CORS, system/admin routes, router includes
+│   ├── api/                    # HTTP routers per feature (auth, documents, quiz, planner, ...)
+│   ├── *_service.py            # Feature business logic (quiz, summary, flashcards, planner, ...)
+│   ├── *_store.py              # SQLite persistence per feature
 │   ├── ingest.py               # Document loading, chunking, indexing, and deletion
 │   ├── rag_service.py          # Chat RAG and quiz explanation RAG
-│   ├── conversation_store.py   # SQLite conversation persistence
-│   ├── quiz_service.py         # Quiz generation, validation, scoring, and history
-│   ├── quiz_store.py           # Persistent quiz, attempt, and explanation storage
 │   └── __init__.py
 ├── frontend/
 │   ├── index.html              # Application layout
 │   ├── styles.css              # Styling and responsive layout
-│   ├── app.js                  # Frontend state and API integration
+│   ├── js/                     # Feature scripts (api, state, quiz, planner, ...), loaded before app.js
+│   ├── app.js                  # DOM wiring, event listeners and startup
 │   ├── server.js               # Static development server
 │   └── package.json
+├── deployment/                 # Kaggle startup, nginx and persistence scripts
+├── docs/ARCHITECTURE.md        # Architecture guide (Vietnamese)
 ├── prompts/
 │   ├── rag_prompt.txt          # Grounded chat instructions
 │   └── quiz_prompt.txt         # Quiz generation instructions

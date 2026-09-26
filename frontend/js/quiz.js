@@ -172,7 +172,7 @@ async function requestGeneratedQuiz(request) {
 
 // With quizId, the backend loads exactly that quiz artifact -- never a different (e.g. newer)
 // quiz sharing the same document/topic/difficulty slot. Required now that several quizzes can
-// share one slot (see backend/quiz_service.load_quiz_with_attempt).
+// share one slot (see backend/quiz_attempt_service.load_quiz_with_attempt).
 async function requestQuizDetail(documentId, quizId) {
   const query = new URLSearchParams({ difficulty: selectedDifficulty(), topic_id: selectedTopicId() });
   if (quizId) query.set("quiz_id", quizId);
@@ -220,7 +220,7 @@ async function requestQuizRegeneration(documentId, request) {
 }
 
 // `payload` carries quiz_id explicitly (never omitted for a live caller -- see
-// backend/quiz_service.update_quiz_progress, which never falls back to "the newest quiz in this
+// backend/quiz_attempt_service.update_quiz_progress, which never falls back to "the newest quiz in this
 // slot" once quiz_id is given) plus whichever of question_id/selected_answer/current_question_index
 // changed.
 async function requestQuizProgress(payload, quiz = currentQuiz) {

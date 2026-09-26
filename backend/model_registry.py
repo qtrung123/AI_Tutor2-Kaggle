@@ -222,7 +222,7 @@ def prepare_generation_model(model_id: str | None) -> dict:
 
     Reused as the single "make sure this model is ready" choke point: the frontend calls it (via
     `/api/models/{id}/prepare`) the moment the Study Session selector changes, and every generation
-    route in backend/main.py (Quiz, Summary, Flashcards, chat) also calls it right before generating,
+    route in backend/api/ (Quiz, Summary, Flashcards, chat) also calls it right before generating,
     so a lazily-pulled model - anything but the Kaggle-startup default - is fetched before its first
     real use instead of failing with "model not found". Never falls back to another model: a failed
     pull raises and the caller's request fails.
