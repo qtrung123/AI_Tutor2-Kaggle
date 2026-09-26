@@ -100,14 +100,14 @@ class ModelRegistryTests(unittest.TestCase):
 
     def test_quiz_uses_backend_default_while_chat_and_summary_keep_selected_default(self):
         frontend = (ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
-        main = (ROOT / "backend" / "main.py").read_text(encoding="utf-8")
+        quiz_api = (ROOT / "backend" / "api" / "quiz_generation.py").read_text(encoding="utf-8")
         summary = (ROOT / "backend" / "summary_service.py").read_text(encoding="utf-8")
         rag = (ROOT / "backend" / "rag_service.py").read_text(encoding="utf-8")
 
         self.assertIn('model_id: selectedModelId || "qwen-2.5-7b"', frontend)
         self.assertIn("model_id: request.model_id", frontend)
         self.assertIn("body: JSON.stringify(request)", frontend)
-        self.assertGreaterEqual(main.count("or QUIZ_DEFAULT_GENERATION_MODEL"), 2)
+        self.assertGreaterEqual(quiz_api.count("or QUIZ_DEFAULT_GENERATION_MODEL"), 2)
         self.assertIn("model_id or DEFAULT_GENERATION_MODEL", summary)
         self.assertIn("resolve_generation_model(model_id)", rag)
 

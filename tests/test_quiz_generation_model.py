@@ -14,7 +14,7 @@ from unittest.mock import patch
 from quiz_fixtures import FakeModel, candidates, make_chunks
 
 from backend import model_registry, quiz_attempt_service, quiz_service
-from backend.main import QuizGenerateResponse
+from backend.api.quiz_generation import QuizGenerateResponse
 from backend.model_registry import describe_generation_model
 from backend.quiz_service import _generate_quiz_from_units
 

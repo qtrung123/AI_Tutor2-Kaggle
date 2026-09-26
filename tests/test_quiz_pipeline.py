@@ -27,7 +27,7 @@ from pydantic import ValidationError
 from quiz_fixtures import FakeModel, candidates, fact_sentence, make_chunks, raw_candidate
 
 from backend import quiz_service, quiz_units
-from backend.main import QuizGenerateRequest, QuizGenerateResponse, QuizRegenerateRequest
+from backend.api.quiz_generation import QuizGenerateRequest, QuizGenerateResponse, QuizRegenerateRequest
 from backend.quiz_service import QuizGenerationError, _generate_quiz_from_units
 from backend.quiz_units import (
     CandidateRejected, build_generation_prompt, build_study_units, candidate_target, context_budget,

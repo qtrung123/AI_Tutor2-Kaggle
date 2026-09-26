@@ -3,7 +3,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from backend.main import QuizGenerateRequest, QuizRegenerateRequest
+from backend.api.quiz_generation import QuizGenerateRequest, QuizRegenerateRequest
 from backend.quiz_legacy_v2 import _build_v2_prompt, _deterministic_grounded_candidate, _validate_v2_question
 
 

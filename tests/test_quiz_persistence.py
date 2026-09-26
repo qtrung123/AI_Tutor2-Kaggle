@@ -15,7 +15,8 @@ from unittest.mock import patch
 
 from quiz_fixtures import FakeModel, candidates, make_chunks
 
-from backend import main, quiz_attempt_service, quiz_service, quiz_store
+from backend import quiz_attempt_service, quiz_service, quiz_store
+from backend.api import quiz_generation as quiz_generation_api
 
 QWEN = "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"
 GEMMA = "gemma3:12b-it-q4_K_M"
@@ -178,7 +179,7 @@ class OpeningAQuizByIdTests(unittest.TestCase):
         qwen_quiz = self.generate(QWEN)
         self.generate(GEMMA, regenerate=True)
         with patch.object(quiz_attempt_service, "_document_lookup", return_value={DOCUMENT["id"]: DOCUMENT}):
-            result = main.quiz_detail(DOCUMENT["id"], topic_id="document", difficulty="easy",
+            result = quiz_generation_api.quiz_detail(DOCUMENT["id"], topic_id="document", difficulty="easy",
                                       quiz_id=qwen_quiz["quiz_id"], current_user={"id": self.owner})
         self.assertEqual(result["quiz"]["quiz_id"], qwen_quiz["quiz_id"])
 
@@ -188,7 +189,7 @@ class ExplicitGenerateAlwaysCreatesANewQuizTests(unittest.TestCase):
     "reuse-if-compatible" cache-hit branch as a passive read, so re-submitting identical settings
     silently returned an older quiz instead of creating a new artifact. The live frontend now always
     sends regenerate=true for this action (see requestGeneratedQuiz); this exercises that exact
-    request shape end to end through backend/main.py's QuizGenerateRequest/quiz_generate route.
+    request shape end to end through backend/api/quiz_generation.py's QuizGenerateRequest/quiz_generate route.
     """
 
     def setUp(self):
@@ -203,7 +204,7 @@ class ExplicitGenerateAlwaysCreatesANewQuizTests(unittest.TestCase):
 
     def generate_via_route(self, model_id, regenerate=True, quiz_name="Benchmark"):
         FakeModel.reset([{"questions": candidates(range(15))}])
-        request = main.QuizGenerateRequest(
+        request = quiz_generation_api.QuizGenerateRequest(
             document_id=DOCUMENT["id"], assessment_scope="document", difficulty="easy",
             question_count=12, model_id=model_id, quiz_name=quiz_name, regenerate=regenerate,
         )
@@ -211,10 +212,10 @@ class ExplicitGenerateAlwaysCreatesANewQuizTests(unittest.TestCase):
             patch.object(quiz_service, "_document_lookup", return_value={DOCUMENT["id"]: DOCUMENT}),
             patch.object(quiz_service, "get_document_chunks", return_value=make_chunks(12, 2)),
             patch.object(quiz_service, "ChatOllama", FakeModel),
-            patch.object(main, "prepare_generation_model"),
-            patch.object(main, "resolve_generation_model", side_effect=lambda value: value),
+            patch.object(quiz_generation_api, "prepare_generation_model"),
+            patch.object(quiz_generation_api, "resolve_generation_model", side_effect=lambda value: value),
         ):
-            return main.quiz_generate(request, current_user=self.owner)
+            return quiz_generation_api.quiz_generate(request, current_user=self.owner)
 
     def test_qwen_gemma_qwen_again_all_three_remain_with_unique_quiz_id(self):
         quiz_a = self.generate_via_route(QWEN)
@@ -228,7 +229,7 @@ class ExplicitGenerateAlwaysCreatesANewQuizTests(unittest.TestCase):
         self.assertEqual({v["quiz_id"] for v in status["variants"]}, ids)
 
     def test_regenerate_defaults_to_false_so_other_callers_keep_the_reuse_if_compatible_cache(self):
-        omitted = main.QuizGenerateRequest(
+        omitted = quiz_generation_api.QuizGenerateRequest(
             document_id=DOCUMENT["id"], assessment_scope="document", difficulty="easy",
             question_count=12, model_id=QWEN, quiz_name="Benchmark",
         )

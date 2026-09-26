@@ -14,7 +14,7 @@ from unittest.mock import patch
 from quiz_fixtures import FakeModel, candidates, fact_sentence, make_chunks, raw_candidate
 
 from backend import quiz_attempt_service, quiz_service, quiz_store, quiz_units
-from backend.main import QuizQuestion
+from backend.api.quiz_generation import QuizQuestion
 from backend.quiz_service import _generate_quiz_from_units
 from backend.quiz_units import (
     FILL_BLANK_MARKER, QUIZ_FILL_BLANK_OUTPUT_SCHEMA, CandidateRejected, build_fill_blank_prompt, build_study_units,

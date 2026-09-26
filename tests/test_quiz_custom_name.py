@@ -17,7 +17,8 @@ from fastapi.testclient import TestClient
 
 from backend import document_retrieval, quiz_attempt_service, quiz_legacy_v2, quiz_store
 from backend.auth_store import LEGACY_USER_ID
-from backend.main import QuizGenerateRequest, QuizRegenerateRequest, app
+from backend.api.quiz_generation import QuizGenerateRequest, QuizRegenerateRequest
+from backend.main import app
 from backend.quiz_legacy_v2 import _generate_topic_quiz_v2
 from backend.quiz_attempt_service import list_completed_quiz_attempts
 from backend.quiz_service import _resolve_quiz_title
@@ -163,7 +164,7 @@ class QuizNameApiRouteTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database_path = Path(self.temp_dir.name) / "auth.db"
-        self.patchers = [patch("backend.main.generate_quiz"), patch("backend.main.prepare_generation_model")]
+        self.patchers = [patch("backend.api.quiz_generation.generate_quiz"), patch("backend.api.quiz_generation.prepare_generation_model")]
         import backend.auth_store as auth_store
         self.patchers.append(patch.object(auth_store, "DATABASE_PATH", self.database_path))
         import backend.conversation_store as conversation_store

@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from backend.main import QuizGenerateRequest, QuizRegenerateRequest
+from backend.api.quiz_generation import QuizGenerateRequest, QuizRegenerateRequest
 from backend import quiz_store
 from backend.mastery_service import calculate_mastery
 from backend.quiz_options import strip_leading_option_label

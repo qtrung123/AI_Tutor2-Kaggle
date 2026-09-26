@@ -9,7 +9,7 @@ from quiz_fixtures import candidates, make_chunks, spread_facts
 
 from backend import quiz_attempt_service, quiz_store, quiz_units
 from backend.assessment_planner import allocate_document_topics, validate_and_deduplicate_concepts
-from backend.main import QuizGenerateRequest, QuizRegenerateRequest
+from backend.api.quiz_generation import QuizGenerateRequest, QuizRegenerateRequest
 from backend.mastery_service import calculate_mastery
 from backend import quiz_service
 
