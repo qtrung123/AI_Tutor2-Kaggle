@@ -1005,23 +1005,6 @@ function moveQuizQuestion(direction) {
   renderAssessmentQuiz();
 }
 
-async function resetAssessmentQuiz() {
-  if (!currentQuiz?.questions?.length) {
-    return;
-  }
-  try {
-    await requestQuizProgressReset();
-    currentAttempt = null;
-    quizAnswers = {};
-    quizExplanations = {};
-    quizQuestionIndex = 0;
-    renderAssessmentQuiz();
-    showToast("Quiz progress reset");
-  } catch (error) {
-    showToast(error.message || "Could not reset quiz progress");
-  }
-}
-
 function createAssessmentReviewCard(question, result, index, total) {
   const card = document.createElement("article");
   card.className = `quiz-question-card quiz-review-card ${result.is_correct ? "correct" : "incorrect"}`;
@@ -1980,8 +1963,26 @@ async function submitAssessmentQuiz(event) {
   }
 }
 
-function resetAssessmentQuiz() {
+// Retake: the same questions from a clean attempt, locally AND on the server. Any earlier save of
+// this quiz (debounced, in flight, or detached on exit) settles first so it can never land after
+// the reset; then this exact quiz_id's in-progress attempt is cleared server-side (completed
+// attempts/history are kept). Local state is reset only once the server reset succeeded.
+async function resetAssessmentQuiz() {
   if (!currentQuiz?.questions?.length) return;
+  if (quizAutosaveTimer || quizAutosaveDirty) {
+    try { await flushQuizAutosave(); } catch (error) { /* the reset below discards it anyway */ }
+  }
+  if (quizDetachedSave) await quizDetachedSave;
+  while (quizAutosaveInFlight) {
+    try { await quizAutosaveInFlight; } catch (error) { /* the reset below discards it anyway */ }
+  }
+  try {
+    await requestQuizProgressReset();
+  } catch (error) {
+    showToast(error.message || "Could not reset quiz progress");
+    return;
+  }
+  resetQuizAutosave();
   currentAttempt = null;
   quizAnswers = {};
   quizExplanations = {};

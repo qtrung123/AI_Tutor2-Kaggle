@@ -114,9 +114,11 @@ def load_quiz_with_attempt(
     else:
         quiz = get_quiz(document_id, difficulty, topic_id, student_id)
     # Scoped to this exact quiz_id so "latest_attempt" can never belong to a different sibling
-    # quiz sharing the same (document, topic, difficulty) slot.
+    # quiz sharing the same (document, topic, difficulty) slot. live_only: an attempt demoted by a
+    # Retake (reset_quiz_progress) is never resumed -- the retaken quiz reopens from a clean state.
     latest_attempt = get_latest_attempt(
-        document_id, difficulty, topic_id, student_id, quiz_id=quiz.get("quiz_id") if quiz else None
+        document_id, difficulty, topic_id, student_id, quiz_id=quiz.get("quiz_id") if quiz else None,
+        live_only=True,
     )
     return {
         "document_id": document_id,
