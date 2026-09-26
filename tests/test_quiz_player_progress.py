@@ -191,7 +191,7 @@ class QuizPlayerProgressScopingTests(unittest.TestCase):
         self.assertTrue(any(item.get("attempt_id") == completed["attempt_id"] for item in history))
 
     def test_progress_request_model_accepts_the_player_snapshot(self):
-        from backend.main import QuizProgressRequest
+        from backend.api.quiz_attempts import QuizProgressRequest
         request = QuizProgressRequest(
             difficulty="easy", topic_id="document", quiz_id="quiz-a",
             answers={"1": "A", "2": ["B", "C"]}, current_question_index=1,

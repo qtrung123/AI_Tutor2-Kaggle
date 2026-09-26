@@ -107,7 +107,7 @@ class QuizResultsBackendTests(unittest.TestCase):
             quiz_attempt_service.load_completed_quiz_attempt(saved["attempt_id"], "someone-else")
 
     def test_submit_request_model_accepts_allow_unanswered(self):
-        from backend.main import QuizSubmitRequest
+        from backend.api.quiz_attempts import QuizSubmitRequest
         request = QuizSubmitRequest(difficulty="easy", topic_id="document", quiz_id="quiz-a", answers={"1": "A"}, allow_unanswered=True)
         self.assertTrue(request.allow_unanswered)
         self.assertFalse(QuizSubmitRequest(difficulty="easy", topic_id="document", answers={}).allow_unanswered)
