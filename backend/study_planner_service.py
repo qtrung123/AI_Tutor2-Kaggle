@@ -1,6 +1,6 @@
-"""Study Planner business logic: interval math, the deterministic scheduler, and the Study
-Buffer calculation (Phase 1), plus document-aware study plan items (Phase 2). Persistence lives
-in study_planner_store.py.
+"""Study Planner business logic: the deterministic scheduler and the Study Buffer calculation
+(Phase 1), plus document-aware study plan items (Phase 2). Persistence lives in
+study_planner_store.py; minute-of-day interval math lives in study_time.py.
 
 Deliberately LLM-free -- the scheduler only ever places blocks inside user-selected
 availability, never after the deadline, and never overlapping an already-busy block. Phase 2
@@ -8,133 +8,24 @@ reuses the Phase 1 scheduler (compute_schedule) completely unchanged, once per s
 instead of modifying its algorithm.
 """
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
-from backend import quiz_store, study_planner_store
+from backend import study_planner_store
 from backend.document_study_state import get_document_study_state
 from backend.indexed_document_store import get_indexed_document
 from backend.document_retrieval import get_topic_chunks
 from backend.study_scheduler_contracts import MaterialContext, SchedulingContext
+from backend.study_time import free_minutes_by_date
 
 MIN_BLOCK_MINUTES = 30
 PREFERRED_BLOCK_MINUTES = 60
 MAX_BLOCK_MINUTES = 90
 MAX_ESTIMATED_MINUTES = 100_000
-# The planner's availability grid granularity (also used by the frontend calendar). Kept as its
-# own constant, distinct from MIN_BLOCK_MINUTES, even though both are currently 30 -- one is a
-# grid-alignment size, the other a scheduling-policy minimum.
-GRID_ALIGNMENT_MINUTES = 30
 
 
 # ---------------------------------------------------------------------------
-# Minute-of-day interval math (shared with study_planner_store's availability merge/subtract)
+# Free-time totals and block allocation (interval math itself lives in study_time.py)
 # ---------------------------------------------------------------------------
-
-def to_minutes(hhmm: str) -> int:
-    hours, minutes = str(hhmm).split(":")
-    return int(hours) * 60 + int(minutes)
-
-
-def to_hhmm(minutes: int) -> str:
-    return f"{minutes // 60:02d}:{minutes % 60:02d}"
-
-
-def merge_minute_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """Union of possibly-overlapping/adjacent (start, end) minute-of-day intervals into the
-    minimal, non-overlapping, sorted set."""
-    ordered = sorted(intervals)
-    merged: list[tuple[int, int]] = []
-    for start, end in ordered:
-        if merged and start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-        else:
-            merged.append((start, end))
-    return merged
-
-
-def subtract_minute_interval(
-    intervals: list[tuple[int, int]], remove_start: int, remove_end: int,
-) -> list[tuple[int, int]]:
-    """Remove [remove_start, remove_end) from a set of (start, end) intervals -- splits an
-    interval in two, shrinks one edge, or drops it entirely, as needed."""
-    result = []
-    for start, end in intervals:
-        if remove_end <= start or remove_start >= end:
-            result.append((start, end))
-            continue
-        if remove_start > start:
-            result.append((start, remove_start))
-        if remove_end < end:
-            result.append((remove_end, end))
-    return result
-
-
-def _datetime_minute_of_day(value: str) -> int:
-    return to_minutes(value[11:16])
-
-
-def _align_up_to_grid(minute: int, grid: int = GRID_ALIGNMENT_MINUTES) -> int:
-    """Round a minute-of-day UP to the next planner grid boundary (e.g. 18:20 -> 18:30), never
-    down -- a partially elapsed grid cell is never usable study time."""
-    return ((minute + grid - 1) // grid) * grid
-
-
-def free_minutes_by_date(
-    start_date: date, end_date: date, availability: list[dict], existing_blocks: list[dict],
-    now: datetime | None = None,
-) -> dict[date, list[tuple[int, int]]]:
-    """For each date in [start_date, end_date] inclusive: available minutes (dated slots plus
-    expanded recurring-weekday slots) minus busy minutes from any confirmed/completed/locked
-    study block -- never fabricates time outside what the user actually selected.
-
-    When `now` is given and falls on one of these dates, that date's already-elapsed time (up
-    to the next 30-minute grid boundary at or after `now`) is also excluded -- the scheduler
-    must never place a block in the past, whether the day is fully or only partially elapsed.
-    """
-    dated: dict[str, list[tuple[int, int]]] = {}
-    recurring_by_weekday: dict[int, list[tuple[int, int]]] = {}
-    for slot in availability:
-        if slot.get("is_recurring"):
-            recurring_by_weekday.setdefault(int(slot["day_of_week"]), []).append(
-                (to_minutes(slot["start_at"]), to_minutes(slot["end_at"]))
-            )
-        else:
-            dated.setdefault(slot["date"], []).append(
-                (to_minutes(slot["start_at"]), to_minutes(slot["end_at"]))
-            )
-
-    busy_by_date: dict[str, list[tuple[int, int]]] = {}
-    for block in existing_blocks:
-        # A block is busy if it's confirmed/locked (Phase 1 rule, unchanged) OR -- Phase 3 --
-        # already completed, regardless of its (possibly still 'suggested', never-accepted)
-        # status/locked flags. A completed block is never touched by regeneration's cleanup, so
-        # it must also never be treated as free time a regenerated block can be placed into.
-        is_busy = (
-            block["status"] in {"confirmed", "completed"} or block.get("locked")
-            or block.get("completion_status") == "completed"
-        )
-        if not is_busy:
-            continue
-        busy_by_date.setdefault(block["start_at"][:10], []).append(
-            (_datetime_minute_of_day(block["start_at"]), _datetime_minute_of_day(block["end_at"]))
-        )
-
-    result: dict[date, list[tuple[int, int]]] = {}
-    current = start_date
-    while current <= end_date:
-        key = current.isoformat()
-        day_intervals = list(dated.get(key, []))
-        day_intervals.extend(recurring_by_weekday.get(current.weekday(), []))
-        free = merge_minute_intervals(day_intervals)
-        for busy_start, busy_end in merge_minute_intervals(busy_by_date.get(key, [])):
-            free = subtract_minute_interval(free, busy_start, busy_end)
-        if now is not None and current == now.date():
-            elapsed_boundary = _align_up_to_grid(now.hour * 60 + now.minute)
-            free = subtract_minute_interval(free, 0, elapsed_boundary)
-        result[current] = free
-        current += timedelta(days=1)
-    return result
-
 
 def total_free_minutes(free_by_date: dict[date, list[tuple[int, int]]]) -> int:
     return sum(end - start for intervals in free_by_date.values() for start, end in intervals)
@@ -510,14 +401,6 @@ def add_plan_material(owner_id: str, plan_id: str, document_id: str, deadline: s
     )
 
 
-def utc_offset_for_local_now(local_now: datetime, utc_now: datetime | None = None) -> timedelta:
-    """The learner's UTC offset, derived from their browser's naive local clock (local_now) versus
-    the real UTC clock, rounded to the nearest 15 minutes -- no timezone is assumed."""
-    utc_now = (utc_now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(tzinfo=None)
-    quarter_hours = round((local_now - utc_now).total_seconds() / 900)
-    return timedelta(minutes=15 * quarter_hours)
-
-
 def build_scheduling_context(owner_id: str, plan_id: str, now: datetime | None = None,
                              utc_offset: timedelta | None = None) -> SchedulingContext:
     """Assemble the read-only SchedulingContext the scheduler consumes for one plan: each
@@ -526,7 +409,8 @@ def build_scheduling_context(owner_id: str, plan_id: str, now: datetime | None =
     plan's still-scheduled sessions no longer block. No scheduling decisions are made here.
 
     `now` is the learner's local time (from the browser); pass their `utc_offset` alongside a naive
-    `now` (see utc_offset_for_local_now). No offset is ever inferred from the server's timezone:
+    `now` (study_plan_api_service derives it from the browser's utc_offset_minutes). No offset is
+    ever inferred from the server's timezone:
     without one the context carries utc_offset=None (unknown). A missing `now` still falls back to
     the server's clock, as the rest of the planner does.
 
@@ -638,19 +522,6 @@ def update_block_actual_minutes(owner_id: str, block_id: str, actual_minutes: in
     if block["completion_status"] == "completed":
         raise ValueError("Cannot modify actual_minutes on a completed study block.")
     return study_planner_store.update_block(owner_id, block_id, {"actual_minutes": actual_minutes})
-
-
-def get_topic_mastery_for_planning(owner_id: str, document_id: str, topic_id: str) -> dict | None:
-    """Read-only extension point for future adaptive scheduling: exposes the existing quiz
-    topic-mastery score (already computed and stored by the quiz feature) in the minimal shape
-    the planner needs, without redesigning or duplicating quiz_store's topic_mastery table."""
-    mastery = quiz_store.get_topic_mastery(owner_id, document_id, topic_id)
-    if not mastery:
-        return None
-    return {
-        "owner_id": owner_id, "document_id": document_id, "topic_id": topic_id,
-        "mastery_score": mastery.get("mastery_score"),
-    }
 
 
 def get_task_progress(owner_id: str, task_id: str) -> dict:

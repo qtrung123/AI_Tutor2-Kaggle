@@ -13,7 +13,7 @@ from backend.document_study_state import (
 )
 from backend.study_planner_store import SESSION_REASONS
 from backend.study_scheduler import (
-    DEFAULT_CONFIG, DeterministicScheduler, base_priority, estimate_duration, local_date, plan_schedule,
+    DEFAULT_CONFIG, base_priority, estimate_duration, local_date, plan_schedule,
     review_interval_days, select_candidates,
 )
 from backend.study_scheduler_contracts import MaterialContext, SchedulingContext
@@ -238,11 +238,10 @@ class SchedulerUnitTests(ScheduleAssertions, unittest.TestCase):
         self.assertGreater(minutes["near"], minutes["far"])
         self.assertEqual(result.capacity.status, "on_track")
 
-    def test_engine_is_deterministic_and_implements_the_protocol(self):
+    def test_engine_is_deterministic(self):
         materials = [material(make_state("a"), "2026-10-05"), material(make_state("b", percentage=55.0), "2026-10-08")]
         ctx = context(materials)
         self.assertEqual(plan_schedule(ctx), plan_schedule(ctx))
-        self.assertEqual(DeterministicScheduler().propose(ctx), list(plan_schedule(ctx).proposals))
 
 
 class FinalRetrievalTests(ScheduleAssertions, unittest.TestCase):
@@ -372,16 +371,6 @@ class TimezoneTests(unittest.TestCase):
 
         import backend.study_scheduler as scheduler
         self.assertIsNone(re.search(r"\.astimezone\(\s*\)", inspect.getsource(scheduler)))
-
-    def test_utc_offset_is_derived_from_the_browser_clock(self):
-        utc_now = datetime(2026, 9, 28, 2, 0, 7, tzinfo=timezone.utc)
-        self.assertEqual(study_planner_service.utc_offset_for_local_now(datetime(2026, 9, 28, 9, 0), utc_now),
-                         timedelta(hours=7))
-        self.assertEqual(study_planner_service.utc_offset_for_local_now(datetime(2026, 9, 28, 7, 30, 2), utc_now),
-                         timedelta(hours=5, minutes=30))
-        self.assertEqual(study_planner_service.utc_offset_for_local_now(datetime(2026, 9, 27, 21, 0), utc_now),
-                         timedelta(hours=-5))
-
 
 class PriorityAndCapacityTests(ScheduleAssertions, unittest.TestCase):
     def test_base_priority_weights_are_the_centralized_35_35_20_10(self):

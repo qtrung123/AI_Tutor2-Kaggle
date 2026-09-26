@@ -14,7 +14,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
-from backend.study_planner_service import free_minutes_by_date, subtract_minute_interval, to_minutes
+from backend.study_time import free_minutes_by_date, subtract_minute_interval, to_minutes
 from backend.study_scheduler_contracts import (
     REASON_DEADLINE_APPROACHING, REASON_FINAL_REVIEW, REASON_LOW_QUIZ_SCORE, REASON_NEW_MATERIAL,
     REASON_QUIZ_IN_PROGRESS, REASON_REVIEW_DUE, CandidateActivity, CapacityReport, MaterialContext,
@@ -485,16 +485,3 @@ def plan_schedule(context: SchedulingContext, config: SchedulerConfig = DEFAULT_
         ),
     )
     return ScheduleResult(proposals=tuple(proposals), capacity=capacity)
-
-
-class DeterministicScheduler:
-    """The Scheduler protocol implementation."""
-
-    def __init__(self, config: SchedulerConfig = DEFAULT_CONFIG):
-        self.config = config
-
-    def plan(self, context: SchedulingContext) -> ScheduleResult:
-        return plan_schedule(context, self.config)
-
-    def propose(self, context: SchedulingContext) -> list[ProposedSession]:
-        return list(plan_schedule(context, self.config).proposals)

@@ -23,7 +23,7 @@ Rules
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-from backend.study_planner_service import free_minutes_by_date, subtract_minute_interval, to_minutes
+from backend.study_time import free_minutes_by_date, subtract_minute_interval, to_minutes
 from backend.study_scheduler import DEFAULT_CONFIG, SchedulerConfig, _build_steps, _Step, resolve_clock
 from backend.study_scheduler_contracts import REASON_FINAL_REVIEW, REASON_RESCHEDULED, MaterialContext
 

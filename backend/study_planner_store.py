@@ -10,6 +10,7 @@ from datetime import date as date_type, datetime, timezone
 from uuid import uuid4
 
 from backend.auth_store import initialize_auth_store
+from backend.study_time import merge_minute_intervals, subtract_minute_interval, to_hhmm, to_minutes
 from config import DATABASE_PATH
 
 
@@ -341,9 +342,7 @@ def add_availability(owner_id: str, start_at: str, end_at: str, date: str | None
                       is_recurring: bool = False, day_of_week: int | None = None) -> list[dict]:
     """Mark [start_at, end_at) available for one date (or one recurring weekday), merging with
     whatever is already persisted for that same group so adjacent/overlapping ranges never
-    duplicate (see _merge_minute_intervals in study_planner_service)."""
-    from backend.study_planner_service import merge_minute_intervals, to_hhmm, to_minutes
-
+    duplicate (see merge_minute_intervals in study_time)."""
     initialize_study_planner_store()
     if is_recurring and day_of_week is None:
         raise ValueError("day_of_week is required for recurring availability.")
@@ -372,8 +371,6 @@ def remove_availability(owner_id: str, start_at: str, end_at: str, date: str | N
                          is_recurring: bool = False, day_of_week: int | None = None) -> list[dict]:
     """Subtract [start_at, end_at) from whatever is persisted for that date/recurring weekday --
     "erase mode": splits, shrinks, or fully removes existing slots as needed."""
-    from backend.study_planner_service import subtract_minute_interval, to_hhmm, to_minutes
-
     initialize_study_planner_store()
     if is_recurring and day_of_week is None:
         raise ValueError("day_of_week is required for recurring availability.")

@@ -623,28 +623,6 @@ class StudyPlannerCompletionTests(unittest.TestCase):
         self.assertEqual(updated["completion_status"], "completed")
         self.assertEqual(study_planner_store.list_topic_progress(self.alice), [])
 
-    def test_topic_mastery_extension_point_reads_from_existing_quiz_store(self):
-        from backend import quiz_store
-
-        with patch.object(
-            quiz_store, "get_topic_mastery",
-            return_value={"mastery_score": 0.75, "student_id": self.alice, "document_id": "notes.pdf",
-                          "topic_id": "topic-a"},
-        ) as mocked:
-            mastery = study_planner_service.get_topic_mastery_for_planning(self.alice, "notes.pdf", "topic-a")
-        mocked.assert_called_once_with(self.alice, "notes.pdf", "topic-a")
-        self.assertEqual(mastery, {
-            "owner_id": self.alice, "document_id": "notes.pdf", "topic_id": "topic-a", "mastery_score": 0.75,
-        })
-
-    def test_topic_mastery_extension_point_returns_none_when_no_mastery_recorded(self):
-        from backend import quiz_store
-
-        with patch.object(quiz_store, "get_topic_mastery", return_value=None):
-            mastery = study_planner_service.get_topic_mastery_for_planning(self.alice, "notes.pdf", "topic-a")
-        self.assertIsNone(mastery)
-
-
 class StudyPlannerTaskLifecycleTests(unittest.TestCase):
     """A task's status automatically flips active -> completed once every one of its blocks has
     completion_status == 'completed'. Purely a status flip layered on the existing planner flow;

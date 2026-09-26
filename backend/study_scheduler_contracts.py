@@ -1,13 +1,13 @@
 """Scheduler-facing contracts for the document-centric Study Planner.
 
-Pure data structures only -- no persistence, no allocation heuristics, no LLM. The future
-deterministic scheduler consumes a SchedulingContext and returns ProposedSessions; both sides
+Pure data structures only -- no persistence, no allocation heuristics, no LLM. The deterministic
+scheduler (study_scheduler.plan_schedule) consumes a SchedulingContext and returns ProposedSessions; both sides
 explain themselves with a SchedulingReason (a stable machine code plus a human-readable message).
 """
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from backend.study_planner_store import ACTIVITY_TYPES, SESSION_REASONS, validate_session
 
@@ -154,9 +154,3 @@ class CapacityReport:
 class ScheduleResult:
     proposals: tuple[ProposedSession, ...]
     capacity: CapacityReport
-
-
-class Scheduler(Protocol):
-    """What a deterministic scheduler implements (see study_scheduler.DeterministicScheduler)."""
-
-    def propose(self, context: SchedulingContext) -> list[ProposedSession]: ...

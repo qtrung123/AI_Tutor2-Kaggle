@@ -19,7 +19,7 @@ other study sessions. Durations always come from the server (the proposal or the
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 
-from backend.study_planner_service import free_minutes_by_date
+from backend.study_time import free_minutes_by_date
 from backend.study_scheduler import select_candidates
 from backend.study_scheduler_contracts import ProposedSession
 
