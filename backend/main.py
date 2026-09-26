@@ -13,6 +13,7 @@ from backend.api.conversations import router as conversations_router
 from backend.api.learning import router as learning_router
 from backend.api.planner_legacy import router as planner_legacy_router
 from backend.api.planner_v2 import router as planner_v2_router
+from backend.api.summary import router as summary_router
 from backend.api.deps import require_admin_user, require_current_user
 from backend.ingest import delete_indexed_file, index_files
 from backend.quiz_attempt_service import (
@@ -36,7 +37,6 @@ from backend.quiz_store import delete_document_quiz_data
 from backend.conversation_store import remove_source_from_conversations
 from backend.rag_service import list_uploaded_sources
 from backend.model_registry import list_generation_models, prepare_generation_model, resolve_generation_model
-from backend.summary_service import generate_document_summary
 from backend.summary_store import delete_document_summaries
 from backend.flashcard_service import FlashcardGenerationError, authoritative_card_fields, generate_flashcards
 from backend.flashcard_store import add_flashcard, delete_document_flashcards, delete_flashcard, update_flashcard
@@ -112,10 +112,6 @@ class DocumentSummary(BaseModel):
     title: str
     chunks: int
     topics: list[dict] = Field(default_factory=list)
-
-
-class SummaryGenerateRequest(BaseModel):
-    model_id: Optional[str] = None
 
 
 class FlashcardGenerateRequest(BaseModel):
@@ -549,37 +545,7 @@ def quiz_delete(quiz_id: str, current_user: dict = Depends(require_current_user)
         ) from error
 
 
-@app.get("/api/summary/{document_id}")
-def summary_detail(document_id: str, model_id: Optional[str] = None, cache_only: bool = False,
-                   current_user: dict = Depends(require_current_user)) -> dict:
-    """Return a compatible persisted summary or generate it from existing indexed chunks.
-
-    With cache_only=true nothing is generated: a missing summary is reported as status "not_generated".
-    """
-    try:
-        if cache_only:
-            # A pure existence check never prepares/pulls anything.
-            return generate_document_summary(current_user["id"], document_id, model_id=model_id, cache_only=True)
-        prepare_generation_model(model_id)
-        return generate_document_summary(current_user["id"], document_id, model_id=model_id)
-    except ValueError as error:
-        message = str(error)
-        raise HTTPException(status_code=404 if message == "Document not found." else 400, detail=message) from error
-    except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Could not generate document summary: {error}") from error
-
-
-@app.post("/api/summary/{document_id}/regenerate")
-def summary_regenerate(document_id: str, request: SummaryGenerateRequest, current_user: dict = Depends(require_current_user)) -> dict:
-    """Explicitly generate and persist a fresh summary version."""
-    try:
-        prepare_generation_model(request.model_id)
-        return generate_document_summary(current_user["id"], document_id, model_id=request.model_id, regenerate=True)
-    except ValueError as error:
-        message = str(error)
-        raise HTTPException(status_code=404 if message == "Document not found." else 400, detail=message) from error
-    except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Could not regenerate document summary: {error}") from error
+app.include_router(summary_router)
 
 
 @app.get("/api/flashcards/{document_id}")

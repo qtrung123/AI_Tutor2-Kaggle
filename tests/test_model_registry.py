@@ -121,11 +121,13 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertNotIn("qwen3", frontend.lower())
 
     def test_every_generation_route_prepares_the_selected_model_before_generating(self):
-        """Every Study Session-driven generation entry point in main.py reuses the same
-        prepare_generation_model choke point (never a bespoke, duplicated pull) before calling into
-        Quiz/Summary/Flashcards/chat, so a lazily-pulled model is fetched before its first real use."""
-        main = (ROOT / "backend" / "main.py").read_text(encoding="utf-8")
-        self.assertGreaterEqual(main.count("prepare_generation_model("), 6)
+        """Every Study Session-driven generation entry point in the API layer (backend/main.py and
+        its backend/api/ routers) reuses the same prepare_generation_model choke point (never a
+        bespoke, duplicated pull) before calling into Quiz/Summary/Flashcards/chat, so a
+        lazily-pulled model is fetched before its first real use."""
+        api_sources = [ROOT / "backend" / "main.py", *sorted((ROOT / "backend" / "api").glob("*.py"))]
+        api = "".join(path.read_text(encoding="utf-8") for path in api_sources)
+        self.assertGreaterEqual(api.count("prepare_generation_model("), 6)
 
     def test_quiz_calls_disable_reasoning_and_kaggle_prepares_without_residency(self):
         quiz = (ROOT / "backend" / "quiz_service.py").read_text(encoding="utf-8")
