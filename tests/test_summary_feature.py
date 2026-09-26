@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend import auth_store, indexed_document_store, summary_service, summary_store
+from frontend_source import frontend_script_text
 
 
 class FakeResponse:
@@ -288,7 +289,7 @@ class SummaryFeatureTests(unittest.TestCase):
         self.assertEqual(validated[0]["subsections"][0]["subtopic_name"], "Synchronization")
 
     def test_frontend_renders_structured_notes_and_one_final_takeaway_block(self):
-        script = (Path(__file__).parents[1] / "frontend" / "app.js").read_text(encoding="utf-8")
+        script = frontend_script_text()
         styles = (Path(__file__).parents[1] / "frontend" / "styles.css").read_text(encoding="utf-8")
         self.assertIn("function renderSummaryContent(content)", script)
         self.assertIn('content.type === "paragraph"', script)

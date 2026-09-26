@@ -34,6 +34,7 @@ from backend.quiz_units import (
     context_support, locate_evidence, parse_candidates, select_context_units, select_questions, squash,
     followup_request, max_llm_calls, min_items_for, output_schema_for, validate_candidate,
 )
+from frontend_source import frontend_script_text
 
 DOCUMENT = {"id": "lecture.pdf", "title": "Lecture", "hash": "hash", "topic_schema_version": 2}
 SCOPE = {"topic_id": "document", "name": "Entire document"}
@@ -133,7 +134,7 @@ class SizingTests(unittest.TestCase):
         self.assertEqual(QuizGenerateRequest(**required).question_count, 12)
 
     def test_the_ui_offers_the_four_counts(self):
-        frontend = (Path(__file__).parents[1] / "frontend" / "app.js").read_text(encoding="utf-8")
+        frontend = frontend_script_text()
         self.assertIn("[12, 15, 18, 20].includes(value) ? value : 12", frontend)
         self.assertIn("[12, 15, 18, 20].forEach((count)", frontend)
 

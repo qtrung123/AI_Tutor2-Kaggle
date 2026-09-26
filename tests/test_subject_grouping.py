@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from backend import quiz_service
 from backend.subject_grouping import derive_subject_name, group_documents_into_subjects
+from frontend_source import frontend_script_text
 
 
 class DeriveSubjectNameTests(unittest.TestCase):
@@ -118,14 +119,14 @@ class HomeDocumentCardsFrontendTests(unittest.TestCase):
     """Home is document-centric: subjects stay a backend read model, the page shows one card per document."""
 
     def test_home_renders_one_card_per_document_from_real_progress(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
+        script = frontend_script_text()
         self.assertIn("function renderHomeDocumentCards", script)
         self.assertIn("home-doc-card", script)
         self.assertIn("PROGRESS_API_BASE_URL", script)
         self.assertNotIn("function renderSubjectCards", script)
 
     def test_each_document_can_still_be_opened_and_deleted(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
+        script = frontend_script_text()
         self.assertIn("openStudySession(documentId)", script)
         self.assertIn("deleteUploadedSource({ title: documentId }, remove)", script)
 

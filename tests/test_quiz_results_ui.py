@@ -271,6 +271,7 @@ class QuizResultsUiTests(unittest.TestCase):
         cls.addClassCleanup(shutil.rmtree, work, ignore_errors=True)
         for name in ("index.html", "styles.css", "app.js"):
             shutil.copy(FRONTEND / name, work / name)
+        shutil.copytree(FRONTEND / "js", work / "js")   # app.js's classic-script modules
         (work / "app-config.js").write_text(MOCK, encoding="utf-8")
         (work / "driver.js").write_text(DRIVER, encoding="utf-8")
         page = (work / "index.html").read_text(encoding="utf-8").replace(

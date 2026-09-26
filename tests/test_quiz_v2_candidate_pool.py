@@ -17,6 +17,7 @@ from unittest.mock import patch
 from backend import quiz_store
 from backend.quiz_legacy_v2 import _generate_topic_quiz_v2
 from backend.quiz_service import QuizGenerationError
+from frontend_source import frontend_script_text
 
 
 CHUNK = {
@@ -230,7 +231,7 @@ class QuizV2CandidatePoolTests(unittest.TestCase):
 
     # --- Case I: frontend surfaces actual_count/requested_count for a partial quiz -------------
     def test_case_i_frontend_displays_actual_and_requested_counts(self):
-        frontend = Path("frontend/app.js").read_text(encoding="utf-8")
+        frontend = frontend_script_text()
         self.assertIn("function quizPartialSuffix(quiz)", frontend)
         self.assertIn("plan.actual_count", frontend)
         self.assertIn("plan.requested_count", frontend)

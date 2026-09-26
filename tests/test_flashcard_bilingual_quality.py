@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend import auth_store, flashcard_service, flashcard_store, indexed_document_store
+from frontend_source import frontend_script_text
 
 
 class FakeResponse:
@@ -289,7 +290,7 @@ class FlashcardLayoutCssTests(unittest.TestCase):
 
 class FlashcardFrontendWiringTests(unittest.TestCase):
     def test_shuffle_manage_cards_and_language_select_remain_wired(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
+        script = frontend_script_text()
         self.assertIn('document.getElementById("shuffle-flashcards")?.addEventListener("click"', script)
         self.assertIn(
             'document.getElementById("manage-flashcards")?.addEventListener("click", openFlashcardManager)',

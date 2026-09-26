@@ -25,6 +25,7 @@ from backend.quiz_legacy_v2 import (
     _run_document_v2_batch,
     _validate_v2_question,
 )
+from frontend_source import frontend_script_text
 
 
 DOCUMENT = {"id": "lecture.pdf", "title": "Lecture", "hash": "hash", "topic_schema_version": 2}
@@ -815,7 +816,7 @@ class NoRawMultiSelectFallbackJunkTests(unittest.TestCase):
 
 class FrontendDocumentBlueprintTests(unittest.TestCase):
     def test_frontend_lets_document_scope_choose_twelve_to_twenty(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
+        script = frontend_script_text()
         self.assertNotIn("DOCUMENT_QUIZ_QUESTION_COUNT", script)
         self.assertIn(
             "function selectedQuestionCount() {\n"

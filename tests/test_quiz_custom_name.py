@@ -22,6 +22,7 @@ from backend.main import app
 from backend.quiz_legacy_v2 import _generate_topic_quiz_v2
 from backend.quiz_attempt_service import list_completed_quiz_attempts
 from backend.quiz_service import _resolve_quiz_title
+from frontend_source import frontend_script_text
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +407,7 @@ class QuizNameFrontendWiringTests(unittest.TestCase):
     def setUpClass(cls):
         root = Path(__file__).parents[1]
         cls.markup = (root / "frontend" / "index.html").read_text(encoding="utf-8")
-        cls.script = (root / "frontend" / "app.js").read_text(encoding="utf-8")
+        cls.script = frontend_script_text()
 
     def test_quiz_name_field_exists_in_the_create_quiz_form(self):
         self.assertIn('id="quiz-name-input"', self.markup)

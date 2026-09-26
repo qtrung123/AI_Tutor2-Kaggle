@@ -17,6 +17,7 @@ from backend.quiz_legacy_v2 import (
     _validate_v2_question,
 )
 from backend.quiz_service import QuizGenerationError
+from frontend_source import frontend_script_text
 
 
 CHUNK = {
@@ -172,7 +173,7 @@ class QuizV2Tests(unittest.TestCase):
                 document_id="lecture.pdf", assessment_scope="topic", topic_id="topic_001",
                 difficulty="easy", question_count=5, quiz_name="Sample Quiz",
             )
-        frontend = Path("frontend/app.js").read_text(encoding="utf-8")
+        frontend = frontend_script_text()
         self.assertIn("[12, 15, 18, 20].includes(value)", frontend)
         self.assertIn("[12, 15, 18, 20].forEach((count)", frontend)
         self.assertNotIn("[10, 15, 20, 25]", frontend)
@@ -246,7 +247,7 @@ class QuizV2Tests(unittest.TestCase):
         self.assertIn("prefer a different valid question_type before using deterministic fallback", prompt)
 
     def test_frontend_supports_multi_select_submission_and_review(self):
-        frontend = Path("frontend/app.js").read_text(encoding="utf-8")
+        frontend = frontend_script_text()
         self.assertIn('question.question_type === "multi_select"', frontend)
         self.assertIn("result.correct_answers || [result.correct_answer]", frontend)
         self.assertIn("result.selected_answers || [result.selected_answer]", frontend)

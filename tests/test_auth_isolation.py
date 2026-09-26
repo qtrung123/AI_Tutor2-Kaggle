@@ -21,6 +21,7 @@ from backend.main import app
 from backend.rag_service import _chroma_filter
 from backend.quiz_attempt_service import submit_quiz_attempt
 from backend.mastery_service import recompute_topic_mastery
+from frontend_source import frontend_script_text
 
 
 class DeterministicEmbeddings(Embeddings):
@@ -196,7 +197,7 @@ class AuthenticationIsolationTests(unittest.TestCase):
     def test_frontend_has_auth_gate_without_client_token_storage(self):
         root = Path(__file__).parents[1]
         markup = (root / "frontend" / "index.html").read_text(encoding="utf-8")
-        script = (root / "frontend" / "app.js").read_text(encoding="utf-8")
+        script = frontend_script_text()
         self.assertIn('id="auth-screen"', markup)
         self.assertIn('id="app-shell" hidden', markup)
         self.assertIn('id="logout-button"', markup)

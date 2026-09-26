@@ -13,13 +13,15 @@ import subprocess
 import textwrap
 import unittest
 from pathlib import Path
+from frontend_source import FRONTEND, frontend_script_paths, frontend_script_text
 
-APP_JS = Path(__file__).parents[1] / "frontend" / "app.js"
-SOURCE = APP_JS.read_text(encoding="utf-8")
+# app.js and its classic-script modules (frontend/js/), in index.html load order.
+SCRIPT_PATHS = [str(path) for path in frontend_script_paths()]
+SOURCE = frontend_script_text()
 
 DRIVER = textwrap.dedent("""
     const fs = require("fs"), vm = require("vm");
-    const source = fs.readFileSync(process.argv[1], "utf8");
+    const source = JSON.parse(process.argv[1]).map((path) => fs.readFileSync(path, "utf8")).join("\\n");
     function extract(name) {
       for (const prefix of [`async function ${name}(`, `function ${name}(`]) {
         const start = source.indexOf(prefix);
@@ -64,7 +66,7 @@ MODEL_READY_FUNCTIONS = ["ensureSelectedModelReady", "ensureSelectedModelReadyWi
 
 def run_node(functions, setup, scenario):
     result = subprocess.run(
-        ["node", "-e", DRIVER, str(APP_JS), json.dumps(functions), setup, scenario],
+        ["node", "-e", DRIVER, json.dumps(SCRIPT_PATHS), json.dumps(functions), setup, scenario],
         capture_output=True, text=True,
     )
     if result.returncode:
@@ -381,7 +383,7 @@ class WiringTests(unittest.TestCase):
         return SOURCE[start:SOURCE.index("\n}\n", start)]
 
     def test_there_is_a_single_model_selector_and_it_belongs_to_the_study_session(self):
-        html = (APP_JS.parent / "index.html").read_text(encoding="utf-8")
+        html = (FRONTEND / "index.html").read_text(encoding="utf-8")
         self.assertEqual(SOURCE.count('select.id = "generation-model-select"'), 1)             # created once, in the Study Session header
         self.assertIn('document.querySelector(".session-header")', SOURCE)
         self.assertNotIn("<select", "".join(re.findall(r'<[^>]*model[^>]*>', html)))            # no model <select> in the static markup either
@@ -396,7 +398,7 @@ class WiringTests(unittest.TestCase):
         self.assertNotIn("qwen3", SOURCE.lower())
 
     def test_the_create_quiz_form_has_no_topic_and_only_four_fields(self):
-        html = (APP_JS.parent / "index.html").read_text(encoding="utf-8")
+        html = (FRONTEND / "index.html").read_text(encoding="utf-8")
         start = html.index('<div class="assessment-form">')
         form = html[start:html.index("</article>", start)]
         self.assertEqual(re.findall(r"<span>([^<]+)</span>", form), ["Quiz name", "Assessment scope", "Difficulty"])   # + "Number of questions" below
@@ -445,8 +447,8 @@ class WiringTests(unittest.TestCase):
     def test_the_old_progress_ui_is_gone_but_the_new_progress_tab_remains(self):
         for removed in ("View Progress", "Progress &amp; Mastery", "quiz-progress-drawer", "Mastery evidence is not available"):
             self.assertNotIn(removed, SOURCE)
-        self.assertNotIn("practice-mastery", (APP_JS.parent / "index.html").read_text(encoding="utf-8"))
-        self.assertIn('data-session-pane="progress"', (APP_JS.parent / "index.html").read_text(encoding="utf-8"))
+        self.assertNotIn("practice-mastery", (FRONTEND / "index.html").read_text(encoding="utf-8"))
+        self.assertIn('data-session-pane="progress"', (FRONTEND / "index.html").read_text(encoding="utf-8"))
         self.assertIn("renderSessionProgress", SOURCE)
 
 

@@ -3,9 +3,10 @@
 import re
 import unittest
 from pathlib import Path
+from frontend_source import frontend_script_text
 
 
-SCRIPT = (Path(__file__).parents[1] / "frontend" / "app.js").read_text(encoding="utf-8")
+SCRIPT = frontend_script_text()
 
 
 def function_body(name: str) -> str:

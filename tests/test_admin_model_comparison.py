@@ -18,6 +18,7 @@ from backend import auth_store, model_benchmark_store, model_comparison_service
 from backend.auth_store import is_admin_email
 from backend.main import app
 from backend.model_comparison_service import QUIZ_BENCHMARK_MODELS, get_quiz_model_comparison
+from frontend_source import frontend_script_text
 
 
 class IsAdminEmailTests(unittest.TestCase):
@@ -197,7 +198,7 @@ class FrontendAdminModelComparisonWiringTests(unittest.TestCase):
     def setUpClass(cls):
         root = Path(__file__).parents[1]
         cls.markup = (root / "frontend" / "index.html").read_text(encoding="utf-8")
-        cls.script = (root / "frontend" / "app.js").read_text(encoding="utf-8")
+        cls.script = frontend_script_text()
 
     def test_nav_item_exists_and_is_hidden_by_default(self):
         self.assertIn('id="admin-model-comparison-nav"', self.markup)

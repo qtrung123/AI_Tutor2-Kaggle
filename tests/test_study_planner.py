@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend import auth_store, study_planner_service, study_planner_store
+from frontend_source import frontend_script_text
 
 # Well before any availability window used in these fixtures (earliest is 18:00), so it never
 # truncates a test's intended availability via the past-time guard unless the test says so.
@@ -1068,12 +1069,12 @@ class StudyPlannerFrontendTests(unittest.TestCase):
         html = Path("frontend/index.html").read_text(encoding="utf-8")
         self.assertIn('data-page="planner"', html)
         self.assertIn('id="planner-view"', html)
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
+        script = frontend_script_text()
         self.assertIn('id="planner-calendar"', script)
         self.assertIn("Generate preview", script)
 
     def test_user_can_select_and_remove_availability_cells(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
+        script = frontend_script_text()
         self.assertIn("function plannerStartDrag", script)
         self.assertIn("function plannerExtendDrag", script)
         self.assertIn("function plannerFinishDrag", script)

@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from backend.api.quiz_generation import QuizGenerateRequest, QuizRegenerateRequest
 from backend.quiz_legacy_v2 import _build_v2_prompt, _deterministic_grounded_candidate, _validate_v2_question
+from frontend_source import frontend_script_text
 
 
 GROUP = {
@@ -29,7 +30,7 @@ class QuizCountAndContentPolicyTests(unittest.TestCase):
             for count in (10, 16, 19, 25):
                 with self.assertRaises(ValidationError):
                     model(**required, question_count=count)
-        frontend = Path("frontend/app.js").read_text(encoding="utf-8")
+        frontend = frontend_script_text()
         self.assertIn("[12, 15, 18, 20].includes(value) ? value : 12", frontend)
         self.assertIn("[12, 15, 18, 20].forEach((count)", frontend)
 

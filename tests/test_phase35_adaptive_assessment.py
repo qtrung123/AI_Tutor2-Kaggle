@@ -12,6 +12,7 @@ from backend.assessment_planner import allocate_document_topics, validate_and_de
 from backend.api.quiz_generation import QuizGenerateRequest, QuizRegenerateRequest
 from backend.mastery_service import calculate_mastery
 from backend import quiz_service
+from frontend_source import frontend_script_text
 
 
 class _FakeV3BatchModel:
@@ -207,7 +208,7 @@ class AdaptiveAssessmentTests(unittest.TestCase):
             document_id="doc.pdf", assessment_scope="topic", topic_id="topic_a", difficulty="easy",
             quiz_name="Sample Quiz",
         ).question_count, 12)
-        frontend = (Path(__file__).parents[1] / "frontend" / "app.js").read_text(encoding="utf-8")
+        frontend = frontend_script_text()
         self.assertIn("quizQuestionCountSelect", frontend)
         self.assertIn("question_count:", frontend)
         self.assertIn('quiz-question-count-select', frontend)
@@ -273,7 +274,7 @@ class AdaptiveAssessmentTests(unittest.TestCase):
     def test_overview_markup_uses_real_dashboard_and_mastery_containers(self):
         root = Path(__file__).parents[1]
         markup = (root / "frontend" / "index.html").read_text(encoding="utf-8")
-        script = (root / "frontend" / "app.js").read_text(encoding="utf-8")
+        script = frontend_script_text()
         for demo_text in (
             "Course average", "Spring semester", "Calculus II", "Database Systems",
             "Study streak", "Next deadline", "Progress Monitor Alert", "This week",

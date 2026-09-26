@@ -7,6 +7,7 @@ from backend import quiz_service, quiz_store
 from backend.auth_store import LEGACY_USER_ID
 from backend.mastery_service import recompute_topic_mastery
 from backend.quiz_attempt_service import load_quiz_for_retake, submit_quiz_attempt
+from frontend_source import frontend_script_text
 
 
 def saved_quiz():
@@ -270,7 +271,7 @@ class QuizRetakeFlowTests(unittest.TestCase):
         self.assertEqual(len(second["question_results"]), 15)
 
     def test_frontend_uses_deferred_submission_navigation_review_and_separate_regeneration(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
+        script = frontend_script_text()
         self.assertIn('check.textContent = "Check Answers"', script)
         self.assertIn('button.className = "quiz-navigator-button"', script)
         self.assertIn("requestQuizSubmission()", script)

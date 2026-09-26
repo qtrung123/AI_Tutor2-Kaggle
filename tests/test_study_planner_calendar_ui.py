@@ -208,6 +208,7 @@ def run_at_width(width, height, mock=MOCK, driver=DRIVER):
     try:
         for name in ("index.html", "styles.css", "app.js"):
             shutil.copy(FRONTEND / name, work / name)
+        shutil.copytree(FRONTEND / "js", work / "js")   # app.js's classic-script modules
         (work / "app-config.js").write_text(mock, encoding="utf-8")
         (work / "driver.js").write_text(driver, encoding="utf-8")
         page = (work / "index.html").read_text(encoding="utf-8").replace(

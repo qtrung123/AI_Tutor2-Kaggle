@@ -11,6 +11,7 @@ from backend import auth_store, conversation_store, indexed_document_store, quiz
 from backend.knowledge_gap_service import detect_knowledge_gaps, mastery_to_gap
 from backend.main import app
 from backend.mastery_service import recompute_topic_mastery
+from frontend_source import frontend_script_text
 
 
 def mastery(level: str, score: float = 30, topic: str = "topic_a", user: str = "user-a", coverage: float = 0.6) -> dict:
@@ -127,7 +128,7 @@ class KnowledgeGapTests(unittest.TestCase):
             self.assertEqual(client.get("/api/knowledge-gaps").json()[0]["topic_id"], "weak")
             self.assertEqual(client.get("/api/knowledge-gaps/doc.pdf").status_code, 200)
         markup = Path("frontend/index.html").read_text(encoding="utf-8")
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
+        script = frontend_script_text()
         self.assertNotIn('id="overview-knowledge-gaps-list"', markup)   # hidden legacy container removed (Phase 6B)
         self.assertIn('id="session-knowledge-gaps-list"', markup)
         self.assertIn('/api/knowledge-gaps', script)

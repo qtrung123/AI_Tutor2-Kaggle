@@ -7,6 +7,7 @@ from backend import quiz_store
 from backend.auth_store import LEGACY_USER_ID
 from backend.quiz_attempt_service import submit_quiz_attempt
 from backend.quiz_service import delete_quiz
+from frontend_source import frontend_script_text
 
 
 def saved_quiz(quiz_id, topic_id, topic_name):
@@ -107,7 +108,7 @@ class QuizDeleteTests(unittest.TestCase):
 
 class QuizDeleteFrontendTests(unittest.TestCase):
     def test_frontend_has_confirmed_delete_action_separate_from_regenerate(self):
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
+        script = frontend_script_text()
         self.assertIn("async function deleteAssessmentQuiz()", script)
         self.assertIn("window.confirm(", script)
         self.assertIn('method: "DELETE"', script)

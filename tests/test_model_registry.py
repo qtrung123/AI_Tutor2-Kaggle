@@ -7,6 +7,7 @@ import httpx
 
 import config
 from backend import model_registry
+from frontend_source import frontend_script_text
 
 
 ROOT = Path(__file__).parents[1]
@@ -99,7 +100,7 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertFalse(offered["glm4-9b"]["ready"])
 
     def test_quiz_uses_backend_default_while_chat_and_summary_keep_selected_default(self):
-        frontend = (ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
+        frontend = frontend_script_text()
         quiz_api = (ROOT / "backend" / "api" / "quiz_generation.py").read_text(encoding="utf-8")
         summary = (ROOT / "backend" / "summary_service.py").read_text(encoding="utf-8")
         rag = (ROOT / "backend" / "rag_service.py").read_text(encoding="utf-8")
@@ -112,7 +113,7 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertIn("resolve_generation_model(model_id)", rag)
 
     def test_the_only_model_selector_is_the_study_session_one_and_it_lists_the_registry_models(self):
-        frontend = (ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
+        frontend = frontend_script_text()
 
         self.assertEqual(frontend.count('select.id = "generation-model-select"'), 1)
         self.assertNotIn("quizModelSelect", frontend)              # the Create Quiz form has no model field of its own

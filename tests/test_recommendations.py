@@ -10,6 +10,7 @@ from backend import auth_store, conversation_store, indexed_document_store, quiz
 from backend.auth_store import LEGACY_USER_ID
 from backend.main import app
 from backend.recommendation_service import generate_recommendations, mastery_to_recommendation
+from frontend_source import frontend_script_text
 
 
 def mastery(level, score=0, evidence=True, sufficient=True):
@@ -128,7 +129,7 @@ class RecommendationTests(unittest.TestCase):
     def test_overview_integration_and_real_empty_states(self):
         self.assertEqual(generate_recommendations(LEGACY_USER_ID), [])
         markup = Path("frontend/index.html").read_text(encoding="utf-8")
-        script = Path("frontend/app.js").read_text(encoding="utf-8")
+        script = frontend_script_text()
         # Recommendations live in the Study Session Progress tab; the hidden Overview list is gone (Phase 6B).
         self.assertNotIn('id="overview-recommendations-list"', markup)
         self.assertIn('id="session-recommendations-list"', markup)
