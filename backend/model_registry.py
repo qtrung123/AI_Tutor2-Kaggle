@@ -6,10 +6,13 @@ future model only requires a new `ModelSpec` entry in `_BUILT_INS` below with `e
 real `ollama_model` reference (either an `hf.co/<repo>:<quant>` GGUF reference or a plain Ollama
 library reference such as `gemma3:12b-it-q4_K_M`) - no other file needs to change.
 
-Only Qwen (the default) is pulled and warmed at Kaggle startup. Every other model - DeepSeek, Gemma
-3, GLM-4, and any future entry - is "configured" (offered in the Study Session selector, resolvable,
-persisted with generated artifacts) but "lazy": it is pulled on demand, the first time it is actually
-selected and used, via `prepare_generation_model`. `_pull_model` below pulls it with the same
+The active generation models are Qwen 2.5 7B and Gemma 3 12B. Only Qwen (the default) is pulled and
+warmed at Kaggle startup; Gemma - and any future entry - is "configured" (offered in the Study
+Session selector, resolvable, persisted with generated artifacts) but "lazy": it is pulled on demand,
+the first time it is actually selected and used, via `prepare_generation_model`. DeepSeek R1 14B and
+GLM-4 9B are temporarily inactive (`enabled=False`): never offered, never resolved for new
+generation and never pulled, even if an operator still lists them; their entries stay so artifacts
+generated earlier keep a recognizable model (see `describe_generation_model`). `_pull_model` below pulls it with the same
 Kaggle-safe mechanism as `pull_model()` in deployment/start_kaggle.sh: any `hf.co/*` reference is
 pulled with the `ollama` CLI's `--insecure` flag first (Ollama can otherwise refuse the Hugging Face
 -> CDN redirect) and falls back to a plain `ollama pull` if that fails; every other reference
@@ -88,11 +91,12 @@ GLM4_9B_OLLAMA_MODEL = os.getenv("OLLAMA_GLM4_9B_MODEL", "glm4:9b-chat-q4_K_M")
 _BUILT_INS: dict[str, ModelSpec] = {
     "qwen-2.5-7b": ModelSpec("qwen-2.5-7b", "Qwen 2.5 7B", QWEN_OLLAMA_MODEL),
     "qwen-2.5-3b": ModelSpec("qwen-2.5-3b", "Qwen 2.5 3B", QWEN_3B_OLLAMA_MODEL),
-    "deepseek-r1-14b": ModelSpec("deepseek-r1-14b", "DeepSeek R1 Distill Qwen 14B", DEEPSEEK_R1_14B_OLLAMA_MODEL),
+    # Temporarily inactive (historical artifacts only): see the module docstring.
+    "deepseek-r1-14b": ModelSpec("deepseek-r1-14b", "DeepSeek R1 Distill Qwen 14B", DEEPSEEK_R1_14B_OLLAMA_MODEL, enabled=False),
     "qwen3-4b": ModelSpec("qwen3-4b", "Qwen3 4B", QWEN3_4B_OLLAMA_MODEL),
     "qwen3-8b": ModelSpec("qwen3-8b", "Qwen3 8B", QWEN3_8B_OLLAMA_MODEL),
     "gemma3-12b": ModelSpec("gemma3-12b", "Gemma 3 12B", GEMMA3_12B_OLLAMA_MODEL),
-    "glm4-9b": ModelSpec("glm4-9b", "GLM-4 9B", GLM4_9B_OLLAMA_MODEL),
+    "glm4-9b": ModelSpec("glm4-9b", "GLM-4 9B", GLM4_9B_OLLAMA_MODEL, enabled=False),
 }
 
 

@@ -43,12 +43,12 @@ class OnDemandEndpointTests(unittest.TestCase):
             prepare.assert_called_once_with("qwen-2.5-7b")
 
     def test_a_lazily_pulled_model_is_prepared_before_generation_and_never_silently_swapped(self):
-        """Selecting a lazy model (Gemma/GLM/DeepSeek) and asking to generate prepares exactly that
+        """Selecting a lazy model (Gemma) and asking to generate prepares exactly that
         model - never Qwen - and a failed preparation aborts the request instead of generating
         anyway with a different model."""
         for route_module, endpoint_call in (
             (summary_api, lambda: summary_api.summary_detail("doc.pdf", model_id="gemma3-12b", current_user=USER)),
-            (flashcards_api, lambda: flashcards_api.flashcards_detail("doc.pdf", topic_ids=None, model_id="glm4-9b", language="auto", current_user=USER)),
+            (flashcards_api, lambda: flashcards_api.flashcards_detail("doc.pdf", topic_ids=None, model_id="gemma3-12b", language="auto", current_user=USER)),
         ):
             with patch.object(summary_api, "generate_document_summary", return_value={}), \
                  patch.object(flashcards_api, "generate_flashcards", return_value={}), \

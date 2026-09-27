@@ -118,6 +118,10 @@ class ModelComparisonServiceTests(unittest.TestCase):
 
     def test_roster_is_exactly_qwen_vs_gemma_with_no_combined_score(self):
         self.assertEqual([entry["model_id"] for entry in QUIZ_BENCHMARK_MODELS], ["qwen-2.5-7b", "gemma3-12b"])
+        # Both benchmark models are active generation models (the benchmark can still run them).
+        from backend.model_registry import resolve_generation_model
+        for entry in QUIZ_BENCHMARK_MODELS:
+            self.assertTrue(resolve_generation_model(entry["model_id"]))
         for forbidden in ("quality_score", "overall_score", "winner", "vram_mb"):
             self.assertNotIn(forbidden, model_comparison_service.METRIC_FIELDS)
 

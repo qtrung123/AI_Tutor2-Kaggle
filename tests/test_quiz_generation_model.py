@@ -42,9 +42,11 @@ class DescribeGenerationModelTests(unittest.TestCase):
         self.assertEqual(describe_generation_model("hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M")["name"], "Qwen3-8B")  # legacy quizzes
 
     def test_every_offered_model_is_described_consistently_with_the_registry(self):
-        for public_id in ("qwen-2.5-7b", "deepseek-r1-14b"):
-            with patch.object(model_registry, "GENERATION_MODELS", ("qwen-2.5-7b", "deepseek-r1-14b")):
-                reference = model_registry.resolve_generation_model(public_id)
+        with patch.object(model_registry, "_is_installed", return_value=True):
+            offered = [model["id"] for model in model_registry.list_generation_models()]
+        self.assertEqual(offered, ["qwen-2.5-7b", "gemma3-12b"])
+        for public_id in offered:
+            reference = model_registry.resolve_generation_model(public_id)
             self.assertEqual(describe_generation_model(reference)["model_id"], public_id)
 
 

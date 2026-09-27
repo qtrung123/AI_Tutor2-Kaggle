@@ -11,6 +11,7 @@ from frontend_source import frontend_script_text
 
 
 ROOT = Path(__file__).parents[1]
+DEEPSEEK_REF = "hf.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q4_K_M"
 
 
 class ModelRegistryTests(unittest.TestCase):
@@ -52,20 +53,33 @@ class ModelRegistryTests(unittest.TestCase):
         startup = (ROOT / "deployment" / "start_kaggle.sh").read_text(encoding="utf-8")
         notebook = (ROOT / "kaggle_run.ipynb").read_text(encoding="utf-8")
 
-        self.assertIn("for required_model_id in qwen-2.5-7b deepseek-r1-14b gemma3-12b glm4-9b", startup)
+        self.assertIn("for required_model_id in qwen-2.5-7b gemma3-12b; do", startup)
         self.assertIn('case ",$OLLAMA_GENERATION_MODELS,"', startup)
-        self.assertIn('OLLAMA_GENERATION_MODELS = \\"qwen-2.5-7b,deepseek-r1-14b,gemma3-12b,glm4-9b\\"', notebook)
+        self.assertIn('OLLAMA_GENERATION_MODELS = \\"qwen-2.5-7b,gemma3-12b\\"', notebook)
         self.assertNotIn("qwen3-4b", startup)
         self.assertNotIn("qwen3-4b", notebook)
 
-    def test_deepseek_public_id_resolves_to_exact_runtime_reference(self):
-        self.assertEqual(model_registry.resolve_generation_model("deepseek-r1-14b"), "hf.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q4_K_M")
+    def test_deepseek_and_glm_are_rejected_for_new_generation_even_if_configured(self):
+        """Temporarily inactive: not offered and never resolved, even when an older environment
+        (e.g. a stale Kaggle notebook) still lists them in OLLAMA_GENERATION_MODELS."""
+        for model_id in ("deepseek-r1-14b", "glm4-9b"):
+            with self.subTest(model_id=model_id):
+                with self.assertRaisesRegex(ValueError, "not an allowed"):
+                    model_registry.resolve_generation_model(model_id)
+                with patch.object(model_registry, "GENERATION_MODELS", ("qwen-2.5-7b", "gemma3-12b", model_id)):
+                    with self.assertRaisesRegex(ValueError, "not an allowed"):
+                        model_registry.resolve_generation_model(model_id)
+                    with patch.object(model_registry, "_is_installed", return_value=True):
+                        self.assertNotIn(model_id, {item["id"] for item in model_registry.list_generation_models()})
+
+    def test_inactive_models_keep_their_historical_description(self):
+        """Artifacts generated earlier by DeepSeek/GLM keep a recognizable model."""
+        self.assertEqual(model_registry.describe_generation_model(DEEPSEEK_REF)["model_id"], "deepseek-r1-14b")
+        self.assertEqual(model_registry.describe_generation_model("glm4:9b-chat-q4_K_M")["model_id"], "glm4-9b")
+        self.assertEqual(model_registry.describe_generation_model("glm4:9b-chat-q4_K_M")["name"], "glm4")
 
     def test_gemma3_public_id_resolves_to_exact_official_ollama_reference(self):
         self.assertEqual(model_registry.resolve_generation_model("gemma3-12b"), "gemma3:12b-it-q4_K_M")
-
-    def test_glm4_public_id_resolves_to_exact_official_ollama_reference(self):
-        self.assertEqual(model_registry.resolve_generation_model("glm4-9b"), "glm4:9b-chat-q4_K_M")
 
     def test_qwen3_8b_stays_resolvable_only_when_explicitly_configured(self):
         # Not offered any more, but old quizzes / external deployments keep a resolvable id.
@@ -74,30 +88,26 @@ class ModelRegistryTests(unittest.TestCase):
         with patch.object(model_registry, "GENERATION_MODELS", ("qwen-2.5-7b", "qwen3-8b")):
             self.assertEqual(model_registry.resolve_generation_model("qwen3-8b"), "hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M")
 
-    def test_the_four_configured_models_are_qwen_deepseek_gemma_and_glm(self):
-        self.assertEqual(config.GENERATION_MODELS, ("qwen-2.5-7b", "deepseek-r1-14b", "gemma3-12b", "glm4-9b"))
+    def test_the_active_models_are_exactly_qwen_default_and_gemma(self):
+        self.assertEqual(config.GENERATION_MODELS, ("qwen-2.5-7b", "gemma3-12b"))
         self.assertEqual(config.DEFAULT_GENERATION_MODEL, "qwen-2.5-7b")
         self.assertEqual(config.QUIZ_DEFAULT_GENERATION_MODEL, "qwen-2.5-7b")
         self.assertEqual(model_registry.resolve_generation_model("qwen-2.5-7b"), "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M")
-        self.assertEqual(model_registry.resolve_generation_model("deepseek-r1-14b"), "hf.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q4_K_M")
         self.assertEqual(model_registry.resolve_generation_model("gemma3-12b"), "gemma3:12b-it-q4_K_M")
-        self.assertEqual(model_registry.resolve_generation_model("glm4-9b"), "glm4:9b-chat-q4_K_M")
         with patch.object(model_registry, "_is_installed", return_value=True):
-            offered = {item["id"]: item for item in model_registry.list_generation_models()}
-        self.assertEqual(set(offered), {"qwen-2.5-7b", "deepseek-r1-14b", "gemma3-12b", "glm4-9b"})
-        self.assertEqual(offered["deepseek-r1-14b"]["label"], "DeepSeek R1 Distill Qwen 14B")
-        self.assertEqual(offered["gemma3-12b"]["label"], "Gemma 3 12B")
-        self.assertEqual(offered["glm4-9b"]["label"], "GLM-4 9B")
-        self.assertTrue(all("ollama_model" not in item for item in offered.values()))
+            offered = model_registry.list_generation_models()
+        self.assertEqual(offered, [
+            {"id": "qwen-2.5-7b", "label": "Qwen 2.5 7B", "default": True, "ready": True},
+            {"id": "gemma3-12b", "label": "Gemma 3 12B", "default": False, "ready": True},
+        ])
 
     def test_ready_false_does_not_remove_a_configured_but_uninstalled_model_from_the_list(self):
         """A model that is configured/allowed but not yet pulled on Kaggle still shows up in the
         Study Session selector - it is just reported not ready, never hidden."""
         with patch.object(model_registry, "_is_installed", return_value=False):
             offered = {item["id"]: item for item in model_registry.list_generation_models()}
-        self.assertEqual(set(offered), {"qwen-2.5-7b", "deepseek-r1-14b", "gemma3-12b", "glm4-9b"})
+        self.assertEqual(list(offered), ["qwen-2.5-7b", "gemma3-12b"])
         self.assertFalse(offered["gemma3-12b"]["ready"])
-        self.assertFalse(offered["glm4-9b"]["ready"])
 
     def test_quiz_uses_backend_default_while_chat_and_summary_keep_selected_default(self):
         frontend = frontend_script_text()
@@ -146,14 +156,14 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertEqual(
             quiz.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE") + legacy.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 8
         )
-        self.assertIn('OLLAMA_DEEPSEEK_R1_14B_MODEL="${OLLAMA_DEEPSEEK_R1_14B_MODEL:-hf.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q4_K_M}"', startup)
+        self.assertIn('OLLAMA_GEMMA3_12B_MODEL="${OLLAMA_GEMMA3_12B_MODEL:-gemma3:12b-it-q4_K_M}"', startup)
         self.assertIn('"keep_alive": 0', startup)
         self.assertIn('OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL = \\"qwen-2.5-7b\\"', notebook)
 
     def test_kaggle_pulls_qwen_with_the_hugging_face_mechanism_and_no_qwen3(self):
-        """The notebook configures Qwen2.5-7B (default, hf.co GGUF), DeepSeek-R1-Distill-Qwen-14B
-        and the two new official-Ollama-library models Gemma 3 12B / GLM-4 9B; Qwen3 is gone from
-        the notebook and the startup script."""
+        """The notebook configures exactly Qwen2.5-7B (default, hf.co GGUF) and Gemma 3 12B (an
+        official Ollama library model); DeepSeek, GLM and Qwen3 are gone from the notebook and the
+        startup script."""
         import json
         startup = (ROOT / "deployment" / "start_kaggle.sh").read_text(encoding="utf-8")
         notebook = (ROOT / "kaggle_run.ipynb").read_text(encoding="utf-8")
@@ -161,17 +171,15 @@ class ModelRegistryTests(unittest.TestCase):
         config_cell = "".join(json.loads(notebook)["cells"][1]["source"])
 
         self.assertIn('OLLAMA_CHAT_MODEL = "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"', config_cell)
-        self.assertIn('OLLAMA_DEEPSEEK_R1_14B_MODEL = "hf.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q4_K_M"', config_cell)
         self.assertIn('OLLAMA_GEMMA3_12B_MODEL = "gemma3:12b-it-q4_K_M"', config_cell)
-        self.assertIn('OLLAMA_GLM4_9B_MODEL = "glm4:9b-chat-q4_K_M"', config_cell)
-        self.assertIn('"OLLAMA_DEEPSEEK_R1_14B_MODEL": OLLAMA_DEEPSEEK_R1_14B_MODEL', config_cell)
         self.assertIn('"OLLAMA_GEMMA3_12B_MODEL": OLLAMA_GEMMA3_12B_MODEL', config_cell)
-        self.assertIn('"OLLAMA_GLM4_9B_MODEL": OLLAMA_GLM4_9B_MODEL', config_cell)
-        self.assertIn(
-            'AVAILABLE_MODELS = f"{OLLAMA_CHAT_MODEL},{OLLAMA_DEEPSEEK_R1_14B_MODEL},{OLLAMA_GEMMA3_12B_MODEL},{OLLAMA_GLM4_9B_MODEL}"',
-            config_cell,
-        )
-        self.assertIn('OLLAMA_GENERATION_MODELS = "qwen-2.5-7b,deepseek-r1-14b,gemma3-12b,glm4-9b"', config_cell)
+        self.assertIn('AVAILABLE_MODELS = f"{OLLAMA_CHAT_MODEL},{OLLAMA_GEMMA3_12B_MODEL}"', config_cell)
+        self.assertIn('OLLAMA_GENERATION_MODELS = "qwen-2.5-7b,gemma3-12b"', config_cell)
+        self.assertIn('AVAILABLE_MODELS="${AVAILABLE_MODELS:-$OLLAMA_CHAT_MODEL,$OLLAMA_GEMMA3_12B_MODEL}"', startup)
+        # DeepSeek and GLM are neither configured nor pulled by the normal runtime.
+        for text in (startup, config_cell):
+            for inactive in ("OLLAMA_DEEPSEEK_R1_14B_MODEL", "OLLAMA_GLM4_9B_MODEL", "deepseek-r1-14b", "glm4-9b"):
+                self.assertNotIn(inactive, text)
         # Only Qwen (the default) is pulled unconditionally at startup.
         self.assertIn('pull_model "$OLLAMA_CHAT_MODEL"', startup)
         self.assertIn('ollama pull --insecure "$model"', startup)          # the shared hf.co mechanism
@@ -182,14 +190,14 @@ class ModelRegistryTests(unittest.TestCase):
             self.assertNotIn("qwen3", text.lower())
             self.assertNotIn("QWEN3", text)
 
-    def test_deepseek_gemma_and_glm_are_not_pulled_unconditionally_at_startup(self):
-        """DeepSeek, Gemma and GLM are configured/offered but lazy: nothing in the unconditional
-        startup path (before the opt-in PRELOAD_ALL_MODELS block) pulls or checks them."""
+    def test_gemma_is_not_pulled_unconditionally_at_startup(self):
+        """Gemma is configured/offered but lazy: nothing in the unconditional startup path (before
+        the opt-in PRELOAD_ALL_MODELS block) pulls or checks it (DeepSeek/GLM are not configured)."""
         startup = (ROOT / "deployment" / "start_kaggle.sh").read_text(encoding="utf-8")
         unconditional_startup = startup[
             startup.index('log "Starting Ollama"'):startup.index('if [[ "$PRELOAD_ALL_MODELS"')
         ]
-        for reference_var in ("$OLLAMA_DEEPSEEK_R1_14B_MODEL", "$OLLAMA_GEMMA3_12B_MODEL", "$OLLAMA_GLM4_9B_MODEL"):
+        for reference_var in ("$OLLAMA_GEMMA3_12B_MODEL",):
             self.assertNotIn(f'pull_model "{reference_var}"', unconditional_startup)
             self.assertNotIn(f'ollama_has_model "{reference_var}"', unconditional_startup)
         # They are still reachable through the generic, opt-in preload loop (benchmarking only).
@@ -254,16 +262,14 @@ class ModelRegistryTests(unittest.TestCase):
 
     @patch("backend.model_registry.subprocess.run")
     @patch("backend.model_registry._is_installed", return_value=False)
-    def test_deepseek_lazy_pull_uses_the_kaggle_safe_insecure_first_hf_co_path(self, _installed, run):
-        """The exact issue this covers: on Kaggle's Ollama 0.34.2, the HTTP API's "insecure": true
-        does not reproduce the CLI's --insecure flag, so DeepSeek's now-lazy pull (on demand instead
-        of at startup) must go through the real `ollama` CLI, exactly like start_kaggle.sh. No
-        DeepSeek-specific code makes this true - it falls out of the reference shape (hf.co/*) alone."""
-        model_registry.prepare_generation_model("deepseek-r1-14b")
-        run.assert_called_once_with(
-            ["ollama", "pull", "--insecure", "hf.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q4_K_M"],
-            check=True, capture_output=True, text=True, timeout=900,
-        )
+    def test_inactive_deepseek_and_glm_are_never_pulled(self, _installed, run):
+        """Preparing a temporarily inactive model is rejected before any pull is attempted."""
+        with patch("backend.model_registry.httpx.Client") as client_type:
+            for model_id in ("deepseek-r1-14b", "glm4-9b"):
+                with self.assertRaisesRegex(ValueError, "not an allowed"):
+                    model_registry.prepare_generation_model(model_id)
+        run.assert_not_called()
+        client_type.assert_not_called()
 
     @patch("backend.model_registry.subprocess.run")
     @patch("backend.model_registry._is_installed", return_value=False)
@@ -275,13 +281,13 @@ class ModelRegistryTests(unittest.TestCase):
             subprocess.CalledProcessError(1, ["ollama", "pull", "--insecure"], stderr="blocked redirect to a different host"),
             subprocess.CompletedProcess(args=[], returncode=0),
         ]
-        model_registry.prepare_generation_model("deepseek-r1-14b")
+        model_registry.prepare_generation_model("qwen-2.5-7b")
         self.assertEqual(run.call_count, 2)
         first_call, second_call = run.call_args_list
         self.assertIn("--insecure", first_call.args[0])
         self.assertNotIn("--insecure", second_call.args[0])
         self.assertEqual(first_call.args[0][-1], second_call.args[0][-1])   # same model reference both times
-        self.assertEqual(first_call.args[0][-1], "hf.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q4_K_M")
+        self.assertEqual(first_call.args[0][-1], "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M")
 
     @patch("backend.model_registry.subprocess.run")
     @patch("backend.model_registry._is_installed", return_value=False)
@@ -291,7 +297,7 @@ class ModelRegistryTests(unittest.TestCase):
         never a quiet swap to Qwen."""
         run.side_effect = subprocess.CalledProcessError(1, ["ollama", "pull"], stderr="simulated failure")
         with self.assertRaises(subprocess.CalledProcessError):
-            model_registry.prepare_generation_model("deepseek-r1-14b")
+            model_registry.prepare_generation_model("qwen-2.5-7b")
         self.assertEqual(run.call_count, 2)   # insecure attempt, then the plain fallback
 
     @patch("backend.model_registry.subprocess.run")
@@ -300,13 +306,13 @@ class ModelRegistryTests(unittest.TestCase):
         """An OSError (e.g. the `ollama` binary not found) from the insecure attempt is treated the
         same as a failed pull: fall through to the plain attempt rather than crashing differently."""
         run.side_effect = [FileNotFoundError("ollama not found"), subprocess.CompletedProcess(args=[], returncode=0)]
-        model_registry.prepare_generation_model("deepseek-r1-14b")
+        model_registry.prepare_generation_model("qwen-2.5-7b")
         self.assertEqual(run.call_count, 2)
 
     @patch("backend.model_registry.httpx.Client")
     @patch("backend.model_registry._is_installed", return_value=False)
     def test_plain_ollama_ref_pull_never_uses_insecure_and_never_retries(self, _installed, client_type):
-        """Gemma/GLM (official Ollama library references, not Hugging Face) keep using a normal,
+        """Gemma (an official Ollama library reference, not Hugging Face) keeps using a normal,
         single Ollama pull - never the hf.co insecure/fallback mechanism, and never a silent retry
         with a different model on failure."""
         client = client_type.return_value.__enter__.return_value
@@ -319,7 +325,7 @@ class ModelRegistryTests(unittest.TestCase):
 
     @patch("backend.model_registry.httpx.Client")
     @patch("backend.model_registry._is_installed", return_value=False)
-    def test_prepare_pulls_the_exact_gemma_and_glm_references_when_missing(self, _installed, client_type):
+    def test_gemma_is_lazy_and_pulled_with_its_exact_reference_when_missing(self, _installed, client_type):
         """Mocked-only: proves the pull call is issued with exactly the official Ollama references,
         without ever touching a real Ollama or downloading anything."""
         client = client_type.return_value.__enter__.return_value
@@ -331,17 +337,13 @@ class ModelRegistryTests(unittest.TestCase):
             "http://127.0.0.1:11434/api/pull", json={"name": "gemma3:12b-it-q4_K_M", "stream": False},
         )
 
-        model_registry.prepare_generation_model("glm4-9b")
-        client.post.assert_called_with(
-            "http://127.0.0.1:11434/api/pull", json={"name": "glm4:9b-chat-q4_K_M", "stream": False},
-        )
-        self.assertEqual(client.post.call_count, 2)
+        self.assertEqual(client.post.call_count, 1)
 
     @patch("backend.model_registry.subprocess.run")
     @patch("backend.model_registry.httpx.Client")
     @patch("backend.model_registry._is_installed", return_value=True)
     def test_preparing_an_already_cached_model_never_pulls_again(self, _installed, client_type, run):
-        for model_id in ("gemma3-12b", "glm4-9b", "deepseek-r1-14b"):
+        for model_id in ("gemma3-12b", "qwen-2.5-7b"):
             with self.subTest(model_id=model_id):
                 result = model_registry.prepare_generation_model(model_id)
                 self.assertEqual(result["model_id"], model_id)
@@ -349,7 +351,7 @@ class ModelRegistryTests(unittest.TestCase):
                 self.assertNotIn("prepared", result)
                 self.assertIsInstance(result["model_prepare_ms"], int)
         client_type.assert_not_called()
-        run.assert_not_called()   # not even the hf.co CLI path (deepseek-r1-14b) touches subprocess
+        run.assert_not_called()   # not even the hf.co CLI path (qwen-2.5-7b) touches subprocess
 
     @patch("backend.model_registry._is_installed", return_value=True)
     def test_prepare_never_touches_the_network_when_the_model_is_already_cached(self, _installed):
@@ -397,12 +399,15 @@ class ModelSpecStructureTests(unittest.TestCase):
         self.assertEqual(registry["qwen-2.5-7b"].quantization, "Q4_K_M")
         self.assertEqual(registry["deepseek-r1-14b"].quantization, "Q4_K_M")
 
-    def test_gemma_and_glm_are_enabled_real_entries_not_placeholders(self):
+    def test_gemma_is_enabled_and_deepseek_glm_are_kept_but_inactive(self):
         gemma = model_registry._BUILT_INS["gemma3-12b"]
-        glm = model_registry._BUILT_INS["glm4-9b"]
         self.assertTrue(gemma.enabled)
-        self.assertTrue(glm.enabled)
         self.assertEqual(gemma.ollama_model, "gemma3:12b-it-q4_K_M")
+        # Kept only so artifacts they generated earlier stay readable.
+        deepseek = model_registry._BUILT_INS["deepseek-r1-14b"]
+        glm = model_registry._BUILT_INS["glm4-9b"]
+        self.assertEqual((deepseek.enabled, glm.enabled), (False, False))
+        self.assertEqual(deepseek.ollama_model, DEEPSEEK_REF)
         self.assertEqual(glm.ollama_model, "glm4:9b-chat-q4_K_M")
         # the old inert placeholder ids are gone, not just disabled
         self.assertNotIn("gemma-2-9b", model_registry._BUILT_INS)
@@ -432,6 +437,48 @@ class ModelSpecStructureTests(unittest.TestCase):
             with patch.object(model_registry, "_is_installed", return_value=True):
                 offered = {item["id"] for item in model_registry.list_generation_models()}
             self.assertIn("future-model-x", offered)
+
+
+class HistoricalArtifactTests(unittest.TestCase):
+    """Quizzes generated earlier by now-inactive models (DeepSeek/GLM) stay readable and listed."""
+
+    def setUp(self):
+        import tempfile
+        from backend import auth_store, quiz_store
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.quiz_store = quiz_store
+        self.patches = [
+            patch.object(auth_store, "DATABASE_PATH", root / "app.db"),
+            patch.object(quiz_store, "DATABASE_PATH", root / "app.db"),
+            patch.object(quiz_store, "LEGACY_GENERATED_QUIZZES_PATH", root / "q.json"),
+            patch.object(quiz_store, "LEGACY_QUIZ_ATTEMPTS_PATH", root / "a.json"),
+            patch.object(quiz_store, "LEGACY_QUIZ_EXPLANATIONS_PATH", root / "e.json"),
+        ]
+        for item in self.patches:
+            item.start()
+
+    def tearDown(self):
+        for item in reversed(self.patches):
+            item.stop()
+        self.temp.cleanup()
+
+    def test_quizzes_generated_by_inactive_models_remain_readable(self):
+        from backend.quiz_service import _quiz_variant_status
+        for model_id, reference in (("deepseek-r1-14b", DEEPSEEK_REF), ("glm4-9b", "glm4:9b-chat-q4_K_M")):
+            with self.subTest(model_id=model_id):
+                info = model_registry.describe_generation_model(reference)
+                saved = self.quiz_store.save_quiz("doc.pdf", "easy", {
+                    "title": f"{model_id} quiz", "topic_id": "document", "assessment_scope": "document",
+                    "assessment_plan": {"planner_version": "study_units_v1", "requested_count": 1, "generation_model": info},
+                    "questions": [{"id": 1, "question": "Q?", "options": ["A. a", "B. b", "C. c", "D. d"],
+                                   "correct_answer": "A", "question_type": "single_choice"}],
+                }, "owner-1")
+                stored = self.quiz_store.get_quiz_by_id(saved["quiz_id"], "owner-1")
+                self.assertEqual(stored["generation_model"]["model_id"], model_id)
+                self.assertEqual(len(stored["questions"]), 1)
+                variant = _quiz_variant_status(stored, "owner-1")
+                self.assertEqual((variant["model_id"], variant["model_name"]), (model_id, info["name"]))
 
 
 if __name__ == "__main__":

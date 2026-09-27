@@ -93,8 +93,9 @@ Truy xuất chunk dùng chung ở `document_retrieval.py`; kiểm tra văn bản
 - SQLite: `DATABASE_PATH` (mặc định `data/conversations.db`) chứa auth, hội thoại, quiz, summary,
   flashcards, planner, tài liệu đã index. File tải lên nằm ở `data/users/<owner_id>/`.
 - Vector: Chroma tại `VECTORSTORE_DIR`, collection `study_documents`, embedding `bge-m3` qua Ollama.
-- Model: `model_registry.py` ánh xạ id công khai (`qwen-2.5-7b`, `deepseek-r1-14b`, `gemma3-12b`,
-  `glm4-9b`) sang tham chiếu Ollama; `prepare_generation_model` kéo model lười (lazy) trước khi sinh.
+- Model: `model_registry.py` ánh xạ id công khai đang hoạt động (`qwen-2.5-7b`, `gemma3-12b`) sang
+  tham chiếu Ollama; `prepare_generation_model` kéo model lười (lazy) trước khi sinh. `deepseek-r1-14b`
+  và `glm4-9b` tạm ngưng (`enabled=False`): không chọn/không kéo được, chỉ giữ để đọc artifact cũ.
   Mặc định cho Quiz/Chat/Summary/Flashcards là `qwen-2.5-7b`. Không bao giờ tự đổi sang model khác.
 
 ## 7. Luồng chạy trên Kaggle

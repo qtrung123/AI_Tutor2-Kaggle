@@ -45,7 +45,7 @@ CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "hf.co/bartowski/Qwen2.5-7B-Instruct
 # models are pulled at Kaggle startup - only Qwen, the default, is pulled/warmed there; every other
 # configured model here is pulled lazily on first use, see backend/model_registry.py and
 # deployment/start_kaggle.sh). Existing OLLAMA_CHAT_MODEL deployments continue to expose one model.
-_DEFAULT_GENERATION_MODELS = "qwen-2.5-7b,deepseek-r1-14b,gemma3-12b,glm4-9b"
+_DEFAULT_GENERATION_MODELS = "qwen-2.5-7b,gemma3-12b"
 GENERATION_MODELS = tuple(dict.fromkeys(
     model.strip() for model in os.getenv("OLLAMA_GENERATION_MODELS", _DEFAULT_GENERATION_MODELS).split(",") if model.strip()
 )) or tuple(_DEFAULT_GENERATION_MODELS.split(","))
