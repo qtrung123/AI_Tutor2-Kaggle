@@ -262,7 +262,7 @@ class DocumentStudyStateTests(unittest.TestCase):
         self.assertEqual(SCHEDULING_REASON_CODES, SESSION_REASONS)
         self.assertEqual(set(SESSION_REASONS), {
             "new_material", "deadline_approaching", "review_due", "low_quiz_score", "flashcard_review_due",
-            "final_review", "quiz_in_progress", "rescheduled",
+            "final_review", "quiz_in_progress", "rescheduled", "retrieval_practice",
         })
         reason = SchedulingReason(REASON_LOW_QUIZ_SCORE, "Latest quiz score is low.", {"percentage": 50.0})
         for state_only_code in ("study_started", "marked_completed", "strong_quiz_score", "made_up_code"):

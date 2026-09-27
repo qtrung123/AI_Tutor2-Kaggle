@@ -17,7 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 from backend.study_time import free_minutes_by_date, subtract_minute_interval, to_minutes
 from backend.study_scheduler_contracts import (
     REASON_DEADLINE_APPROACHING, REASON_FINAL_REVIEW, REASON_LOW_QUIZ_SCORE, REASON_NEW_MATERIAL,
-    REASON_QUIZ_IN_PROGRESS, REASON_REVIEW_DUE, CandidateActivity, CapacityReport, MaterialContext,
+    REASON_QUIZ_IN_PROGRESS, REASON_RETRIEVAL_PRACTICE, REASON_REVIEW_DUE, CandidateActivity, CapacityReport, MaterialContext,
     ProposedSession, ScheduleResult, SchedulingContext, SchedulingReason,
 )
 
@@ -66,13 +66,16 @@ class SchedulerConfig:
     # Durations: (min, max, default when the artifact size is unknown), minutes.
     durations: dict = field(default_factory=lambda: {
         "summary": (30, 50, 40), "flashcards": (15, 30, 20), "quiz": (20, 40, 30),
-        "review": (10, 20, 15), "quiz_retry": (20, 30, 25),
+        "review": (10, 20, 15), "quiz_retry": (20, 30, 25), "written_quiz": (10, 25, 15),
     })
     summary_base_minutes: int = 20
     summary_minutes_per_chunk: float = 2.0
     flashcard_minutes_per_card: float = 1.0
     review_minutes_per_card: float = 0.5
     quiz_minutes_per_question: float = 2.0
+    # A written_quiz session practices at most this many of the document's flashcards.
+    written_quiz_questions: int = 10
+    written_quiz_minutes_per_question: float = 1.5
     duration_rounding_minutes: int = 5
     # Daily shape: availability is permission, not obligation.
     max_block_minutes: int = 50
@@ -90,6 +93,7 @@ DEFAULT_CONFIG = SchedulerConfig()
 _ACTIVITY_LABELS = {
     "summary": "read the summary", "flashcards": "practice the flashcards", "quiz": "take a quiz",
     "review": "review the key points", "quiz_retry": "retake a quiz",
+    "written_quiz": "practice recall with a written quiz from your flashcards",
 }
 
 
@@ -162,6 +166,8 @@ def estimate_duration(activity_type: str, state, config: SchedulerConfig = DEFAU
         value = cards * config.review_minutes_per_card
     elif activity_type == "quiz" and questions:
         value = questions * config.quiz_minutes_per_question
+    elif activity_type == "written_quiz" and cards:
+        value = min(cards, config.written_quiz_questions) * config.written_quiz_minutes_per_question
     elif activity_type == "quiz_retry" and (state.quiz.latest_completed or questions):
         total = state.quiz.latest_completed.total if state.quiz.latest_completed else questions
         value = total * config.quiz_minutes_per_question
@@ -237,6 +243,14 @@ def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_
         base = local_date(quiz.latest_completed.completed_at, utc_offset, today)
         return base + timedelta(days=review_interval_days(percentage, config))
 
+    # Written Quiz (retrieval practice) is only possible from a persisted, usable flashcard set.
+    has_cards = bool(state.flashcards.available and state.flashcards.card_count)
+
+    def written_quiz(earliest=today, gap=0) -> _Step:
+        return step("written_quiz", REASON_RETRIEVAL_PRACTICE,
+                    f'Written Quiz on "{title}": reinforce recall before your next assessment.', "review",
+                    earliest=earliest, gap=gap)
+
     steps: list[_Step] = []
     if code == "marked_completed":
         pass  # only the final review below, when a deadline is coming up
@@ -249,6 +263,8 @@ def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_
                               artifact=state.summary.summary_id))
         if not state.flashcards.available:
             steps.append(step("flashcards", learn_reason(), learn_message("flashcards"), "learn"))
+        if has_cards:   # summary -> flashcards -> written quiz -> quiz
+            steps.append(written_quiz())
         steps.append(step("quiz", learn_reason(), learn_message("quiz"), "learn",
                           gap=config.quiz_gap_after_learning_days if steps else 0,
                           artifact=quiz.latest_quiz_id if quiz.latest_quiz_status == "not_started" else None))
@@ -257,6 +273,8 @@ def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_
         low_message = f'Latest quiz on "{title}" scored {result.percentage:g}%'
         steps.append(step("flashcards", REASON_LOW_QUIZ_SCORE, f"{low_message}: practice the flashcards.", "review",
                           earliest=review_due(result.percentage), artifact=state.flashcards.set_id))
+        if has_cards:   # flashcard review -> written quiz -> quiz retry
+            steps.append(written_quiz())
         steps.append(step("quiz_retry", REASON_LOW_QUIZ_SCORE, f"{low_message}: retake a quiz.", "review",
                           gap=config.low_score_retry_gap_days, artifact=result.quiz_id))
     elif code in ("moderate_quiz_score", "strong_quiz_score"):
@@ -266,8 +284,13 @@ def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_
         if final_start is None or due < final_start:
             steps.append(step("review", REASON_REVIEW_DUE, f'Spaced review of "{title}".', "review", earliest=due))
         if code == "moderate_quiz_score":
+            # Reinforcement between the review and the next assessment; the retry keeps its spacing.
+            practice_gap = 1 if has_cards and config.moderate_retry_gap_days > 1 else 0
+            if has_cards:
+                steps.append(written_quiz(earliest=due, gap=practice_gap))
             steps.append(step("quiz_retry", REASON_REVIEW_DUE, f'Check "{title}" again with a quiz.', "review",
-                              earliest=due, gap=config.moderate_retry_gap_days, artifact=result.quiz_id))
+                              earliest=due, gap=config.moderate_retry_gap_days - practice_gap, artifact=result.quiz_id))
+        # A strong score gets plain spaced review: no immediate written quiz.
 
     if deadline is not None:
         steps.append(_Step("review", REASON_FINAL_REVIEW, f'Final review of "{title}" before {deadline.isoformat()}.',

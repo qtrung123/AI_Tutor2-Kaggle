@@ -26,6 +26,7 @@ REASON_FLASHCARD_REVIEW_DUE = "flashcard_review_due"
 REASON_FINAL_REVIEW = "final_review"
 REASON_QUIZ_IN_PROGRESS = "quiz_in_progress"
 REASON_RESCHEDULED = "rescheduled"
+REASON_RETRIEVAL_PRACTICE = "retrieval_practice"
 SCHEDULING_REASON_CODES = SESSION_REASONS
 # Short human-readable label per code, for persisted sessions (which store only the code).
 REASON_LABELS = {
@@ -37,6 +38,7 @@ REASON_LABELS = {
     REASON_FINAL_REVIEW: "Final review before the deadline",
     REASON_QUIZ_IN_PROGRESS: "Finish the quiz you started",
     REASON_RESCHEDULED: "Rescheduled",
+    REASON_RETRIEVAL_PRACTICE: "Scheduled to reinforce recall before your next assessment",
 }
 
 

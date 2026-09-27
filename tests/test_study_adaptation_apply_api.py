@@ -155,7 +155,8 @@ class StudyAdaptationApplyTests(PlannerDatabaseMixin, unittest.TestCase):
         quiz = self.session("quiz", "2026-09-29T18:00:00", "2026-09-29T18:30:00", 30)
         material = study_planner_store.get_plan_material(self.alice, self.plan["plan_id"], "mkt")
         study_planner_store.update_material(self.alice, material["material_id"], {"deadline": "2026-09-28"})
-        body = self.apply({"kind": "deadline_changed", "document_id": "mkt"}).json()
+        # The document has flashcards, so a Written Quiz is added too: a larger change, confirmed here.
+        body = self.apply({"kind": "deadline_changed", "document_id": "mkt"}, confirm=True).json()
         self.assertTrue(body["applied"])
         active = [s for s in self.rows().values() if s["status"] == "scheduled" and s["document_id"] == "mkt"]
         self.assertTrue(active)

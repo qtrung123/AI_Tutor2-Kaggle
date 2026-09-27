@@ -1357,6 +1357,7 @@ const PLANNER_STEPS = ["materials", "availability", "preview", "plan"];
 const PLANNER_ACTIVE_SESSION_STATUSES = ["scheduled", "in_progress"];
 const PLANNER_ACTIVITY_LABELS = {
   summary: "Summary", flashcards: "Flashcards", quiz: "Quiz", review: "Review", quiz_retry: "Quiz retry",
+  written_quiz: "Written Quiz",
 };
 
 class PlannerRequestError extends Error {
@@ -1444,6 +1445,7 @@ const PCAL_REASON_TEXT = {
   final_review: "Final retrieval practice before the deadline.",
   quiz_in_progress: "Continue the quiz already in progress.",
   rescheduled: "Moved from an earlier study session.",
+  retrieval_practice: "Retrieval practice: scheduled to reinforce recall before your next assessment.",
 };
 
 // "How this plan was built": only the factors the planner really used, with this plan's data.

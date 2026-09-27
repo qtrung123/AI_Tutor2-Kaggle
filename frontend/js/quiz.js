@@ -1621,6 +1621,10 @@ function moveQuizReview(direction) {
 
 // ---- Quiz Player: answering and navigation -------------------------------------------------------
 
+function isPracticeQuiz(quiz) {
+  return quiz?.assessment_plan?.planner_version === "flashcard_written_v1";
+}
+
 function isWrittenQuestionType(questionType) {
   return questionType === "fill_blank" || questionType === "short_answer";
 }
@@ -1809,7 +1813,8 @@ async function submitQuizPlayer() {
     await loadDashboard();
     renderQuizHistory();
     showQuizResults(buildQuizResult(currentAttempt, currentQuiz));
-    plannerAdaptAfterQuiz(currentQuiz.document_id);
+    // Flashcard written practice is not an assessment: it never re-shapes the plan.
+    if (!isPracticeQuiz(currentQuiz)) plannerAdaptAfterQuiz(currentQuiz.document_id);
   } catch (error) {
     // Local answers are untouched -- the learner can simply press Finish Quiz again.
     showToast(error.message || "Could not submit quiz");
@@ -2006,7 +2011,7 @@ async function submitAssessmentQuiz(event) {
     await loadDashboard();
     renderAssessmentQuiz();
     showToast(`Attempt ${currentAttempt.attempt_number}: ${currentAttempt.score}/${currentAttempt.total}`);
-    plannerAdaptAfterQuiz(currentQuiz.document_id);
+    if (!isPracticeQuiz(currentQuiz)) plannerAdaptAfterQuiz(currentQuiz.document_id);
   } catch (error) {
     renderAssessmentQuiz();
     showToast(error.message || "Could not submit quiz");

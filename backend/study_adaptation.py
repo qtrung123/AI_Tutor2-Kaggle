@@ -29,7 +29,7 @@ from backend.study_scheduler_contracts import REASON_FINAL_REVIEW, REASON_RESCHE
 
 TRIGGER_KINDS = ("quiz_completed", "session_missed", "session_skipped", "availability_changed", "deadline_changed")
 _ACTIVITY_NAMES = {"summary": "summary", "flashcards": "flashcards", "quiz": "quiz", "review": "review",
-                   "quiz_retry": "quiz retry"}
+                   "quiz_retry": "quiz retry", "written_quiz": "written quiz"}
 
 
 @dataclass(frozen=True)

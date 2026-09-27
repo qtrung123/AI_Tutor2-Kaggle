@@ -696,7 +696,9 @@ def upsert_topic_progress(owner_id: str, document_id: str, topic_id: str, planne
 PLAN_STATUSES = ("active", "paused", "completed", "archived")
 FAMILIARITY_LEVELS = ("new_to_me", "somewhat_familiar", "reviewing")
 LEARNING_STATES = ("new", "learning", "needs_review", "on_track", "completed")
-ACTIVITY_TYPES = ("summary", "flashcards", "quiz", "review", "quiz_retry")
+# written_quiz = retrieval practice from the document's persisted flashcards (a flashcard-derived
+# written quiz); it never counts as the document's assessment.
+ACTIVITY_TYPES = ("summary", "flashcards", "quiz", "review", "quiz_retry", "written_quiz")
 # skipped = the learner chose to skip it; missed = its time passed; rescheduled = moved, with a
 # replacement row pointing back via rescheduled_from; cancelled = the adaptive planner withdrew a
 # future recommendation that is no longer needed/valid. All four are terminal history: never
@@ -706,7 +708,7 @@ SESSION_STATUSES = ("scheduled", "in_progress", "completed", "skipped", "missed"
 # translates them). Scheduling semantics only; learning/performance state lives in DocumentStudyState.
 SESSION_REASONS = (
     "new_material", "deadline_approaching", "review_due", "low_quiz_score", "flashcard_review_due",
-    "final_review", "quiz_in_progress", "rescheduled",
+    "final_review", "quiz_in_progress", "rescheduled", "retrieval_practice",
 )
 
 

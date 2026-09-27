@@ -3541,3 +3541,8 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .flashcard-quiz-error { margin:0 0 12px; color:var(--danger); font-weight:700; }
 .flashcard-quiz-start { width:100%; }
 .quiz-review-self-check { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:10px; color:var(--muted); font-size:13px; }
+
+/* Written Quiz (flashcard retrieval practice) sessions: visually distinct from normal Quiz. */
+.planner-session--written_quiz{border-left:4px solid #1f9d8a}
+.planner-session--written_quiz .planner-activity-chip{background:#e3f6f2;color:#136b5e}
+.pcal-event.pcal-activity--written_quiz{box-shadow:inset 3px 0 0 #1f9d8a}

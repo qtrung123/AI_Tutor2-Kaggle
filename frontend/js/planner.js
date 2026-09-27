@@ -406,6 +406,7 @@ function plannerSessionItem(session, tag = "li", { action = false } = {}) {
   const chip = document.createElement("span");
   chip.className = "planner-activity-chip";
   chip.textContent = PLANNER_ACTIVITY_LABELS[session.activity_type] || session.activity_type;
+  if (session.activity_type === "written_quiz") chip.textContent += " · Retrieval practice";
   const duration = document.createElement("span");
   duration.textContent = plannerFormatDuration(session.duration_minutes);
   meta.append(chip, duration);
@@ -463,6 +464,9 @@ function plannerAddSessionActions(item, content, session, name) {
 async function plannerQuizTarget(session) {
   // The exact quiz a planned quiz / quiz_retry session is about: its own artifact (the quiz to
   // take or retake), else the document's quiz already in progress. null = the Quiz library.
+  // A written_quiz session only ever opens its own flashcard practice quiz (set by the backend
+  // when the session starts) -- never a normal assessment quiz.
+  if (session.activity_type === "written_quiz" && !session.artifact_id) return null;
   await loadQuizStatuses();
   const variants = (quizStatuses.find((item) => item.document_id === session.document_id)?.variants || [])
     .filter((variant) => variant.quiz_id);

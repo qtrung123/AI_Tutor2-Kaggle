@@ -79,26 +79,29 @@ class QuizTriggerTests(AdaptationAssertions, unittest.TestCase):
                     session("cards", "mkt", "flashcards", "2026-09-28T18:00:00", 10, reason="review_due")]
         result = propose(quiz_done("mkt"), [mkt], sessions)
         self.assertEqual([(m.session_id, m.to_start) for m in result.moved], [("cards", "2026-09-25T18:00:00")])
+        # Flashcard review -> Written Quiz (retrieval practice, same day) -> Quiz retry the next day.
         self.assertEqual([(a.activity_type, a.scheduled_start, a.reason_code) for a in result.added],
-                         [("quiz_retry", "2026-09-26T18:00:00", "low_quiz_score")])
-        self.assertEqual(result.added[0].artifact_id, "q-mkt")
-        self.assertEqual((result.cancelled, result.significance, result.unchanged_count), ((), "small", 0))
+                         [("written_quiz", "2026-09-25T18:20:00", "retrieval_practice"),
+                          ("quiz_retry", "2026-09-26T18:00:00", "low_quiz_score")])
+        self.assertEqual(result.added[1].artifact_id, "q-mkt")
+        self.assertEqual((result.cancelled, result.significance, result.unchanged_count), ((), "large", 0))
         self.assert_rules(result, sessions, [mkt])
 
     def test_low_score_keeps_good_sessions_and_cancels_a_duplicate_retry(self):
         mkt = fx.material(fx.make_state("mkt", "Marketing", summary=True, cards=10, percentage=40,
                                         completed_at=QUIZ_THIS_MORNING))
         sessions = [session("cards", "mkt", "flashcards", "2026-09-25T18:00:00", 10, reason="low_quiz_score"),
+                    session("written", "mkt", "written_quiz", "2026-09-25T18:20:00", 15, reason="retrieval_practice"),
                     session("retry1", "mkt", "quiz_retry", "2026-09-26T18:00:00", 20, reason="low_quiz_score"),
                     session("retry2", "mkt", "quiz_retry", "2026-09-27T18:00:00", 20, reason="low_quiz_score")]
         result = propose(quiz_done("mkt"), [mkt], sessions)
         self.assertEqual((result.added, result.moved), ((), ()))
         self.assertEqual([c.session_id for c in result.cancelled], ["retry2"])
-        self.assertEqual(result.unchanged_count, 2)
+        self.assertEqual(result.unchanged_count, 3)
         # Applying the proposal and asking again changes nothing more: no duplicate retries.
         applied = [s for s in sessions if s["session_id"] != "retry2"]
         again = propose(quiz_done("mkt"), [mkt], applied)
-        self.assertEqual((again.added, again.moved, again.cancelled, again.unchanged_count), ((), (), (), 2))
+        self.assertEqual((again.added, again.moved, again.cancelled, again.unchanged_count), ((), (), (), 3))
 
     def test_high_score_pushes_review_out_and_drops_the_retry(self):
         mkt = fx.material(fx.make_state("mkt", "Marketing", summary=True, cards=10, percentage=90,
@@ -116,9 +119,10 @@ class QuizTriggerTests(AdaptationAssertions, unittest.TestCase):
         mkt = fx.material(fx.make_state("mkt", "Marketing", summary=True, cards=10, percentage=70,
                                         completed_at=QUIZ_THIS_MORNING))
         result = propose(quiz_done("mkt"), [mkt], [])
-        # 70% -> review in 2 days, then a retry 2 days after that review.
+        # 70% -> review in 2 days, a Written Quiz as reinforcement, then a retry still 2 days after the review.
         self.assertEqual([(a.activity_type, a.scheduled_start) for a in result.added],
-                         [("review", "2026-09-26T18:00:00"), ("quiz_retry", "2026-09-28T18:00:00")])
+                         [("review", "2026-09-26T18:00:00"), ("written_quiz", "2026-09-27T18:00:00"),
+                          ("quiz_retry", "2026-09-28T18:00:00")])
         self.assertEqual((result.moved, result.cancelled), ((), ()))
 
     def test_review_never_moves_past_the_deadline(self):
@@ -247,21 +251,24 @@ class AvailabilityAndDeadlineTests(AdaptationAssertions, unittest.TestCase):
 
     def test_earlier_deadline_moves_late_sessions_inside_it(self):
         mkt = fx.material(fx.make_state("mkt", "Marketing", summary=True, cards=10), deadline="2026-09-28")
-        sessions = [session("quiz", "mkt", "quiz", "2026-09-29T18:00:00", 30),
+        sessions = [session("written", "mkt", "written_quiz", "2026-09-24T18:00:00", 15, reason="retrieval_practice"),
+                    session("quiz", "mkt", "quiz", "2026-09-29T18:00:00", 30),
                     session("final", "mkt", "review", "2026-10-04T18:00:00", 10, reason="final_review")]
         result = propose(AdaptationTrigger("deadline_changed", document_id="mkt"), [mkt], sessions)
         moved = {m.session_id: m.to_start for m in result.moved}
-        self.assertEqual(moved, {"quiz": "2026-09-24T18:00:00", "final": "2026-09-26T18:00:00"})
+        # The quiz follows its Written Quiz by a day; the final review stays after it.
+        self.assertEqual(moved, {"quiz": "2026-09-25T18:00:00", "final": "2026-09-26T18:00:00"})
         self.assertEqual(result.significance, "small")
         self.assert_rules(result, sessions, [mkt])
 
     def test_new_deadline_adds_a_final_review(self):
         mkt = fx.material(fx.make_state("mkt", "Marketing", summary=True, cards=10), deadline="2026-09-30")
-        sessions = [session("quiz", "mkt", "quiz", "2026-09-25T18:00:00", 30)]
+        sessions = [session("written", "mkt", "written_quiz", "2026-09-24T18:00:00", 15, reason="retrieval_practice"),
+                    session("quiz", "mkt", "quiz", "2026-09-25T18:00:00", 30)]
         result = propose(AdaptationTrigger("deadline_changed", document_id="mkt"), [mkt], sessions)
         self.assertEqual([(a.activity_type, a.reason_code, a.scheduled_start) for a in result.added],
                          [("review", "final_review", "2026-09-28T18:00:00")])
-        self.assertEqual((result.moved, result.cancelled, result.unchanged_count), ((), (), 1))
+        self.assertEqual((result.moved, result.cancelled, result.unchanged_count), ((), (), 2))
 
 
 class RulesTests(AdaptationAssertions, unittest.TestCase):
@@ -285,9 +292,10 @@ class RulesTests(AdaptationAssertions, unittest.TestCase):
         mkt = fx.material(fx.make_state("mkt", "Marketing", summary=True, cards=10, percentage=40,
                                         completed_at=QUIZ_THIS_MORNING))
         sessions = [session("cards", "mkt", "flashcards", "2026-09-28T18:00:00", 10, reason="review_due")]
-        self.assertEqual(propose(quiz_done("mkt"), [mkt], sessions).significance, "small")
-        strict = AdaptationConfig(small_max_changes=1)
-        self.assertEqual(propose(quiz_done("mkt"), [mkt], sessions, config=strict).significance, "large")
+        # Three changes: move the flashcards, add the Written Quiz and the retry.
+        self.assertEqual(propose(quiz_done("mkt"), [mkt], sessions).significance, "large")
+        lenient = AdaptationConfig(small_max_changes=3)
+        self.assertEqual(propose(quiz_done("mkt"), [mkt], sessions, config=lenient).significance, "small")
 
     def test_deterministic_regardless_of_input_order(self):
         mkt = fx.material(fx.make_state("mkt", "Marketing", summary=True, cards=10, percentage=40,

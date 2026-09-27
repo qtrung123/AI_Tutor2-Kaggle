@@ -9,6 +9,8 @@ from datetime import date, datetime, timedelta, timezone
 
 from backend import study_adaptation, study_placement, study_planner_service, study_planner_store, study_progress
 from backend.document_study_state import get_document_study_state
+from backend.flashcard_quiz_service import create_flashcard_written_quiz, is_flashcard_quiz
+from backend.quiz_store import get_quiz_by_id
 from backend.indexed_document_store import list_indexed_documents
 from backend.study_scheduler import DEFAULT_CONFIG, find_next_slot, plan_schedule
 from backend.study_scheduler_contracts import REASON_LABELS, SchedulingContext
@@ -342,7 +344,8 @@ class SessionConflictError(Exception):
 
 
 # Which study tool each activity opens. review is resolved from the document's state.
-ACTIVITY_TOOLS = {"summary": "summary", "flashcards": "flashcards", "quiz": "quiz", "quiz_retry": "quiz"}
+ACTIVITY_TOOLS = {"summary": "summary", "flashcards": "flashcards", "quiz": "quiz", "quiz_retry": "quiz",
+                  "written_quiz": "quiz"}
 
 
 def _session_tool(owner_id: str, session: dict) -> tuple[str, bool]:
@@ -366,6 +369,31 @@ def _session_tool(owner_id: str, session: dict) -> tuple[str, bool]:
     return tool, {"summary": has_summary, "flashcards": has_cards, "quiz": has_quiz}[tool]
 
 
+def _written_quiz_artifact(owner_id: str, session: dict) -> str | None:
+    """The exact flashcard practice quiz a written_quiz session opens (its quiz_id), or None when the
+    document has no usable flashcards. Resolved once: the first start creates the practice quiz from
+    the document's current persisted flashcard set (no LLM) and stores its quiz_id as the session's
+    artifact_id, so every later Start/Resume/reload opens that same quiz."""
+    document_id = session["document_id"]
+    if session.get("artifact_id"):
+        quiz = get_quiz_by_id(session["artifact_id"], owner_id)
+        if is_flashcard_quiz(quiz) and quiz.get("document_id") == document_id:
+            return quiz["quiz_id"]
+    state = get_document_study_state(owner_id, document_id)
+    if not (state and state.flashcards.available and state.flashcards.card_count):
+        return None
+    count = min(state.flashcards.card_count, DEFAULT_CONFIG.written_quiz_questions)
+    try:
+        try:
+            quiz = create_flashcard_written_quiz(owner_id, document_id, "mixed", count, set_id=state.flashcards.set_id)
+        except ValueError:   # fewer usable cards than counted: practice every usable one
+            quiz = create_flashcard_written_quiz(owner_id, document_id, "mixed", None, set_id=state.flashcards.set_id)
+    except ValueError:
+        return None
+    study_planner_store.update_session(owner_id, session["session_id"], {"artifact_id": quiz["quiz_id"]})
+    return quiz["quiz_id"]
+
+
 def _transition(owner_id: str, session_id: str, action: str) -> tuple[dict, bool]:
     try:
         return study_planner_store.transition_session(owner_id, session_id, action)
@@ -386,7 +414,13 @@ def start_session(owner_id: str, session_id: str, utc_offset_minutes: int, local
         raise SessionConflictError("session_missed", "This session's time has passed. Reschedule it instead.",
                                    status=current["status"])
     session, started = _transition(owner_id, session_id, "start")
-    tool, artifact_available = _session_tool(owner_id, session)
+    if session["activity_type"] == "written_quiz":
+        quiz_id = _written_quiz_artifact(owner_id, session)
+        session = study_planner_store.get_session(owner_id, session_id) or session
+        # Without usable flashcards there is nothing to practice: open Flashcards to create them.
+        tool, artifact_available = ("quiz", True) if quiz_id else ("flashcards", False)
+    else:
+        tool, artifact_available = _session_tool(owner_id, session)
     return {"session": _saved_session(session, _document_titles(owner_id)), "started": started,
             "tool": tool, "artifact_available": artifact_available}
 
