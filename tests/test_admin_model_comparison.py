@@ -1,9 +1,10 @@
-"""Tests for the admin-only Quiz Model Comparison tab.
+"""Tests for the Quiz Model Comparison tab.
 
 Covers: the admin allowlist gate, the benchmark results store, the
 model-comparison service (Qwen vs Gemma roster + production/candidate status),
-the admin-only API routes, and frontend wiring (nav visibility, a real
-"Run benchmark" form, no subjective quality score and no overall winner).
+the API routes (comparison readable by any signed-in user, benchmark start
+admin-only), and frontend wiring (nav visible to every signed-in user, an
+admin-only "Run benchmark" form, no subjective quality score and no overall winner).
 The benchmark runner itself is covered by tests/test_quiz_model_benchmark.py.
 """
 
@@ -161,11 +162,35 @@ class AdminRouteAccessTests(unittest.TestCase):
             response = client.get("/api/admin/quiz-model-comparison")
         self.assertEqual(response.status_code, 401)
 
-    def test_non_admin_user_is_forbidden(self):
+    def test_non_admin_user_can_read_the_comparison(self):
         with TestClient(app) as client:
             self._signup(client, "student@example.com")
             response = client.get("/api/admin/quiz-model-comparison")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual([model["model_id"] for model in body["models"]], ["qwen-2.5-7b", "gemma3-12b"])
+        self.assertEqual(body, get_quiz_model_comparison())   # same payload an admin gets
+
+    def test_unauthenticated_benchmark_start_is_rejected(self):
+        with TestClient(app) as client:
+            response = client.post("/api/admin/quiz-model-benchmark", json={"document_ids": ["doc-1"]})
+        self.assertEqual(response.status_code, 401)
+
+    def test_non_admin_cannot_start_a_benchmark(self):
+        with patch("backend.main.start_benchmark") as start:
+            with TestClient(app) as client:
+                self._signup(client, "student@example.com")
+                response = client.post("/api/admin/quiz-model-benchmark", json={"document_ids": ["doc-1"]})
         self.assertEqual(response.status_code, 403)
+        start.assert_not_called()
+
+    def test_admin_can_start_a_benchmark(self):
+        with patch("backend.main.start_benchmark") as start:
+            with TestClient(app) as client:
+                admin = self._signup(client, "admin@example.com")
+                response = client.post("/api/admin/quiz-model-benchmark", json={"document_ids": ["doc-1"]})
+        self.assertEqual(response.status_code, 202)
+        start.assert_called_once_with(admin["id"], ["doc-1"], "medium", 12, start.call_args.args[4])
 
     def test_admin_user_receives_full_roster(self):
         with TestClient(app) as client:
@@ -211,8 +236,21 @@ class FrontendAdminModelComparisonWiringTests(unittest.TestCase):
     def test_view_section_exists(self):
         self.assertIn('id="model-comparison-view"', self.markup)
 
-    def test_admin_flag_gates_nav_visibility(self):
-        self.assertIn('document.getElementById("admin-model-comparison-nav")?.toggleAttribute("hidden", !user.is_admin);', self.script)
+    def test_nav_is_shown_to_every_authenticated_user(self):
+        start = self.script.index("function showAuthenticatedShell(user)")
+        body = self.script[start:self.script.index("\n}\n", start)]
+        self.assertIn('document.getElementById("admin-model-comparison-nav")?.removeAttribute("hidden");', body)
+        self.assertNotIn("is_admin", body)
+
+    def test_nav_is_hidden_again_on_sign_out(self):
+        start = self.script.index("function showAuthentication()")
+        body = self.script[start:self.script.index("\n}\n", start)]
+        self.assertIn('document.getElementById("admin-model-comparison-nav")?.setAttribute("hidden", "");', body)
+
+    def test_run_benchmark_form_is_only_built_for_admins(self):
+        self.assertIn("if (currentUser?.is_admin) panel.append(buildBenchmarkForm(data));", self.script)
+        self.assertEqual(self.script.count("panel.append(buildBenchmarkForm(data))"), 1)
+        self.assertIn("if (runButton) runButton.disabled", self.script)
 
     def test_page_load_calls_comparison_loader(self):
         self.assertIn('if (page === "model-comparison") loadQuizModelComparison();', self.script)

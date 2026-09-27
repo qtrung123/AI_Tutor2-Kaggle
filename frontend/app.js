@@ -435,7 +435,7 @@ function showAuthenticatedShell(user) {
   profileEmail.textContent = user.email;
   profileAvatar.textContent = (user.display_name || user.email || "U").trim().charAt(0).toUpperCase();
   if (homeGreeting) homeGreeting.textContent = `Hello, ${user.display_name || "there"}!`;
-  document.getElementById("admin-model-comparison-nav")?.toggleAttribute("hidden", !user.is_admin);
+  document.getElementById("admin-model-comparison-nav")?.removeAttribute("hidden");   // every signed-in user; the run form stays admin-only
 }
 
 function showAuthentication() {
@@ -443,6 +443,8 @@ function showAuthentication() {
   appShell.hidden = true;
   authScreen.hidden = false;
   document.getElementById("admin-model-comparison-nav")?.setAttribute("hidden", "");
+  const comparisonView = document.getElementById("model-comparison-view");
+  if (comparisonView) comparisonView.innerHTML = "";   // the next user may differ in admin rights
   authPassword.value = "";
   setAuthMode("login");
 }
@@ -693,14 +695,16 @@ function renderQuizModelComparison(view, data) {
     panel.className = "panel model-comparison-panel";
     const heading = document.createElement("div");
     heading.className = "panel-heading";
-    heading.innerHTML = "<div><p>Admin only</p><h2>Quiz Model Comparison</h2></div>";
-    const form = buildBenchmarkForm(data);
+    heading.innerHTML = "<div><p>Benchmark results</p><h2>Quiz Model Comparison</h2></div>";
     const results = document.createElement("div");
     results.className = "model-comparison-results";
-    panel.append(heading, form, results);
+    panel.append(heading);
+    if (currentUser?.is_admin) panel.append(buildBenchmarkForm(data));   // starting a benchmark is admin-only
+    panel.append(results);
     view.appendChild(panel);
   }
-  panel.querySelector(".benchmark-run-button").disabled = data.benchmark_status === "running";
+  const runButton = panel.querySelector(".benchmark-run-button");
+  if (runButton) runButton.disabled = data.benchmark_status === "running";
   renderBenchmarkResults(panel.querySelector(".model-comparison-results"), data);
 }
 

@@ -68,8 +68,11 @@ app.include_router(auth_router)
 
 
 @app.get("/api/admin/quiz-model-comparison")
-def admin_quiz_model_comparison(_admin: dict = Depends(require_admin_user)) -> dict:
-    """Admin-only: the latest stored Quiz model benchmark (config, progress, aggregates, raw runs)."""
+def admin_quiz_model_comparison(_user: dict = Depends(require_current_user)) -> dict:
+    """Any signed-in user: the latest stored Quiz model benchmark (config, progress, aggregates, raw runs).
+
+    Read-only; starting a benchmark (POST /api/admin/quiz-model-benchmark) stays admin-only.
+    """
     return get_quiz_model_comparison()
 
 
