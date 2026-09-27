@@ -3534,3 +3534,10 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 @media (min-width: 1024px) and (prefers-reduced-motion: reduce) {
   body[data-page="session"] .persistent-tutor, body.tutor-overlay-open[data-page="session"] .persistent-tutor { transition: none; }
 }
+
+/* Flashcards -> "Practice as Quiz" sheet (reuses the Create Quiz sheet styles) and self-check review. */
+.flashcard-quiz-fields { display:grid; gap:18px; margin-bottom:18px; }
+.flashcard-quiz-empty { margin:0 0 18px; color:var(--muted); font-weight:700; }
+.flashcard-quiz-error { margin:0 0 12px; color:var(--danger); font-weight:700; }
+.flashcard-quiz-start { width:100%; }
+.quiz-review-self-check { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:10px; color:var(--muted); font-size:13px; }

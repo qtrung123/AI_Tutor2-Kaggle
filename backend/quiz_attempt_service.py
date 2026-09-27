@@ -18,12 +18,15 @@ from backend.quiz_store import (
     get_quiz_explanation,
     get_quiz_history_attempt,
     get_quiz_titles,
+    practice_quiz_ids,
     list_quiz_history as load_quiz_history,
     quiz_cache_key,
     reset_quiz_progress,
     save_quiz_explanation,
     save_quiz_progress,
     utc_now_iso,
+    WRITTEN_QUESTION_TYPES,
+    FLASHCARD_WRITTEN_PLANNER_VERSION,
 )
 from backend.quiz_units import fill_blank_is_correct, normalize_fill_blank_answer
 from backend.rag_service import explain_quiz_answer
@@ -56,9 +59,14 @@ def _correct_answers(question: dict) -> list[str]:
     return list(dict.fromkeys(str(value).strip().upper() for value in values if str(value).strip()))
 
 
-def _fill_blank_answer(value) -> str:
-    """A learner's fill_blank answer as saved: the text itself (trimmed, inner whitespace collapsed).
-    Case and punctuation are kept for display; grading normalizes (normalize_fill_blank_answer)."""
+def _is_written(question: dict) -> bool:
+    return _question_type(question) in WRITTEN_QUESTION_TYPES
+
+
+def _fill_blank_answer(value, max_chars: int = 200) -> str:
+    """A learner's written (fill_blank / short_answer) answer as saved: the text itself (trimmed,
+    inner whitespace collapsed). Case and punctuation are kept for display; grading normalizes
+    (normalize_fill_blank_answer)."""
     if isinstance(value, list) and len(value) <= 1:
         value = value[0] if value else ""
     if value is None:
@@ -66,15 +74,20 @@ def _fill_blank_answer(value) -> str:
     if not isinstance(value, str):
         raise ValueError("A fill-in-the-blank answer must be text.")
     text = re.sub(r"\s+", " ", value).strip()
-    if len(text) > 200:
-        raise ValueError("A fill-in-the-blank answer must be at most 200 characters.")
+    if len(text) > max_chars:
+        raise ValueError(f"A written answer must be at most {max_chars} characters.")
     return text
+
+
+def _written_answer(question: dict, value) -> str:
+    # A short answer may be a sentence (self-check); a blank is a short term.
+    return _fill_blank_answer(value, 1000 if _question_type(question) == "short_answer" else 200)
 
 
 def _saved_answer(question: dict, value):
     """Normalize one submitted/autosaved answer for its question type (None = unanswered)."""
-    if _question_type(question) == "fill_blank":
-        return _fill_blank_answer(value) or None
+    if _is_written(question):
+        return _written_answer(question, value) or None
     if value in (None, "", []):
         return None
     selected = _selected_answers(value)
@@ -133,7 +146,7 @@ def load_quiz_with_attempt(
 def _quiz_from_attempt_snapshot(attempt: dict) -> dict | None:
     results = list(attempt.get("question_results") or [])
     if not results or any(
-        len(result.get("options") or []) != 4 and result.get("question_type") != "fill_blank" for result in results
+        len(result.get("options") or []) != 4 and result.get("question_type") not in WRITTEN_QUESTION_TYPES for result in results
     ):
         return None
     topic_id = str(attempt.get("topic_id") or "document")
@@ -293,8 +306,8 @@ def submit_quiz_attempt(
     normalized_answers = {}
     for key, value in answers.items():
         question = questions_by_id.get(str(key))
-        if question is not None and _question_type(question) == "fill_blank":
-            text = _fill_blank_answer(value)
+        if question is not None and _is_written(question):
+            text = _written_answer(question, value)
             if text:
                 normalized_answers[str(key)] = [text]
             elif not allow_unanswered:
@@ -312,7 +325,7 @@ def submit_quiz_attempt(
             continue
         selected = normalized_answers[str(question.get("id"))]
         question_type = _question_type(question)
-        if question_type == "fill_blank":
+        if question_type in WRITTEN_QUESTION_TYPES:
             continue
         valid_letters = set("ABCD"[:len(question.get("options") or [])])
         if any(answer not in valid_letters for answer in selected):
@@ -325,8 +338,9 @@ def submit_quiz_attempt(
     for question in questions:
         question_id = str(question.get("id"))
         selected_answers = normalized_answers.get(question_id, [])
-        if _question_type(question) == "fill_blank":
-            # Deterministic: normalized exact match against the explicitly stored accepted answers.
+        if _is_written(question):
+            # Deterministic: normalized exact match against the explicitly stored accepted answers
+            # (a flashcard short answer's self-check questions can later be marked by the learner).
             correct_answers = _fill_blank_correct_answers(question)
             is_correct = bool(selected_answers) and fill_blank_is_correct(selected_answers[0], correct_answers)
         else:
@@ -374,7 +388,10 @@ def submit_quiz_attempt(
         "answers": {key: (value if len(value) > 1 else value[0]) for key, value in normalized_answers.items()},
         "question_results": results,
     }, topic_id, student_id)
-    represented_topics = sorted({str(result["topic_id"]) for result in results if result.get("topic_id")})
+    # Flashcard written practice is not mastery evidence (its answers are excluded from mastery), so
+    # submitting it recomputes nothing.
+    practice = str((quiz.get("assessment_plan") or {}).get("planner_version") or "") == FLASHCARD_WRITTEN_PLANNER_VERSION
+    represented_topics = [] if practice else sorted({str(result["topic_id"]) for result in results if result.get("topic_id")})
     saved["mastery_by_topic"] = {
         represented_topic: recompute_topic_mastery(student_id, document_id, represented_topic)
         for represented_topic in represented_topics
@@ -393,6 +410,7 @@ def list_completed_quiz_attempts(
     """Return compact summaries for the Quiz History UI."""
     attempts = load_quiz_history(document_id, difficulty, student_id)
     titles = get_quiz_titles([attempt.get("quiz_id") for attempt in attempts], student_id)
+    practice_ids = practice_quiz_ids([attempt.get("quiz_id") for attempt in attempts], student_id)
     summaries = []
     for attempt in attempts:
         total = int(attempt.get("total", 0))
@@ -411,6 +429,8 @@ def list_completed_quiz_attempts(
                 "percentage": round((score / total) * 100) if total else 0,
                 "attempt_number": attempt.get("attempt_number", 0),
                 "completed_at": attempt.get("completed_at") or attempt.get("submitted_at"),
+                # Flashcard written practice: shown in history, never the document's latest assessment.
+                "practice": attempt.get("quiz_id") in practice_ids,
             }
         )
     return summaries
@@ -438,6 +458,8 @@ def load_completed_quiz_attempt(attempt_id: str, student_id: str = LEGACY_USER_I
             "partial": bool(plan.get("partial")),
             "requested_count": plan.get("requested_count") or plan.get("target_questions"),
             "question_count": len(quiz.get("questions") or []),
+            "source": plan.get("source"),
+            "self_check_question_ids": list(plan.get("self_check_question_ids") or []),
         }
         concept_names = {
             str(question.get("id")): question.get("concept_name") or ""
@@ -502,7 +524,7 @@ def explain_quiz_question(
         document_id=document_id,
         question=question["question"],
         options=question["options"],
-        correct_answer=(_fill_blank_correct_answers(question) if _question_type(question) == "fill_blank"
+        correct_answer=(_fill_blank_correct_answers(question) if _is_written(question)
                         else _correct_answers(question)),
     )
     saved = {

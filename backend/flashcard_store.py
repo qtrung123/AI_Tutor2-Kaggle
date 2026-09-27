@@ -66,7 +66,7 @@ def initialize_flashcard_store() -> None:
 
 def _card(row: sqlite3.Row) -> dict:
     return {
-        "flashcard_id": row["flashcard_id"], "owner_id": row["owner_id"],
+        "flashcard_id": row["flashcard_id"], "set_id": row["set_id"], "owner_id": row["owner_id"],
         "document_id": row["document_id"], "topic_id": row["topic_id"],
         "topic_name": row["topic_name"], "subtopic_id": row["subtopic_id"],
         "subtopic_name": row["subtopic_name"], "front": row["front"], "back": row["back"],

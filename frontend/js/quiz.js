@@ -22,7 +22,7 @@ function updateDifficultyOptions() {
     return;
   }
   const savedLevels = (getSelectedQuizStatus()?.variants || [])
-    .filter((variant) => variant.topic_id === selectedTopicId() && variantMatchesSettings(variant))
+    .filter((variant) => !variant.practice && variant.topic_id === selectedTopicId() && variantMatchesSettings(variant))
     .map((variant) => variant.difficulty);
   Array.from(quizDifficultySelect.options).forEach((option) => {
     const label = option.value.charAt(0).toUpperCase() + option.value.slice(1);
@@ -98,7 +98,7 @@ async function loadIndexedDocuments() {
       const option = document.createElement("option");
       option.value = documentItem.id;
       const status = quizStatuses.find((item) => item.document_id === documentItem.id);
-      const levels = [...new Set((status?.variants || []).map((variant) => variant.difficulty))];
+      const levels = [...new Set((status?.variants || []).filter((variant) => !variant.practice).map((variant) => variant.difficulty))];
       const quizLabel = levels.length ? `saved: ${levels.join(", ")}` : "no quiz yet";
       option.textContent = `${documentItem.title} (${documentItem.chunks} chunks, ${quizLabel})`;
       quizDocumentSelect.appendChild(option);
@@ -737,10 +737,10 @@ async function showQuizHistoryDetail(attemptId) {
       question.textContent = `${index + 1}. ${result.question || `Question ${result.question_id}`}`;
       const options = document.createElement("div");
       options.className = "review-answer-list";
-      if (result.question_type === "fill_blank") {
+      if (isWrittenQuestionType(result.question_type)) {
         options.append(...fillBlankReviewRows(result.selected_answer || "", result.correct_answers || [result.correct_answer], result.is_correct, "review-answer-option"));
       }
-      (result.question_type === "fill_blank" ? [] : result.options || []).forEach((option) => {
+      (isWrittenQuestionType(result.question_type) ? [] : result.options || []).forEach((option) => {
         const letter = option.trim().charAt(0).toUpperCase();
         const row = document.createElement("div");
         row.className = "review-answer-option";
@@ -1017,10 +1017,10 @@ function createAssessmentReviewCard(question, result, index, total) {
   questionText.textContent = question.question;
   const options = document.createElement("div");
   options.className = "review-answer-list";
-  if (isFillBlankQuestion(question)) {
+  if (isWrittenQuestion(question)) {
     options.append(...fillBlankReviewRows(result.selected_answer || "", result.correct_answers || [result.correct_answer], result.is_correct, "review-answer-option"));
   }
-  (isFillBlankQuestion(question) ? [] : question.options).forEach((option) => {
+  (isWrittenQuestion(question) ? [] : question.options).forEach((option) => {
     const letter = option.trim().charAt(0).toUpperCase();
     const row = document.createElement("div");
     row.className = "review-answer-option";
@@ -1187,7 +1187,7 @@ function renderAttemptSummary() {
 }
 
 function quizTypeLabel(questionType) {
-  return { single_choice: "Multiple Choice", true_false: "True/False", multi_select: "Multiple Select", fill_blank: "Fill in the Blank" }[questionType]
+  return { single_choice: "Multiple Choice", true_false: "True/False", multi_select: "Multiple Select", fill_blank: "Fill in the Blank", short_answer: "Short Answer" }[questionType]
     || questionType;
 }
 
@@ -1242,7 +1242,7 @@ function assessmentTitleText(quiz) {
     + (mismatch ? " · Current settings differ: press Regenerate Quiz to use them" : "");
   if (quiz.assessment_scope === "document") {
     const distribution = documentQuizTypeBreakdown(quiz);
-    const parts = ["single_choice", "true_false", "multi_select", "fill_blank"]
+    const parts = ["single_choice", "true_false", "multi_select", "fill_blank", "short_answer"]
       .filter((questionType) => distribution[questionType])
       .map((questionType) => `${distribution[questionType]} ${quizTypeLabel(questionType)}`);
     return `${quizName} · ${quiz.questions.length} questions · ${parts.join(" · ")}` + partialSuffix;
@@ -1339,8 +1339,8 @@ function renderQuizPlayerQuestion() {
   const selected = quizAnswers[String(question.id)];
   const answersEl = document.getElementById("quiz-player-answers");
   answersEl.innerHTML = "";
-  if (isFillBlankQuestion(question)) answersEl.appendChild(createQuizPlayerFillBlank(question, selected));
-  (isFillBlankQuestion(question) ? [] : question.options || []).forEach((option) => {
+  if (isWrittenQuestion(question)) answersEl.appendChild(createQuizPlayerFillBlank(question, selected));
+  (isWrittenQuestion(question) ? [] : question.options || []).forEach((option) => {
     const letter = option.trim().charAt(0).toUpperCase();
     const isSelected = Array.isArray(selected) ? selected.includes(letter) : selected === letter;
     const button = document.createElement("button");
@@ -1424,11 +1424,13 @@ function buildQuizResult(attempt, quiz, fallback = {}) {
     const position = (result) => { const index = order.indexOf(String(result.question_id)); return index < 0 ? order.length : index; };
     results.sort((left, right) => position(left) - position(right));
   }
+  const selfCheckIds = new Set((quiz?.assessment_plan?.self_check_question_ids || quiz?.self_check_question_ids || []).map(Number));
   const items = results.map((result) => {
     const question = questionsById.get(String(result.question_id)) || {};
     const questionType = result.question_type || question.question_type || "single_choice";
-    const fillBlank = questionType === "fill_blank";
-    // fill_blank answers are text, shown as written (never upper-cased or sorted like option letters).
+    const fillBlank = isWrittenQuestionType(questionType);
+    // Written (fill_blank / short_answer) answers are text, shown as written (never upper-cased or
+    // sorted like option letters).
     const selected = fillBlank
       ? [String((result.selected_answers?.length ? result.selected_answers[0] : result.selected_answer) || "").trim()].filter(Boolean)
       : quizResultLetters(result.selected_answers?.length ? result.selected_answers : [result.selected_answer]);
@@ -1445,6 +1447,8 @@ function buildQuizResult(attempt, quiz, fallback = {}) {
       correct,
       unanswered,
       isCorrect: !unanswered && Boolean(result.is_correct),
+      // Flashcard short answers too long for an exact match: the learner marks them after comparing.
+      selfCheck: selfCheckIds.has(Number(result.question_id)),
       explanation: String(result.explanation || question.explanation || "").trim(),
       topicName: result.topic_name || question.topic_name || "",
       conceptName: result.concept_name || question.concept_name || "",
@@ -1550,15 +1554,17 @@ function renderQuizReview() {
   document.getElementById("quiz-review-progress-bar").style.width = `${Math.round(((index + 1) / total) * 100)}%`;
   const status = document.getElementById("quiz-review-status");
   const state = item.unanswered ? "unanswered" : (item.isCorrect ? "correct" : "incorrect");
-  status.textContent = { correct: "Correct", incorrect: "Incorrect", unanswered: "Unanswered" }[state];
+  status.textContent = { correct: "Correct", incorrect: "Incorrect", unanswered: "Unanswered" }[state]
+    + (item.selfCheck && !item.unanswered ? " · Self-check" : "");
   status.className = `quiz-review-status is-${state}`;
   document.getElementById("quiz-review-question").textContent = item.question;
   document.getElementById("quiz-review-unanswered-note").hidden = !item.unanswered;
 
   const options = document.getElementById("quiz-review-options");
   options.innerHTML = "";
-  if (item.questionType === "fill_blank") options.append(...fillBlankReviewRows(item.selected[0] || "", item.correct, item.isCorrect));
-  (item.questionType === "fill_blank" ? [] : item.options).forEach((option, optionIndex) => {
+  if (isWrittenQuestionType(item.questionType)) options.append(...fillBlankReviewRows(item.selected[0] || "", item.correct, item.isCorrect));
+  if (item.selfCheck && !item.unanswered) options.appendChild(createSelfCheckControls(item));
+  (isWrittenQuestionType(item.questionType) ? [] : item.options).forEach((option, optionIndex) => {
     const letter = QUIZ_OPTION_LETTERS[optionIndex];
     const isSelected = item.selected.includes(letter);
     const isCorrect = item.correct.includes(letter);
@@ -1615,11 +1621,15 @@ function moveQuizReview(direction) {
 
 // ---- Quiz Player: answering and navigation -------------------------------------------------------
 
-function isFillBlankQuestion(question) {
-  return question?.question_type === "fill_blank";
+function isWrittenQuestionType(questionType) {
+  return questionType === "fill_blank" || questionType === "short_answer";
 }
 
-// Fill-in-the-blank: a plain text field. Typing only updates local state, the answered count and the
+function isWrittenQuestion(question) {
+  return isWrittenQuestionType(question?.question_type);
+}
+
+// Written answers (fill_blank / short_answer): a plain text field. Typing only updates local state, the answered count and the
 // navigator (no full re-render, so focus and caret stay put) and autosaves like any other answer;
 // a blank/whitespace-only field counts as unanswered.
 function createQuizPlayerFillBlank(question, value) {
@@ -1627,12 +1637,13 @@ function createQuizPlayerFillBlank(question, value) {
   wrapper.className = "quiz-player-fill-blank";
   const caption = document.createElement("span");
   caption.className = "quiz-player-fill-caption";
-  caption.textContent = "Fill in the blank";
+  const shortAnswer = question.question_type === "short_answer";
+  caption.textContent = shortAnswer ? "Type your answer" : "Fill in the blank";
   const input = document.createElement("input");
   input.type = "text";
   input.id = "quiz-player-fill-input";
   input.className = "quiz-player-fill-input";
-  input.maxLength = 200;
+  input.maxLength = shortAnswer ? 1000 : 200;
   input.autocomplete = "off";
   input.spellcheck = false;
   input.placeholder = "Type your answer";
@@ -1670,6 +1681,45 @@ function fillBlankReviewRows(selectedText, correctAnswers, isCorrect, rowClass =
   const [canonical, ...alternatives] = correctAnswers;
   row("Correct answer", alternatives.length ? `${canonical} (also accepted: ${alternatives.join(", ")})` : (canonical || ""), ["is-correct"]);
   return rows;
+}
+
+// Self-check (flashcard short answers too long for an exact match): after comparing their answer with
+// the flashcard answer, the learner marks it; the backend updates the saved attempt and its score.
+function createSelfCheckControls(item) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "quiz-review-self-check";
+  const note = document.createElement("span");
+  note.textContent = "Compare with the flashcard answer and mark your own result:";
+  wrapper.appendChild(note);
+  [["I got it right", true], ["I missed it", false]].forEach(([label, value]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `secondary-button quiz-self-check-${value ? "right" : "missed"}`;
+    button.textContent = label;
+    button.disabled = item.isCorrect === value;
+    button.addEventListener("click", () => markSelfCheckAnswer(item, value));
+    wrapper.appendChild(button);
+  });
+  return wrapper;
+}
+
+async function markSelfCheckAnswer(item, isCorrect) {
+  const state = quizResultState;
+  if (!state?.result?.attemptId) return;
+  try {
+    const attempt = await fetchJson(`${QUIZ_HISTORY_API_URL}/${encodeURIComponent(state.result.attemptId)}/self-check`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question_id: Number(item.questionId), is_correct: isCorrect }),
+    });
+    if (quizResultState !== state) return;
+    const quiz = currentQuiz?.quiz_id === attempt.quiz_id ? currentQuiz : (attempt.quiz || null);
+    if (currentAttempt?.attempt_id === attempt.attempt_id) currentAttempt = attempt;
+    state.result = buildQuizResult(attempt, quiz, { title: state.result.title, difficulty: state.result.difficulty });
+    renderQuizReview();
+  } catch (error) {
+    showToast(error.message || "Could not save your self-check");
+  }
 }
 
 function selectQuizPlayerAnswer(question, letter, isMultiSelect) {
@@ -1854,12 +1904,12 @@ function renderAssessmentQuiz() {
   }
   const options = document.createElement("div");
   options.className = "answer-list";
-  if (isFillBlankQuestion(question)) {
+  if (isWrittenQuestion(question)) {
     // Older inline view: a plain text field committed on change (the focused player autosaves per keystroke).
     const field = document.createElement("input");
     field.type = "text";
     field.className = "quiz-player-fill-input";
-    field.maxLength = 200;
+    field.maxLength = question.question_type === "short_answer" ? 1000 : 200;
     field.placeholder = "Type your answer";
     field.setAttribute("aria-label", "Your answer");
     field.value = typeof quizAnswers[String(question.id)] === "string" ? quizAnswers[String(question.id)] : "";
@@ -1871,7 +1921,7 @@ function renderAssessmentQuiz() {
     });
     options.appendChild(field);
   }
-  (isFillBlankQuestion(question) ? [] : question.options).forEach((option) => {
+  (isWrittenQuestion(question) ? [] : question.options).forEach((option) => {
     const button = document.createElement("button");
     button.className = `answer-option ${isMultiSelect ? "answer-option--checkbox" : "answer-option--radio"}`;
     button.type = "button";

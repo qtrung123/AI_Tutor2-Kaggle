@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.api.deps import require_current_user
+from backend.flashcard_quiz_service import set_self_check_result
 from backend.quiz_attempt_service import (
     clear_quiz_progress,
     explain_quiz_question,
@@ -55,6 +56,11 @@ class QuizSubmitRequest(BaseModel):
     allow_unanswered: bool = False
 
 
+class QuizSelfCheckRequest(BaseModel):
+    question_id: int = Field(ge=1)
+    is_correct: bool
+
+
 @history_router.get("/api/quiz-history")
 def quiz_history(document_id: Optional[str] = None, difficulty: Optional[str] = None, current_user: dict = Depends(require_current_user)) -> list[dict]:
     """List completed quiz attempts for the history UI."""
@@ -71,6 +77,19 @@ def quiz_history_detail(attempt_id: str, current_user: dict = Depends(require_cu
         return load_completed_quiz_attempt(attempt_id, current_user["id"])
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@history_router.post("/api/quiz-history/{attempt_id}/self-check")
+def quiz_history_self_check(attempt_id: str, request: QuizSelfCheckRequest,
+                            current_user: dict = Depends(require_current_user)) -> dict:
+    """The learner marks one answered self-check question (flashcard short answer) right or wrong."""
+    try:
+        set_self_check_result(attempt_id, request.question_id, request.is_correct, current_user["id"])
+        return load_completed_quiz_attempt(attempt_id, current_user["id"])
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @history_router.get("/api/quiz-history/{attempt_id}/retake")

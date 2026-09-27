@@ -6,6 +6,7 @@ from uuid import uuid4
 from langchain_ollama import ChatOllama
 
 from backend.quiz_store import (
+    FLASHCARD_WRITTEN_PLANNER_VERSION,
     delete_quiz as _delete_quiz_row,
     get_latest_attempt,
     get_quiz,
@@ -719,6 +720,8 @@ def _quiz_variant_status(quiz: dict, owner_id: str = LEGACY_USER_ID) -> dict:
         "total": int(attempt.get("total") or 0) if attempt and attempt.get("total") else actual,
         "score": int(attempt.get("score") or 0) if completed else None,
         "percentage": float(attempt.get("percentage") or 0) if completed else None,
+        # Flashcard written practice: listed and resumable, but never a "saved" assessment variant.
+        "practice": str(plan.get("planner_version") or "") == FLASHCARD_WRITTEN_PLANNER_VERSION,
     }
 
 
@@ -925,7 +928,7 @@ def build_learning_dashboard(student_id: str = LEGACY_USER_ID) -> dict:
                 "document_name": document.get("title") or document["id"],
             })
 
-    attempts = load_quiz_history(student_id=student_id)
+    attempts = load_quiz_history(student_id=student_id, include_practice=False)   # assessment only
     answer_rows = [result for attempt in attempts for result in attempt.get("question_results", [])]
     answered_questions = len(answer_rows)
     assessed = [mastery for mastery in mastery_rows if mastery.get("has_evidence")]

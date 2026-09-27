@@ -45,7 +45,8 @@ function sessionOverviewQuizState(documentId) {
   const attempts = quizHistory.filter((attempt) => attempt.document_id === documentId)
     .sort((left, right) => new Date(right.completed_at || 0) - new Date(left.completed_at || 0));
   const completedQuizIds = new Set(attempts.map((attempt) => attempt.quiz_id).filter(Boolean));
-  return { variants, inProgress, latest: attempts[0] || null, completedCount: completedQuizIds.size };
+  // Flashcard written practice stays in history but is never the document's latest assessment score.
+  return { variants, inProgress, latest: attempts.find((attempt) => !attempt.practice) || null, completedCount: completedQuizIds.size };
 }
 
 function renderSessionOverview() {
@@ -268,6 +269,113 @@ async function showFlashcardsState() {
   if (activeDocumentId !== requestDocumentId || key !== flashcardsKey()) return;
   if (saved && saved.status !== "not_generated" && (saved.cards || []).length) applyFlashcardSet(saved, key);
   else flashcardsGenerate.hidden = false;
+}
+
+// ---- Flashcards -> "Practice as Quiz" ------------------------------------------------------------
+// Turns the flashcard set on screen into a written quiz (short answer / fill in the blank) without
+// generating anything new (backend/flashcard_quiz_service.py), then opens it in the Quiz Player.
+const FLASHCARD_QUIZ_MODES = [["mixed", "Mixed"], ["short_answer", "Short Answer"], ["fill_blank", "Fill Blank"]];
+const FLASHCARD_QUIZ_COUNTS = [5, 10, "all"];
+let flashcardQuizDialog = null;
+let flashcardQuizSettings = { mode: "mixed", count: 10 };
+let flashcardQuizInFlight = false;
+
+function renderFlashcardQuizSegments(containerId, choices, selected, onSelect) {
+  const container = flashcardQuizDialog.querySelector(`#${containerId}`);
+  container.innerHTML = "";
+  choices.forEach(([value, label, disabled]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiz-segmented-option";
+    button.textContent = label;
+    button.setAttribute("role", "radio");
+    button.setAttribute("aria-checked", String(value === selected));
+    button.classList.toggle("active", value === selected);
+    button.disabled = Boolean(disabled);
+    button.addEventListener("click", () => onSelect(value));
+    container.appendChild(button);
+  });
+}
+
+function renderFlashcardQuizDialog() {
+  if (!flashcardQuizDialog) return;
+  const available = flashcards.length;
+  if (flashcardQuizSettings.count !== "all" && flashcardQuizSettings.count > available) flashcardQuizSettings.count = "all";
+  renderFlashcardQuizSegments("flashcard-quiz-mode", FLASHCARD_QUIZ_MODES, flashcardQuizSettings.mode, (mode) => {
+    flashcardQuizSettings.mode = mode; renderFlashcardQuizDialog();
+  });
+  renderFlashcardQuizSegments("flashcard-quiz-count",
+    FLASHCARD_QUIZ_COUNTS.map((count) => [count, count === "all" ? `All (${available})` : String(count), count !== "all" && count > available]),
+    flashcardQuizSettings.count, (count) => { flashcardQuizSettings.count = count; renderFlashcardQuizDialog(); });
+  flashcardQuizDialog.querySelector("#flashcard-quiz-empty").hidden = available > 0;
+  flashcardQuizDialog.querySelector("#flashcard-quiz-fields").hidden = available === 0;
+  const start = flashcardQuizDialog.querySelector("#flashcard-quiz-start");
+  start.disabled = available === 0 || flashcardQuizInFlight;
+  start.textContent = flashcardQuizInFlight ? "Creating…" : "Start Quiz";
+}
+
+function openFlashcardQuizDialog() {
+  if (!flashcardQuizDialog) {
+    flashcardQuizDialog = document.createElement("div");
+    flashcardQuizDialog.className = "quiz-create-dialog flashcard-quiz-dialog";
+    flashcardQuizDialog.innerHTML = '<div class="quiz-create-dialog-card" role="dialog" aria-modal="true" aria-labelledby="flashcard-quiz-title">'
+      + '<div class="quiz-dialog-heading"><div><h2 id="flashcard-quiz-title">Practice as Quiz</h2><p>Written questions from this document’s saved flashcards.</p></div>'
+      + '<button class="text-button quiz-dialog-cancel" type="button">Cancel</button></div>'
+      + '<p class="flashcard-quiz-empty" id="flashcard-quiz-empty" hidden>No flashcards available. Generate flashcards for this document first.</p>'
+      + '<div class="flashcard-quiz-fields" id="flashcard-quiz-fields">'
+      + '<div class="quiz-sheet-field"><span>Type</span><div class="quiz-segmented" role="radiogroup" id="flashcard-quiz-mode"></div></div>'
+      + '<div class="quiz-sheet-field"><span>Questions</span><div class="quiz-segmented" role="radiogroup" id="flashcard-quiz-count"></div></div></div>'
+      + '<p class="flashcard-quiz-error" id="flashcard-quiz-error" role="alert" hidden></p>'
+      + '<button class="primary-button flashcard-quiz-start" id="flashcard-quiz-start" type="button">Start Quiz</button></div>';
+    flashcardQuizDialog.querySelector(".quiz-dialog-cancel").addEventListener("click", () => closeFlashcardQuizDialog());
+    flashcardQuizDialog.addEventListener("click", (event) => { if (event.target === flashcardQuizDialog) closeFlashcardQuizDialog(); });
+    flashcardQuizDialog.querySelector("#flashcard-quiz-start").addEventListener("click", startFlashcardQuiz);
+    document.body.appendChild(flashcardQuizDialog);
+  }
+  flashcardQuizDialog.querySelector("#flashcard-quiz-error").hidden = true;
+  renderFlashcardQuizDialog();
+  flashcardQuizDialog.classList.add("open");
+}
+
+function closeFlashcardQuizDialog() {
+  if (flashcardQuizInFlight || !flashcardQuizDialog) return;
+  flashcardQuizDialog.classList.remove("open");
+}
+
+async function startFlashcardQuiz() {
+  if (flashcardQuizInFlight || !activeDocumentId || !flashcards.length) return;
+  const documentId = activeDocumentId;
+  const error = flashcardQuizDialog.querySelector("#flashcard-quiz-error");
+  error.hidden = true;
+  flashcardQuizInFlight = true;
+  renderFlashcardQuizDialog();
+  let quiz = null;
+  try {
+    quiz = await fetchJson(`${FLASHCARDS_API_BASE_URL}/${encodeURIComponent(documentId)}/practice-quiz`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: flashcardQuizSettings.mode,
+        question_count: flashcardQuizSettings.count === "all" ? null : flashcardQuizSettings.count,
+        set_id: flashcardSet?.set_id || null,
+      }),
+    });
+  } catch (requestError) {
+    error.textContent = requestError.message || "Could not create the practice quiz.";
+    error.hidden = false;
+  } finally {
+    flashcardQuizInFlight = false;
+    renderFlashcardQuizDialog();
+  }
+  if (!quiz?.quiz_id || activeDocumentId !== documentId) return;
+  closeFlashcardQuizDialog();
+  setSessionTab("quiz");
+  await loadQuizStatuses();
+  try {
+    await openQuizPlayer({ document_id: documentId, topic_id: quiz.topic_id || "document", difficulty: quiz.difficulty, quiz_id: quiz.quiz_id });
+  } catch (openError) {
+    showToast(openError.message || "Could not open this quiz");
+  }
 }
 
 // Only the Generate/Regenerate buttons (or a saved-set reload) reach this: it is the one place

@@ -19,6 +19,10 @@ from backend.auth_store import LEGACY_USER_ID, initialize_auth_store
 from backend.quiz_options import canonicalize_option
 
 LEGACY_TOPIC_ID = "document"
+# Question types answered by typing text (graded by normalized text match, not option letters).
+WRITTEN_QUESTION_TYPES = ("fill_blank", "short_answer")
+# planner_version of written quizzes built from flashcards (backend/flashcard_quiz_service.py).
+FLASHCARD_WRITTEN_PLANNER_VERSION = "flashcard_written_v1"
 
 
 class _ClosingConnection(sqlite3.Connection):
@@ -459,8 +463,8 @@ def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: s
                 question_id,
                 position,
                 str(question.get("question", "")),
-                # fill_blank answers are text (kept as written); option answers are letters.
-                (str(question.get("correct_answer", "")).strip() if question.get("question_type") == "fill_blank"
+                # Written answers (fill_blank, short_answer) are text kept as written; option answers are letters.
+                (str(question.get("correct_answer", "")).strip() if question.get("question_type") in WRITTEN_QUESTION_TYPES
                  else str(question.get("correct_answer", "")).upper()),
                 str(question.get("topic_id") or stored["topic_id"]),
                 str(question.get("difficulty") or difficulty),
@@ -562,17 +566,19 @@ def get_quiz(document_id: str, difficulty: str, topic_id: str = LEGACY_TOPIC_ID,
     """The most recently created quiz for this slot -- used only to decide whether a NEW generation
     request can reuse a compatible quiz (same model/count/planner, see _generate_quiz's cache-hit
     check) or must create another one. Multiple quizzes can share a slot; this never hides the
-    others from listings (see list_document_quizzes) or deletes them."""
+    others from listings (see list_document_quizzes) or deletes them. Flashcard-derived written
+    quizzes (backend/flashcard_quiz_service.py) are never "the quiz of this slot": they are opened by
+    quiz_id only, so normal quiz generation and slot lookups behave as if they did not exist."""
     initialize_quiz_store()
     with _connect() as connection:
         row = connection.execute(
             """
             SELECT * FROM quizzes
             WHERE owner_id = ? AND document_id = ? AND topic_id = ? AND difficulty = ? AND is_active = 1
-              AND benchmark_id IS NULL
+              AND benchmark_id IS NULL AND planner_version != ?
             ORDER BY created_at DESC LIMIT 1
             """,
-            (owner_id, document_id, topic_id, difficulty),
+            (owner_id, document_id, topic_id, difficulty, FLASHCARD_WRITTEN_PLANNER_VERSION),
         ).fetchone()
         return _row_to_quiz(connection, row) if row else None
 
@@ -632,6 +638,20 @@ def save_quiz(document_id: str, difficulty: str, quiz: dict, owner_id: str = LEG
     initialize_quiz_store()
     with _connect() as connection:
         return _insert_quiz(connection, document_id, difficulty, quiz, owner_id)
+
+
+def practice_quiz_ids(quiz_ids: list[str], owner_id: str = LEGACY_USER_ID) -> set[str]:
+    """Which of these quizzes are flashcard written practice quizzes."""
+    ids = [quiz_id for quiz_id in dict.fromkeys(quiz_ids) if quiz_id]
+    if not ids:
+        return set()
+    initialize_quiz_store()
+    with _connect() as connection:
+        rows = connection.execute(
+            f"SELECT quiz_id FROM quizzes WHERE owner_id = ? AND planner_version = ? AND quiz_id IN ({','.join('?' * len(ids))})",
+            (owner_id, FLASHCARD_WRITTEN_PLANNER_VERSION, *ids),
+        ).fetchall()
+    return {row["quiz_id"] for row in rows}
 
 
 def get_quiz_titles(quiz_ids: list[str], owner_id: str = LEGACY_USER_ID) -> dict[str, str]:
@@ -1213,6 +1233,8 @@ def list_completed_answer_snapshots(
                 JOIN quiz_attempts t ON t.attempt_id = a.attempt_id
                 WHERE t.student_id = ? AND t.document_id = ? AND a.topic_id = ?
                   AND t.completed = 1 AND t.submitted_at IS NOT NULL
+                  -- Flashcard practice answers (partly self-marked) are not mastery evidence.
+                  AND a.concept_origin != 'flashcard'
             )
             SELECT * FROM ranked WHERE response_rank = 1
             ORDER BY quiz_id, question_id
@@ -1225,6 +1247,34 @@ def list_completed_answer_snapshots(
             return snapshots
         latest_plan_id = max(planned, key=lambda row: (str(row.get("evidence_at") or ""), str(row.get("attempt_id") or "")))["concept_plan_id"]
         return [row for row in snapshots if row.get("concept_plan_id") == latest_plan_id]
+
+
+def set_attempt_answer_correctness(attempt_id: str, student_id: str, question_id: int, is_correct: bool) -> None:
+    """Set one graded answer of a completed attempt and recompute that attempt's score/percentage.
+    Used only for learner-marked self-check questions (backend/flashcard_quiz_service.py)."""
+    initialize_quiz_store()
+    with _connect() as connection:
+        attempt = connection.execute(
+            "SELECT attempt_id FROM quiz_attempts WHERE attempt_id = ? AND student_id = ? AND completed = 1",
+            (attempt_id, student_id),
+        ).fetchone()
+        if not attempt:
+            raise ValueError("Quiz attempt was not found.")
+        connection.execute(
+            "UPDATE quiz_attempt_answers SET is_correct = ? WHERE attempt_id = ? AND question_id = ?",
+            (int(bool(is_correct)), attempt_id, int(question_id)),
+        )
+        connection.execute(
+            """
+            UPDATE quiz_attempts SET
+                score = (SELECT COALESCE(SUM(is_correct), 0) FROM quiz_attempt_answers WHERE attempt_id = ?),
+                percentage = CASE WHEN total > 0 THEN ROUND(100.0 * (
+                    SELECT COALESCE(SUM(is_correct), 0) FROM quiz_attempt_answers WHERE attempt_id = ?) / total, 2) ELSE 0 END,
+                updated_at = ?
+            WHERE attempt_id = ?
+            """,
+            (attempt_id, attempt_id, utc_now_iso(), attempt_id),
+        )
 
 
 def get_quiz_attempt_summary(quiz_id: str, student_id: str) -> dict:
@@ -1326,6 +1376,7 @@ def list_topic_mastery(student_id: str, document_id: str | None = None) -> list[
                        WHERE t.student_id = m.student_id
                          AND t.document_id = m.document_id
                          AND a.topic_id = m.topic_id
+                         AND a.concept_origin != 'flashcard'
                        ORDER BY COALESCE(t.submitted_at, t.completed_at) DESC, a.question_id
                        LIMIT 1
                    ), m.topic_id) AS topic_name
@@ -1349,12 +1400,12 @@ def list_mastery_identities(student_id: str | None = None) -> list[dict]:
     with _connect() as connection:
         if student_id:
             rows = connection.execute(
-                "SELECT DISTINCT t.student_id, t.document_id, a.topic_id FROM quiz_attempts t JOIN quiz_attempt_answers a ON a.attempt_id=t.attempt_id WHERE t.completed = 1 AND t.student_id = ?",
+                "SELECT DISTINCT t.student_id, t.document_id, a.topic_id FROM quiz_attempts t JOIN quiz_attempt_answers a ON a.attempt_id=t.attempt_id WHERE t.completed = 1 AND a.concept_origin != 'flashcard' AND t.student_id = ?",
                 (student_id,),
             ).fetchall()
         else:
             rows = connection.execute(
-                "SELECT DISTINCT t.student_id, t.document_id, a.topic_id FROM quiz_attempts t JOIN quiz_attempt_answers a ON a.attempt_id=t.attempt_id WHERE t.completed = 1"
+                "SELECT DISTINCT t.student_id, t.document_id, a.topic_id FROM quiz_attempts t JOIN quiz_attempt_answers a ON a.attempt_id=t.attempt_id WHERE t.completed = 1 AND a.concept_origin != 'flashcard'"
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -1363,10 +1414,16 @@ def list_quiz_history(
     document_id: str | None = None,
     difficulty: str | None = None,
     student_id: str | None = None,
+    include_practice: bool = True,
 ) -> list[dict]:
+    """Completed attempts, newest first. `include_practice=False` leaves out flashcard written
+    practice attempts (assessment read models); Quiz History keeps them."""
     initialize_quiz_store()
     clauses = ["completed = 1", "(quiz_id IS NULL OR quiz_id NOT IN (SELECT quiz_id FROM quizzes WHERE benchmark_id IS NOT NULL))"]
     parameters: list[str] = []
+    if not include_practice:
+        clauses.append("(quiz_id IS NULL OR quiz_id NOT IN (SELECT quiz_id FROM quizzes WHERE planner_version = ?))")
+        parameters.append(FLASHCARD_WRITTEN_PLANNER_VERSION)
     if document_id:
         clauses.append("document_id = ?")
         parameters.append(document_id)
@@ -1514,14 +1571,16 @@ def get_document_quiz_activity(document_id: str, owner_id: str) -> dict:
     questions. `quizzes`: every active quiz artifact, newest first, each with ITS OWN latest attempt
     (same per-quiz_id rule as the Quiz Library, so sibling quizzes never share progress).
     `completed_attempts`: completed attempts, newest first, restricted to attempts whose quiz is
-    an active quiz of this same owner and document."""
+    an active quiz of this same owner and document. Flashcard written practice quizzes are
+    retrieval practice, not the document's assessment: they are left out of both lists."""
     initialize_quiz_store()
     with _connect() as connection:
         quiz_rows = connection.execute(
             """SELECT quiz_id, title, question_count, created_at FROM quizzes
                WHERE owner_id = ? AND document_id = ? AND is_active = 1 AND benchmark_id IS NULL
+                 AND planner_version != ?
                ORDER BY created_at DESC, quiz_id DESC""",
-            (owner_id, document_id),
+            (owner_id, document_id, FLASHCARD_WRITTEN_PLANNER_VERSION),
         ).fetchall()
         quizzes = []
         for quiz_row in quiz_rows:
@@ -1539,9 +1598,9 @@ def get_document_quiz_activity(document_id: str, owner_id: str) -> dict:
                FROM quiz_attempts a
                JOIN quizzes q ON q.quiz_id = a.quiz_id AND q.owner_id = a.student_id
                              AND q.document_id = a.document_id AND q.is_active = 1
-                             AND q.benchmark_id IS NULL
+                             AND q.benchmark_id IS NULL AND q.planner_version != ?
                WHERE a.student_id = ? AND a.document_id = ? AND a.completed = 1
                ORDER BY COALESCE(a.completed_at, a.submitted_at, a.updated_at) DESC, a.attempt_id DESC""",
-            (owner_id, document_id),
+            (FLASHCARD_WRITTEN_PLANNER_VERSION, owner_id, document_id),
         ).fetchall()
     return {"quizzes": quizzes, "completed_attempts": [dict(row) for row in completed_attempts]}

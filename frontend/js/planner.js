@@ -469,7 +469,7 @@ async function plannerQuizTarget(session) {
   const byRecent = (left, right) => new Date(right.updated_at || right.created_at || 0) - new Date(left.updated_at || left.created_at || 0);
   const variant = session.artifact_id
     ? variants.find((item) => item.quiz_id === session.artifact_id)
-    : variants.filter((item) => item.progress_status === "in_progress").sort(byRecent)[0];
+    : variants.filter((item) => !item.practice && item.progress_status === "in_progress").sort(byRecent)[0];   // flashcard practice is not the planned quiz
   const quizId = session.artifact_id || variant?.quiz_id;
   if (!quizId) return null;
   return { document_id: session.document_id, topic_id: variant?.topic_id || "document", difficulty: variant?.difficulty, quiz_id: quizId };

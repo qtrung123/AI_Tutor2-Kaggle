@@ -1,10 +1,12 @@
-"""Flashcard routes: cached lookup/generation, explicit regeneration and learner card CRUD."""
-from typing import Optional
+"""Flashcard routes: cached lookup/generation, explicit regeneration, learner card CRUD and the
+flashcard-derived written practice quiz."""
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from backend.api.deps import require_current_user
+from backend.flashcard_quiz_service import NoFlashcardsAvailable, create_flashcard_written_quiz
 from backend.flashcard_service import FlashcardGenerationError, authoritative_card_fields, generate_flashcards
 from backend.flashcard_store import add_flashcard, delete_flashcard, update_flashcard
 from backend.model_registry import prepare_generation_model
@@ -29,6 +31,14 @@ class FlashcardUpdateRequest(BaseModel):
     front: Optional[str] = Field(default=None, min_length=1, max_length=1000)
     back: Optional[str] = Field(default=None, min_length=1, max_length=4000)
     is_favorite: Optional[bool] = None
+
+
+class FlashcardPracticeQuizRequest(BaseModel):
+    mode: Literal["mixed", "short_answer", "fill_blank"] = "mixed"
+    # None = every usable card of the set ("All").
+    question_count: Optional[int] = Field(default=None, ge=1, le=500)
+    set_id: Optional[str] = None
+    quiz_name: Optional[str] = Field(default=None, max_length=200)
 
 
 @router.get("/api/flashcards/{document_id}")
@@ -105,3 +115,19 @@ def flashcard_delete(document_id: str, flashcard_id: str,
         return {"deleted": flashcard_id}
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.post("/api/flashcards/{document_id}/practice-quiz")
+def flashcard_practice_quiz(document_id: str, request: FlashcardPracticeQuizRequest,
+                            current_user: dict = Depends(require_current_user)) -> dict:
+    """Turn this owner's persisted flashcards of this document into a written quiz (short_answer /
+    fill_blank only, no LLM call). 409 when the document has no flashcards."""
+    try:
+        return create_flashcard_written_quiz(
+            current_user["id"], document_id, mode=request.mode, question_count=request.question_count,
+            set_id=request.set_id, quiz_name=request.quiz_name,
+        )
+    except NoFlashcardsAvailable as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=404 if str(error) == "Document not found." else 400, detail=str(error)) from error
