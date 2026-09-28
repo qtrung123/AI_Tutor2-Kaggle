@@ -31,6 +31,7 @@ PLACEMENT_MESSAGES = {
     "outside_availability": "Pick a time inside your available hours.",
     "after_deadline": "That is after this material's deadline.",
     "slot_taken": "That time is already taken by another session.",
+    "calendar_busy": "That time is busy in your Google Calendar.",
     "candidate_stale": "This suggestion changed. The calendar has been refreshed.",
 }
 
@@ -71,7 +72,10 @@ def validate_window(scheduled_start: str, duration_minutes: int, *, now: datetim
     last = first + duration_minutes
     intervals = free_minutes_by_date(day, day, list(availability), []).get(day, [])
     if not any(begin <= first and last <= finish for begin, finish in intervals):
-        raise PlacementError("outside_availability")
+        # Inside the learner's own hours but blocked by Google Calendar busy time: say so.
+        own = free_minutes_by_date(day, day, [slot for slot in availability if not slot.get("busy")], []).get(day, [])
+        inside_own = any(begin <= first and last <= finish for begin, finish in own)
+        raise PlacementError("calendar_busy" if inside_own else "outside_availability")
     start_iso, end_iso = start.isoformat(), end.isoformat()
     if any(s["scheduled_start"] < end_iso and s["scheduled_end"] > start_iso for s in busy):
         raise PlacementError("slot_taken")

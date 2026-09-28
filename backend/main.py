@@ -10,6 +10,7 @@ from backend.api.auth import router as auth_router
 from backend.api.conversations import router as conversations_router
 from backend.api.documents import router as documents_router
 from backend.api.flashcards import router as flashcards_router
+from backend.api.google_calendar import router as google_calendar_router
 from backend.api.learning import router as learning_router
 from backend.api.planner_legacy import router as planner_legacy_router
 from backend.api.planner_v2 import router as planner_v2_router
@@ -210,3 +211,6 @@ app.include_router(planner_legacy_router)
 
 
 app.include_router(planner_v2_router)
+
+
+app.include_router(google_calendar_router)

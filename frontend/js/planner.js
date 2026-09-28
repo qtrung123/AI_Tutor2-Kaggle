@@ -93,6 +93,8 @@ async function plannerRequest(url, options = {}) {
     const message = typeof detail === "string" ? detail : detail?.message || `Request returned ${response.status}`;
     throw new PlannerRequestError(message, response.status, detail);
   }
+  // Planner actions report their Google Calendar sync (only when connected); never blocking.
+  if (payload?.calendar_sync) plannerNoteCalendarSync(payload.calendar_sync);
   return payload;
 }
 
@@ -132,6 +134,7 @@ async function loadPlannerData({ keepWeek = false } = {}) {
       plannerQueueAutoPreview(0);
       plannerLoadLiveCandidates();
       plannerLoadDocStates();
+      plannerLoadGoogleCalendar();
     }
   } catch (error) {
     showToast(error.message || "Could not load Study Planner data");
@@ -1433,6 +1436,7 @@ function renderPlannerWorkspace() {
   pcalRenderGrid();
   pcalRenderQueue();
   pcalRenderSheet();
+  pcalRenderGoogleCalendar();
 }
 
 function pcalRenderMaterials() {
@@ -1731,6 +1735,7 @@ function pcalRenderGrid() {
     const busy = dayItems.map((item) => [plannerToMinutes(item.session.scheduled_start.slice(11, 16)),
       plannerToMinutes(item.session.scheduled_end.slice(11, 16))]);
     pcalAvailabilityFor(key, weekday).forEach((slot) => column.appendChild(pcalAvailabilityBlock(slot, key, busy)));
+    pcalGoogleBusyFor(key).forEach(([from, to]) => column.appendChild(pcalBusyBlock(from, to)));
     dayItems.forEach((item) => column.appendChild(pcalEventBlock(item)));
     if (key === todayKey) {
       const shade = pcalEl("div", "pcal-past-shade");   // the part of today that has passed
@@ -1756,6 +1761,7 @@ function pcalRenderGrid() {
     const first = Math.min(8 * 60, ...starts);
     pcal.scroll.scrollTop = Math.max(0, (first - 60) * PCAL_MINUTE_PX);
   }
+  pcalLoadGoogleBusy();   // no-op unless connected with "Avoid conflicts" and this week is not loaded yet
 }
 
 function pcalPlace(element, startMinute, endMinute) {
@@ -2242,6 +2248,7 @@ function pcalCheckTarget(dateKey, weekday, start, source) {
       return merged;
     }, []);
   if (!windows.some(([from, to]) => from <= start && end <= to)) return "Pick a time inside your available hours.";
+  if (pcalGoogleBusyFor(dateKey).some(([from, to]) => from < end && to > start)) return "That time is busy in your Google Calendar.";
   const clash = pcalOccupied(dateKey, source).some((session) => {
     const from = plannerToMinutes(session.scheduled_start.slice(11, 16));
     const to = plannerToMinutes(session.scheduled_end.slice(11, 16));
@@ -2420,5 +2427,219 @@ async function pcalPlaceCandidate(key, startIso) {
     if (error.detail?.code === "candidate_stale" || error.detail?.code === "stale_plan") await loadPlannerData({ keepWeek: true });
   } finally {
     pcalMoveBusy = false;
+  }
+}
+
+// -- Google Calendar (one-way: Google busy time in, confirmed study sessions out) ------------------
+// The backend owns OAuth and every token; the page only sees connection status, the two toggles,
+// and anonymous busy blocks ("Busy" -- never an event's name).
+
+function plannerGoogleUrl(suffix) {
+  return `${GOOGLE_CALENDAR_API_URL}${suffix}`;
+}
+
+function plannerGoogleNavigate(url) {
+  // The OAuth flow is a full-page redirect through the backend. A single seam so tests can observe it.
+  window.location.assign(url);
+}
+
+function plannerGoogleAvoiding() {
+  return Boolean(plannerGoogle?.connected && plannerGoogle.avoid_conflicts);
+}
+
+function plannerHandleGoogleReturn() {
+  // Back from Google's consent screen (?google_calendar=connected|error&reason=...): open the Planner.
+  const params = new URLSearchParams(window.location.search);
+  const outcome = params.get("google_calendar");
+  if (!outcome) return;
+  const reason = params.get("reason");
+  params.delete("google_calendar");
+  params.delete("reason");
+  const query = params.toString();
+  window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
+  setPage("planner");
+  showToast(outcome === "connected" ? "Google Calendar connected"
+    : PCAL_GOOGLE_RETURN_ERRORS[reason] || "Could not connect Google Calendar");
+}
+
+async function plannerLoadGoogleCalendar() {
+  try {
+    const status = await plannerRequest(plannerGoogleUrl(`/status?utc_offset_minutes=${plannerUtcOffsetMinutes()}`));
+    plannerGoogle = status && typeof status === "object" && "connected" in status ? status : null;
+  } catch (error) {
+    plannerGoogle = null;   // unknown: the section stays hidden and the Planner works as before
+  }
+  if (plannerGoogle) plannerGoogleSyncFailed = plannerGoogle.sync_errors > 0;
+  plannerGoogleBusyWeek = null;
+  plannerGoogleWarning = plannerGoogle?.reconnect_required ? "google_calendar_reconnect" : null;
+  if (!plannerGoogleAvoiding()) plannerGoogleBusy = [];
+  pcalRenderGoogleCalendar();
+  if (plannerWorkspace && !plannerWorkspace.hidden) pcalRenderGrid();   // also loads this week's busy blocks
+}
+
+async function pcalLoadGoogleBusy() {
+  if (!plannerGoogleAvoiding()) return;
+  const weekKey = plannerDateKey(pcalWeekDates()[0]);
+  if (plannerGoogleBusyWeek === weekKey) return;
+  plannerGoogleBusyWeek = weekKey;
+  let busy = [];
+  let warning = null;
+  try {
+    const result = await plannerRequest(plannerGoogleUrl(
+      `/busy?start=${weekKey}&days=7&utc_offset_minutes=${plannerUtcOffsetMinutes()}`));
+    busy = result.busy || [];
+    warning = result.warning || null;
+  } catch (error) {
+    warning = "google_calendar_unavailable";
+  }
+  if (plannerGoogleBusyWeek !== weekKey) return;   // the learner moved on to another week meanwhile
+  plannerGoogleBusy = busy;
+  plannerGoogleWarning = warning;
+  pcalRenderGoogleCalendar();
+  if (plannerWorkspace && !plannerWorkspace.hidden) pcalRenderGrid();
+}
+
+function pcalGoogleBusyFor(dateKey) {
+  // [startMinute, endMinute] of each busy block on that day (a block across midnight is cut at it).
+  if (!plannerGoogleAvoiding()) return [];
+  return plannerGoogleBusy.flatMap(({ start, end }) => {
+    if (start.slice(0, 10) > dateKey || end.slice(0, 10) < dateKey) return [];
+    const from = start.slice(0, 10) < dateKey ? 0 : plannerToMinutes(start.slice(11, 16));
+    const to = end.slice(0, 10) > dateKey ? PCAL_DAY_MINUTES : plannerToMinutes(end.slice(11, 16));
+    return to > from ? [[from, to]] : [];
+  });
+}
+
+function pcalBusyBlock(start, end) {
+  // Read-only: not a button, not draggable, no popover; it only blocks placement.
+  const block = pcalEl("div", "pcal-busy");
+  block.dataset.start = plannerMinutesToLabel(start);
+  block.dataset.end = plannerMinutesToLabel(end);
+  block.setAttribute("aria-label", `Busy in Google Calendar ${plannerMinutesToLabel(start)}–${plannerMinutesToLabel(end)}`);
+  pcalPlace(block, start, end);
+  block.appendChild(pcalEl("span", "pcal-busy-label", "Busy"));
+  return block;
+}
+
+function plannerNoteCalendarSync(outcome) {
+  plannerGoogleSyncFailed = outcome.status === "error";
+  if (outcome.status === "reconnect_required") {
+    plannerLoadGoogleCalendar();
+    return;
+  }
+  pcalRenderGoogleCalendar();
+}
+
+function pcalGoogleWarningCode() {
+  const previewWarning = (plannerPreview?.warnings || []).find((warning) => PCAL_GOOGLE_WARNINGS[warning.code]);
+  return plannerGoogleWarning || previewWarning?.code || null;
+}
+
+function pcalGoogleButton(id, text, onClick, className = "pcal-button pcal-secondary") {
+  const button = pcalEl("button", className, text);
+  button.type = "button";
+  button.id = id;
+  button.addEventListener("click", () => onClick(button));
+  return button;
+}
+
+function pcalGoogleToggle(id, text, checked, field) {
+  const label = pcalEl("label", "pcal-gcal-toggle");
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.id = id;
+  input.checked = checked;
+  input.addEventListener("change", () => pcalGoogleSetting(field, input));
+  label.append(input, pcalEl("span", "", text));
+  return label;
+}
+
+function pcalRenderGoogleCalendar() {
+  const box = pcal.gcal;
+  if (!box) return;
+  box.innerHTML = "";
+  box.hidden = !plannerGoogle;
+  if (!plannerGoogle) return;
+  const title = pcalEl("h3", "pcal-rail-title", "Google Calendar");
+  title.id = "pcal-gcal-title";
+  box.appendChild(title);
+  const warning = pcalGoogleWarningCode();
+  if (plannerGoogle.connected) {
+    box.appendChild(pcalEl("p", "pcal-gcal-state", "✓ Connected"));
+    box.append(pcalGoogleToggle("pcal-gcal-avoid", "Avoid conflicts", plannerGoogle.avoid_conflicts, "avoid_conflicts"),
+      pcalGoogleToggle("pcal-gcal-sync", "Sync confirmed study sessions", plannerGoogle.sync_sessions, "sync_sessions"));
+    if (plannerGoogleSyncFailed) {
+      const failed = pcalEl("p", "pcal-gcal-error", "Calendar sync failed");
+      failed.id = "pcal-gcal-sync-error";
+      failed.setAttribute("role", "status");
+      box.appendChild(failed);
+    }
+    if (warning) box.appendChild(pcalEl("p", "pcal-gcal-hint is-warn", PCAL_GOOGLE_WARNINGS[warning]));
+    const actions = pcalEl("div", "pcal-gcal-actions");
+    actions.append(pcalGoogleButton("pcal-gcal-sync-now", "Sync now", pcalGoogleSyncNow),
+      pcalGoogleButton("pcal-gcal-disconnect", "Disconnect", pcalGoogleDisconnect));
+    box.appendChild(actions);
+    return;
+  }
+  if (plannerGoogle.reconnect_required) box.appendChild(pcalEl("p", "pcal-gcal-hint is-warn", PCAL_GOOGLE_WARNINGS.google_calendar_reconnect));
+  else if (!plannerGoogle.configured) box.appendChild(pcalEl("p", "pcal-gcal-hint", "Not set up on this server yet."));
+  else box.appendChild(pcalEl("p", "pcal-gcal-hint", "Avoid your busy times and add study sessions to your calendar."));
+  const connect = pcalGoogleButton("pcal-gcal-connect", plannerGoogle.reconnect_required ? "Reconnect" : "Connect",
+    () => plannerGoogleNavigate(plannerGoogleUrl("/connect")), "pcal-button");
+  connect.disabled = !plannerGoogle.configured;
+  box.appendChild(connect);
+}
+
+function pcalAfterGoogleBusyChange() {
+  // Busy time feeds the server-side scheduler: refresh the blocks and, before confirmation, the suggestions.
+  plannerGoogleBusy = [];
+  plannerGoogleBusyWeek = null;
+  plannerGoogleWarning = null;
+  renderPlannerWorkspace();
+  if (!plannerHasLivePlan()) plannerQueueAutoPreview(0);
+}
+
+async function pcalGoogleSetting(field, input) {
+  input.disabled = true;
+  try {
+    plannerGoogle = await plannerRequest(plannerGoogleUrl("/settings"), { method: "PATCH", body: { [field]: input.checked } });
+    if (field === "avoid_conflicts") pcalAfterGoogleBusyChange();
+    else {
+      plannerGoogleSyncFailed = plannerGoogle.sync_errors > 0;
+      pcalRenderGoogleCalendar();
+    }
+  } catch (error) {
+    input.checked = !input.checked;
+    input.disabled = false;
+    showToast(error.message || "Could not update Google Calendar settings");
+  }
+}
+
+async function pcalGoogleSyncNow(button) {
+  button.disabled = true;
+  button.textContent = "Syncing…";
+  try {
+    const result = await plannerRequest(plannerGoogleUrl("/sync"), { method: "POST", body: { utc_offset_minutes: plannerUtcOffsetMinutes() } });
+    plannerGoogle = result;
+    plannerGoogleSyncFailed = result.sync.status !== "ok" || result.sync_errors > 0;
+    showToast(plannerGoogleSyncFailed ? "Calendar sync failed" : "Google Calendar is up to date");
+    if (result.sync.status === "reconnect_required") await plannerLoadGoogleCalendar();
+  } catch (error) {
+    plannerGoogleSyncFailed = true;
+    showToast(error.message || "Calendar sync failed");
+  }
+  pcalRenderGoogleCalendar();
+}
+
+async function pcalGoogleDisconnect(button) {
+  button.disabled = true;
+  try {
+    plannerGoogle = await plannerRequest(plannerGoogleUrl("/disconnect"), { method: "POST" });
+    plannerGoogleSyncFailed = false;
+    showToast("Google Calendar disconnected");
+    pcalAfterGoogleBusyChange();
+  } catch (error) {
+    button.disabled = false;
+    showToast(error.message || "Could not disconnect Google Calendar");
   }
 }

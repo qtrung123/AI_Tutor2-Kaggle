@@ -75,6 +75,21 @@ Truy xuất chunk dùng chung ở `document_retrieval.py`; kiểm tra văn bản
 | `study_progress.py`, `document_study_state.py` | Trạng thái học và tiến độ theo tài liệu |
 | API | `api/planner_legacy.py` (tasks/blocks/availability — availability dùng chung với V2), `api/planner_v2.py` (plans/sessions/progress) |
 
+### Google Calendar (MVP, một chiều mỗi hướng)
+
+| Thành phần | Vai trò |
+| --- | --- |
+| `google_calendar_service.py` | OAuth (authorization code, offline, scope `calendar.freebusy` + `calendar.app.created`), mã hoá refresh token (Fernet), refresh/revoke, gọi REST Calendar qua httpx (`_transport` là seam cho test) |
+| `google_calendar_store.py` | SQLite (cùng DB với planner): `google_calendar_connections`, `google_calendar_event_links`, `google_oauth_states` |
+| `google_calendar_sync.py` | Busy time -> Planner (dòng availability `busy=True`, `free_minutes_by_date` trừ đi) và đồng bộ session đã confirm -> lịch "AI Tutor Study Plan" (idempotent: event id tất định + hash nội dung) |
+| API | `api/google_calendar.py`: `/api/integrations/google-calendar/{status,connect,callback,disconnect,settings,sync,busy}` |
+
+- Scheduler không đổi: chỉ availability đầu vào bị trừ busy time (`study_plan_api_service._effective_availability`).
+- Mọi hành động planner gọi `google_calendar_sync.after_planner_change` SAU khi đã commit: lỗi Google chỉ ghi
+  `sync_status="error"`, không bao giờ rollback hành động. Chưa kết nối = hành vi và response như cũ.
+- Biến môi trường: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALENDAR_REDIRECT_URI`,
+  `GOOGLE_CALENDAR_TOKEN_ENCRYPTION_KEY` (tuỳ chọn `AI_TUTOR_FRONTEND_URL` khi frontend khác origin với backend).
+
 ## 5. Frontend
 
 - Không dùng framework/bundler. `index.html` nạp theo thứ tự:

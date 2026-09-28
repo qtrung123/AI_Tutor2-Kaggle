@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from backend import study_planner_store
+from backend import google_calendar_sync, study_planner_store
 from backend.api.deps import require_current_user
 from backend.conversation_store import remove_source_from_conversations
 from backend.flashcard_store import delete_document_flashcards
@@ -182,6 +182,7 @@ def delete_source(document_id: str, current_user: dict = Depends(require_current
         delete_document_summaries(current_user["id"], result["deleted"])
         delete_document_flashcards(current_user["id"], result["deleted"])
         study_planner_store.delete_document_plan_data(current_user["id"], result["deleted"])
+        google_calendar_sync.after_planner_change(current_user["id"])   # its sessions' Google events go too
         remove_source_from_conversations(current_user["id"], result["deleted"])
         sources_result = [SourceSummary(**source) for source in list_uploaded_sources(current_user["id"])]
 

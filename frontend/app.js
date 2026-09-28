@@ -311,6 +311,7 @@ if (plannerView) {
     <ul id="pcal-material-list" class="pcal-material-list"></ul>
     <button class="pcal-add-button" id="pcal-add-materials" type="button" aria-haspopup="dialog">+ Add materials</button>
     <button class="text-button pcal-new-plan" id="pcal-new-plan" type="button" hidden>Start a new plan</button>
+    <section class="pcal-gcal" id="pcal-gcal" aria-labelledby="pcal-gcal-title" hidden></section>
   </aside>
   <section class="pcal-main" aria-label="Study calendar">
     <div class="pcal-toolbar">
@@ -388,6 +389,7 @@ const pcal = {
   sheetList: document.getElementById("pcal-sheet-list"),
   sheetClose: document.getElementById("pcal-sheet-close"),
   popover: document.getElementById("pcal-popover"),
+  gcal: document.getElementById("pcal-gcal"),
 };
 const todayPlanPanel = document.getElementById("today-plan");
 
@@ -1395,6 +1397,19 @@ const PCAL_HOUR_PX = 48;
 const PCAL_MINUTE_PX = PCAL_HOUR_PX / 60;
 const PCAL_DAY_MINUTES = 24 * 60;
 const PCAL_PREVIEW_DELAY_MS = 450;
+// Google Calendar section of the desktop planner (js/planner.js).
+const PCAL_GOOGLE_WARNINGS = {
+  google_calendar_unavailable: "Couldn’t read Google Calendar right now. Planning with your own hours only.",
+  google_calendar_reconnect: "Google Calendar access expired. Reconnect to avoid conflicts again.",
+};
+
+const PCAL_GOOGLE_RETURN_ERRORS = {
+  access_denied: "Google Calendar was not connected.",
+  invalid_state: "That Google sign-in expired. Try connecting again.",
+  scope_denied: "Both calendar permissions are needed to connect Google Calendar.",
+  not_configured: "Google Calendar is not set up on this server.",
+  signed_out: "Sign in, then connect Google Calendar again.",
+};
 const PLANNER_LEARNING_STATE_LABELS = {
   new: "New", learning: "Learning", needs_review: "Needs review", on_track: "On track", completed: "Completed",
 };
@@ -1573,6 +1588,7 @@ async function bootstrapAuthentication() {
     const user = await fetchJson(AUTH_ME_API_URL);
     showAuthenticatedShell(user);
     await initializeApplication();
+    plannerHandleGoogleReturn();   // back from Google's consent screen: open the Planner
   } catch (error) {
     showAuthentication();
   }

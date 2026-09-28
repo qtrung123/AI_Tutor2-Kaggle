@@ -67,7 +67,8 @@ def free_minutes_by_date(
 ) -> dict[date, list[tuple[int, int]]]:
     """For each date in [start_date, end_date] inclusive: available minutes (dated slots plus
     expanded recurring-weekday slots) minus busy minutes from any confirmed/completed/locked
-    study block -- never fabricates time outside what the user actually selected.
+    study block and from busy=True rows in `availability` (external calendar busy time) -- never
+    fabricates time outside what the user actually selected.
 
     When `now` is given and falls on one of these dates, that date's already-elapsed time (up
     to the next 30-minute grid boundary at or after `now`) is also excluded -- the scheduler
@@ -75,8 +76,13 @@ def free_minutes_by_date(
     """
     dated: dict[str, list[tuple[int, int]]] = {}
     recurring_by_weekday: dict[int, list[tuple[int, int]]] = {}
+    blocked: dict[str, list[tuple[int, int]]] = {}
     for slot in availability:
-        if slot.get("is_recurring"):
+        if slot.get("busy"):
+            # External busy time (Google Calendar, dated rows with busy=True): subtracted from the
+            # learner's availability, never available itself.
+            blocked.setdefault(slot["date"], []).append((to_minutes(slot["start_at"]), to_minutes(slot["end_at"])))
+        elif slot.get("is_recurring"):
             recurring_by_weekday.setdefault(int(slot["day_of_week"]), []).append(
                 (to_minutes(slot["start_at"]), to_minutes(slot["end_at"]))
             )
@@ -108,7 +114,7 @@ def free_minutes_by_date(
         day_intervals = list(dated.get(key, []))
         day_intervals.extend(recurring_by_weekday.get(current.weekday(), []))
         free = merge_minute_intervals(day_intervals)
-        for busy_start, busy_end in merge_minute_intervals(busy_by_date.get(key, [])):
+        for busy_start, busy_end in merge_minute_intervals(busy_by_date.get(key, []) + blocked.get(key, [])):
             free = subtract_minute_interval(free, busy_start, busy_end)
         if now is not None and current == now.date():
             elapsed_boundary = _align_up_to_grid(now.hour * 60 + now.minute)

@@ -7,7 +7,8 @@ result without persisting anything; confirm recomputes the same schedule server-
 
 from datetime import date, datetime, timedelta, timezone
 
-from backend import study_adaptation, study_placement, study_planner_service, study_planner_store, study_progress
+from backend import (google_calendar_sync, study_adaptation, study_placement, study_planner_service,
+                     study_planner_store, study_progress)
 from backend.document_study_state import get_document_study_state
 from backend.flashcard_quiz_service import create_flashcard_written_quiz, is_flashcard_quiz
 from backend.quiz_store import get_quiz_by_id
@@ -77,6 +78,21 @@ def _validate_utc_offset(utc_offset_minutes: int) -> timedelta:
     return timedelta(minutes=minutes)
 
 
+def _effective_availability(owner_id: str, now: datetime, offset: timedelta) -> tuple[list[dict], list[dict]]:
+    """(availability, warnings): the learner's availability minus Google Calendar busy time when
+    connected (busy rows, see google_calendar_sync). Not connected = exactly the stored rows; Google
+    unavailable = the stored rows plus a non-blocking warning."""
+    return google_calendar_sync.planner_availability(owner_id, study_planner_store.list_availability(owner_id), now, offset)
+
+
+def _with_calendar_sync(owner_id: str, response: dict, utc_offset_minutes: int | None = None) -> dict:
+    """Mirror the committed planner change into Google Calendar (when connected). A sync failure is
+    reported as calendar_sync.status="error" and never undoes the planner action; without a
+    connection the response is returned unchanged."""
+    outcome = google_calendar_sync.after_planner_change(owner_id, utc_offset_minutes)
+    return response if outcome is None else {**response, "calendar_sync": outcome}
+
+
 def _document_titles(owner_id: str) -> dict[str, str]:
     return {doc["document_id"]: doc["display_name"] or doc["document_id"] for doc in list_indexed_documents(owner_id)}
 
@@ -95,12 +111,16 @@ def get_plan_detail(owner_id: str, plan_id: str) -> dict:
 
 def update_plan(owner_id: str, plan_id: str, changes: dict) -> dict:
     _require_plan(owner_id, plan_id)
-    return study_planner_store.update_plan(owner_id, plan_id, changes)
+    plan = study_planner_store.update_plan(owner_id, plan_id, changes)
+    if "status" in changes:   # an archived plan's future sessions leave the calendar
+        google_calendar_sync.after_planner_change(owner_id)
+    return plan
 
 
 def delete_plan(owner_id: str, plan_id: str) -> None:
     _require_plan(owner_id, plan_id)
     study_planner_store.delete_plan(owner_id, plan_id)
+    google_calendar_sync.after_planner_change(owner_id)
 
 
 # -- materials ----------------------------------------------------------------
@@ -137,6 +157,7 @@ def update_plan_material(owner_id: str, plan_id: str, material_id: str, changes:
 def remove_plan_material(owner_id: str, plan_id: str, material_id: str) -> None:
     _require_material(owner_id, plan_id, material_id)
     study_planner_store.remove_material(owner_id, material_id)
+    google_calendar_sync.after_planner_change(owner_id)   # its sessions were deleted with it
 
 
 # -- preview ------------------------------------------------------------------
@@ -203,7 +224,9 @@ def _schedule_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_n
                         "document_title": titles.get(m["document_id"]), "deadline": m["deadline"]} for m in past],
         )
 
-    context = study_planner_service.build_scheduling_context(owner_id, plan_id, now=local_now, utc_offset=offset)
+    availability, calendar_warnings = _effective_availability(owner_id, local_now, offset)
+    context = study_planner_service.build_scheduling_context(owner_id, plan_id, now=local_now, utc_offset=offset,
+                                                             availability=availability)
     result, entries, applied, rejected = study_placement.apply_placements(
         plan_schedule(context), list(placements), now=local_now, availability=context.availability,
         busy=context.busy_sessions, deadlines={m.document_id: m.deadline for m in context.materials},
@@ -211,11 +234,12 @@ def _schedule_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_n
 
     titles = {material.document_id: material.state.title for material in context.materials}
     warnings = []
-    if not context.availability:
+    if not any(not slot.get("busy") for slot in context.availability):
         warnings.append({"code": "no_availability"})
     for material in materials:
         if material["document_id"] not in titles:
             warnings.append({"code": "document_missing", "document_id": material["document_id"]})
+    warnings.extend(calendar_warnings)
     return local_now, offset, result, warnings, titles, (entries, applied, rejected)
 
 
@@ -323,7 +347,7 @@ def confirm_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now
         )
     except study_planner_store.PlanAlreadyConfirmedError as error:
         raise PlanConflictError("This plan is already confirmed.") from error
-    return {
+    return _with_calendar_sync(owner_id, {
         "plan_id": plan_id,
         "persisted": True,
         "schedule_run_id": saved["schedule_run"]["schedule_run_id"],
@@ -332,7 +356,7 @@ def confirm_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now
         "sessions": [_saved_session(session, titles) for session in saved["sessions"]],
         "capacity": _capacity(result.capacity, titles),
         "warnings": warnings,
-    }
+    }, int(offset.total_seconds() // 60))
 
 
 class SessionConflictError(Exception):
@@ -421,20 +445,22 @@ def start_session(owner_id: str, session_id: str, utc_offset_minutes: int, local
         tool, artifact_available = ("quiz", True) if quiz_id else ("flashcards", False)
     else:
         tool, artifact_available = _session_tool(owner_id, session)
-    return {"session": _saved_session(session, _document_titles(owner_id)), "started": started,
-            "tool": tool, "artifact_available": artifact_available}
+    return _with_calendar_sync(owner_id, {"session": _saved_session(session, _document_titles(owner_id)), "started": started,
+                                          "tool": tool, "artifact_available": artifact_available}, utc_offset_minutes)
 
 
 def complete_session(owner_id: str, session_id: str) -> dict:
     """in_progress -> completed (completed_at stamped once); completing again is a no-op."""
     session, changed = _transition(owner_id, session_id, "complete")
-    return {"session": _saved_session(session, _document_titles(owner_id)), "changed": changed}
+    # A completed session keeps its Google event (nothing to write unless it was never synced).
+    return _with_calendar_sync(owner_id, {"session": _saved_session(session, _document_titles(owner_id)), "changed": changed})
 
 
 def skip_session(owner_id: str, session_id: str) -> dict:
     """scheduled/in_progress -> skipped. The row is kept as history; skipping again is a no-op."""
     session, changed = _transition(owner_id, session_id, "skip")
-    return {"session": _saved_session(session, _document_titles(owner_id)), "changed": changed}
+    # A skipped session's Google event is deleted.
+    return _with_calendar_sync(owner_id, {"session": _saved_session(session, _document_titles(owner_id)), "changed": changed})
 
 
 def reschedule_session(owner_id: str, session_id: str, utc_offset_minutes: int, local_now: str | None = None,
@@ -453,12 +479,15 @@ def reschedule_session(owner_id: str, session_id: str, utc_offset_minutes: int, 
     offset = _validate_utc_offset(utc_offset_minutes)
     now = _parse_local_now(local_now, offset)
     material = study_planner_store.get_plan_material(owner_id, session["plan_id"], session["document_id"])
+    availability, _ = _effective_availability(owner_id, now, offset)
     if target_start is not None:
-        return _reschedule_to(owner_id, session, target_start, now, material["deadline"] if material else None)
+        return _with_calendar_sync(owner_id, _reschedule_to(owner_id, session, target_start, now,
+                                                            material["deadline"] if material else None, availability),
+                                   utc_offset_minutes)
     deadline = date.fromisoformat(material["deadline"]) if material and material["deadline"] else None
     context = SchedulingContext(
         owner_id=owner_id, plan_id=session["plan_id"], now=now, utc_offset=offset, materials=(),
-        availability=tuple(study_planner_store.list_availability(owner_id)),
+        availability=tuple(availability),
         busy_sessions=tuple(s for s in study_planner_store.list_busy_sessions(owner_id, start_from=now.date().isoformat())
                             if s["session_id"] != session_id),
     )
@@ -481,11 +510,13 @@ def reschedule_session(owner_id: str, session_id: str, utc_offset_minutes: int, 
     except study_planner_store.SessionTransitionError as error:
         raise SessionConflictError(error.code, str(error), status=error.status) from error
     titles = _document_titles(owner_id)
-    return {"session": _saved_session(moved, titles), "previous": _saved_session(previous, titles),
-            "after_deadline": after_deadline}
+    # The Google event of the original session moves with it (updated in place, not duplicated).
+    return _with_calendar_sync(owner_id, {"session": _saved_session(moved, titles), "previous": _saved_session(previous, titles),
+                                          "after_deadline": after_deadline}, utc_offset_minutes)
 
 
-def _reschedule_to(owner_id: str, session: dict, target_start: str, now: datetime, deadline: str | None) -> dict:
+def _reschedule_to(owner_id: str, session: dict, target_start: str, now: datetime, deadline: str | None,
+                   availability: list[dict]) -> dict:
     if session["status"] not in study_planner_store.RESCHEDULABLE_STATUSES:
         raise SessionConflictError("session_not_reschedulable", f"A {session['status']} session cannot be rescheduled.",
                                    status=session["status"])
@@ -494,7 +525,7 @@ def _reschedule_to(owner_id: str, session: dict, target_start: str, now: datetim
     try:
         start, end = study_placement.validate_window(
             target_start, session["duration_minutes"], now=now,
-            availability=study_planner_store.list_availability(owner_id), deadline=deadline, busy=busy)
+            availability=availability, deadline=deadline, busy=busy)
     except study_placement.PlacementError as error:
         raise SessionConflictError(error.code, str(error), status=session["status"]) from error
     try:
@@ -513,7 +544,9 @@ def _live_context(owner_id: str, plan_id: str, utc_offset_minutes: int, local_no
         raise PlanValidationError("plan_not_active", "Only an active plan can take new sessions.")
     offset = _validate_utc_offset(utc_offset_minutes)
     now = _parse_local_now(local_now, offset)
-    context = study_planner_service.build_scheduling_context(owner_id, plan_id, now=now, utc_offset=offset)
+    availability, _ = _effective_availability(owner_id, now, offset)
+    context = study_planner_service.build_scheduling_context(owner_id, plan_id, now=now, utc_offset=offset,
+                                                             availability=availability)
     return now, context, study_planner_store.list_sessions(owner_id, plan_id=plan_id)
 
 
@@ -559,7 +592,8 @@ def place_live_candidate(owner_id: str, plan_id: str, key: str, target_start: st
     except study_planner_store.SessionTransitionError as error:
         raise SessionConflictError(error.code, str(error), status=error.status) from error
     session = study_planner_store.get_session(owner_id, written["added"][0])
-    return {"session": _saved_session(session, _document_titles(owner_id))}
+    return _with_calendar_sync(owner_id, {"session": _saved_session(session, _document_titles(owner_id))},
+                               utc_offset_minutes)
 
 
 def _compute_adaptation(owner_id: str, plan_id: str, trigger: dict, utc_offset_minutes: int,
@@ -574,7 +608,9 @@ def _compute_adaptation(owner_id: str, plan_id: str, trigger: dict, utc_offset_m
         parsed = study_adaptation.AdaptationTrigger(**trigger)
     except (TypeError, ValueError) as error:
         raise PlanValidationError("invalid_trigger", str(error)) from error
-    context = study_planner_service.build_scheduling_context(owner_id, plan_id, now=now, utc_offset=offset)
+    availability, _ = _effective_availability(owner_id, now, offset)
+    context = study_planner_service.build_scheduling_context(owner_id, plan_id, now=now, utc_offset=offset,
+                                                             availability=availability)
     plan_sessions = study_planner_store.list_sessions(owner_id, plan_id=plan_id)
     # Exact plan isolation: a trigger may only name this plan's own documents and sessions.
     if parsed.document_id and parsed.document_id not in {m.document_id for m in context.materials}:
@@ -635,8 +671,8 @@ def apply_adaptation(owner_id: str, plan_id: str, trigger: dict, utc_offset_minu
     titles = _document_titles(owner_id)
     refreshed = sorted((study_planner_store.get_session(owner_id, session_id) for session_id in affected),
                        key=lambda s: (s["scheduled_start"], s["session_id"]))
-    return {**base, **proposal, "applied": True, "requires_confirmation": False,
-            "sessions": [_saved_session(s, titles) for s in refreshed]}
+    return _with_calendar_sync(owner_id, {**base, **proposal, "applied": True, "requires_confirmation": False,
+                                          "sessions": [_saved_session(s, titles) for s in refreshed]}, utc_offset_minutes)
 
 
 def document_progress(owner_id: str, document_id: str, utc_offset_minutes: int, local_now: str | None = None) -> dict:

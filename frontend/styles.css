@@ -3546,3 +3546,19 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .planner-session--written_quiz{border-left:4px solid #1f9d8a}
 .planner-session--written_quiz .planner-activity-chip{background:#e3f6f2;color:#136b5e}
 .pcal-event.pcal-activity--written_quiz{box-shadow:inset 3px 0 0 #1f9d8a}
+
+/* Google Calendar: a quiet section at the foot of the materials rail, and read-only "Busy" blocks */
+.pcal-gcal{margin-top:10px;padding-top:10px;border-top:1px solid var(--pcal-line);display:grid;gap:6px}
+.pcal-new-plan[hidden]+.pcal-gcal{margin-top:auto}
+.pcal-gcal[hidden]{display:none}
+.pcal-gcal-state{margin:0;font-size:12.5px;font-weight:600;color:var(--pcal-avail-ink)}
+.pcal-gcal-hint{margin:0;font-size:11.5px;line-height:1.35;color:var(--muted)}
+.pcal-gcal-hint.is-warn{color:var(--pcal-warn-ink)}
+.pcal-gcal-error{margin:0;padding:4px 7px;border-radius:6px;background:var(--pcal-warn-bg);color:var(--pcal-warn-ink);font-size:11.5px;font-weight:600}
+.pcal-gcal-toggle{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--pcal-ink-2);cursor:pointer}
+.pcal-gcal-toggle input{margin:0;accent-color:var(--session-accent)}
+.pcal-gcal-actions{display:flex;flex-wrap:wrap;gap:6px}
+.pcal-gcal .pcal-button{padding:4px 10px;font-size:12px}
+.pcal-gcal .pcal-button:disabled{opacity:.55;cursor:not-allowed}
+.pcal-busy{position:absolute;left:0;right:0;z-index:2;box-sizing:border-box;padding:2px 6px;overflow:hidden;pointer-events:none;border-left:2px solid #b9bec9;color:#5f6675;background:repeating-linear-gradient(135deg,rgba(116,124,142,.17) 0 6px,rgba(116,124,142,.07) 6px 12px)}
+.pcal-busy-label{font-size:9.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase}

@@ -102,3 +102,21 @@ CHUNK_OVERLAP = 150
 
 # Số đoạn tài liệu lấy ra khi hỏi
 TOP_K = 4
+
+# Google Calendar integration (one-way: Google busy time -> Planner, confirmed sessions -> Google).
+# Read at call time (never cached at import) so a missing value is reported clearly per request and
+# tests can supply fake values. Secrets come only from the environment; never commit them.
+GOOGLE_CALENDAR_ENV_VARS = (
+    "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_CALENDAR_REDIRECT_URI",
+    "GOOGLE_CALENDAR_TOKEN_ENCRYPTION_KEY",
+)
+
+
+def google_calendar_settings() -> dict:
+    """The Google OAuth settings plus `missing`: the required variables that are not set."""
+    values = {name: os.getenv(name, "").strip() for name in GOOGLE_CALENDAR_ENV_VARS}
+    # Where the OAuth callback sends the browser back to (the frontend origin, e.g.
+    # http://localhost:3000 in local dev). Empty = same origin as the backend (nginx on Kaggle).
+    values["AI_TUTOR_FRONTEND_URL"] = os.getenv("AI_TUTOR_FRONTEND_URL", "").strip().rstrip("/")
+    values["missing"] = [name for name in GOOGLE_CALENDAR_ENV_VARS if not values[name]]
+    return values

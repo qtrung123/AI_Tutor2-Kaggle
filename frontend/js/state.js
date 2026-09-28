@@ -139,3 +139,14 @@ let plannerPreview = null;       // the latest read-only preview result
 let plannerStep = "materials";   // materials | availability | preview | plan
 
 let plannerBusy = false;         // a preview/confirm request is in flight (no double submit)
+
+// Google Calendar (desktop planner): connection status only -- no token ever reaches the page.
+let plannerGoogle = null;           // GET /api/integrations/google-calendar/status, null = unknown
+
+let plannerGoogleBusy = [];         // read-only busy blocks ({start, end} naive local) of the shown week
+
+let plannerGoogleBusyWeek = null;   // the Monday key plannerGoogleBusy was loaded for
+
+let plannerGoogleWarning = null;    // google_calendar_unavailable | google_calendar_reconnect | null
+
+let plannerGoogleSyncFailed = false; // the last outbound sync reported an error

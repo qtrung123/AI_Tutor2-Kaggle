@@ -402,7 +402,7 @@ def add_plan_material(owner_id: str, plan_id: str, document_id: str, deadline: s
 
 
 def build_scheduling_context(owner_id: str, plan_id: str, now: datetime | None = None,
-                             utc_offset: timedelta | None = None) -> SchedulingContext:
+                             utc_offset: timedelta | None = None, availability: list[dict] | None = None) -> SchedulingContext:
     """Assemble the read-only SchedulingContext the scheduler consumes for one plan: each
     material with its DocumentStudyState, the owner's availability, and sessions (any plan) that
     already occupy time from today on -- see study_planner_store.list_busy_sessions: an archived
@@ -413,6 +413,9 @@ def build_scheduling_context(owner_id: str, plan_id: str, now: datetime | None =
     ever inferred from the server's timezone:
     without one the context carries utc_offset=None (unknown). A missing `now` still falls back to
     the server's clock, as the rest of the planner does.
+
+    `availability` overrides the owner's stored availability rows (e.g. with Google Calendar busy
+    rows added, see google_calendar_sync.planner_availability).
 
     A material whose document no longer exists is skipped (it has no state to plan from)."""
     if not study_planner_store.get_plan(owner_id, plan_id):
@@ -425,7 +428,7 @@ def build_scheduling_context(owner_id: str, plan_id: str, now: datetime | None =
             materials.append(MaterialContext(material=material, state=state))
     return SchedulingContext(
         owner_id=owner_id, plan_id=plan_id, now=now, utc_offset=utc_offset, materials=tuple(materials),
-        availability=tuple(study_planner_store.list_availability(owner_id)),
+        availability=tuple(study_planner_store.list_availability(owner_id) if availability is None else availability),
         busy_sessions=tuple(study_planner_store.list_busy_sessions(owner_id, start_from=now.date().isoformat())),
     )
 
