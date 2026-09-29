@@ -1439,6 +1439,40 @@ function renderPlannerWorkspace() {
   pcalRenderGoogleCalendar();
 }
 
+// -- collapsible side rails ---------------------------------------------------------
+// Materials and Study queue each fold to a slim icon rail (>=1280px, where they are side columns);
+// the calendar grid column takes the freed width. The state is a per-browser convenience.
+const PCAL_RAIL_STORAGE_KEYS = { materials: "planner_materials_collapsed", queue: "planner_queue_collapsed" };
+const pcalRails = Object.fromEntries(Object.entries(PCAL_RAIL_STORAGE_KEYS).map(([rail, key]) => {
+  try {
+    return [rail, localStorage.getItem(key) === "true"];
+  } catch {
+    return [rail, false];   // storage blocked: start expanded
+  }
+}));
+
+function pcalApplyRailState() {
+  if (!plannerWorkspace) return;
+  Object.entries(pcalRails).forEach(([rail, collapsed]) => {
+    plannerWorkspace.classList.toggle(`is-${rail}-collapsed`, collapsed);
+    document.getElementById(`pcal-${rail}-collapse`)?.setAttribute("aria-expanded", String(!collapsed));
+    document.getElementById(`pcal-${rail}-expand`)?.setAttribute("aria-expanded", String(!collapsed));
+  });
+}
+
+function pcalSetRailCollapsed(rail, collapsed) {
+  pcalRails[rail] = collapsed;
+  try {
+    localStorage.setItem(PCAL_RAIL_STORAGE_KEYS[rail], String(collapsed));
+  } catch {
+    // Storage blocked: the rail still folds for this page view.
+  }
+  if (rail === "materials" && collapsed) pcalCloseSheet();
+  pcalClosePopover();
+  pcalApplyRailState();
+  document.getElementById(collapsed ? `pcal-${rail}-expand` : `pcal-${rail}-collapse`)?.focus();
+}
+
 function pcalRenderMaterials() {
   pcal.materials.innerHTML = "";
   const today = plannerDateKey(plannerNow());
@@ -1679,6 +1713,26 @@ function pcalAvailabilityFor(dateKey, weekday) {
   return plannerAvailability.filter((slot) => plannerAvailabilityCoversDate(slot, dateKey, weekday));
 }
 
+function pcalSubtractIntervals(start, end, blocked) {
+  // [start, end) minus the blocked [from, to) ranges (any order, may overlap): the pieces left, in order.
+  let free = [[start, end]];
+  [...blocked].sort((left, right) => left[0] - right[0]).forEach(([from, to]) => {
+    free = free.flatMap(([s, e]) => (to <= s || from >= e ? [[s, e]]
+      : [...(from > s ? [[s, from]] : []), ...(to < e ? [[to, e]] : [])]));
+  });
+  return free;
+}
+
+function pcalEffectiveAvailabilityFor(dateKey, weekday) {
+  // What the scheduler can actually use (study_time.free_minutes_by_date): each marked slot minus the
+  // day's Google busy time. [{slot, start, end}] per remaining piece; with "Avoid conflicts" off (or
+  // Google not connected) there is no busy time, so each slot is shown whole.
+  const busy = pcalGoogleBusyFor(dateKey);
+  return pcalAvailabilityFor(dateKey, weekday).flatMap((slot) =>
+    pcalSubtractIntervals(plannerToMinutes(slot.start_at), plannerToMinutes(slot.end_at), busy)
+      .map(([start, end]) => ({ slot, start, end })));
+}
+
 function pcalRenderGrid() {
   const dates = pcalWeekDates();
   const now = plannerNow();
@@ -1734,7 +1788,7 @@ function pcalRenderGrid() {
     const dayItems = items.filter((item) => item.session.scheduled_start.slice(0, 10) === key);
     const busy = dayItems.map((item) => [plannerToMinutes(item.session.scheduled_start.slice(11, 16)),
       plannerToMinutes(item.session.scheduled_end.slice(11, 16))]);
-    pcalAvailabilityFor(key, weekday).forEach((slot) => column.appendChild(pcalAvailabilityBlock(slot, key, busy)));
+    pcalEffectiveAvailabilityFor(key, weekday).forEach((piece) => column.appendChild(pcalAvailabilityBlock(piece, key, busy)));
     pcalGoogleBusyFor(key).forEach(([from, to]) => column.appendChild(pcalBusyBlock(from, to)));
     dayItems.forEach((item) => column.appendChild(pcalEventBlock(item)));
     if (key === todayKey) {
@@ -1769,24 +1823,25 @@ function pcalPlace(element, startMinute, endMinute) {
   element.style.height = `${Math.max(12, (endMinute - startMinute) * PCAL_MINUTE_PX - 2)}px`;
 }
 
-function pcalAvailabilityBlock(slot, dateKey, busy = []) {
-  const start = plannerToMinutes(slot.start_at), end = plannerToMinutes(slot.end_at);
+function pcalAvailabilityBlock({ slot, start, end }, dateKey, busy = []) {
+  // One effective piece of a marked slot (see pcalEffectiveAvailabilityFor); its popover edits the whole slot.
+  const from = plannerMinutesToLabel(start), to = plannerMinutesToLabel(end);
   const block = pcalEl("div", "pcal-avail");
-  block.dataset.start = slot.start_at;
-  block.dataset.end = slot.end_at;
+  block.dataset.start = from;
+  block.dataset.end = to;
   block.dataset.recurring = String(Boolean(slot.is_recurring));
   block.tabIndex = 0;
   block.setAttribute("role", "button");
-  block.setAttribute("aria-label", `Available ${slot.start_at}–${slot.end_at}${slot.is_recurring ? ", every week" : ""}`);
+  block.setAttribute("aria-label", `Available ${from}–${to}${slot.is_recurring ? ", every week" : ""}`);
   pcalPlace(block, start, end);
   block.classList.toggle("is-short", end - start < 60);
-  block.classList.toggle("is-past", pcalSlotIsPast(slot, dateKey));
+  block.classList.toggle("is-past", pcalSlotIsPast({ end_at: to }, dateKey));
   // The label goes where no session covers it: the bottom of the window, else the top, else none.
   const free = (from, to) => !busy.some(([s, e]) => s < to && e > from);
   const room = 30;
   block.classList.add(free(end - room, end) ? "label-bottom" : free(start, start + room) ? "label-top" : "label-none");
   block.append(pcalEl("span", "pcal-avail-label", "Available"),
-    pcalEl("span", "pcal-avail-time", `${slot.start_at}–${slot.end_at} · ${plannerFormatDuration(end - start)}`));
+    pcalEl("span", "pcal-avail-time", `${from}–${to} · ${plannerFormatDuration(end - start)}`));
   block.addEventListener("pointerdown", (event) => {
     event.stopPropagation();
     pcalStartDrag(event, block.parentElement, { slot, dateKey, block });
@@ -1940,7 +1995,11 @@ function pcalOpenAvailabilityPopover(slot, dateKey, block) {
   pcalShowPopover(block, "Availability", (popover) => {
     const start = plannerToMinutes(slot.start_at), end = plannerToMinutes(slot.end_at);
     popover.append(pcalEl("h4", "pcal-popover-title", "Available"),
-      pcalEl("p", "pcal-popover-when", `${plannerDayLabel(dateKey)} · ${slot.start_at}–${slot.end_at} (${plannerFormatDuration(end - start)})`));
+      pcalEl("p", "pcal-popover-when", `${plannerDayLabel(dateKey)} · ${block.dataset.start}–${block.dataset.end} (${plannerFormatDuration(plannerToMinutes(block.dataset.end) - plannerToMinutes(block.dataset.start))})`));
+    if (block.dataset.start !== slot.start_at || block.dataset.end !== slot.end_at) {
+      // A piece of a slot that Google busy time splits: the actions below apply to the whole slot.
+      popover.appendChild(pcalEl("p", "pcal-popover-note", `Part of ${slot.start_at}–${slot.end_at} (${plannerFormatDuration(end - start)}); busy time in Google Calendar is skipped.`));
+    }
     if (pcalSlotIsPast(slot, dateKey)) return;   // history: shown, not editable
     const repeat = pcalEl("label", "pcal-popover-toggle");
     const checkbox = document.createElement("input");
@@ -2505,7 +2564,9 @@ function pcalGoogleBusyFor(dateKey) {
   return plannerGoogleBusy.flatMap(({ start, end }) => {
     if (start.slice(0, 10) > dateKey || end.slice(0, 10) < dateKey) return [];
     const from = start.slice(0, 10) < dateKey ? 0 : plannerToMinutes(start.slice(11, 16));
-    const to = end.slice(0, 10) > dateKey ? PCAL_DAY_MINUTES : plannerToMinutes(end.slice(11, 16));
+    // A partial last minute still blocks, as in google_calendar_sync.busy_availability_rows.
+    const to = end.slice(0, 10) > dateKey ? PCAL_DAY_MINUTES
+      : Math.min(PCAL_DAY_MINUTES, plannerToMinutes(end.slice(11, 16)) + (/[1-9]/.test(end.slice(17)) ? 1 : 0));
     return to > from ? [[from, to]] : [];
   });
 }

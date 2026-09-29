@@ -306,8 +306,9 @@ if (plannerView) {
   </section>
 </div>
 <div class="pcal" id="planner-workspace" hidden>
-  <aside class="pcal-rail pcal-materials" aria-labelledby="pcal-materials-title">
-    <h3 class="pcal-rail-title" id="pcal-materials-title">Materials</h3>
+  <aside class="pcal-rail pcal-materials" id="pcal-materials-rail" aria-labelledby="pcal-materials-title">
+    <button class="pcal-rail-expand" id="pcal-materials-expand" type="button" aria-label="Show materials" title="Materials" aria-controls="pcal-materials-rail"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 3.5h3v13h-3zM8.5 3.5h3v13h-3zM13.2 4.3l2.8-.8 3 12.6-2.9.8z"/></svg></button>
+    <div class="pcal-rail-head"><h3 class="pcal-rail-title" id="pcal-materials-title">Materials</h3><button class="pcal-rail-collapse" id="pcal-materials-collapse" type="button" aria-label="Hide materials" aria-expanded="true" aria-controls="pcal-materials-rail">‹</button></div>
     <ul id="pcal-material-list" class="pcal-material-list"></ul>
     <button class="pcal-add-button" id="pcal-add-materials" type="button" aria-haspopup="dialog">+ Add materials</button>
     <button class="text-button pcal-new-plan" id="pcal-new-plan" type="button" hidden>Start a new plan</button>
@@ -331,8 +332,9 @@ if (plannerView) {
       <div class="pcal-body" id="pcal-body"></div>
     </div>
   </section>
-  <aside class="pcal-rail pcal-queue" aria-labelledby="pcal-queue-title">
-    <div class="pcal-queue-head"><h3 class="pcal-rail-title" id="pcal-queue-title">Study queue</h3><span class="pcal-queue-count" id="pcal-queue-count"></span></div>
+  <aside class="pcal-rail pcal-queue" id="pcal-queue-rail" aria-labelledby="pcal-queue-title">
+    <button class="pcal-rail-expand" id="pcal-queue-expand" type="button" aria-label="Show study queue" title="Study queue" aria-controls="pcal-queue-rail"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4.5l1.5 1.5L7 3.5M3 10l1.5 1.5L7 9M3 15.5L4.5 17 7 14.5M9.5 5h8M9.5 10.5h8M9.5 16h8"/></svg></button>
+    <div class="pcal-queue-head"><h3 class="pcal-rail-title" id="pcal-queue-title">Study queue</h3><span class="pcal-queue-count" id="pcal-queue-count"></span><button class="pcal-rail-collapse" id="pcal-queue-collapse" type="button" aria-label="Hide study queue" aria-expanded="true" aria-controls="pcal-queue-rail">›</button></div>
     <ol class="pcal-queue-list" id="pcal-queue"></ol>
   </aside>
   <section class="pcal-sheet" id="pcal-sheet" role="dialog" aria-labelledby="pcal-sheet-title" hidden>
@@ -1549,6 +1551,12 @@ pcal.accept?.addEventListener("click", plannerAcceptPlan);
 pcal.addMaterials?.addEventListener("click", () => (pcal.sheet.hidden ? pcalOpenSheet() : pcalCloseSheet()));
 pcal.sheetClose?.addEventListener("click", pcalCloseSheet);
 pcal.newPlan?.addEventListener("click", pcalStartNewPlan);
+// Collapsible side rails (desktop): the calendar takes the freed width; remembered per browser.
+pcalApplyRailState();
+[["materials", "pcal-materials"], ["queue", "pcal-queue"]].forEach(([rail, prefix]) => {
+  document.getElementById(`${prefix}-collapse`)?.addEventListener("click", () => pcalSetRailCollapsed(rail, true));
+  document.getElementById(`${prefix}-expand`)?.addEventListener("click", () => pcalSetRailCollapsed(rail, false));
+});
 document.addEventListener("pointermove", (event) => {
   if (pcalDrag) pcalMoveDrag(event);
   if (pcalMove) pcalUpdateMove(event);

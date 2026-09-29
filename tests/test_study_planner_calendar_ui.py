@@ -49,7 +49,7 @@ const queue = () => ({items: [...document.querySelectorAll("#pcal-queue .pcal-qu
   buttons: [...li.querySelectorAll("button")].map((b) => b.textContent)})),
   empty: document.querySelector("#pcal-queue .pcal-queue-empty")?.textContent || null,
   sessionCards: document.querySelectorAll("#pcal-queue .planner-session").length,
-  buttonCount: $("pcal-queue").closest(".pcal-queue").querySelectorAll("button").length,
+  buttonCount: $("pcal-queue").querySelectorAll("button").length,   // the items, not the rail's collapse control
   text: $("pcal-queue").closest(".pcal-queue").textContent});
 const toolbar = () => ({range: $("pcal-range").textContent, status: $("pcal-status").textContent,
   acceptShown: visible($("pcal-accept")), acceptDisabled: $("pcal-accept").disabled, acceptText: $("pcal-accept").textContent,
