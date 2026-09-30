@@ -83,7 +83,7 @@ def complete_connection(owner_id: str, code: str) -> dict:
     granted = set(str(tokens.get("scope", "")).split())
     if not refresh_token:
         raise google.GoogleCalendarError("no_refresh_token", "Google did not grant offline access.")
-    if not set(google.SCOPES) <= granted:
+    if not set(google.REQUIRED_SCOPES) <= granted:
         google.revoke_token(refresh_token)
         raise google.GoogleCalendarError("scope_denied", "Both Google Calendar permissions are needed.")
     previous = google_calendar_store.get_connection(owner_id)
@@ -152,8 +152,44 @@ def _local(value: datetime, offset: timedelta) -> datetime:
     return (value.astimezone(timezone.utc) + offset).replace(tzinfo=None)
 
 
+def conflict_calendar_ids(owner_id: str, connection: dict) -> list[str]:
+    """The calendars whose busy time blocks planning: always the primary calendar, plus every calendar
+    the learner shows in Google Calendar (selected, not hidden) -- never this app's own "AI Tutor Study
+    Plan" calendar, so synced study sessions do not block planning against themselves. Primary only
+    when the calendar-list permission was not granted or the list cannot be read."""
+    if google.SCOPE_CALENDAR_LIST not in (connection.get("granted_scopes") or "").split():
+        return ["primary"]
+    try:
+        calendars = google.list_calendars(owner_id)
+    except google.GoogleReconnectRequired:
+        raise
+    except (google.GoogleCalendarError, KeyError, ValueError, TypeError) as error:
+        logger.warning("Google calendar list unavailable, using the primary calendar only: %s", error)
+        return ["primary"]
+    study_id = connection.get("study_calendar_id")
+    ids = ["primary"]
+    for calendar in calendars:
+        if calendar.get("primary") or calendar["id"] == study_id or calendar.get("summary") == google.STUDY_CALENDAR_NAME:
+            continue
+        if calendar.get("selected") and not calendar.get("hidden"):
+            ids.append(calendar["id"])
+    return list(dict.fromkeys(ids))
+
+
+def merge_busy(intervals: list[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:
+    """Overlapping or touching busy intervals (e.g. the same meeting on two calendars) as one."""
+    merged: list[list[datetime]] = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
+
+
 def busy_intervals(owner_id: str, local_start: datetime, local_end: datetime, offset: timedelta) -> dict:
-    """The owner's Google busy time in [local_start, local_end) on the learner's naive-local clock.
+    """The owner's Google busy time in [local_start, local_end) on the learner's naive-local clock,
+    across conflict_calendar_ids, merged.
 
     {"intervals": [(start_iso, end_iso)], "warning": None | code}. Nothing (and no warning) when
     Google Calendar is not connected or "Avoid conflicts" is off -- the Planner then behaves
@@ -167,7 +203,7 @@ def busy_intervals(owner_id: str, local_start: datetime, local_end: datetime, of
         return (local - offset).replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
 
     try:
-        raw = google.query_busy(owner_id, to_utc(local_start), to_utc(local_end))
+        raw = google.query_busy(owner_id, to_utc(local_start), to_utc(local_end), conflict_calendar_ids(owner_id, connection))
     except google.GoogleReconnectRequired:
         return {"intervals": [], "warning": WARNING_RECONNECT}
     except (google.GoogleCalendarError, google.GoogleCalendarConfigError, KeyError, ValueError) as error:
@@ -178,8 +214,8 @@ def busy_intervals(owner_id: str, local_start: datetime, local_end: datetime, of
         begin = max(_local(_parse_google_time(start), offset), local_start)
         finish = min(_local(_parse_google_time(end), offset), local_end)
         if finish > begin:
-            intervals.append((begin.isoformat(), finish.isoformat()))
-    return {"intervals": sorted(intervals), "warning": None}
+            intervals.append((begin, finish))
+    return {"intervals": [(start.isoformat(), end.isoformat()) for start, end in merge_busy(intervals)], "warning": None}
 
 
 def busy_availability_rows(intervals: list[tuple[str, str]]) -> list[dict]:

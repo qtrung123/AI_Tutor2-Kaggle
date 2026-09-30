@@ -2,8 +2,9 @@
 
 OAuth 2.0 authorization-code flow (offline access, narrow scopes), refresh-token encryption at
 rest, access-token refresh (memory only), token revocation, and the few Calendar REST calls the
-integration needs: the dedicated "AI Tutor Study Plan" calendar, freeBusy on the primary calendar,
-and create/update/delete of the events this app created. Plain httpx with explicit token handling;
+integration needs: the dedicated "AI Tutor Study Plan" calendar, the user's calendar list (calendar
+metadata only), freeBusy on the calendars that count as busy, and create/update/delete of the events
+this app created. Plain httpx with explicit token handling;
 tests swap `_transport` for an httpx.MockTransport, so no real Google call is ever made.
 
 Tokens are never logged, returned to a client or written unencrypted.
@@ -11,6 +12,7 @@ Tokens are never logged, returned to a client or written unencrypted.
 
 import base64
 import hashlib
+import logging
 import secrets
 import threading
 import time
@@ -30,11 +32,19 @@ CALENDAR_API = "https://www.googleapis.com/calendar/v3"
 
 SCOPE_FREEBUSY = "https://www.googleapis.com/auth/calendar.freebusy"
 SCOPE_APP_CREATED = "https://www.googleapis.com/auth/calendar.app.created"
-SCOPES = (SCOPE_FREEBUSY, SCOPE_APP_CREATED)
+SCOPE_CALENDAR_LIST = "https://www.googleapis.com/auth/calendar.calendarlist.readonly"
+# Connecting needs free/busy + the app's own calendar. The calendar list is asked for too but optional:
+# without it (a connection made before it was requested, or unticked on the consent screen) busy time
+# comes from the primary calendar only.
+REQUIRED_SCOPES = (SCOPE_FREEBUSY, SCOPE_APP_CREATED)
+SCOPES = REQUIRED_SCOPES + (SCOPE_CALENDAR_LIST,)
 
 STUDY_CALENDAR_NAME = "AI Tutor Study Plan"
 STATE_TTL = timedelta(minutes=10)
 HTTP_TIMEOUT_SECONDS = 8.0
+FREEBUSY_MAX_CALENDARS = 50   # Google's per-request limit for freeBusy items
+
+logger = logging.getLogger(__name__)
 
 # Test seam: an httpx transport (e.g. httpx.MockTransport). None = the real network.
 _transport: httpx.BaseTransport | None = None
@@ -248,18 +258,60 @@ def create_study_calendar(owner_id: str) -> dict:
     return {"id": payload["id"], "summary": payload.get("summary") or STUDY_CALENDAR_NAME}
 
 
-def query_busy(owner_id: str, time_min_utc: str, time_max_utc: str) -> list[tuple[str, str]]:
-    """Busy (start, end) RFC 3339 strings on the user's PRIMARY calendar. Only times -- the freebusy
-    scope never exposes event titles or descriptions."""
-    response = _api(owner_id, "POST", "/freeBusy", json={
-        "timeMin": time_min_utc, "timeMax": time_max_utc, "items": [{"id": "primary"}],
-    })
-    if response.status_code != 200:
-        raise _error_from(response, "free/busy query")
-    primary = response.json().get("calendars", {}).get("primary", {})
-    if primary.get("errors"):
-        raise GoogleCalendarError("google_error", "Google Calendar could not read your busy times.")
-    return [(item["start"], item["end"]) for item in primary.get("busy", [])]
+def list_calendars(owner_id: str) -> list[dict]:
+    """The user's calendar list: [{id, summary, primary, selected, hidden}] -- calendar metadata only
+    (calendar.calendarlist.readonly), never events."""
+    calendars, page_token = [], None
+    while True:
+        query = {"fields": "items(id,summary,primary,selected,hidden),nextPageToken", "maxResults": 250}
+        if page_token:
+            query["pageToken"] = page_token
+        response = _api(owner_id, "GET", f"/users/me/calendarList?{urlencode(query)}")
+        if response.status_code != 200:
+            raise _error_from(response, "calendar list")
+        payload = response.json()
+        calendars += [item for item in payload.get("items", []) if item.get("id")]
+        page_token = payload.get("nextPageToken")
+        if not page_token:
+            return calendars
+
+
+def query_busy(owner_id: str, time_min_utc: str, time_max_utc: str,
+               calendar_ids: tuple[str, ...] | list[str] = ("primary",)) -> list[tuple[str, str]]:
+    """Busy (start, end) RFC 3339 strings across `calendar_ids` (unmerged). Only times -- the freebusy
+    scope never exposes event titles or descriptions. The primary calendar failing fails the query;
+    any other calendar that cannot be read is skipped, so one broken calendar never hides the rest."""
+    ids = list(dict.fromkeys(["primary", *calendar_ids]))
+    busy: list[tuple[str, str]] = []
+    skipped = 0
+    for offset in range(0, len(ids), FREEBUSY_MAX_CALENDARS):
+        chunk = ids[offset:offset + FREEBUSY_MAX_CALENDARS]
+        try:
+            response = _api(owner_id, "POST", "/freeBusy", json={
+                "timeMin": time_min_utc, "timeMax": time_max_utc, "items": [{"id": calendar_id} for calendar_id in chunk],
+            })
+            if response.status_code != 200:
+                raise _error_from(response, "free/busy query")
+        except GoogleReconnectRequired:
+            raise
+        except GoogleCalendarError:
+            if "primary" in chunk:
+                raise
+            skipped += len(chunk)
+            continue
+        calendars = response.json().get("calendars", {})
+        for calendar_id in chunk:
+            result = calendars.get(calendar_id, {})
+            if result.get("errors"):
+                if calendar_id == "primary":
+                    raise GoogleCalendarError("google_error", "Google Calendar could not read your busy times.")
+                skipped += 1
+                continue
+            busy += [(item["start"], item["end"]) for item in result.get("busy", [])]
+    if skipped:
+        # Counts only: calendar ids can be e-mail addresses.
+        logger.warning("Google busy time: skipped %d unreadable calendar(s) of %d", skipped, len(ids))
+    return busy
 
 
 def insert_event(owner_id: str, calendar_id: str, event_id: str, body: dict) -> str:

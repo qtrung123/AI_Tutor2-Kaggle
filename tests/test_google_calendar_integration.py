@@ -1,7 +1,7 @@
 """Google Calendar integration (MVP, one-way planning integration) -- no real Google call is made.
 
 Google is an in-memory fake behind httpx.MockTransport (google_calendar_service._transport): OAuth
-token/revoke endpoints, calendars, freeBusy on the primary calendar and events. Every secret in
+token/revoke endpoints, calendars, the calendar list, freeBusy per calendar and events. Every secret in
 this file looks like "<kind>-SECRET-..." so a single check proves none of them reaches an API response.
 
 Clock: the learner's local now is Mon 2026-09-28 08:00 (sent explicitly); availability is weekly.
@@ -52,8 +52,12 @@ class FakeGoogle:
         self.calendars = {"primary": {"unrelated-primary-event": {"id": "unrelated-primary-event", "summary": "Dentist",
                                                                   "status": "confirmed"}}}
         self.created_calendars = 0
-        self.busy = []
-        self.fail = set()            # "freebusy", "events", "token", "network"
+        self.busy = []               # the primary calendar's busy time
+        self.calendar_busy = {}      # other calendar id -> busy time
+        self.calendar_list = [{"id": "alice@example.com", "summary": "alice@example.com", "primary": True, "selected": True}]
+        self.broken_calendars = set()   # calendar ids freeBusy reports errors for
+        self.fail = set()            # "freebusy", "events", "token", "network", "calendar_list"
+        self.calendar_list_calls = 0
         self.revoked = False
         self.revocations = []
         self.freebusy_bodies = []
@@ -87,13 +91,27 @@ class FakeGoogle:
             self.created_calendars += 1
             calendar_id = f"study-{self.created_calendars}@group.calendar.google.com"
             self.calendars[calendar_id] = {}
+            # Like Google, a calendar the app creates also shows up (selected) in the user's list.
+            self.calendar_list.append({"id": calendar_id, "summary": body["summary"], "selected": True})
             return _json(200, {"id": calendar_id, "summary": body["summary"]})
+        if api == "/users/me/calendarList":
+            self.calendar_list_calls += 1
+            if "calendar_list" in self.fail:
+                return _json(403)
+            assert request.url.params["fields"] == "items(id,summary,primary,selected,hidden),nextPageToken"
+            return _json(200, {"items": self.calendar_list})
         if api == "/freeBusy":
             self.freebusy_bodies.append(body)
             if "freebusy" in self.fail:
                 return _json(503)
-            assert [item["id"] for item in body["items"]] == ["primary"]
-            return _json(200, {"calendars": {"primary": {"busy": [{"start": s, "end": e} for s, e in self.busy]}}})
+            calendars = {}
+            for item in body["items"]:
+                if item["id"] in self.broken_calendars:
+                    calendars[item["id"]] = {"errors": [{"domain": "global", "reason": "notFound"}], "busy": []}
+                    continue
+                busy = self.busy if item["id"] == "primary" else self.calendar_busy.get(item["id"], [])
+                calendars[item["id"]] = {"busy": [{"start": s, "end": e} for s, e in busy]}
+            return _json(200, {"calendars": calendars})
         match = re.fullmatch(r"/calendars/([^/]+)(/events(?:/([^/]+))?)?", api)
         calendar_id = unquote(match[1])
         if match[2] is None:
@@ -259,7 +277,8 @@ class GoogleCalendarConnectionTests(GoogleCalendarTestBase):
         query = {key: values[0] for key, values in parse_qs(url.query).items()}
         self.assertEqual(f"{url.scheme}://{url.netloc}{url.path}", "https://accounts.google.com/o/oauth2/v2/auth")
         self.assertEqual(query["scope"].split(), ["https://www.googleapis.com/auth/calendar.freebusy",
-                                                  "https://www.googleapis.com/auth/calendar.app.created"])
+                                                  "https://www.googleapis.com/auth/calendar.app.created",
+                                                  "https://www.googleapis.com/auth/calendar.calendarlist.readonly"])
         self.assertEqual((query["access_type"], query["response_type"], query["client_id"], query["redirect_uri"]),
                          ("offline", "code", ENV["GOOGLE_CLIENT_ID"], ENV["GOOGLE_CALENDAR_REDIRECT_URI"]))
         self.assertNotIn("client_secret", query)
@@ -488,6 +507,111 @@ class GoogleBusyTimeTests(GoogleCalendarTestBase):
         self.google.revoked = True
         google_calendar_service._access_tokens.clear()
         self.assertEqual(self.preview()["warnings"], [{"code": "google_calendar_reconnect"}])
+
+
+class GoogleConflictCalendarsTests(GoogleBusyTimeTests):
+    """Busy time comes from the primary calendar plus every calendar the learner shows in Google
+    Calendar (CalendarList.list), merged -- never from the app's own "AI Tutor Study Plan" calendar.
+    The inherited busy-time tests run again here, with secondary calendars in the list."""
+
+    PERSONAL, WORK = "personal-1@group.calendar.google.com", "team-work@group.calendar.google.com"
+
+    def setUp(self):
+        super().setUp()
+        self.google.calendar_list += [
+            {"id": self.PERSONAL, "summary": "personal", "selected": True},
+            {"id": self.WORK, "summary": "Work", "selected": True},
+            {"id": "hidden@group.calendar.google.com", "summary": "Old", "selected": True, "hidden": True},
+            {"id": "en.vietnamese#holiday@group.v.calendar.google.com", "summary": "Holidays"},   # not shown
+        ]
+
+    def busy(self):
+        response = self.call("GET", f"{BASE}/busy", params={"start": "2026-09-28", "utc_offset_minutes": 0})
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def queried(self):
+        return [item["id"] for item in self.google.freebusy_bodies[-1]["items"]]
+
+    def test_primary_and_secondary_calendar_busy_time_is_included(self):
+        self.connect()
+        self.google.busy = [("2026-09-28T09:00:00Z", "2026-09-28T10:00:00Z")]
+        self.google.calendar_busy = {self.PERSONAL: [("2026-09-29T20:00:00Z", "2026-09-29T22:00:00Z")]}   # Tue 20-22, personal
+        self.assertEqual(self.busy(), {"busy": [{"start": "2026-09-28T09:00:00", "end": "2026-09-28T10:00:00"},
+                                                {"start": "2026-09-29T20:00:00", "end": "2026-09-29T22:00:00"}], "warning": None})
+
+    def test_every_shown_calendar_is_queried_in_one_request(self):
+        self.connect()
+        self.busy()
+        # Primary by its alias (once); shown secondaries; not hidden, unselected or the study calendar.
+        self.assertEqual(self.queried(), ["primary", self.PERSONAL, self.WORK])
+        self.assertEqual(len(self.google.freebusy_bodies), 1)
+        # Only calendar metadata and free/busy are read: no event is ever listed or fetched.
+        self.assertFalse([r for r in self.google.requests if r[0] == "GET" and "/events" in r[2]])
+
+    def test_overlapping_busy_time_is_merged(self):
+        self.connect()
+        self.google.busy = [("2026-09-29T20:00:00Z", "2026-09-29T22:00:00Z"), ("2026-09-30T08:00:00Z", "2026-09-30T09:00:00Z")]
+        self.google.calendar_busy = {
+            self.PERSONAL: [("2026-09-29T19:00:00Z", "2026-09-29T23:00:00Z"), ("2026-09-30T09:00:00Z", "2026-09-30T09:30:00Z")],
+            self.WORK: [("2026-09-29T20:00:00Z", "2026-09-29T22:00:00Z")],   # the same meeting on two calendars
+        }
+        self.assertEqual(self.busy()["busy"], [{"start": "2026-09-29T19:00:00", "end": "2026-09-29T23:00:00"},
+                                               {"start": "2026-09-30T08:00:00", "end": "2026-09-30T09:30:00"}])   # touching, joined
+
+    def test_study_plan_calendar_never_blocks_planning(self):
+        self.connect()
+        study = self.study_calendar()
+        stale = {"id": "old-study@group.calendar.google.com", "summary": "AI Tutor Study Plan", "selected": True}
+        self.google.calendar_list.append(stale)
+        self.google.calendar_busy = {study: [("2026-09-28T18:00:00Z", "2026-09-28T21:00:00Z")],
+                                     stale["id"]: [("2026-09-29T18:00:00Z", "2026-09-29T21:00:00Z")]}
+        self.assertEqual(self.busy()["busy"], [])
+        self.assertNotIn(study, self.queried())
+        self.assertNotIn(stale["id"], self.queried())
+        # Planning still uses the time the synced study sessions occupy in Google.
+        preview = self.preview()
+        self.assertTrue(any(self.overlaps(s, "2026-09-28T18:00:00", "2026-09-28T21:00:00") for s in preview["sessions"]))
+
+    def test_secondary_calendar_busy_time_blocks_scheduling(self):
+        self.connect()
+        self.google.calendar_busy = {self.PERSONAL: [("2026-09-28T18:00:00Z", "2026-09-28T20:00:00Z")]}
+        preview = self.preview()
+        self.assertTrue(preview["sessions"])
+        for session in preview["sessions"]:
+            self.assertFalse(self.overlaps(session, "2026-09-28T18:00:00", "2026-09-28T20:00:00"), session)
+
+    def test_one_unreadable_calendar_does_not_break_the_planner(self):
+        self.connect()
+        self.google.busy = [("2026-09-28T09:00:00Z", "2026-09-28T10:00:00Z")]
+        self.google.calendar_busy = {self.WORK: [("2026-09-29T20:00:00Z", "2026-09-29T22:00:00Z")]}
+        self.google.broken_calendars = {self.PERSONAL}
+        self.assertEqual(self.busy(), {"busy": [{"start": "2026-09-28T09:00:00", "end": "2026-09-28T10:00:00"},
+                                                {"start": "2026-09-29T20:00:00", "end": "2026-09-29T22:00:00"}], "warning": None})
+        self.assertEqual(self.preview()["warnings"], [])
+        # The calendar list itself failing: the primary calendar still counts, without a warning.
+        self.google.fail = {"calendar_list"}
+        self.assertEqual(self.busy()["busy"], [{"start": "2026-09-28T09:00:00", "end": "2026-09-28T10:00:00"}])
+        self.assertEqual(self.queried(), ["primary"])
+        # The primary calendar failing is still the existing fallback: manual availability + a warning.
+        self.google.fail = set()
+        self.google.broken_calendars = {"primary"}
+        self.assertEqual(self.busy(), {"busy": [], "warning": "google_calendar_unavailable"})
+
+    def test_connection_without_the_calendar_list_permission_uses_the_primary_calendar(self):
+        self.google.scope = " ".join(google_calendar_service.REQUIRED_SCOPES)   # older grant, or unticked
+        self.connect()
+        self.google.busy = [("2026-09-28T09:00:00Z", "2026-09-28T10:00:00Z")]
+        self.google.calendar_busy = {self.PERSONAL: [("2026-09-29T20:00:00Z", "2026-09-29T22:00:00Z")]}
+        self.assertEqual(self.busy()["busy"], [{"start": "2026-09-28T09:00:00", "end": "2026-09-28T10:00:00"}])
+        self.assertEqual((self.queried(), self.google.calendar_list_calls), (["primary"], 0))
+
+    def test_disconnected_or_not_avoiding_reads_nothing(self):
+        self.assertEqual(self.busy(), {"busy": [], "warning": None})
+        self.connect()
+        self.call("PATCH", f"{BASE}/settings", json={"avoid_conflicts": False})
+        self.assertEqual(self.busy(), {"busy": [], "warning": None})
+        self.assertEqual((self.google.calendar_list_calls, self.google.freebusy_bodies), (0, []))
 
 
 class GoogleSessionSyncTests(GoogleCalendarTestBase):

@@ -79,7 +79,7 @@ Truy xuất chunk dùng chung ở `document_retrieval.py`; kiểm tra văn bản
 
 | Thành phần | Vai trò |
 | --- | --- |
-| `google_calendar_service.py` | OAuth (authorization code, offline, scope `calendar.freebusy` + `calendar.app.created`), mã hoá refresh token (Fernet), refresh/revoke, gọi REST Calendar qua httpx (`_transport` là seam cho test) |
+| `google_calendar_service.py` | OAuth (authorization code, offline, scope `calendar.freebusy` + `calendar.app.created` + `calendar.calendarlist.readonly` (tuỳ chọn)), CalendarList + freeBusy trên primary và các lịch đang hiển thị (trừ "AI Tutor Study Plan"), mã hoá refresh token (Fernet), refresh/revoke, gọi REST Calendar qua httpx (`_transport` là seam cho test) |
 | `google_calendar_store.py` | SQLite (cùng DB với planner): `google_calendar_connections`, `google_calendar_event_links`, `google_oauth_states` |
 | `google_calendar_sync.py` | Busy time -> Planner (dòng availability `busy=True`, `free_minutes_by_date` trừ đi) và đồng bộ session đã confirm -> lịch "AI Tutor Study Plan" (idempotent: event id tất định + hash nội dung) |
 | API | `api/google_calendar.py`: `/api/integrations/google-calendar/{status,connect,callback,disconnect,settings,sync,busy}` |
