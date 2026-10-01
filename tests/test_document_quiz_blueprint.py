@@ -499,17 +499,18 @@ class GenerateQuizDocumentContractTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_document_scope_respects_requested_count_and_is_all_single_choice(self):
-        """Live Study Units path: document scope respects the requested question_count and
-        produces an all-single_choice quiz in ONE LLM call -- no Planner, no per-topic quota
-        (see _generate_quiz_from_units)."""
+        """Live Study Units path: document scope respects the requested question_count in ONE
+        candidate-generation call -- no Planner, no per-topic quota (see _generate_quiz_from_units).
+        The bounded multiple_select call that follows finds nothing here (an empty answer), so
+        valid single_choice questions fill the whole quiz."""
         document = {
             "id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 2,
             "topics": [{"topic_id": "topic_a", "name": "A"}],
         }
         document_chunks = make_chunks(15, facts_per_chunk=1)
 
-        def respond(_prompt):
-            return candidates(range(15))
+        def respond(prompt):
+            return [] if "multiple-select" in prompt else candidates(range(15))
 
         SequencedOllama.respond = respond
         with patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
@@ -522,7 +523,8 @@ class GenerateQuizDocumentContractTests(unittest.TestCase):
         self.assertEqual(result["question_count"], 12)
         self.assertEqual(result["assessment_plan"]["target_questions"], 12)
         self.assertEqual(result["assessment_plan"]["status"], "complete")
-        self.assertEqual(result["assessment_plan"]["llm_calls"], 1)
+        self.assertEqual(result["assessment_plan"]["llm_calls"], 2)   # candidates + one multiple_select call
+        self.assertEqual(result["assessment_plan"]["multiple_select"]["stop"], "empty result")
         self.assertGreater(result["assessment_plan"]["context_group_count"], 1)
         self.assertEqual(result["assessment_plan"]["type_distribution"], {"single_choice": 12})
         self.assertTrue(all(q["question_type"] == "single_choice" for q in result["questions"]))

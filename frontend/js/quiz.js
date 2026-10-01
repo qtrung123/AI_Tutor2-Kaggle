@@ -1297,6 +1297,7 @@ function renderQuizPlayer() {
     showQuizPlayerView("question");
     document.getElementById("quiz-player-title").textContent = "Loading…";
     document.getElementById("quiz-player-question").textContent = "";
+    document.getElementById("quiz-player-select-hint").hidden = true;
     document.getElementById("quiz-player-answers").innerHTML = "";
     document.getElementById("quiz-player-position").textContent = "";
     document.getElementById("quiz-player-answered-count").textContent = "";
@@ -1336,6 +1337,7 @@ function renderQuizPlayerQuestion() {
   renderQuizPlayerNav();
 
   const isMultiSelect = question.question_type === "multi_select";
+  document.getElementById("quiz-player-select-hint").hidden = !isMultiSelect;
   const selected = quizAnswers[String(question.id)];
   const answersEl = document.getElementById("quiz-player-answers");
   answersEl.innerHTML = "";
@@ -1345,7 +1347,7 @@ function renderQuizPlayerQuestion() {
     const isSelected = Array.isArray(selected) ? selected.includes(letter) : selected === letter;
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `quiz-player-answer-card${isSelected ? " selected" : ""}`;
+    button.className = `quiz-player-answer-card${isMultiSelect ? " is-multi" : ""}${isSelected ? " selected" : ""}`;
     button.setAttribute("role", isMultiSelect ? "checkbox" : "radio");
     button.setAttribute("aria-checked", String(isSelected));
     const indicator = document.createElement("span");
@@ -1564,16 +1566,22 @@ function renderQuizReview() {
   options.innerHTML = "";
   if (isWrittenQuestionType(item.questionType)) options.append(...fillBlankReviewRows(item.selected[0] || "", item.correct, item.isCorrect));
   if (item.selfCheck && !item.unanswered) options.appendChild(createSelfCheckControls(item));
+  const isMultiSelect = item.questionType === "multi_select";
   (isWrittenQuestionType(item.questionType) ? [] : item.options).forEach((option, optionIndex) => {
     const letter = QUIZ_OPTION_LETTERS[optionIndex];
     const isSelected = item.selected.includes(letter);
     const isCorrect = item.correct.includes(letter);
+    // Multiple select: a correct option the learner did not select is "missed" (shown apart from
+    // the correct options they did select); a selected wrong option is marked as incorrect.
+    const isMissed = isMultiSelect && isCorrect && !isSelected && !item.unanswered;
     const row = document.createElement("div");
     row.className = "quiz-review-option";
     row.dataset.letter = letter;
+    if (isMultiSelect) row.classList.add("is-multi");
     if (isCorrect) row.classList.add("is-correct");
     if (isSelected) row.classList.add("is-selected");
     if (isSelected && !isCorrect) row.classList.add("is-wrong");
+    if (isMissed) row.classList.add("is-missed");
     const indicator = document.createElement("span");
     indicator.className = "quiz-review-option-indicator";
     indicator.setAttribute("aria-hidden", "true");
@@ -1582,7 +1590,10 @@ function renderQuizReview() {
     label.className = "quiz-review-option-label";
     label.textContent = option;
     row.append(indicator, label);
-    const tagText = isSelected && isCorrect ? "Your answer · Correct" : (isSelected ? "Your answer" : (isCorrect ? "Correct answer" : ""));
+    const tagText = isMultiSelect
+      ? (isSelected && isCorrect ? "Your answer · Correct" : (isSelected ? "Your answer · Incorrect"
+        : (isMissed ? "Correct answer · Missed" : (isCorrect ? "Correct answer" : ""))))
+      : (isSelected && isCorrect ? "Your answer · Correct" : (isSelected ? "Your answer" : (isCorrect ? "Correct answer" : "")));
     if (tagText) {
       const tag = document.createElement("span");
       tag.className = "quiz-review-option-tag";

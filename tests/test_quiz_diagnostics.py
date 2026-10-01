@@ -407,7 +407,8 @@ class GenerateQuizWrapperBehaviorTests(unittest.TestCase):
 
     @contextmanager
     def _mocked_pipeline(self, document, candidate_count: int = 12):
-        _FakeV3DiagModel.payloads = [{"questions": _v3_diag_candidates(candidate_count)}]
+        # the candidate call, then the bounded multiple_select call (answered empty here)
+        _FakeV3DiagModel.payloads = [{"questions": _v3_diag_candidates(candidate_count)}, {"questions": []}]
         with ExitStack() as stack:
             stack.enter_context(patch.object(quiz_service, "_document_lookup", return_value={document["id"]: document}))
             stack.enter_context(patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"))
@@ -453,8 +454,9 @@ class GenerateQuizWrapperBehaviorTests(unittest.TestCase):
         self.assertEqual(summary["requested_questions"], 12)
         self.assertEqual(summary["generated_questions"], 12)
         self.assertEqual(summary["validated_questions"], 12)
-        # One initial call already supplies all 12 valid candidates -- no repair/fill needed.
-        self.assertEqual(summary["llm_calls"], 1)
+        # One initial call already supplies all 12 valid candidates -- no repair/fill needed; the
+        # second call is the bounded multiple_select step.
+        self.assertEqual(summary["llm_calls"], 2)
         self.assertEqual(summary["cache_hit"], False)
 
     def test_cache_hit_path_still_logs_a_summary(self):

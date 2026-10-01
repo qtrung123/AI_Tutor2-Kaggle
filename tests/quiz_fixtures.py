@@ -78,6 +78,35 @@ def candidates(facts) -> list[dict]:
     return [raw_candidate(fact, answer_index=fact % 4) for fact in facts]
 
 
+def multi_candidate(first: int, second: int, **overrides) -> dict:
+    """A valid multiple_select candidate: facts `first` and `second` are the two correct options
+    (A and C), each quoted verbatim; B and D pair the same components with another fact's behaviour."""
+    first %= FACT_COUNT
+    second %= FACT_COUNT
+    correct = [f"The {_NOUNS[first]} {_BEHAVIOURS[first]}", f"The {_NOUNS[second]} {_BEHAVIOURS[second]}"]
+    wrong = [f"The {_NOUNS[first]} {_BEHAVIOURS[(first + 7) % FACT_COUNT]}",
+             f"The {_NOUNS[second]} {_BEHAVIOURS[(second + 11) % FACT_COUNT]}"]
+    candidate = {
+        "evidence_quotes": [fact_sentence(first), fact_sentence(second)],
+        "question": f"Which statements about the {_NOUNS[first]} and the {_NOUNS[second]} are correct?",
+        "options": [correct[0], wrong[0], correct[1], wrong[1]],
+        "correct_answers": list(correct),
+        "explanation": f"The document states that the {_NOUNS[first]} {_BEHAVIOURS[first]} and the "
+                       f"{_NOUNS[second]} {_BEHAVIOURS[second]}.",
+    }
+    candidate.update(overrides)
+    return candidate
+
+
+# Facts no single-choice fixture pool built from candidates(range(15)) tests, paired per chunk of
+# make_chunks(12, 2): valid multiple_select payloads for the live pipeline's multiple_select call.
+MULTI_FACT_PAIRS = ((16, 17), (18, 19), (22, 23))
+
+
+def multi_payload(pairs=MULTI_FACT_PAIRS) -> dict:
+    return {"questions": [multi_candidate(first, second) for first, second in pairs]}
+
+
 class FakeModel:
     """Stands in for ChatOllama: returns queued payloads and records every prompt/kwargs."""
 

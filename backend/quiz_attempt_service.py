@@ -94,6 +94,12 @@ def _saved_answer(question: dict, value):
     return selected if _question_type(question) == "multi_select" else selected[0]
 
 
+def option_answers_correct(selected: list[str], correct: list[str]) -> bool:
+    """Exact-set grading of an option question: order never matters, no partial credit, and an
+    empty selection is never correct. For single_choice both sets hold one letter."""
+    return bool(selected) and set(selected) == set(correct)
+
+
 def _selected_answers(value) -> list[str]:
     values = value if isinstance(value, list) else [value]
     normalized = list(dict.fromkeys(str(item).strip().upper() for item in values if str(item).strip()))
@@ -330,8 +336,7 @@ def submit_quiz_attempt(
         valid_letters = set("ABCD"[:len(question.get("options") or [])])
         if any(answer not in valid_letters for answer in selected):
             raise ValueError("A selected answer does not exist for its question.")
-        if question_type == "multi_select" and len(selected) < 2:
-            raise ValueError("multi_select questions require at least two selected answers.")
+        # A multi_select answer of any size is graded (too few/many options is simply incorrect).
         if question_type != "multi_select" and len(selected) != 1:
             raise ValueError(f"{question_type} questions require exactly one selected answer.")
     results = []
@@ -345,7 +350,7 @@ def submit_quiz_attempt(
             is_correct = bool(selected_answers) and fill_blank_is_correct(selected_answers[0], correct_answers)
         else:
             correct_answers = sorted(_correct_answers(question))
-            is_correct = selected_answers == correct_answers
+            is_correct = option_answers_correct(selected_answers, correct_answers)
         results.append({
             "question_id": int(question_id),
             "question": question.get("question", ""),

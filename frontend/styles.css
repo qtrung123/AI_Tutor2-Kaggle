@@ -2923,6 +2923,15 @@ body[data-page="session"] [data-session-pane="quiz"].quiz-player-open #quiz-play
   box-shadow: inset 0 0 0 3px #fff;
 }
 .quiz-player-answer-label { flex: 1; }
+/* Multiple select: "Select all that apply" hint and square (checkbox) indicators. */
+.quiz-player-select-hint { margin: -12px 0 16px; font-size: 13px; font-weight: 650; color: var(--muted); }
+.quiz-player-answer-card.is-multi .quiz-player-answer-indicator { border-radius: 5px; }
+.quiz-player-answer-card.is-multi.selected .quiz-player-answer-indicator {
+  box-shadow: none;
+  background: var(--session-accent, #6876f5)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='white' d='M6.2 11.4 3 8.2l1.2-1.2 2 2 5.6-5.6 1.2 1.2z'/%3E%3C/svg%3E")
+    no-repeat center / 12px 12px;
+}
 .quiz-player-footer { display: flex; gap: 12px; margin-top: 24px; }
 .quiz-player-footer button { flex: 1; }
 /* Quiz Results + Review Answers (inside the focused Quiz Player). */
@@ -2979,6 +2988,9 @@ body[data-page="session"] [data-session-pane="quiz"].quiz-player-open #quiz-play
 .quiz-review-option.is-wrong { border-color: #e08a74; background: #fdf1ee; }
 .quiz-review-option.is-wrong .quiz-review-option-indicator { border-color: #c0472a; background: #c0472a; }
 .quiz-review-option.is-wrong .quiz-review-option-tag { color: #c0472a; }
+.quiz-review-option.is-multi .quiz-review-option-indicator { border-radius: 6px; }
+.quiz-review-option.is-missed { border-style: dashed; background: #fff; }
+.quiz-review-option.is-missed .quiz-review-option-indicator { background: #fff; color: #1d8a4c; }
 /* Fill-in-the-blank: a text field in the player; review shows the learner's text and the accepted answer. */
 .quiz-player-fill-blank { display: grid; gap: 8px; }
 .quiz-player-fill-caption { font-size: 13px; font-weight: 650; color: var(--muted); }

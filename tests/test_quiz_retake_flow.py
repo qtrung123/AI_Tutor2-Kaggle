@@ -94,16 +94,19 @@ class QuizRetakeFlowTests(unittest.TestCase):
         self.assertEqual(mastery["answered_questions"], 3)
         self.assertEqual(mastery["mastery_score"], 100.0)
 
-    def test_invalid_multi_select_does_not_persist_partial_attempt(self):
+    def test_incomplete_multi_select_selection_is_graded_incorrect(self):
         mixed = saved_quiz()
         mixed["quiz_id"] = "invalid-multi"
         mixed["questions"][2] = {**mixed["questions"][2], "question_type": "multi_select", "correct_answers": ["A", "C"]}
         quiz_store.save_quiz("lecture.pdf", "easy", mixed, LEGACY_USER_ID)
-        with self.assertRaisesRegex(ValueError, "at least two selected"):
-            submit_quiz_attempt(
-                "lecture.pdf", "easy", "topic_1", {"1": "A", "2": "B", "3": ["A"]}, LEGACY_USER_ID
-            )
-        self.assertEqual(quiz_store.list_quiz_history(student_id=LEGACY_USER_ID), [])
+        attempt = submit_quiz_attempt(
+            "lecture.pdf", "easy", "topic_1", {"1": "A", "2": "B", "3": ["A"]}, LEGACY_USER_ID
+        )
+        self.assertFalse(attempt["question_results"][2]["is_correct"])   # exact-set: no partial credit
+        self.assertEqual(attempt["question_results"][2]["selected_answers"], ["A"])
+        self.assertEqual(attempt["score"], 2)
+        with self.assertRaisesRegex(ValueError, "only A, B, C, or D"):   # an option letter that does not exist
+            submit_quiz_attempt("lecture.pdf", "easy", "topic_1", {"1": "A", "2": "B", "3": ["A", "E"]}, LEGACY_USER_ID)
 
     def test_each_retake_is_new_attempt_with_scores_and_full_snapshots(self):
         first = submit_quiz_attempt(

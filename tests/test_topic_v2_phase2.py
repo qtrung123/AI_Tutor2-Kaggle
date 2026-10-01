@@ -153,13 +153,14 @@ class TopicV2Phase2Tests(unittest.TestCase):
 
     def test_document_generation_uses_requested_question_count_all_single_choice(self):
         """Live Study Units path: document scope respects the requested 12/15 question_count
-        (default 12) and produces an all-single_choice quiz in one LLM call -- no Planner, no
-        per-topic quota (see _generate_quiz_from_units)."""
+        (default 12) from one candidate-generation call -- no Planner, no per-topic quota (see
+        _generate_quiz_from_units). The bounded multiple_select call that follows answers empty
+        here, so valid single_choice questions fill the whole quiz."""
         document = {"id": "doc.pdf", "title": "Doc", "hash": "hash", "topic_schema_version": 3, "topics": []}
         document_chunks = _v3_chunks(15)
         for requested in (None, 12, 15):
             expected_count = requested or 12
-            _FakeV3Model.payloads = [{"questions": _v3_candidates(expected_count)}]
+            _FakeV3Model.payloads = [{"questions": _v3_candidates(expected_count)}, {"questions": []}]
             with self.subTest(question_count=requested), \
                  patch.object(quiz_service, "_document_lookup", return_value={"doc.pdf": document}), \
                  patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"), \
@@ -173,7 +174,7 @@ class TopicV2Phase2Tests(unittest.TestCase):
             self.assertEqual(result["question_count"], expected_count)
             self.assertEqual(result["assessment_plan"]["target_questions"], expected_count)
             self.assertEqual(result["assessment_plan"]["status"], "complete")
-            self.assertEqual(result["assessment_plan"]["llm_calls"], 1)
+            self.assertEqual(result["assessment_plan"]["llm_calls"], 2)   # candidates + multiple_select
             self.assertTrue(all(question["question_type"] == "single_choice" for question in result["questions"]))
             self.assertGreater(result["assessment_plan"]["context_group_count"], 1)
             timings = result["assessment_plan"]["timings_ms"]

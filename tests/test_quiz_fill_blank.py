@@ -252,7 +252,9 @@ class LiveEntryPointTests(unittest.TestCase):
 
     def generate(self, cards):
         document = {**DOCUMENT, "topics": []}
-        FakeModel.reset([{"questions": candidates(range(15))}, {"questions": [fill_candidate(20), fill_candidate(21)]}])
+        # candidates, then the multiple_select call (answered empty here), then the fill_blank call
+        FakeModel.reset([{"questions": candidates(range(15))}, {"questions": []},
+                         {"questions": [fill_candidate(20), fill_candidate(21)]}])
         with (
             patch.object(quiz_service, "_document_lookup", return_value={DOCUMENT["id"]: document}),
             patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"),
@@ -273,9 +275,10 @@ class LiveEntryPointTests(unittest.TestCase):
         self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 10, "fill_blank": 2})
         self.assertEqual(len(quiz["questions"]), 12)
 
-    def test_no_flashcards_keeps_the_normal_single_call_quiz(self):
+    def test_no_flashcards_makes_no_fill_blank_call(self):
         quiz, _ = self.generate([])
-        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 1)
+        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 2)   # candidates + multiple_select, no fill_blank
+        self.assertNotIn("fill_blank", quiz["assessment_plan"])
         self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 12})
         self.assertEqual(len(quiz["questions"]), 12)
 

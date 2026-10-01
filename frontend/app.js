@@ -71,6 +71,7 @@ const uploadStatus = document.getElementById("upload-status");
         </div>
         <article class="quiz-player-card" id="quiz-player-card">
           <p class="quiz-player-question" id="quiz-player-question"></p>
+          <p class="quiz-player-select-hint" id="quiz-player-select-hint" hidden>Select all that apply</p>
           <div class="quiz-player-answers" id="quiz-player-answers"></div>
         </article>
         <footer class="quiz-player-footer">

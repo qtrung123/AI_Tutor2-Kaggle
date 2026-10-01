@@ -1068,12 +1068,17 @@ class CacheAndMetadataTests(unittest.TestCase):
             fn = quiz_service.generate_quiz if public else quiz_service._generate_quiz
             return fn(DOCUMENT["id"], "easy", "document", question_count=count, regenerate=regenerate)
 
+    @staticmethod
+    def candidate_prompts():
+        # the live path's candidate-generation prompts (the bounded multiple_select call is separate)
+        return [prompt for prompt in FakeModel.prompts if "multiple-select" not in prompt]
+
     def test_a_quiz_saved_by_an_older_engine_never_hides_the_new_pipeline(self):
         for old in ("simple_context_v7_old", "study_units_v6", "study_units_v5", "study_units_v4",
                     "context_group_v3_no_planner", "legacy", ""):
             result = self.call(self.saved_quiz(old))
             self.assertEqual(result["assessment_plan"]["planner_version"], quiz_units.QUIZ_ENGINE_VERSION, old)
-            self.assertEqual(len(FakeModel.prompts), 1)
+            self.assertEqual(len(self.candidate_prompts()), 1)
 
     def test_a_quiz_from_the_current_engine_is_reused_even_when_it_is_partial(self):
         for requested, actual in ((12, 12), (18, 16), (20, 17)):
@@ -1085,9 +1090,9 @@ class CacheAndMetadataTests(unittest.TestCase):
     def test_a_different_requested_count_or_regeneration_generates_again(self):
         saved = self.saved_quiz(quiz_units.QUIZ_ENGINE_VERSION, 12, 12)
         self.call(saved, count=18)
-        self.assertEqual(len(FakeModel.prompts), 1)
+        self.assertEqual(len(self.candidate_prompts()), 1)
         self.call(saved, count=12, regenerate=True)
-        self.assertEqual(len(FakeModel.prompts), 1)
+        self.assertEqual(len(self.candidate_prompts()), 1)
 
     def test_engine_version_is_distinct_from_every_earlier_engine(self):
         self.assertNotIn(quiz_units.QUIZ_ENGINE_VERSION, {"study_units_v6", "study_units_v5", "study_units_v4", "context_group_v3_no_planner", "legacy"})
@@ -1203,7 +1208,8 @@ class PersistenceRoundTripTests(unittest.TestCase):
         self.temp.cleanup()
 
     def generate(self, count, payload):
-        FakeModel.reset([{"questions": payload}, {"questions": []}, {"questions": []}])
+        # candidates, up to two follow-ups, then the multiple_select call (answered empty here)
+        FakeModel.reset([{"questions": payload}, {"questions": []}, {"questions": []}, {"questions": []}])
         with (
             patch.object(quiz_service, "_document_lookup", return_value={DOCUMENT["id"]: DOCUMENT}),
             patch.object(quiz_service, "get_document_chunks", return_value=make_chunks(12, 2)),
@@ -1226,7 +1232,8 @@ class PersistenceRoundTripTests(unittest.TestCase):
             self.assertIn(question["correct_answer"], "ABCD")
             self.assertEqual(question["correct_answers"], [question["correct_answer"]])
             self.assertTrue(question["source_chunk_ids"])
-        self.assertEqual(len(FakeModel.prompts), 3)  # call 1, then two follow-ups that added nothing (stall guard)
+        # call 1, then two follow-ups that added nothing (stall guard), then the multiple_select call
+        self.assertEqual(len(FakeModel.prompts), 4)
         again = self.generate(18, candidates(range(16)))            # the same request is served from the database
         self.assertEqual(again["quiz_id"], first["quiz_id"])
         self.assertEqual(len(FakeModel.prompts), 0)

@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from quiz_fixtures import FakeModel, candidates, make_chunks
+from quiz_fixtures import FakeModel, candidates, make_chunks, multi_payload
 
 from backend import auth_store, model_benchmark_service, model_benchmark_store, quiz_diagnostics, quiz_service, quiz_store
 from backend import flashcard_store
@@ -73,8 +73,9 @@ class EndToEndBenchmarkTests(_TempStores):
 
     def test_both_models_get_identical_inputs_and_every_run_is_forced_fresh(self):
         valid = {"questions": candidates(range(candidate_target(12)))}
+        multi = multi_payload()   # each run: the candidate call, then the multiple_select call
         # Order is model -> document -> run: qwen r1, qwen r2, gemma r1, gemma r2 (queue empty -> fails).
-        state = self.run_benchmark([valid, valid, valid])
+        state = self.run_benchmark([valid, multi, valid, multi, valid, multi])
 
         self.assertEqual(state["status"], "completed")
         self.assertEqual(state["progress"], {"completed": 4, "total": 4})
@@ -83,8 +84,8 @@ class EndToEndBenchmarkTests(_TempStores):
             ("qwen-2.5-7b", 1), ("qwen-2.5-7b", 2), ("gemma3-12b", 1), ("gemma3-12b", 2),
         ])
         # No silent fallback: each call went to exactly the requested model.
-        self.assertEqual([kwargs["model"] for kwargs in FakeModel.kwargs[:3]], [QWEN_REF, QWEN_REF, GEMMA_REF])
-        self.assertTrue(all(kwargs["model"] == GEMMA_REF for kwargs in FakeModel.kwargs[3:]))
+        self.assertEqual([kwargs["model"] for kwargs in FakeModel.kwargs[:6]], [QWEN_REF] * 4 + [GEMMA_REF] * 2)
+        self.assertTrue(all(kwargs["model"] == GEMMA_REF for kwargs in FakeModel.kwargs[6:]))
 
         # Identical document + flashcard snapshot + config for every run of both models.
         identity = {
@@ -107,14 +108,14 @@ class EndToEndBenchmarkTests(_TempStores):
         self.assertEqual(qwen_first["ollama_load_ms"], 0)        # warm model: nothing loaded inside the run
         self.assertNotIn("model_prepare_ms", qwen_first)        # cold start lives on the warm-up, not the run
         self.assertEqual(qwen_first["benchmark_id"], state["benchmark_id"])
-        self.assertEqual((qwen_first["llm_calls"], qwen_first["retries"]), (1, 0))
+        self.assertEqual((qwen_first["llm_calls"], qwen_first["retries"]), (2, 0))
         self.assertEqual((qwen_first["prompt_tokens"], qwen_first["generated_tokens"]), (456, 123))
         self.assertEqual(qwen_first["tokens_per_second"], 61.5)
         self.assertEqual((qwen_first["requested_count"], qwen_first["final_count"]), (12, 12))
         self.assertEqual(qwen_first["validated_count"], candidate_target(12))
         self.assertEqual(qwen_first["rejected_count"], 0)
         self.assertEqual(qwen_first["rejection_reasons"], {})
-        self.assertEqual(qwen_first["question_type_distribution"], {"single_choice": 12})
+        self.assertEqual(qwen_first["question_type_distribution"], {"single_choice": 9, "multi_select": 3})
         for key in ("retrieval_ms", "generation_ms", "total_ms"):
             self.assertIsInstance(qwen_first[key], int)
         self.assertEqual(qwen_first["generation_config"]["calls"], [
@@ -144,7 +145,7 @@ class EndToEndBenchmarkTests(_TempStores):
 
     def test_warm_up_is_measured_separately_and_never_inside_latency(self):
         valid = {"questions": candidates(range(candidate_target(12)))}
-        state = self.run_benchmark([valid, valid], runs=1)
+        state = self.run_benchmark([valid, multi_payload(), valid, multi_payload()], runs=1)
         # Each model: pull check, then load with the Quiz num_ctx, before its first measured call.
         self.assertEqual(self.events, [
             ("prepare", "qwen-2.5-7b"), ("warm", "qwen-2.5-7b", QUIZ_NUM_CTX, quiz_service.QUIZ_GENERATION_KEEP_ALIVE),
@@ -165,7 +166,7 @@ class EndToEndBenchmarkTests(_TempStores):
 
     def test_benchmark_quizzes_are_kept_by_id_but_hidden_from_learner_surfaces(self):
         valid = {"questions": candidates(range(candidate_target(12)))}
-        state = self.run_benchmark([valid, valid], runs=1)
+        state = self.run_benchmark([valid, multi_payload(), valid, multi_payload()], runs=1)
         quiz_ids = [run["quiz_id"] for run in state["runs"]]
         self.assertTrue(all(quiz_ids))
         for quiz_id in quiz_ids:   # evidence for Model Comparison stays loadable by exact id
@@ -180,7 +181,7 @@ class EndToEndBenchmarkTests(_TempStores):
         self.assertEqual(library_entry["variants"], [])
 
         # A learner's normal request is never served a benchmark quiz: it generates its own, unmarked.
-        FakeModel.reset([valid])
+        FakeModel.reset([valid, multi_payload()])
         with (
             patch.object(quiz_service, "get_document_chunks", return_value=make_chunks(12, 2)),
             patch.object(quiz_service, "ChatOllama", FakeModel),
@@ -195,7 +196,7 @@ class EndToEndBenchmarkTests(_TempStores):
 
     def test_results_persist_and_reach_the_comparison_page(self):
         valid = {"questions": candidates(range(candidate_target(12)))}
-        self.run_benchmark([valid, valid], runs=1)
+        self.run_benchmark([valid, multi_payload(), valid, multi_payload()], runs=1)
         stored = model_benchmark_store.load_benchmark_state()
         self.assertEqual(stored["status"], "completed")
         self.assertEqual(len(stored["runs"]), 2)

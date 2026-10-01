@@ -814,10 +814,19 @@ def _save_attempt_row(
     results = list(progress.get("question_results") or [])
     answers = {str(key): value for key, value in (progress.get("answers") or {}).items()}
     if not results:
+        # An in-progress answer that is a list is a multi_select selection: it is stored as an array
+        # (selected_answers_json) with its type, so resume returns the same array.
         results = [
             {
                 "question_id": int(question_id),
                 "selected_answer": selected_answer,
+                "correct_answer": "",
+                "is_correct": False,
+            } if not isinstance(selected_answer, list) else {
+                "question_id": int(question_id),
+                "selected_answer": selected_answer[0] if selected_answer else "",
+                "selected_answers": list(selected_answer),
+                "question_type": "multi_select",
                 "correct_answer": "",
                 "is_correct": False,
             }
