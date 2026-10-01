@@ -78,6 +78,20 @@ def candidates(facts) -> list[dict]:
     return [raw_candidate(fact, answer_index=fact % 4) for fact in facts]
 
 
+def flashcard(fact: int, kind: str = "term", **overrides) -> dict:
+    """A persisted flashcard about fact `fact`, with the source chunk make_chunks(12, 2) puts it in.
+    kind="term": front is the component, back its sentence; kind="question": a question front."""
+    fact %= FACT_COUNT
+    front = _NOUNS[fact].capitalize() if kind == "term" else f"What does the {_NOUNS[fact]} do during processing?"
+    card = {
+        "flashcard_id": f"fc-{fact}-{kind}", "set_id": "set-1", "topic_id": "t1", "topic_name": "Topic 1",
+        "subtopic_id": None, "subtopic_name": None, "front": front, "back": fact_sentence(fact),
+        "source_chunk_ids": [f"chunk_{fact // 2 + 1}"],
+    }
+    card.update(overrides)
+    return card
+
+
 def multi_candidate(first: int, second: int, **overrides) -> dict:
     """A valid multiple_select candidate: facts `first` and `second` are the two correct options
     (A and C), each quoted verbatim; B and D pair the same components with another fact's behaviour."""

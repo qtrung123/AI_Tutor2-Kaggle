@@ -91,7 +91,7 @@ def _sha256(value) -> str:
 
 def flashcard_snapshot(document: dict, owner_id: str) -> dict:
     """The flashcards the live pipeline reads for this document (same lookup as
-    quiz_service._flashcard_coverage_hints), reduced to a count and a content hash."""
+    quiz_service._usable_flashcards), reduced to a count and a content hash."""
     info = get_latest_flashcard_set_info(
         owner_id, document["id"], str(document.get("hash") or ""), int(document.get("topic_schema_version") or 0),
         FLASHCARD_VERSION,

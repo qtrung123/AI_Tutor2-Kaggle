@@ -1,9 +1,8 @@
-"""Fill-in-the-blank questions (safe, objective subset): schema/prompt, deterministic validation
-against the original document excerpts, deterministic grading, the bounded generation step with a
-retry only on malformed/invalid output, persisted flashcards as coverage hints only (never evidence),
-and persistence/resume/submit through the real SQLite store. Free-text
-short-answer grading is deliberately not supported: only exact (normalized) matches against answers
-explicitly stored with the question are correct.
+"""Fill-in-the-blank questions of the Normal Quiz, derived DETERMINISTICALLY from the document's
+persisted flashcards (no LLM call): the cloze algorithm and its rejection rules, the persisted
+question shape, selection inside the live pipeline with single_choice fill-in, deterministic grading,
+and persistence/resume/submit through the real SQLite store. Only exact (normalized) matches against
+the answer stored with the question are correct -- no fuzzy matching and no invented synonyms.
 """
 
 import tempfile
@@ -11,49 +10,29 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from quiz_fixtures import FakeModel, candidates, fact_sentence, make_chunks, raw_candidate
+from quiz_fixtures import FakeModel, candidates, flashcard, make_chunks, multi_payload, raw_candidate
 
-from backend import quiz_attempt_service, quiz_service, quiz_store, quiz_units
+from backend import quiz_attempt_service, quiz_service, quiz_store
 from backend.api.quiz_generation import QuizQuestion
 from backend.quiz_service import _generate_quiz_from_units
 from backend.quiz_units import (
-    FILL_BLANK_MARKER, QUIZ_FILL_BLANK_OUTPUT_SCHEMA, CandidateRejected, build_fill_blank_prompt, build_study_units,
-    fill_blank_is_correct, fill_blank_target, flashcard_hint_terms, ground_fill_blank_hints,
-    normalize_fill_blank_answer, validate_candidate, validate_fill_blank_candidate,
+    FILL_BLANK_MARKER, CandidateRejected, build_flashcard_fill_blank, build_study_units, fill_blank_is_correct,
+    fill_blank_target, flashcard_cloze, flashcard_hint_terms, normalize_fill_blank_answer, select_flashcard_fill_blanks,
+    validate_candidate,
 )
 
 DOCUMENT = {"id": "lecture.pdf", "title": "Lecture", "hash": "hash", "topic_schema_version": 2}
 SCOPE = {"topic_id": "document", "name": "Entire document"}
+# Facts 15, 20 and 21 are tested by none of the single-choice (candidates(range(15))) or
+# multiple_select (multi_payload()) fixtures, so their clozes are not duplicates.
+FREE_FACTS = (20, 21, 15)
 
 
-def fill_candidate(fact: int, **overrides) -> dict:
-    """A valid fill_blank candidate for fact `fact` of the shared fixtures: blank out its noun."""
-    noun = fact_sentence(fact).split()[1]
-    candidate = {
-        "evidence_quote": fact_sentence(fact),
-        "sentence": fact_sentence(fact).replace(noun, FILL_BLANK_MARKER, 1),
-        "answer": noun,
-        "accepted_answers": [],
-        "explanation": f"The document names the {noun} here.",
-    }
-    candidate.update(overrides)
-    return candidate
+def card(front: str, back: str, **extra) -> dict:
+    return {"flashcard_id": "fc", "front": front, "back": back, **extra}
 
 
-class SchemaAndPromptTests(unittest.TestCase):
-    def test_schema_requires_quote_sentence_answer_and_explanation(self):
-        item = QUIZ_FILL_BLANK_OUTPUT_SCHEMA["properties"]["questions"]["items"]
-        self.assertEqual(item["required"], ["evidence_quote", "sentence", "answer", "explanation"])
-        self.assertNotIn("options", item["properties"])
-
-    def test_prompt_grounds_in_excerpts_and_asks_for_short_objective_answers(self):
-        units = build_study_units(make_chunks(4, 2))
-        prompt = build_fill_blank_prompt("Lecture", "easy", units, 3)
-        self.assertIn("using ONLY the excerpts below", prompt)
-        self.assertIn(FILL_BLANK_MARKER, prompt)
-        self.assertIn("1-4 words", prompt)
-        self.assertIn(units[0]["evidence_excerpt"][:40], prompt)
-
+class TargetAndApiTests(unittest.TestCase):
     def test_target_is_a_small_share_of_the_quiz(self):
         self.assertEqual({n: fill_blank_target(n) for n in (12, 15, 18, 20)}, {12: 2, 15: 2, 18: 3, 20: 3})
 
@@ -63,105 +42,139 @@ class SchemaAndPromptTests(unittest.TestCase):
                                 difficulty="easy", explanation="e", source_chunk_ids=["h1"])
         self.assertEqual(question.question_type, "fill_blank")
 
+    def test_benchmark_flashcard_terms_are_unchanged(self):
+        cards = [{"front": "What does the encoder do?", "back": "It encodes symbols during processing of every frame."},
+                 {"front": "Encoder", "back": "encodes symbols"}, {"front": "The hypervisor.", "back": "Isolates machines"}]
+        self.assertEqual(flashcard_hint_terms(cards), ["Encoder", "encodes symbols", "hypervisor", "Isolates machines"])
+
+
+class ClozeTests(unittest.TestCase):
+    def assertCloze(self, front, back, question, answer):
+        cloze = flashcard_cloze(card(front, back))
+        self.assertEqual((cloze["question"], cloze["answer"]), (question, answer))
+        self.assertEqual(cloze["sentence"], back)
+
+    def assertRejected(self, front, back, code):
+        with self.assertRaises(CandidateRejected) as caught:
+            flashcard_cloze(card(front, back))
+        self.assertEqual(caught.exception.code, code)
+
+    def test_question_card_blanks_the_one_span_its_answer_adds(self):
+        self.assertCloze("What does Round Robin scheduling use?", "Round Robin scheduling uses a fixed time quantum.",
+                         f"Round Robin scheduling uses a {FILL_BLANK_MARKER}.", "fixed time quantum")
+        self.assertCloze("What does virtual memory use disk space as?", "Virtual memory uses disk space as an extension of RAM.",
+                         f"Virtual memory uses disk space as an {FILL_BLANK_MARKER}.", "extension of RAM")
+        self.assertCloze("What is the size of a page in this system?", "In this system the size of a page is 4096 bytes.",
+                         f"In this system the size of a page is {FILL_BLANK_MARKER}.", "4096 bytes")
+
+    def test_term_card_blanks_the_term_in_its_definition(self):
+        self.assertCloze("Virtual memory", "Virtual memory uses disk space as an extension of RAM.",
+                         f"{FILL_BLANK_MARKER} uses disk space as an extension of RAM.", "Virtual memory")
+        self.assertCloze("The semaphore", "A semaphore guards shared counters between threads.",
+                         f"A {FILL_BLANK_MARKER} guards shared counters between threads.", "semaphore")
+
+    def test_back_that_is_not_a_standalone_sentence_is_rejected(self):
+        self.assertRejected("What does RR scheduling use?", "A fixed time quantum.", "not_a_sentence")
+        self.assertRejected("Quantum", "Is the quantum fixed for every process in RR?", "not_a_sentence")
+        self.assertRejected("What does RR use?", "Each process receives a fixed slice of time.", "not_standalone")
+
+    def test_no_safe_single_span_is_rejected(self):
+        self.assertRejected("Which component orders processes during processing in the kernel?",
+                            "The component orders processes during processing in the kernel.", "no_answer_span")
+        self.assertRejected("What does the scheduler do during processing?",
+                            "The scheduler quickly orders processes during processing and memory pages.", "ambiguous_span")
+        self.assertRejected("Deadlock", "A situation where processes wait forever for each other.", "term_not_once")
+        self.assertRejected("Cache", "The cache keeps copies so that the cache answers quickly.", "term_not_once")
+        self.assertRejected("This front is a long statement and not a term", "This front is a long statement here.", "front_shape")
+
+    def test_broad_trivial_or_meaningless_blanks_are_rejected(self):
+        self.assertRejected("What does the scheduler do during processing?",
+                            "The scheduler orders runnable user kernel batch processes during processing.", "answer_too_long")
+        self.assertRejected("into", "The scheduler moves processes into memory during processing.", "trivial_answer")
+        self.assertRejected("Paging", "Paging is it, as it is, so it is.", "too_little_context")
+
+    def test_list_items_are_rejected_because_other_items_would_fit(self):
+        self.assertRejected("SRTF", "Preemptive algorithms include Round Robin, SRTF and priority scheduling.", "list_ambiguity")
+        self.assertRejected("Which algorithms are preemptive?",
+                            "Preemptive algorithms include Round Robin, SRTF and priority scheduling.", "ambiguous_span")
+
+
+class BuildQuestionTests(unittest.TestCase):
+    def setUp(self):
+        self.units = build_study_units(make_chunks(12, 2))
+
+    def build(self, source, accepted=None, scope=SCOPE):
+        return build_flashcard_fill_blank(source, self.units, accepted or [], "medium", scope, 1)
+
+    def test_persisted_shape_keeps_the_flashcard_answer_and_linkage(self):
+        question = self.build(flashcard(20))
+        self.assertEqual(question["question"], f"The {FILL_BLANK_MARKER} encodes symbols during processing.")
+        self.assertEqual((question["question_type"], question["options"]), ("fill_blank", []))
+        self.assertEqual((question["correct_answer"], question["correct_answers"]), ("encoder", ["encoder"]))   # no synonyms
+        self.assertEqual(question["source_chunk_ids"], ["chunk_11"])
+        self.assertEqual(question["concept_id"], next(u["unit_id"] for u in self.units if "chunk_11" in u["source_chunk_ids"]))
+        self.assertEqual(question["concept_origin"], "flashcard_cloze")   # an assessment question: not 'flashcard' practice
+        self.assertEqual((question["topic_id"], question["difficulty"]), ("document", "medium"))
+        self.assertEqual(question["explanation"], "From your flashcard: The encoder encodes symbols during processing.")
+        self.assertEqual(question["_meta"]["flashcard_id"], "fc-20-term")
+        question = self.build(card("What does the hypervisor isolate on a shared server?",
+                                   "The hypervisor isolates guest virtual machines on a shared server.",
+                                   flashcard_id="fc-q", source_chunk_ids=["chunk_11"]))
+        self.assertEqual((question["question"], question["correct_answer"]),
+                         (f"The hypervisor isolates {FILL_BLANK_MARKER} on a shared server.", "guest virtual machines"))
+        with self.assertRaises(CandidateRejected) as caught:   # "The hypervisor ____ during processing." says too little
+            self.build(flashcard(21, "question"))
+        self.assertEqual(caught.exception.code, "too_little_context")
+
+    def test_card_outside_the_quiz_material_is_rejected(self):
+        with self.assertRaises(CandidateRejected) as caught:
+            self.build(flashcard(20, source_chunk_ids=["chunk_from_another_topic"]))
+        self.assertEqual(caught.exception.code, "out_of_scope")
+        with self.assertRaises(CandidateRejected) as caught:
+            self.build(flashcard(20, source_chunk_ids=[]), scope={"topic_id": "t1", "name": "Topic 1"})
+        self.assertEqual(caught.exception.code, "out_of_scope")
+        self.assertEqual(self.build(flashcard(20, source_chunk_ids=[]))["source_chunk_ids"], [])   # whole document: allowed
+
+    def test_cloze_duplicating_a_question_in_the_quiz_is_rejected(self):
+        single, _ = validate_candidate(raw_candidate(13), self.units, [], "easy", 1, SCOPE, 1)
+        with self.assertRaises(CandidateRejected) as caught:
+            self.build(flashcard(13), accepted=[single])   # the same fact as a single_choice question
+        self.assertEqual(caught.exception.code, "duplicate")
+        first = self.build(flashcard(20))
+        with self.assertRaises(CandidateRejected):
+            self.build(flashcard(20, "question"), accepted=[first])
+
+    def test_selection_is_deterministic_in_deck_order(self):
+        deck = [card("Deadlock", "A situation where processes wait forever."), flashcard(21), flashcard(20), flashcard(15)]
+        first, info = select_flashcard_fill_blanks(deck, self.units, [], "easy", SCOPE, 2, 0)
+        second, _ = select_flashcard_fill_blanks(deck, self.units, [], "easy", SCOPE, 2, 0)
+        self.assertEqual([q["question"] for q in first], [q["question"] for q in second])
+        self.assertEqual([q["correct_answer"] for q in first], ["hypervisor", "encoder"])
+        self.assertEqual((info["accepted"], info["rejected"], info["rejected_by"], info["flashcard_ids"]),
+                         (2, 1, {"term_not_once": 1}, ["fc-21-term", "fc-20-term"]))
+
 
 class GradingTests(unittest.TestCase):
-    def test_trim_case_and_surrounding_punctuation_are_normalized(self):
+    def test_trim_case_whitespace_and_terminal_punctuation_are_normalized(self):
         for typed in ("Scheduler", "  scheduler  ", "SCHEDULER.", "\"scheduler\"", "(scheduler)", "scheduler!"):
             self.assertTrue(fill_blank_is_correct(typed, ["scheduler"]), typed)
-        self.assertEqual(normalize_fill_blank_answer("  Task   Scheduler; "), "task scheduler")
+        self.assertEqual(normalize_fill_blank_answer("  Fixed   Time quantum; "), "fixed time quantum")
+        self.assertTrue(fill_blank_is_correct("fixed  time  QUANTUM.", ["fixed time quantum"]))
 
     def test_no_fuzzy_matching(self):
         for typed in ("schedulr", "the scheduler", "scheduler process", "", "   "):
             self.assertFalse(fill_blank_is_correct(typed, ["scheduler"]), typed)
 
-    def test_synonyms_only_when_explicitly_stored(self):
+    def test_no_automatic_synonyms(self):
         self.assertFalse(fill_blank_is_correct("CPU", ["central processing unit"]))
-        self.assertTrue(fill_blank_is_correct("CPU", ["central processing unit", "CPU"]))
 
     def test_inner_punctuation_is_kept(self):
         self.assertTrue(fill_blank_is_correct("C++", ["c++"]))
         self.assertFalse(fill_blank_is_correct("C", ["C++"]))
 
 
-class ValidationTests(unittest.TestCase):
-    def setUp(self):
-        self.units = build_study_units(make_chunks(6, 2))
-
-    def validate(self, raw, accepted=None):
-        return validate_fill_blank_candidate(raw, self.units, accepted or [], "easy", 1, SCOPE, 1)
-
-    def assertRejected(self, raw, code, accepted=None):
-        with self.assertRaises(CandidateRejected) as caught:
-            self.validate(raw, accepted)
-        self.assertEqual(caught.exception.code, code)
-
-    def test_a_grounded_candidate_is_normalized(self):
-        question, warnings = self.validate(fill_candidate(3))
-        self.assertEqual(question["question_type"], "fill_blank")
-        self.assertEqual(question["question"], f"The {FILL_BLANK_MARKER} connects endpoints during processing.")
-        self.assertEqual((question["correct_answer"], question["correct_answers"], question["options"]), ("socket", ["socket"], []))
-        self.assertTrue(question["source_chunk_ids"])
-        self.assertEqual(warnings, [])
-
-    def test_blank_marker_must_appear_exactly_once(self):
-        self.assertRejected(fill_candidate(3, sentence=fact_sentence(3)), "fill_blank_marker")
-        self.assertRejected(fill_candidate(3, sentence="The ____ connects ____ during processing."), "fill_blank_marker")
-        question, _ = self.validate(fill_candidate(3, sentence="The ________ connects endpoints during processing."))
-        self.assertEqual(question["question"].count(FILL_BLANK_MARKER), 1)   # longer runs normalize to one marker
-
-    def test_answer_must_be_short_and_objective(self):
-        self.assertRejected(fill_candidate(3, answer="socket that connects the two endpoints"), "fill_blank_answer")
-        self.assertRejected(fill_candidate(3, answer="..."), "fill_blank_answer")
-
-    def test_sentence_must_not_give_the_answer_away(self):
-        self.assertRejected(fill_candidate(3, sentence=f"The socket {FILL_BLANK_MARKER} endpoints during processing.", answer="socket"),
-                            "fill_blank_giveaway")
-
-    def test_grounding_in_the_original_document(self):
-        self.assertRejected(fill_candidate(3, evidence_quote="The socket is invented by an outside textbook entirely."), "quote_not_found")
-        self.assertRejected(fill_candidate(3, answer="router"), "answer_not_in_context")
-        # the answer is in the quote, but the completed sentence is not what the document says
-        self.assertRejected(fill_candidate(3, sentence=f"The {FILL_BLANK_MARKER} deletes every file on the disk forever."),
-                            "question_not_supported")
-
-    def test_alternatives_are_kept_only_when_written_in_the_material(self):
-        question, _ = self.validate(fill_candidate(3, accepted_answers=["Socket", "router", "made-up synonym"]))
-        # "Socket" is the same answer, "router" is in the material, "made-up synonym" is not
-        self.assertEqual(question["correct_answers"], ["socket", "router"])
-
-    def test_duplicate_of_an_accepted_question_is_rejected(self):
-        first, _ = self.validate(fill_candidate(3))
-        self.assertRejected(fill_candidate(3), "duplicate_stem", accepted=[first])
-        mcq, _ = validate_candidate(raw_candidate(3), self.units, [], "easy", 1, SCOPE, 1)
-        self.validate(fill_candidate(3), accepted=[mcq])   # a different fact of the same sentence is fine
-
-
-class FlashcardHintTests(unittest.TestCase):
-    def setUp(self):
-        self.units = build_study_units(make_chunks(12, 2))
-
-    def test_compact_terms_come_from_flashcards_and_questions_are_skipped(self):
-        cards = [{"front": "What does the encoder do?", "back": "It encodes symbols during processing of every frame."},
-                 {"front": "Encoder", "back": "encodes symbols"}, {"front": "The hypervisor.", "back": "Isolates machines"}]
-        self.assertEqual(flashcard_hint_terms(cards), ["Encoder", "encodes symbols", "hypervisor", "Isolates machines"])
-
-    def test_ungrounded_flashcard_terms_are_ignored(self):
-        grounded = ground_fill_blank_hints(["encoder", "quantum teleporter", "hypervisor"], self.units)
-        self.assertEqual([hint["term"] for hint in grounded], ["encoder", "hypervisor"])
-        self.assertTrue(all(hint["unit_ids"] for hint in grounded))
-
-    def test_flashcard_text_alone_cannot_authorize_a_question(self):
-        # the flashcard's own wording is not in the document: a candidate quoting it is rejected
-        flashcard_back = "The quantum teleporter moves qubits between distant laboratories."
-        with self.assertRaises(CandidateRejected) as caught:
-            validate_fill_blank_candidate({"evidence_quote": flashcard_back, "answer": "teleporter",
-                                           "sentence": "The quantum ____ moves qubits between distant laboratories.",
-                                           "explanation": "From the flashcard."}, self.units, [], "easy", 1, SCOPE, 1)
-        self.assertEqual(caught.exception.code, "quote_not_found")
-
-
 class EngineTests(unittest.TestCase):
-    def run_engine(self, payloads, hints=("encoder", "hypervisor"), fill_blank_count=2):
+    def run_engine(self, payloads, cards, fill_blank_count=2, multi_select_count=0):
         FakeModel.reset(payloads)
         with (
             patch.object(quiz_service, "ChatOllama", FakeModel),
@@ -171,90 +184,49 @@ class EngineTests(unittest.TestCase):
             return _generate_quiz_from_units(
                 document=DOCUMENT, scope="document", scope_topic_id="document", scope_topic_name="Entire document",
                 chunks=make_chunks(12, 2), difficulty="easy", owner_id="owner", model_id="qwen-test", regenerate=False,
-                question_count=12, fill_blank_count=fill_blank_count, fill_blank_hints=list(hints),
+                question_count=12, fill_blank_count=fill_blank_count, fill_blank_cards=list(cards),
+                multi_select_count=multi_select_count,
             )
 
-    @staticmethod
-    def fill_prompts():
-        return [prompt for prompt in FakeModel.prompts if "fill-in-the-blank" in prompt]
-
-    def test_flashcard_covered_concept_is_preferred_when_grounded(self):
-        # three valid candidates for two slots: the two flashcard-covered terms win over "watchdog"
-        quiz = self.run_engine([{"questions": candidates(range(15))},
-                                {"questions": [fill_candidate(22), fill_candidate(20), fill_candidate(21)]}])
-        fills = [q for q in quiz["questions"] if q["question_type"] == "fill_blank"]
-        self.assertEqual({q["correct_answer"] for q in fills}, {"encoder", "hypervisor"})
-        info = quiz["assessment_plan"]["fill_blank"]
-        self.assertEqual((info["hint_terms"], info["accepted"], info["hinted_accepted"], info["calls"]), (2, 3, 2, 1))
-        self.assertIn("Preferred terms to blank out", self.fill_prompts()[0])
-        self.assertIn("encoder; hypervisor", self.fill_prompts()[0])
-
-    def test_total_quiz_count_is_unchanged(self):
-        quiz = self.run_engine([{"questions": candidates(range(15))},
-                                {"questions": [fill_candidate(20), fill_candidate(21)]}])
-        self.assertEqual(len(quiz["questions"]), 12)
+    def test_flashcard_clozes_replace_single_choice_without_any_model_call(self):
+        quiz = self.run_engine([{"questions": candidates(range(15))}], [flashcard(fact) for fact in FREE_FACTS])
+        self.assertEqual(len(FakeModel.prompts), 1)                     # the candidate call only
+        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 1)
         self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 10, "fill_blank": 2})
-        self.assertEqual(quiz["assessment_plan"]["status"], "complete")
+        self.assertEqual((len(quiz["questions"]), quiz["assessment_plan"]["status"]), (12, "complete"))
         self.assertEqual([q["id"] for q in quiz["questions"]], list(range(1, 13)))
         self.assertTrue(all("_meta" not in q for q in quiz["questions"]))
-
-    def test_no_flashcards_means_no_fill_blank_call_and_a_normal_quiz(self):
-        quiz = self.run_engine([{"questions": candidates(range(15))}], hints=())
-        self.assertEqual(len(FakeModel.prompts), 1)
-        self.assertNotIn("fill_blank", quiz["assessment_plan"])
-        self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 12})
-
-    def test_only_ungrounded_flashcards_make_no_fill_blank_call(self):
-        quiz = self.run_engine([{"questions": candidates(range(15))}], hints=("quantum teleporter",))
-        self.assertEqual((len(self.fill_prompts()), len(quiz["questions"])), (0, 12))
-
-    def test_valid_empty_response_is_not_retried(self):
-        quiz = self.run_engine([{"questions": candidates(range(15))}, {"questions": []}, "never used"])
-        self.assertEqual(len(self.fill_prompts()), 1)
         info = quiz["assessment_plan"]["fill_blank"]
-        self.assertEqual((info["calls"], info["stop"]), (1, "empty result"))
-        self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 12})
+        self.assertEqual((info["source"], info["target"], info["accepted"], info["flashcard_set_id"]), ("flashcards", 2, 2, "set-1"))
+        self.assertEqual(info["flashcard_ids"], ["fc-20-term", "fc-21-term"])
+        linked = {record["flashcard_id"] for record in quiz["assessment_plan"]["question_evidence"] if "flashcard_id" in record}
+        self.assertEqual(linked, {"fc-20-term", "fc-21-term"})
 
-    def test_malformed_response_is_retried_once(self):
-        quiz = self.run_engine([{"questions": candidates(range(15))}, "not json at all {",
-                                {"questions": [fill_candidate(20), fill_candidate(21)]}])
-        info = quiz["assessment_plan"]["fill_blank"]
-        self.assertEqual((info["calls"], info["accepted"], len(info["errors"])), (2, 2, 1))
-        self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 10, "fill_blank": 2})
-
-    def test_all_invalid_candidates_are_retried_once(self):
-        bad = fill_candidate(20, sentence=fact_sentence(20))   # no blank
-        quiz = self.run_engine([{"questions": candidates(range(15))}, {"questions": [bad]},
-                                {"questions": [fill_candidate(21)]}])
-        info = quiz["assessment_plan"]["fill_blank"]
-        self.assertEqual((info["calls"], info["rejected_by"]), (2, {"fill_blank_marker": 1}))
+    def test_ineligible_flashcards_fall_back_to_single_choice(self):
+        deck = [card("Deadlock", "A situation where processes wait forever."), flashcard(13), flashcard(20)]
+        quiz = self.run_engine([{"questions": candidates(range(15))}], deck)
         self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 11, "fill_blank": 1})
-
-    def test_at_most_one_retry_then_mcq_only_with_the_requested_count(self):
-        quiz = self.run_engine([{"questions": candidates(range(15))}, "broken", "broken", "never used"])
-        self.assertEqual(len(self.fill_prompts()), quiz_units.QUIZ_FILL_BLANK_MAX_CALLS)
+        self.assertEqual(quiz["assessment_plan"]["fill_blank"]["rejected_by"], {"term_not_once": 1, "duplicate": 1})
         self.assertEqual(len(quiz["questions"]), 12)
+
+    def test_no_flashcards_means_an_unchanged_quiz(self):
+        quiz = self.run_engine([{"questions": candidates(range(15))}], [])
+        self.assertNotIn("fill_blank", quiz["assessment_plan"])
         self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 12})
 
-    def test_a_partial_valid_result_is_not_retried(self):
-        quiz = self.run_engine([{"questions": candidates(range(15))}, {"questions": [fill_candidate(20)]}, "never used"])
-        self.assertEqual(len(self.fill_prompts()), 1)
-        self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 11, "fill_blank": 1})
-
-    def test_disabled_step_makes_no_fill_blank_call(self):
-        quiz = self.run_engine([{"questions": candidates(range(15))}], fill_blank_count=0)
-        self.assertNotIn("fill_blank", quiz["assessment_plan"])
-        self.assertEqual(len(FakeModel.prompts), 1)
+    def test_full_normal_quiz_mix(self):
+        quiz = self.run_engine([{"questions": candidates(range(15))}, multi_payload()],
+                               [flashcard(fact) for fact in FREE_FACTS], multi_select_count=3)
+        self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 7, "multi_select": 3, "fill_blank": 2})
+        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 2)       # candidates + multiple_select, none for fill_blank
 
 
 class LiveEntryPointTests(unittest.TestCase):
-    """generate_quiz reads the document's CURRENT persisted flashcards as hints (never generates them)."""
+    """generate_quiz reads the document's CURRENT persisted flashcards (never generates them)."""
 
     def generate(self, cards):
         document = {**DOCUMENT, "topics": []}
-        # candidates, then the multiple_select call (answered empty here), then the fill_blank call
-        FakeModel.reset([{"questions": candidates(range(15))}, {"questions": []},
-                         {"questions": [fill_candidate(20), fill_candidate(21)]}])
+        FakeModel.reset([{"questions": candidates(range(15))}, {"questions": []}])   # candidates, multiple_select (empty)
         with (
             patch.object(quiz_service, "_document_lookup", return_value={DOCUMENT["id"]: document}),
             patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"),
@@ -269,18 +241,20 @@ class LiveEntryPointTests(unittest.TestCase):
             quiz = quiz_service.generate_quiz(DOCUMENT["id"], "easy", "document", question_count=12, owner_id="owner")
         return quiz, listing
 
-    def test_persisted_flashcards_become_hints(self):
-        quiz, listing = self.generate([{"front": "Encoder", "back": "encodes symbols"}, {"front": "Hypervisor", "back": "x"}])
+    def test_persisted_flashcards_become_fill_blank_questions(self):
+        cards = [card("Empty", "", flashcard_id="fc-empty"), flashcard(20), flashcard(21)]
+        quiz, listing = self.generate(cards)
         listing.assert_called_once_with("owner", DOCUMENT["id"], "set-1")
         self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 10, "fill_blank": 2})
+        self.assertEqual(quiz["assessment_plan"]["fill_blank"]["available_flashcards"], 2)   # the empty card is not usable
+        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 2)
         self.assertEqual(len(quiz["questions"]), 12)
 
-    def test_no_flashcards_makes_no_fill_blank_call(self):
+    def test_no_flashcards_makes_no_fill_blank_questions(self):
         quiz, _ = self.generate([])
-        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 2)   # candidates + multiple_select, no fill_blank
+        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 2)   # candidates + multiple_select
         self.assertNotIn("fill_blank", quiz["assessment_plan"])
         self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 12})
-        self.assertEqual(len(quiz["questions"]), 12)
 
 
 def mixed_quiz(quiz_id: str) -> dict:

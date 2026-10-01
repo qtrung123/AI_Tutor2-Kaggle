@@ -1059,6 +1059,8 @@ def finalize_questions(selected: list[dict]) -> tuple[list[dict], list[dict]]:
             "quote_alignment": round(meta["alignment"], 3),
             "context_support": None if meta["link"] is None else round(meta["link"], 3),
             "answer_in_evidence": meta["answer_in_evidence"],
+            # fill_blank: the source flashcard (the persisted question has no column for it)
+            **({"flashcard_id": meta["flashcard_id"]} if meta.get("flashcard_id") else {}),
         })
     return questions, evidence
 
@@ -1353,50 +1355,33 @@ def validate_multiple_select_candidate(
 
 
 # ---------------------------------------------------------------------------------------------
-# Fill-in-the-blank (safe, objective subset)
+# Fill-in-the-blank, derived from the document's persisted flashcards (no LLM call)
 # ---------------------------------------------------------------------------------------------
-# A fill_blank question is a sentence from the document with ONE short key term replaced by a
-# blank. It is only accepted when the completed sentence is found in the excerpts the model was
-# shown and the answer is written in its evidence quote, so the answer is objective and grounded in
-# the original document (never in flashcards or outside knowledge). Grading is deterministic
-# (normalize_fill_blank_answer): no fuzzy matching and no LLM. Alternative answers are accepted only
-# when they are explicitly stored with the question (correct_answers) and are themselves written in
-# the material.
+# A Normal Quiz fill_blank question is a cloze built deterministically from ONE usable flashcard:
+# the card's own declarative sentence with ONE short key span replaced by a blank; the removed span
+# is the only accepted answer. Nothing is invented (no synonyms, no outside facts) and the document
+# is not re-read: the flashcard -- itself generated from the document's chunks, whose ids it keeps --
+# is the source. A card that yields no safe, unambiguous cloze is skipped; the quiz then keeps
+# single_choice questions instead. Grading is deterministic (normalize_fill_blank_answer).
 
 FILL_BLANK_MARKER = "____"
 QUIZ_FILL_BLANK_MAX_ANSWER_WORDS = 4
 QUIZ_FILL_BLANK_MAX_ANSWER_CHARS = 40
-QUIZ_FILL_BLANK_MAX_ALTERNATIVES = 3
-QUIZ_FILL_BLANK_MAX_CALLS = 2         # one call plus one retry when the output is malformed / yields nothing
+QUIZ_FILL_BLANK_MIN_SENTENCE_WORDS = 6   # the card sentence must stand alone
+QUIZ_FILL_BLANK_MIN_CONTEXT_TOKENS = 3   # meaningful words left around the blank
+QUIZ_FILL_BLANK_MIN_SHARED_WITH_FRONT = 2   # a question card's back must restate its subject
+FLASHCARD_CLOZE_ORIGIN = "flashcard_cloze"
 _BLANK_RUN = re.compile(r"_{3,}")
 _SURROUNDING_PUNCTUATION = re.compile(r"^[\s.,;:!?\"'`“”‘’«»()\[\]{}<>…]+|[\s.,;:!?\"'`“”‘’«»()\[\]{}<>…]+$")
-
-QUIZ_FILL_BLANK_OUTPUT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "questions": {
-            "type": "array",
-            "maxItems": 12,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "evidence_quote": {"type": "string"},
-                    "sentence": {"type": "string"},
-                    "answer": {"type": "string"},
-                    "accepted_answers": {"type": "array", "items": {"type": "string"}, "maxItems": QUIZ_FILL_BLANK_MAX_ALTERNATIVES},
-                    "explanation": {"type": "string"},
-                },
-                "required": ["evidence_quote", "sentence", "answer", "explanation"],
-            },
-        }
-    },
-    "required": ["questions"],
-}
+_CLOZE_WORD = re.compile(r"[^\W_]+(?:['’\-][^\W_]+)*", flags=re.UNICODE)
+_CLOZE_RUN_BREAK = re.compile(r"[,;:()\[\]\"“”]")
+_CLOZE_LIST_BEFORE = re.compile(r"(?:,|\band|\bor)\s*$", flags=re.IGNORECASE)
+_CLOZE_LIST_AFTER = re.compile(r"^\s*(?:,|and\b|or\b)", flags=re.IGNORECASE)
 
 
 def fill_blank_target(question_count: int) -> int:
     """How many fill_blank questions a quiz aims for: 12/15 -> 2, 18/20 -> 3. A target only: the
-    quiz stays all multiple-choice when no fill_blank candidate passes validation."""
+    quiz keeps single_choice questions when fewer flashcards yield a valid cloze."""
     return max(0, question_count // 6)
 
 
@@ -1413,52 +1398,6 @@ def fill_blank_is_correct(selected, correct_answers: list[str]) -> bool:
     return bool(answer) and answer in {normalize_fill_blank_answer(value) for value in correct_answers}
 
 
-def fill_blank_output_schema(ask: int) -> dict:
-    schema = copy.deepcopy(QUIZ_FILL_BLANK_OUTPUT_SCHEMA)
-    schema["properties"]["questions"]["minItems"] = 1
-    schema["properties"]["questions"]["maxItems"] = ask + QUIZ_MAX_ITEMS_EXTRA
-    return schema
-
-
-def build_fill_blank_prompt(
-    scope_name: str,
-    difficulty: str,
-    units: list[dict],
-    count: int,
-    avoid_stems: list[str] | None = None,
-    preferred_terms: list[str] | None = None,
-) -> str:
-    excerpts = "\n\n".join(f"[{unit['unit_id']}]\n{unit['evidence_excerpt']}" for unit in units)
-    preferred = ""
-    if preferred_terms:
-        preferred = ("Preferred terms to blank out (use one only where an excerpt states it; the excerpts are the "
-                     "only source): " + "; ".join(preferred_terms) + "\n")
-    avoid = ""
-    if avoid_stems:
-        avoid = ("Questions that already exist (do not test the same facts):\n"
-                 + "\n".join(f"- {stem}" for stem in avoid_stems) + "\n")
-    return (
-        f"Write exactly {count} {difficulty} fill-in-the-blank revision questions about \"{scope_name}\", "
-        "using ONLY the excerpts below.\n"
-        'Return JSON only: {"questions":[{"evidence_quote":"...","sentence":"...","answer":"...",'
-        '"accepted_answers":[],"explanation":"..."}]}\n'
-        "Rules:\n"
-        "- First choose evidence_quote: one sentence (about 8-30 words) copied exactly as written from an excerpt.\n"
-        f"- sentence: that same sentence, copied exactly, with ONE key term replaced by {FILL_BLANK_MARKER} "
-        f"(four underscores). Exactly one {FILL_BLANK_MARKER} per sentence.\n"
-        f"- answer: the exact removed term as written in the quote: a name, term, number or short phrase of 1-"
-        f"{QUIZ_FILL_BLANK_MAX_ANSWER_WORDS} words. Never an opinion, explanation or a whole clause.\n"
-        "- Choose a term that only one answer can fill; the rest of the sentence must not already contain it.\n"
-        "- accepted_answers: other spellings of the SAME answer that the excerpts also use (for example an "
-        "acronym and its full form). Leave it empty when there are none.\n"
-        "- Each question tests a different fact. Write in the main language of the excerpts. "
-        "Explanation <=25 words. No markdown, no extra fields.\n"
-        f"{preferred}"
-        f"{avoid}"
-        f"EXCERPTS:\n{excerpts}"
-    )
-
-
 def _fill_blank_answer_shape_ok(answer: str) -> bool:
     words = answer.split()
     return (
@@ -1469,114 +1408,206 @@ def _fill_blank_answer_shape_ok(answer: str) -> bool:
     )
 
 
-def validate_fill_blank_candidate(
-    raw,
+def _cloze_key(word: str) -> str:
+    return squash(word)
+
+
+def _cloze_minor(word: str) -> bool:
+    """Function words and very short words: never an answer on their own."""
+    key = _cloze_key(word)
+    return len(key) <= 2 or _normalize(word) in _STOPWORDS
+
+
+def _cloze_same_word(left: str, right: str) -> bool:
+    """The same word, allowing a short inflection (use/uses, process/processes)."""
+    if left == right:
+        return True
+    shorter, longer = sorted((left, right), key=len)
+    return len(shorter) >= 3 and longer.startswith(shorter) and len(longer) - len(shorter) <= 3
+
+
+def _cloze_is_question(front: str) -> bool:
+    return "?" in front or bool(_HINT_QUESTION_START.match(front))
+
+
+def _cloze_span_from_question(front: str, back: str, words: list[re.Match]) -> tuple[int, int]:
+    """Question card: the back restates the question and adds the answer. The answer span is the
+    ONE contiguous run of back words that the front does not contain (function words may sit inside
+    the run, never at its edges). No such run, or more than one, means no safe single blank."""
+    front_keys = [_cloze_key(word) for word in _CLOZE_WORD.findall(front)]
+    in_front = [any(_cloze_same_word(_cloze_key(match.group()), key) for key in front_keys) for match in words]
+    shared = sum(1 for match, known in zip(words, in_front) if known and not _cloze_minor(match.group()))
+    if shared < QUIZ_FILL_BLANK_MIN_SHARED_WITH_FRONT:
+        raise CandidateRejected("structure", "The flashcard back does not restate its question.", "not_standalone")
+    new = [index for index, match in enumerate(words) if not in_front[index] and not _cloze_minor(match.group())]
+    if not new:
+        raise CandidateRejected("structure", "The flashcard back adds no answer to its question.", "no_answer_span")
+    runs = [[new[0]]]
+    for index in new[1:]:
+        previous = runs[-1][-1]
+        between = words[previous + 1:index]
+        gap_text = back[words[previous].end():words[index].start()]
+        if all(not in_front[previous + 1 + offset] and _cloze_minor(match.group()) for offset, match in enumerate(between)) \
+                and not _CLOZE_RUN_BREAK.search(gap_text):
+            runs[-1].append(index)
+        else:
+            runs.append([index])
+    if len(runs) != 1:
+        raise CandidateRejected("structure", "More than one part of the flashcard answer could be the blank.", "ambiguous_span")
+    return words[runs[0][0]].start(), words[runs[0][-1]].end()
+
+
+def _cloze_span_from_term(front: str, back: str) -> tuple[int, int]:
+    """Term card: the front names a term and the back is a sentence about it. The term, written
+    exactly once in the back, is the blank."""
+    term = _HINT_ARTICLE.sub("", _SURROUNDING_PUNCTUATION.sub("", front))
+    if len(squash(term)) < 3 or not _fill_blank_answer_shape_ok(term):
+        raise CandidateRejected("structure", "The flashcard front is neither a question nor a short term.", "front_shape")
+    pattern = re.compile(r"(?<!\w)" + r"\s+".join(re.escape(word) for word in term.split()) + r"(?!\w)", re.IGNORECASE)
+    matches = list(pattern.finditer(back))
+    if len(matches) != 1:
+        raise CandidateRejected("structure", "The term is not written exactly once in the flashcard sentence.", "term_not_once")
+    return matches[0].start(), matches[0].end()
+
+
+def flashcard_cloze(card: dict) -> dict:
+    """The deterministic cloze of one flashcard, or CandidateRejected (with a code) when the card
+    has no safe, unambiguous single blank. Uses only the card's own front/back text.
+
+    1. The back must be ONE declarative sentence that stands alone (no question mark, at least
+       QUIZ_FILL_BLANK_MIN_SENTENCE_WORDS words, not over QUIZ_MAX_STEM_CHARS).
+    2. The span: for a question front, the single run of back words the question does not contain
+       (_cloze_span_from_question); for a short-term front, that term inside the back
+       (_cloze_span_from_term).
+    3. The span is a short answer (1-4 words, <= 40 characters), not only function words, written
+       once (never a giveaway), not an item of a list ("X, ____ and Y"), and enough meaningful words
+       remain around the blank.
+    """
+    front = _clean_inline(card.get("front"))
+    back = _clean_inline(card.get("back"))
+    if not front or not back:
+        raise CandidateRejected("structure", "The flashcard is empty.", "empty_card")
+    words = list(_CLOZE_WORD.finditer(back))
+    if ("?" in back or len(words) < QUIZ_FILL_BLANK_MIN_SENTENCE_WORDS or len(back) > QUIZ_MAX_STEM_CHARS
+            or _BLANK_RUN.search(back) or _SCAFFOLDING.search(back)):
+        raise CandidateRejected("structure", "The flashcard back is not a standalone sentence.", "not_a_sentence")
+    if _cloze_is_question(front):
+        start, end = _cloze_span_from_question(front, back, words)
+        rule = "question_answer"
+    else:
+        start, end = _cloze_span_from_term(front, back)
+        rule = "term_in_definition"
+    answer = _SURROUNDING_PUNCTUATION.sub("", back[start:end])
+    if not _fill_blank_answer_shape_ok(answer):
+        raise CandidateRejected("structure", "The blank would remove more than a short term.", "answer_too_long")
+    if all(_cloze_minor(word) for word in _CLOZE_WORD.findall(answer)):
+        raise CandidateRejected("structure", "The blank would remove only filler words.", "trivial_answer")
+    before, after = back[:start], back[end:]
+    if _CLOZE_LIST_BEFORE.search(before) or _CLOZE_LIST_AFTER.search(after):
+        raise CandidateRejected("structure", "The blank is one item of a list; other items would fit too.", "list_ambiguity")
+    rest = f"{before} {after}"
+    if squash(answer) in squash(rest):
+        raise CandidateRejected("structure", "The sentence already contains its answer.", "fill_blank_giveaway")
+    if len(content_tokens(rest)) < QUIZ_FILL_BLANK_MIN_CONTEXT_TOKENS:
+        raise CandidateRejected("structure", "Too little is left around the blank.", "too_little_context")
+    question = _clean_inline(f"{before.rstrip()} {FILL_BLANK_MARKER} {after.lstrip()}").replace(f"{FILL_BLANK_MARKER} .", f"{FILL_BLANK_MARKER}.")
+    question = re.sub(rf"{re.escape(FILL_BLANK_MARKER)}\s+([,.;:!])", rf"{FILL_BLANK_MARKER}\1", question)
+    return {"question": question, "answer": answer, "sentence": back, "rule": rule}
+
+
+def build_flashcard_fill_blank(
+    card: dict,
     units: list[dict],
     accepted: list[dict],
     difficulty: str,
-    question_id: int,
     scope_topic: dict,
     generation_index: int,
-) -> tuple[dict, list[str]]:
-    """Validate one fill_blank candidate against the excerpts the model saw and every question
-    accepted so far (multiple-choice and fill_blank). Hard failures raise CandidateRejected."""
-    if not isinstance(raw, dict):
-        raise CandidateRejected("structure", "Question must be a JSON object.")
-    sentence = _BLANK_RUN.sub(FILL_BLANK_MARKER, _clean_inline(raw.get("sentence")))
-    if sentence.count(FILL_BLANK_MARKER) != 1:
-        raise CandidateRejected("structure", "A fill_blank sentence must contain exactly one blank.", "fill_blank_marker")
-    if len(sentence) < QUIZ_MIN_STEM_CHARS or len(sentence) > QUIZ_MAX_STEM_CHARS or _SCAFFOLDING.search(sentence):
-        raise CandidateRejected("structure", "Fill-blank sentence is too short/long or contains scaffolding.", "stem")
-    if _NEGATIVE_EMPHASIS.search(sentence) or _NEGATIVE_PHRASES.search(sentence):
-        raise CandidateRejected("structure", "Negative sentences cannot be verified against the material.", "negative_polarity")
-    answer = _SURROUNDING_PUNCTUATION.sub("", _clean_inline(raw.get("answer")))
-    if not _fill_blank_answer_shape_ok(answer):
-        raise CandidateRejected("structure", "A fill_blank answer must be a short term of 1-4 words.", "fill_blank_answer")
-    answer_squashed = squash(answer)
-    if not answer_squashed or answer_squashed in squash(sentence.replace(FILL_BLANK_MARKER, " ")):
-        raise CandidateRejected("structure", "The sentence already contains its answer.", "fill_blank_giveaway")
+) -> dict:
+    """One Normal Quiz fill_blank question from one flashcard, or CandidateRejected.
 
-    quote = _clean_inline(raw.get("evidence_quote"))
-    located = locate_evidence(quote, units)
-    if located is None:
-        code = "quote_too_short" if len(squash(quote)) < QUIZ_MIN_QUOTE_CHARS else "quote_not_found"
-        raise CandidateRejected("grounding", "evidence_quote was not found in the provided context.", code)
-    unit, alignment = located
-    if answer_squashed not in squash(quote):
-        raise CandidateRejected("grounding", "The answer is not written in the evidence quote.", "answer_not_in_context")
-    completed = sentence.replace(FILL_BLANK_MARKER, answer)
-    if locate_evidence(completed, [unit]) is None:
-        raise CandidateRejected("grounding", "The completed sentence is not stated in the provided context.", "question_not_supported")
-    link, _ = context_support(sentence.replace(FILL_BLANK_MARKER, " "), answer, unit, units)
+    Beyond flashcard_cloze: the card must belong to this quiz's material (one of its source chunks
+    is among the quiz's excerpts; a card without source chunks only for a whole-document quiz), and
+    the cloze must not test the same fact as a question already in the pool (single_choice,
+    multi_select or an earlier cloze)."""
+    cloze = flashcard_cloze(card)
+    source_ids = [str(value) for value in card.get("source_chunk_ids") or [] if str(value)]
+    unit = next((unit for unit in units if set(unit["source_chunk_ids"]) & set(source_ids)), None)
+    if (source_ids and unit is None) or (not source_ids and str(scope_topic["topic_id"]) != "document"):
+        raise CandidateRejected("grounding", "The flashcard is not about this quiz's material.", "out_of_scope")
 
-    # Alternatives only when explicitly given AND written in the material themselves.
-    alternatives: list[str] = []
-    seen = {normalize_fill_blank_answer(answer)}
-    raw_alternatives = raw.get("accepted_answers")
-    for value in raw_alternatives if isinstance(raw_alternatives, list) else []:
-        alternative = _SURROUNDING_PUNCTUATION.sub("", _clean_inline(value))
-        key = normalize_fill_blank_answer(alternative)
-        if (not key or key in seen or not _fill_blank_answer_shape_ok(alternative)
-                or not any(squash(alternative) in context["_squashed"] for context in units)):
-            continue
-        seen.add(key)
-        alternatives.append(alternative)
-        if len(alternatives) >= QUIZ_FILL_BLANK_MAX_ALTERNATIVES:
-            break
-
-    stem_key = squash(sentence)
-    spans = evidence_spans(quote, unit)
-    answer_tokens = content_tokens(answer)
+    stem_key = squash(cloze["question"])
+    answer_tokens, answer_key = content_tokens(cloze["answer"]), squash(cloze["answer"])
+    signature = content_tokens(f"{cloze['question']} {cloze['answer']}")
     for existing in accepted:
-        existing_key = squash(existing["question"])
-        if stem_key == existing_key or difflib.SequenceMatcher(None, stem_key, existing_key).ratio() >= QUIZ_STEM_DUPLICATE_RATIO:
-            raise CandidateRejected("duplicate", "Question duplicates an accepted question.", "duplicate_stem")
         meta = existing["_meta"]
-        if (_evidence_overlap(spans, meta.get("spans", ())) >= QUIZ_EVIDENCE_OVERLAP_MAX
-                and _same_target(answer_tokens, answer_squashed, meta["answer_tokens"], meta["answer_key"])):
-            raise CandidateRejected("duplicate", "Question tests the same fact as an accepted question on the same evidence.", "duplicate_evidence")
+        if (difflib.SequenceMatcher(None, stem_key, squash(existing["question"])).ratio() >= QUIZ_STEM_DUPLICATE_RATIO
+                or (signature and _jaccard(signature, meta["signature"]) >= QUIZ_CONTENT_DUPLICATE_JACCARD)
+                or (_same_target(answer_tokens, answer_key, meta["answer_tokens"], meta["answer_key"])
+                    and _jaccard(signature, meta["signature"]) >= QUIZ_SAME_TARGET_JACCARD / 2)):
+            raise CandidateRejected("duplicate", "The cloze tests the same fact as a question already in the quiz.", "duplicate")
 
-    explanation = _clean_inline(raw.get("explanation"))
-    warnings: list[str] = []
-    if alignment < 1.0:
-        warnings.append("quote_not_verbatim")
-    if len(explanation.split()) < 3:
-        warnings.append("short_explanation")
-    normalized = {
-        "id": question_id,
-        "question": sentence,
+    return {
+        "id": 0,
+        "question": cloze["question"],
         "options": [],
-        "correct_answer": answer,
+        "correct_answer": cloze["answer"],
         "question_type": "fill_blank",
-        # For fill_blank, correct_answers is the explicit list of accepted answers (any one is correct).
-        "correct_answers": [answer, *alternatives],
+        # Exactly the removed span: no synonyms or alternatives are invented.
+        "correct_answers": [cloze["answer"]],
         "topic_id": str(scope_topic["topic_id"]),
         "topic_name": str(scope_topic.get("name") or scope_topic["topic_id"]),
-        "concept_id": unit["unit_id"],
-        "concept_name": unit["name"],
-        "source_subtopic_ids": [],
-        "concept_origin": "study_unit",
+        "concept_id": unit["unit_id"] if unit else str(card.get("flashcard_id") or ""),
+        "concept_name": unit["name"] if unit else str(card.get("subtopic_name") or card.get("topic_name") or ""),
+        "source_subtopic_ids": [card["subtopic_id"]] if card.get("subtopic_id") else [],
+        "concept_origin": FLASHCARD_CLOZE_ORIGIN,
         "concept_plan_id": QUIZ_ENGINE_VERSION,
         "assessment_capacity": len(units),
         "difficulty": difficulty,
-        "explanation": explanation,
-        "source_chunk_ids": list(unit["source_chunk_ids"]),
-        "validation_outcome": "accepted_quality_warning" if warnings else "accepted",
+        "explanation": f"From your flashcard: {cloze['sentence']}",
+        "source_chunk_ids": source_ids,
+        "validation_outcome": "accepted",
         "_meta": {
-            "index": generation_index, "unit_index": unit["index"],
-            "signature": content_tokens(f"{sentence} {answer}"), "quote_shingles": _shingles(squash(quote)),
-            "quote": quote, "alignment": alignment, "link": link, "answer_in_evidence": True, "spans": spans,
-            "answer_tokens": answer_tokens, "answer_key": answer_squashed,
+            "index": generation_index, "unit_index": unit["index"] if unit else len(units),
+            "signature": signature, "quote_shingles": _shingles(squash(cloze["sentence"])),
+            "quote": cloze["sentence"], "alignment": 1.0, "link": None, "answer_in_evidence": True, "spans": (),
+            "answer_tokens": answer_tokens, "answer_key": answer_key,
+            "flashcard_id": str(card.get("flashcard_id") or ""), "cloze_rule": cloze["rule"],
         },
     }
-    return normalized, sorted(set(warnings))
 
 
-# Flashcards as COVERAGE HINTS only. A persisted flashcard of the document can suggest WHICH short
-# term is worth a blank; it is never evidence. A hint is kept only when the term is written in the
-# document's own excerpts, and every fill_blank question is still validated against those excerpts
-# (validate_fill_blank_candidate) exactly like one without a hint.
-QUIZ_FILL_BLANK_MAX_HINTS = 8
+def select_flashcard_fill_blanks(
+    cards: list[dict],
+    units: list[dict],
+    accepted: list[dict],
+    difficulty: str,
+    scope_topic: dict,
+    target: int,
+    first_index: int,
+) -> tuple[list[dict], dict]:
+    """Up to `target` fill_blank questions from the flashcards, in deck order (deterministic). A
+    card that yields no valid cloze is skipped and counted under its rejection code."""
+    pool: list[dict] = []
+    info = {"source": "flashcards", "target": target, "available_flashcards": len(cards),
+            "accepted": 0, "rejected": 0, "rejected_by": {}, "flashcard_ids": []}
+    for offset, card in enumerate(cards):
+        if len(pool) >= target:
+            break
+        try:
+            question = build_flashcard_fill_blank(card, units, accepted + pool, difficulty, scope_topic, first_index + offset + 1)
+        except CandidateRejected as error:
+            info["rejected"] += 1
+            info["rejected_by"][error.code] = info["rejected_by"].get(error.code, 0) + 1
+            continue
+        pool.append(question)
+        info["flashcard_ids"].append(question["_meta"]["flashcard_id"])
+    info["accepted"] = len(pool)
+    return pool, info
+
+
+# Flashcard terms (compact concept/answer terms of a document's flashcards). Used by the admin Quiz
+# model benchmark to fingerprint its flashcard input; Normal Quiz fill_blank questions come from
+# select_flashcard_fill_blanks above.
 _HINT_QUESTION_START = re.compile(
     r"^(?:what|which|who|whom|whose|why|how|when|where|define|describe|explain|name|list|give)\b", re.IGNORECASE,
 )
@@ -1599,17 +1630,3 @@ def flashcard_hint_terms(cards: list[dict]) -> list[str]:
             seen.add(key)
             terms.append(term)
     return terms
-
-
-def ground_fill_blank_hints(terms: list[str], units: list[dict]) -> list[dict]:
-    """The hint terms actually written in the document excerpts, with the excerpts that state them.
-    A term found in no excerpt is ignored (a flashcard cannot introduce outside content)."""
-    grounded = []
-    for term in terms or []:
-        key = squash(term)
-        unit_ids = [unit["unit_id"] for unit in units if key and key in unit["_squashed"]]
-        if unit_ids:
-            grounded.append({"term": term, "key": key, "unit_ids": unit_ids})
-        if len(grounded) >= QUIZ_FILL_BLANK_MAX_HINTS:
-            break
-    return grounded

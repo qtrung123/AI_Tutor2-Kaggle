@@ -34,17 +34,11 @@ from backend.quiz_units import (
     QUIZ_TOKENS_PER_QUESTION,
     QUIZ_UNUSED_CHARS_PER_QUESTION,
     QUIZ_TOTAL_DEADLINE_S,
-    QUIZ_FILL_BLANK_MAX_CALLS,
     QUIZ_MULTI_SELECT_MAX_CALLS,
-    build_fill_blank_prompt,
     build_multiple_select_prompt,
     build_generation_prompt,
-    flashcard_hint_terms,
-    ground_fill_blank_hints,
     build_study_units,
-    fill_blank_output_schema,
     fill_blank_target,
-    validate_fill_blank_candidate,
     candidate_target,
     context_budget,
     finalize_questions,
@@ -57,6 +51,7 @@ from backend.quiz_units import (
     parse_candidates,
     public_unit,
     select_context_units,
+    select_flashcard_fill_blanks,
     select_questions,
     validate_candidate,
     validate_multiple_select_candidate,
@@ -151,7 +146,7 @@ def _generate_quiz_from_units(
     quiz_title: str | None = None,
     retrieval_ms: int = 0,
     fill_blank_count: int = 0,
-    fill_blank_hints: list[str] | None = None,
+    fill_blank_cards: list[dict] | None = None,
     multi_select_count: int = 0,
 ) -> dict:
     """Live Quiz generation: one simple pipeline for ANY document.
@@ -162,12 +157,12 @@ def _generate_quiz_from_units(
     multiple_select_target(count)); when fewer valid ones exist, valid single-choice questions fill
     the rest, so the total is unchanged whenever the pool allows it.
 
-    With `fill_blank_count` > 0 AND `fill_blank_hints` (flashcard terms) of which at least one is
-    written in the document's excerpts, a bounded fill_blank step runs after the multiple-choice pool
-    (see _generate_fill_blank_pool): up to that many validated fill_blank questions replace the
-    lowest-ranked multiple-choice ones, so the total question count is unchanged. Without grounded
-    hints no fill_blank call is made. The live entry point asks for fill_blank_target(count) with
-    the document's persisted flashcards as hints.
+    With `fill_blank_count` > 0 and `fill_blank_cards` (the document's persisted usable flashcards),
+    up to that many fill_blank questions are derived DETERMINISTICALLY from the cards, without any
+    model call (quiz_units.select_flashcard_fill_blanks: one cloze per suitable card, deck order).
+    They take the place of single-choice ones, so the total is unchanged; cards that yield no safe
+    cloze are skipped and single-choice questions fill in. The live entry point asks for
+    fill_blank_target(count) with the document's current flashcards.
 
         chunks -> excerpts -> context that fits a fixed budget
         -> call 1 writes a surplus of candidates (12 -> 15, 15 -> 18, 18 -> 22, 20 -> 24)
@@ -475,22 +470,19 @@ def _generate_quiz_from_units(
         candidate_counter += multi_info["rejected"] + multi_info["accepted"]
         llm_calls += multi_info["calls"]
 
-    fill_pool, fill_info = [], None
-    grounded_hints = ground_fill_blank_hints(fill_blank_hints or [], units) if fill_blank_count > 0 else []
-    if grounded_hints:
-        fill_pool, fill_info = _generate_fill_blank_pool(
-            model_id=model_id, scope_label=scope_label, difficulty=difficulty,
-            units=units, accepted=accepted + multi_pool, hints=grounded_hints,
-            scope_topic=scope_topic, target=min(fill_blank_count, len(grounded_hints)), first_index=candidate_counter,
-            deadline_s=QUIZ_TOTAL_DEADLINE_S - (time.perf_counter() - total_started),
+    fill_selected, fill_info = [], None
+    if fill_blank_count > 0 and fill_blank_cards:
+        # No model call: clozes are derived from the flashcards themselves.
+        fill_selected, fill_info = select_flashcard_fill_blanks(
+            fill_blank_cards, units, accepted + multi_pool, difficulty, scope_topic, fill_blank_count, candidate_counter,
         )
-        llm_calls += fill_info["calls"]
+        fill_info["flashcard_set_id"] = fill_blank_cards[0].get("set_id")
+        print(f"[quiz-units-fill-blank] {json.dumps(fill_info)}")
 
     # final_count = min(valid candidates, requested_count). Short is "partial", never a failure.
     # Fill_blank and multiple_select questions REPLACE single-choice ones, so the requested total is
     # unchanged. Priority: validity, then the total, then the type mix -- when too few valid
     # single-choice questions remain, surplus valid multiple_select ones fill the gap.
-    fill_selected = _select_fill_blank(fill_pool, fill_blank_count) if fill_pool else []
     ranked_multi = sorted(multi_pool, key=_rank_question)
     multi_selected = ranked_multi[:max(0, min(multi_select_count, question_count - len(fill_selected)))]
     single_target = question_count - len(fill_selected) - len(multi_selected)
@@ -643,125 +635,21 @@ def _generate_multiple_select_pool(
     return pool, info
 
 
-def _flashcard_coverage_hints(document: dict, owner_id: str) -> list[str]:
-    """Compact terms from the document's current persisted flashcards (coverage hints only; see
-    quiz_units.flashcard_hint_terms). No flashcards, or any read problem -> no hints."""
+def _usable_flashcards(document: dict, owner_id: str) -> list[dict]:
+    """The document's current persisted flashcards with both sides filled, in deck order -- the
+    source of Normal Quiz fill_blank questions (same set lookup as the Flashcards view). No
+    flashcards, or any read problem -> none (the quiz keeps single-choice questions)."""
     try:
-        from backend.flashcard_service import FLASHCARD_VERSION   # inside the try: any failure means no hints
+        from backend.flashcard_service import FLASHCARD_VERSION   # inside the try: any failure means no cards
         info = get_latest_flashcard_set_info(
             owner_id, document["id"], str(document.get("hash") or ""), int(document.get("topic_schema_version") or 0),
             FLASHCARD_VERSION,
         )
         cards = list_flashcards(owner_id, document["id"], info["set_id"]) if info else []
     except Exception as error:
-        print(f"[quiz-units-fill-blank] flashcard hints unavailable: {type(error).__name__}: {error}")
+        print(f"[quiz-units-fill-blank] flashcards unavailable: {type(error).__name__}: {error}")
         return []
-    return flashcard_hint_terms(cards)
-
-
-def _fill_blank_context(units: list[dict], hints: list[dict], used: list[dict], budget_chars: int) -> list[dict]:
-    """Excerpts for the fill_blank call: those stating a hinted term first, then the least-used rest,
-    within the call's evidence budget."""
-    hinted_ids = {unit_id for hint in hints for unit_id in hint["unit_ids"]}
-    ordered = [unit for unit in units if unit["unit_id"] in hinted_ids]
-    ordered += [unit for unit in followup_units(units, used, budget_chars, QUIZ_UNUSED_CHARS_PER_QUESTION)
-                if unit["unit_id"] not in hinted_ids]
-    shown, total = [], 0
-    for unit in ordered:
-        if shown and total + unit["char_count"] > budget_chars:
-            break
-        shown.append(unit)
-        total += unit["char_count"]
-    return shown
-
-
-def _generate_fill_blank_pool(
-    *, model_id: str, scope_label: str, difficulty: str, units: list[dict], accepted: list[dict],
-    scope_topic: dict, target: int, first_index: int, deadline_s: float, hints: list[dict],
-) -> tuple[list[dict], dict]:
-    """The bounded fill_blank step of the live pipeline, run after the multiple-choice pool exists
-    and only when there are grounded flashcard hints (the reason to ask for fill_blank at all).
-
-    The call is shown the excerpts that state the hinted terms and told to prefer them. It stops
-    after the first call that parses and yields a valid candidate, and after a valid EMPTY answer
-    ({"questions": []}); exactly ONE retry follows only malformed output (unparseable) or output
-    whose candidates were all invalid. A transport/model failure is not retried. Every candidate
-    goes through validate_fill_blank_candidate against the document excerpts (a hint never
-    authorizes a question). Never raises: without a valid candidate the quiz stays multiple-choice.
-    """
-    diag = quiz_diagnostics.get_current()
-    started = time.perf_counter()
-    pool: list[dict] = []
-    hint_keys = {hint["key"] for hint in hints}
-    info = {"target": target, "hint_terms": len(hints), "calls": 0, "accepted": 0, "hinted_accepted": 0,
-            "rejected": 0, "rejected_by": {}, "errors": [], "stop": ""}
-    index = first_index
-    for call_number in range(1, QUIZ_FILL_BLANK_MAX_CALLS + 1):
-        remaining_s = deadline_s - (time.perf_counter() - started)
-        if remaining_s < QUIZ_MIN_CALL_S:
-            info["stop"] = "time budget used up"
-            break
-        ask = target + 1
-        shown = _fill_blank_context(units, hints, accepted + pool, context_budget(ask))
-        prompt = build_fill_blank_prompt(scope_label, difficulty, shown, ask, [q["question"] for q in accepted + pool],
-                                         [hint["term"] for hint in hints])
-        llm = ChatOllama(
-            model=model_id, reasoning=False, temperature=0.1 if call_number == 1 else 0.3,
-            format=fill_blank_output_schema(ask), num_ctx=QUIZ_NUM_CTX,
-            num_predict=min(QUIZ_MAX_NEW_TOKENS, max(600, (ask + QUIZ_MAX_ITEMS_EXTRA) * QUIZ_TOKENS_PER_QUESTION)),
-            keep_alive=QUIZ_GENERATION_KEEP_ALIVE,
-            client_kwargs={"timeout": min(QUIZ_LLM_TIMEOUT_S, max(30, remaining_s))},
-        )
-        info["calls"] += 1
-        invocation_started = time.perf_counter()
-        try:
-            response_text, _metadata, _cut = _generate_with_deadline(llm, prompt, min(QUIZ_FOLLOWUP_DEADLINE_S, remaining_s))
-        except Exception as error:   # the model/runtime failed: no retry, no extra latency
-            info["errors"].append(f"call {call_number}: {type(error).__name__}: {error}"[:200])
-            info["stop"] = "model call failed"
-            diag.record_llm_call(stage="fill_blank", model=model_id, success=False, attempt=call_number,
-                                 elapsed_ms=(time.perf_counter() - invocation_started) * 1000,
-                                 exception_type=type(error).__name__, reason=str(error)[:200])
-            break
-        diag.record_llm_call(stage="fill_blank", model=model_id, success=True, attempt=call_number,
-                             elapsed_ms=(time.perf_counter() - invocation_started) * 1000)
-        try:
-            candidates = parse_candidates(response_text)
-        except ValueError as error:   # malformed output: retry once
-            info["errors"].append(f"call {call_number}: malformed output: {error}"[:200])
-            info["stop"] = "malformed output"
-            continue
-        if not candidates:            # a valid, empty answer: the excerpts hold nothing suitable
-            info["stop"] = "empty result"
-            break
-        added = 0
-        for raw in candidates:
-            index += 1
-            try:
-                question, _warnings = validate_fill_blank_candidate(
-                    raw, shown, accepted + pool, difficulty, 0, scope_topic, index,
-                )
-            except (ValueError, TypeError, KeyError, AttributeError) as error:
-                code = getattr(error, "code", None) or "structure"
-                info["rejected"] += 1
-                info["rejected_by"][code] = info["rejected_by"].get(code, 0) + 1
-                continue
-            question["_meta"]["hinted"] = question["_meta"]["answer_key"] in hint_keys
-            pool.append(question)
-            added += 1
-        if added:
-            info["stop"] = "valid candidates"
-            break
-        info["stop"] = "all candidates invalid"   # invalid output: retry once
-    info["accepted"] = len(pool)
-    info["hinted_accepted"] = sum(bool(question["_meta"].get("hinted")) for question in pool)
-    print(f"[quiz-units-fill-blank] {json.dumps(info)}")
-    return pool, info
-
-
-def _select_fill_blank(pool: list[dict], target: int) -> list[dict]:
-    """Flashcard-covered (hinted) candidates first, then the usual quality ranking."""
-    return sorted(pool, key=lambda question: (not question["_meta"].get("hinted"), _rank_question(question)))[:max(0, target)]
+    return [card for card in cards if str(card.get("front") or "").strip() and str(card.get("back") or "").strip()]
 
 
 def _resolve_quiz_title(quiz_name: str | None, previous_title: str | None, fallback: str) -> str:
@@ -980,7 +868,7 @@ def _generate_quiz(
     return _generate_quiz_from_units(
         multi_select_count=multiple_select_target(question_count),
         fill_blank_count=fill_blank_target(question_count),
-        fill_blank_hints=_flashcard_coverage_hints(document, owner_id),
+        fill_blank_cards=_usable_flashcards(document, owner_id),
         document=document,
         scope=assessment_scope,
         scope_topic_id=scope_topic_id,
