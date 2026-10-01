@@ -62,7 +62,10 @@ const snapshot = () => ({
   continueTitle: root().querySelector(".overview-continue-title")?.textContent,
   continueDetail: root().querySelector(".overview-continue-detail")?.textContent,
   tools: Object.fromEntries([...root().querySelectorAll(".overview-tool")].map((b) => [b.dataset.overviewTool, b.querySelector(".overview-tool-status").textContent])),
-  stats: Object.fromEntries([...root().querySelectorAll(".overview-stat")].map((t) => [t.querySelector("span").textContent, t.querySelector("strong").textContent])),
+  sections: [...root().querySelectorAll(".overview-section h3")].map((h) => h.textContent),
+  panels: [...document.querySelectorAll('[data-session-pane="overview"] .progress-panel h2')].map((h) => h.textContent),
+  sessionTabs: [...document.querySelectorAll(".session-tab")].map((b) => b.textContent),
+  hasStatTiles: Boolean(root().querySelector(".overview-stat")),
   noOverflow: root().scrollWidth <= root().clientWidth + 1,
 });
 (async () => {
@@ -146,18 +149,19 @@ class SessionOverviewUiTests(unittest.TestCase):
             "tutor": "Ask about this document", "summary": "Not generated",
             "flashcards": "Not generated", "quiz": "No quizzes yet",
         })
-        self.assertEqual(empty["stats"], {
-            "Quizzes completed": "0", "In progress": "0", "Latest score": "—", "Flashcards": "—", "Summary": "Not yet",
-        })
+        self.assertEqual(empty["sections"], ["Continue studying", "Study Pack"])
+        self.assertFalse(empty["hasStatTiles"])   # no duplicated snapshot tiles
+
+    def test_progress_tab_is_gone_and_its_status_lives_in_overview(self):
+        empty = self.out["empty"]
+        self.assertEqual(empty["sessionTabs"], ["Overview", "Original Content", "Summary", "Flashcards", "Quiz"])
+        self.assertEqual(empty["panels"], ["Where you are", "Latest quiz score", "This document in your plan", "Quiz details"])
 
     def test_statuses_come_from_real_saved_state(self):
         populated = self.out["populated"]
         self.assertEqual(populated["tools"]["summary"], "Generated")
         self.assertEqual(populated["tools"]["flashcards"], "12 cards")
         self.assertEqual(populated["tools"]["quiz"], "3 quizzes · 1 in progress · 2 completed")
-        self.assertEqual(populated["stats"], {
-            "Quizzes completed": "2", "In progress": "1", "Latest score": "4 / 4", "Flashcards": "12", "Summary": "Available",
-        })
         self.assertTrue(populated["noOverflow"])
 
     def test_continue_studying_shows_the_in_progress_quiz(self):

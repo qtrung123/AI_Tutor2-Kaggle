@@ -1,7 +1,8 @@
-// Study Session: document overview, summary, flashcards and document progress.
+// Study Session: document overview (with its progress status), summary and flashcards.
 // Classic script (shared global scope), loaded by index.html before app.js.
 
 function setSessionTab(tab) {
+  if (tab === "progress") tab = "overview";   // the Progress tab now lives in Overview (older links)
   document.body.dataset.sessionTab = tab;
   document.querySelectorAll(".session-tab").forEach((button) => button.classList.toggle("active", button.dataset.sessionTab === tab));
   document.querySelectorAll(".session-pane").forEach((pane) => pane.classList.toggle("active", pane.dataset.sessionPane === tab));
@@ -80,12 +81,8 @@ function renderSessionOverview() {
       </div>
     </section>
     <section class="overview-section">
-      <h3>Study tools</h3>
+      <h3>Study Pack</h3>
       <div class="overview-tools"></div>
-    </section>
-    <section class="overview-section">
-      <h3>Progress snapshot</h3>
-      <div class="overview-stats"></div>
     </section>`;
   root.querySelector(".overview-title").textContent = documentItem.title;
   root.querySelector(".overview-model").textContent = `Model: ${modelLabel(selectedModelId) || "—"}`;
@@ -131,25 +128,6 @@ function renderSessionOverview() {
     button.append(icon, copy, chevron);
     button.addEventListener("click", () => openOverviewTool(tool.tab));
     toolList.appendChild(button);
-  });
-
-  const latest = quiz.latest;
-  const stats = [
-    ["Quizzes completed", String(quiz.completedCount)],
-    ["In progress", String(quiz.inProgress.length)],
-    ["Latest score", latest ? `${latest.score} / ${latest.total}` : "—", latest ? ((latest.title || "").trim() || "Untitled Quiz") : "No completed quiz yet"],
-    ["Flashcards", status.flashcards === "generated" ? String(status.flashcardCount) : "—", status.flashcards === "loading" ? "Checking…" : ""],
-    ["Summary", { generated: "Available", not_generated: "Not yet", error: "—", loading: "…" }[status.summary]],
-  ];
-  const statList = root.querySelector(".overview-stats");
-  stats.forEach(([label, value, note]) => {
-    const tile = document.createElement("div");
-    tile.className = "overview-stat";
-    const strong = document.createElement("strong"); strong.textContent = value;
-    const span = document.createElement("span"); span.textContent = label;
-    tile.append(strong, span);
-    if (note) { const small = document.createElement("small"); small.textContent = note; tile.appendChild(small); }
-    statList.appendChild(tile);
   });
 }
 
@@ -707,7 +685,8 @@ function quizCoverageText(mastery) {
 async function loadDocumentProgress(documentId) {
   if (!sessionProgressState) return;
   const request = ++documentProgressRequest;
-  [sessionProgressState, sessionProgressQuiz, sessionProgressPack, sessionProgressPlan].forEach((element) => {
+  if (sessionProgressPlanPanel) sessionProgressPlanPanel.hidden = true;
+  [sessionProgressState, sessionProgressQuiz, sessionProgressPlan].forEach((element) => {
     element.innerHTML = '<p class="empty-state">Loading…</p>';
   });
   try {
@@ -716,7 +695,7 @@ async function loadDocumentProgress(documentId) {
     renderDocumentProgress(progress);
   } catch (error) {
     if (request !== documentProgressRequest) return;
-    [sessionProgressState, sessionProgressQuiz, sessionProgressPack, sessionProgressPlan].forEach((element) => {
+    [sessionProgressState, sessionProgressQuiz].forEach((element) => {
       element.innerHTML = '<p class="empty-state">Progress could not be loaded right now.</p>';
     });
   }
@@ -740,26 +719,6 @@ function renderDocumentProgress(progress) {
   const badge = progressLine(sessionProgressState, progress.learning.label, `progress-state progress-state--${progress.learning.state}`);
   badge.setAttribute("data-state", progress.learning.state);
   progressLine(sessionProgressState, progress.learning.explanation, "progress-note");
-
-  // Study Pack: what exists for this document. Flashcards are a card count only -- there is no
-  // review data, so nothing here claims flashcard progress or mastery.
-  sessionProgressPack.innerHTML = "";
-  const pack = progress.study_pack || { summary_ready: false, flashcard_count: progress.flashcards?.card_count || 0, quiz_count: 0 };
-  const cards = Number(pack.flashcard_count) || 0;
-  const quizzes = Number(pack.quiz_count) || 0;
-  const packList = document.createElement("dl");
-  packList.className = "progress-pack";
-  [["Summary", pack.summary_ready ? "Ready" : "Not generated yet"],
-   ["Flashcards", cards ? `${cards} card${cards === 1 ? "" : "s"}` : "Not generated yet"],
-   ["Quiz", quizzes ? `Ready · ${quizzes} quiz${quizzes === 1 ? "" : "zes"}` : "Not generated yet"]].forEach(([label, value]) => {
-    const row = document.createElement("div");
-    row.className = `progress-pack-row${value === "Not generated yet" ? " is-missing" : ""}`;
-    const term = document.createElement("dt"); term.textContent = label;
-    const detail = document.createElement("dd"); detail.textContent = value;
-    row.append(term, detail);
-    packList.appendChild(row);
-  });
-  sessionProgressPack.appendChild(packList);
 
   sessionProgressQuiz.innerHTML = "";
   const quiz = progress.quiz;
@@ -793,6 +752,8 @@ function renderDocumentProgress(progress) {
 
   sessionProgressPlan.innerHTML = "";
   const plan = progress.plan;
+  // Planner progress is shown only when this document is in an active study plan.
+  if (sessionProgressPlanPanel) sessionProgressPlanPanel.hidden = !plan;
   if (!plan) {
     progressLine(sessionProgressPlan, "Not in an active study plan. Add it in Study Planner to schedule sessions.", "empty-state");
     return;

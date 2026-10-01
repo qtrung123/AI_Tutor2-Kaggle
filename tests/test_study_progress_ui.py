@@ -1,4 +1,4 @@
-"""Real-browser tests for Phase 6A progress (headless Chrome, mocked API): the Progress tab's
+"""Real-browser tests for Phase 6A progress (headless Chrome, mocked API): the Overview tab's
 Where you are / Quiz results / Study plan panels, the Quiz coverage fix (concept_coverage_ratio),
 Home's per-document "Continue studying" cards (no cross-document headline metrics) and the
 Planner's plan-progress line. Desktop + 390px."""
@@ -65,7 +65,7 @@ window.addEventListener("error", (e) => out.errors.push(String(e.message) + " @ 
 window.addEventListener("unhandledrejection", (e) => out.errors.push("rejection: " + String(e.reason && e.reason.message || e.reason)));
 const lines = (id) => [...document.getElementById(id).children].map((el) => el.textContent);
 const noOverflow = () => document.documentElement.scrollWidth <= window.innerWidth + 1;
-const pack = () => [...document.querySelectorAll("#session-progress-pack .progress-pack-row")].map((row) => [row.querySelector("dt").textContent, row.querySelector("dd").textContent]);
+const planShown = () => !document.getElementById("session-progress-plan-panel").hidden;
 const details = () => ({hidden: document.getElementById("session-quiz-details").hidden, open: document.getElementById("session-quiz-details").open,
   sections: [...document.querySelectorAll("#session-quiz-details h3")].map((h) => h.textContent)});
 (async () => {
@@ -83,17 +83,17 @@ const details = () => ({hidden: document.getElementById("session-quiz-details").
   };
   out.overflow.homeCards = noOverflow();
 
-  await openStudySession("mkt.pdf", "progress"); await sleep(600);
+  await openStudySession("mkt.pdf", "overview"); await sleep(600);
   out.mkt = {state: lines("session-progress-state"), quiz: lines("session-progress-quiz"), plan: lines("session-progress-plan"),
     coverage: [...document.querySelectorAll("#session-coverage-list .mastery-card span")].map((el) => el.textContent),
-    headings: [...document.querySelectorAll('[data-session-pane="progress"] h2')].map((h) => h.textContent),
-    pack: pack(), details: details(), paneText: document.querySelector('[data-session-pane="progress"]').textContent};
+    headings: [...document.querySelectorAll('[data-session-pane="overview"] .progress-panel h2')].map((h) => h.textContent),
+    planShown: planShown(), details: details(), paneText: document.querySelector('[data-session-pane="overview"]').textContent};
   out.overflow.progress = noOverflow();
 
-  await openStudySession("stats.pdf", "progress"); await sleep(600);
+  await openStudySession("stats.pdf", "overview"); await sleep(600);
   out.stats = {state: lines("session-progress-state"), quiz: lines("session-progress-quiz"), plan: lines("session-progress-plan"),
-    pack: pack(), details: details()};
-  await openStudySession("pbi.pdf", "progress"); await sleep(600);
+    planShown: planShown(), details: details()};
+  await openStudySession("pbi.pdf", "overview"); await sleep(600);
   out.pbi = {quiz: lines("session-progress-quiz")};
   out.overflow.empty = noOverflow();
 
@@ -152,9 +152,9 @@ class ProgressUiAssertions:
 
     def test_progress_panels_show_real_values(self):
         mkt = self.out["mkt"]
-        self.assertEqual(mkt["headings"], ["Where you are", "Quiz results", "Study Pack", "This document in your plan", "Quiz details"])
+        self.assertEqual(mkt["headings"], ["Where you are", "Latest quiz score", "This document in your plan", "Quiz details"])
+        self.assertTrue(mkt["planShown"])
         self.assertEqual(mkt["state"], ["Learning", "Latest quiz score 7/10 (70%); keep practicing."])
-        self.assertEqual(mkt["pack"], [["Summary", "Ready"], ["Flashcards", "12 cards"], ["Quiz", "Ready · 2 quizzes"]])
         self.assertEqual(mkt["quiz"][0], "70%")
         self.assertRegex(mkt["quiz"][1], r"^7/10 correct · ")
         self.assertEqual(mkt["quiz"][2], "Up 15 points from your previous attempt")
@@ -187,7 +187,7 @@ class ProgressUiAssertions:
         self.assertEqual(stats["state"], ["Not started", "Not studied yet."])
         self.assertEqual(stats["quiz"], ["No quiz results yet. Take a quiz to see your score here."])
         self.assertEqual(stats["plan"], ["Not in an active study plan. Add it in Study Planner to schedule sessions."])
-        self.assertEqual(stats["pack"], [["Summary", "Not generated yet"], ["Flashcards", "Not generated yet"], ["Quiz", "Not generated yet"]])
+        self.assertFalse(stats["planShown"])   # planner progress only when the document is in a plan
 
     def test_one_attempt_is_not_interpreted_as_a_trend(self):
         quiz = self.out["pbi"]["quiz"]

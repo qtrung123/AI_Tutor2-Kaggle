@@ -123,7 +123,8 @@ const summaryCalls = () => window.__calls.filter((c) => c.includes("/api/summary
   setSessionTab("quiz"); await sleep(300);
   const easy = () => [...quizDifficultySelect.options].find((o) => o.value === "easy").textContent;
   out.quizSaved = {qwen12: null, quizOnScreen: Boolean(currentQuiz), title: assessmentTitle.textContent};
-  quizScopeSelect.value = "document"; await loadSelectedQuiz(); await sleep(200);
+  // Opening the Quiz tab shows the Library and never auto-loads a quiz: open the saved one by its quiz_id.
+  quizScopeSelect.value = "document"; await loadSelectedQuiz("q1"); await sleep(200);
   out.quizSaved.qwen12 = easy(); out.quizSaved.title = assessmentTitle.textContent;
   header.value = "deepseek-r1-14b"; header.dispatchEvent(new Event("change", {bubbles: true})); await sleep(300);
   out.quizSaved.deepseek12 = easy(); out.quizSaved.titleAfterSwitch = assessmentTitle.textContent;
