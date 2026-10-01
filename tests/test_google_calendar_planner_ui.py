@@ -140,7 +140,7 @@ const busyBlocks = () => [...document.querySelectorAll("#pcal-body .pcal-busy")]
   out.writtenQuiz = {classes: wq.className, meta: wq.querySelector(".pcal-event-meta").textContent};
   wq.click(); await sleep(100);
   out.writtenQuiz.buttons = [...$("pcal-popover").querySelectorAll("button")].map((b) => b.textContent);
-  [...$("pcal-popover").querySelectorAll("button")].find((b) => b.textContent === "Start").click(); await sleep(1500);
+  [...$("pcal-popover").querySelectorAll("button")].find((b) => b.textContent === "Start Session").click(); await sleep(1500);
   out.writtenQuiz.startCalls = G.startCalls;
   out.writtenQuiz.page = document.body.dataset.page;
   out.writtenQuiz.tab = document.body.dataset.sessionTab;
@@ -225,7 +225,7 @@ class GoogleCalendarPlannerUiTests(unittest.TestCase):
         written = self.out["writtenQuiz"]
         self.assertIn("pcal-activity--written_quiz", written["classes"])
         self.assertTrue(written["meta"].startswith("Written Quiz"))
-        self.assertIn("Start", written["buttons"])
+        self.assertIn("Start Session", written["buttons"])
         self.assertEqual([call[0] for call in written["startCalls"]], ["s-wq"])
         self.assertEqual((written["page"], written["tab"], written["document"]), ("session", "quiz", "mkt.pdf"))
 

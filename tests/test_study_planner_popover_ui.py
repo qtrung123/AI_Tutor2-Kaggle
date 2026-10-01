@@ -74,6 +74,16 @@ const press = (label) => [...$("pcal-popover").querySelectorAll(".pcal-session-a
   $("pcal-scroll").scrollTop = 8 * 48;
   out.onCalendar = [...document.querySelectorAll(".pcal-event")].map((e) => e.dataset.sessionId).sort();
 
+  // Event blocks: height = duration; content compacts with it (visible parts only, no overflow).
+  const shownText = (el) => el && el.getClientRects().length && getComputedStyle(el).display !== "none" ? el.textContent : null;
+  out.blocks = Object.fromEntries(["s-ahead", "s-start", "s-missed", "s-skipped"].map((id) => {
+    const e = document.querySelector(`.pcal-event[data-session-id="${id}"]`);
+    const tier = ["roomy", "tall", "medium", "short", "tiny"].find((t) => e.classList.contains(`pcal-event--${t}`));
+    return [id, {tier, height: Math.round(e.getBoundingClientRect().height), top: Math.round(parseFloat(e.style.top)),
+      title: shownText(e.querySelector(".pcal-event-title")), time: shownText(e.querySelector(".pcal-event-time")),
+      activity: shownText(e.querySelector(".pcal-event-activity")), meta: e.querySelector(".pcal-event-meta").textContent,
+      overflows: [...e.children].some((c) => c.getClientRects().length && c.getBoundingClientRect().bottom > e.getBoundingClientRect().bottom + 1)}];
+  }));
   out.scheduled = open("s-ahead");
   out.running = open("s-running");
   out.missed = open("s-missed");
@@ -100,7 +110,7 @@ const press = (label) => [...$("pcal-popover").querySelectorAll(".pcal-session-a
   out.overflow.afterActions = noOverflow();
   // Start opens the study tool (last: it leaves the planner).
   open("s-start");
-  const start = press("Start"); start.click(); start.click();
+  const start = press("Start Session"); start.click(); start.click();
   await sleep(1500);
   out.started = {calls: [...P.startCalls], page: document.body.dataset.page, tab: document.body.dataset.sessionTab};
   publish();
@@ -110,6 +120,25 @@ const press = (label) => [...$("pcal-popover").querySelectorAll(".pcal-session-a
 
 
 class PopoverAssertions:
+    def test_event_blocks_reflect_duration_and_compact_their_content(self):
+        blocks = self.out["blocks"]
+        # 18:00-18:45 (45m): title + "time · activity"; height and top follow the scheduled times.
+        self.assertEqual(blocks["s-ahead"]["tier"], "medium")
+        self.assertEqual((blocks["s-ahead"]["top"], blocks["s-ahead"]["height"]), (18 * 48, 45 * 48 // 60 - 2))
+        self.assertEqual((blocks["s-ahead"]["title"], blocks["s-ahead"]["time"], blocks["s-ahead"]["activity"]),
+                         ("Marketing", "18:00–18:45", "Summary"))
+        # 40m and 20m: one row, title + time.
+        for key in ("s-skipped", "s-start"):
+            self.assertEqual(blocks[key]["tier"], "short")
+            self.assertIsNotNone(blocks[key]["time"])
+            self.assertIsNone(blocks[key]["activity"])
+        # 15m: the title only.
+        self.assertEqual(blocks["s-missed"]["tier"], "tiny")
+        self.assertEqual((blocks["s-missed"]["title"], blocks["s-missed"]["time"]), ("PowerBI", None))
+        for block in blocks.values():
+            self.assertFalse(block["overflows"])
+        self.assertEqual(blocks["s-ahead"]["meta"], "Summary · 18:00–18:45")   # the text other code reads is unchanged
+
     def test_no_script_errors(self):
         self.assertNotIn("fatal", self.out)
         self.assertEqual(self.out["errors"], [])
@@ -120,10 +149,10 @@ class PopoverAssertions:
 
     def test_scheduled_session_start_is_primary_and_complete_is_absent(self):
         scheduled = self.out["scheduled"]
-        self.assertEqual((scheduled["pill"], scheduled["primary"], scheduled["secondary"]), ("Planned", ["Start"], ["Reschedule", "Skip"]))
+        self.assertEqual((scheduled["pill"], scheduled["primary"], scheduled["secondary"]), ("Planned", ["Start Session"], ["Reschedule", "Skip"]))
         self.assertEqual((scheduled["title"], scheduled["activity"]), ("Marketing", "Summary"))
         self.assertRegex(scheduled["when"], r"25.* · 18:00–18:45 · 45m$")
-        self.assertEqual(scheduled["focused"], "Start")   # keyboard lands on the primary action
+        self.assertEqual(scheduled["focused"], "Start Session")   # keyboard lands on the primary action
         self.assertNotIn("Complete", scheduled["text"])
 
     def test_in_progress_resume_is_primary_and_complete_is_secondary(self):
@@ -150,7 +179,7 @@ class PopoverAssertions:
 
     def test_moved_session_shows_where_it_came_from(self):
         moved = self.out["moved"]
-        self.assertEqual(moved["primary"], ["Start"])
+        self.assertEqual(moved["primary"], ["Start Session"])
         self.assertEqual(len(moved["notes"]), 1)
         self.assertRegex(moved["notes"][0], r"^Moved from .*23.* · 19:00$")
 

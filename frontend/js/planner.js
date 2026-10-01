@@ -1869,6 +1869,11 @@ function pcalEventBlock({ kind, session, change = null }) {
   block.setAttribute("aria-label", `${label}: ${pcalActivity(session.activity_type)} · ${title}, ${pcalShortDay(session.scheduled_start.slice(0, 10))} ${pcalSessionTimes(session)}`);
   pcalPlace(block, start, end);
   block.classList.toggle("is-compact", end - start < 40);
+  // Like a calendar event, the content compacts with the block's height (its real duration):
+  // roomy/tall = title, time, activity on their own lines; medium = title + "time · activity";
+  // short = one row, title + time; tiny = the title only. The full text stays in aria-label.
+  const minutes = end - start;
+  block.classList.add(`pcal-event--${minutes >= 95 ? "roomy" : minutes >= 75 ? "tall" : minutes >= 45 ? "medium" : minutes >= 20 ? "short" : "tiny"}`);
   if (change) {
     // A proposed change: tagged, reviewable, not draggable until the learner decides.
     block.classList.add("pcal-change", `pcal-change--${change.type}`);
@@ -1879,8 +1884,10 @@ function pcalEventBlock({ kind, session, change = null }) {
       : change.type === "added" ? `+ ${PCAL_CHANGE_LABELS.added}` : PCAL_CHANGE_LABELS[change.type];
     if (tag) block.appendChild(pcalEl("span", "pcal-event-tag", tag));
   }
-  block.append(pcalEl("strong", "pcal-event-title", title),
-    pcalEl("span", "pcal-event-meta", `${pcalActivity(session.activity_type)} · ${pcalSessionTimes(session)}`));
+  const meta = pcalEl("span", "pcal-event-meta");   // its text stays "Activity · 15:30–16:00"
+  meta.append(pcalEl("span", "pcal-event-activity", pcalActivity(session.activity_type)),
+    pcalEl("span", "pcal-event-sep", " · "), pcalEl("span", "pcal-event-time", pcalSessionTimes(session)));
+  block.append(pcalEl("strong", "pcal-event-title", title), meta);
   const source = change ? null : pcalMoveSourceFor(kind, session, block);
   block.addEventListener("pointerdown", (event) => {
     event.stopPropagation();

@@ -413,7 +413,7 @@ class TodayAndWeekAssertions:
             self.assertEqual(week["overdue"], {"pill": "Not completed", "primary": ["Reschedule"], "secondary": ["Skip"], "note": None})
             self.assertEqual(week["running"], {"pill": "In progress", "primary": ["Resume"],
                                                "secondary": ["Complete session", "Skip"], "note": None})
-            self.assertEqual(week["later"], {"pill": "Planned", "primary": ["Start"], "secondary": ["Reschedule", "Skip"], "note": None})
+            self.assertEqual(week["later"], {"pill": "Planned", "primary": ["Start Session"], "secondary": ["Reschedule", "Skip"], "note": None})
         else:
             self.assertEqual((week["overdue"], week["running"], week["later"]), (not_completed, running, ahead))
         for state in list(home.values()) + list(week.values()):
@@ -503,7 +503,7 @@ class DesktopCalendarWeekAssertions:
         self.assertEqual(calendar[("Statistics", "Review")], "skipped")
         self.assertEqual(calendar[("PowerBI", "Flashcards")], "confirmed")   # later today
         self.assertEqual(calendar[("Marketing", "Summary")], "confirmed")   # the moved session, on its new day
-        self.assertEqual(after["moved"]["primary"], ["Start"])
+        self.assertEqual(after["moved"]["primary"], ["Start Session"])
         self.assertRegex(after["moved"]["note"], r"^Moved from .*24.* · 09:00$")   # lineage, from data already loaded
         self.assertEqual(after["queue"], [])   # neither history nor scheduled sessions are queued work
 

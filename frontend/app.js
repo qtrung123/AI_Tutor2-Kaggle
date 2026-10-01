@@ -1454,7 +1454,7 @@ let plannerDocStatesLoad = 0;
 // The calendar popover's actions by state -- the primary action first; terminal or history-changing
 // ones stay secondary. Only what the lifecycle API allows for that state (Home keeps its own set).
 const PCAL_SESSION_ACTIONS = {
-  confirmed: [["start", "Start", true], ["reschedule", "Reschedule", false], ["skip", "Skip", false]],
+  confirmed: [["start", "Start Session", true], ["reschedule", "Reschedule", false], ["skip", "Skip", false]],
   active: [["start", "Resume", true], ["complete", "Complete session", false], ["skip", "Skip", false]],
   overdue: [["reschedule", "Reschedule", true], ["skip", "Skip", false]],
 };

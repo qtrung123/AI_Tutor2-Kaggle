@@ -3421,11 +3421,25 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 /* sessions: document title first, activity + time second */
 .pcal-event{position:absolute;left:5px;right:3px;z-index:3;box-sizing:border-box;padding:3px 6px;border-radius:6px;border:1px solid transparent;text-align:left;font:inherit;display:flex;flex-direction:column;gap:0;overflow:hidden;cursor:pointer;min-width:0;transition:box-shadow .15s var(--pcal-ease),border-color .15s var(--pcal-ease),background-color .15s var(--pcal-ease),opacity .15s var(--pcal-ease)}
 .pcal-event:focus-visible,.pcal-event.is-selected{outline:2px solid #1f2540;outline-offset:1px;z-index:4}
-.pcal-event-title{font-size:12px;font-weight:600;line-height:1.3;overflow:hidden;overflow-wrap:break-word;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;flex:none}
-.pcal-event-meta{font-size:11px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.85}
+.pcal-event-title{font-size:12px;font-weight:650;line-height:15px;overflow:hidden;overflow-wrap:break-word;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;flex:none}
+.pcal-event-meta{display:flex;min-width:0;font-size:11px;line-height:14px;white-space:nowrap;overflow:hidden;opacity:.9}
+.pcal-event-meta>span{flex:none}
+/* Calendar-style order: the time first, then the activity. */
+.pcal-event-time{order:1;font-variant-numeric:tabular-nums}
+.pcal-event-sep{order:2;white-space:pre}
+.pcal-event-activity{order:3;flex:0 1 auto!important;min-width:0;overflow:hidden;text-overflow:ellipsis}
+/* Content compacts with the block's height (= its scheduled duration). */
+.pcal-event--roomy,.pcal-event--tall{padding:4px 7px;gap:1px}
+.pcal-event--roomy .pcal-event-title{-webkit-line-clamp:2}
+.pcal-event--roomy .pcal-event-meta,.pcal-event--tall .pcal-event-meta{flex-direction:column}
+.pcal-event--roomy .pcal-event-sep,.pcal-event--tall .pcal-event-sep{display:none}
+.pcal-event--medium{padding:2px 7px}
 .pcal-event.is-compact{flex-direction:row;align-items:center;gap:6px;padding-top:0;padding-bottom:0}
-.pcal-event.is-compact .pcal-event-title{display:block;white-space:nowrap;text-overflow:ellipsis;flex:0 1 auto;font-size:11px}
-.pcal-event.is-compact .pcal-event-meta{flex:1 1 0;min-width:0}
+.pcal-event.is-compact .pcal-event-title{display:block;white-space:nowrap;text-overflow:ellipsis;flex:0 1 auto;min-width:0;font-size:11.5px;line-height:13px}
+.pcal-event.is-compact .pcal-event-meta{flex:0 0 auto;line-height:13px}
+.pcal-event--short .pcal-event-activity,.pcal-event--short .pcal-event-sep,.pcal-event--tiny .pcal-event-meta{display:none}
+.pcal-event--tiny{padding:0 6px}
+.pcal-event--tiny .pcal-event-title{font-size:10.5px;line-height:11px}
 .pcal-event--suggested{background:var(--pcal-ghost);border:1px dashed var(--pcal-ghost-edge);color:var(--pcal-ghost-ink)}
 .pcal-event--suggested:hover{background:#eef0ff;border-color:var(--session-accent)}
 .pcal-event--confirmed{background:var(--session-accent);color:#fff}
