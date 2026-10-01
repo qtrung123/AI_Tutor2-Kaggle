@@ -1674,6 +1674,78 @@ function renderQuizReview() {
 
   document.getElementById("quiz-review-previous").disabled = index === 0;
   document.getElementById("quiz-review-next").textContent = index === total - 1 ? "Back to Results" : "Next";
+  setReviewExplainMoreBusy(quizExplanationPending);
+}
+
+// ---- Review: "Explain more" -------------------------------------------------------------------
+// Never automatic: only a click asks the existing (document-scoped) AI Tutor about this one
+// question. The message carries just this question's context -- the tutor's own retrieval brings
+// the relevant passages of the document, never the whole document.
+
+function setReviewExplainMoreBusy(busy) {
+  const button = document.getElementById("quiz-review-explain-more");
+  if (!button) return;
+  button.disabled = busy;
+  button.textContent = busy ? "Explaining…" : "Explain more";
+}
+
+function reviewItemAnswerText(item, values) {
+  if (!values.length) return "";
+  if (isWrittenQuestionType(item.questionType)) return values.map((value) => `"${value}"`).join(" or ");
+  return values.map((letter) => matchingOptionText(item.options, letter) || letter).join("; ");
+}
+
+function reviewItemMatchingLines(item, letters) {
+  return matchingParts(item).prompts
+    .map((prompt, index) => `  ${index + 1}. ${prompt} → ${matchingOptionText(item.options, letters[index]) || "not paired"}`);
+}
+
+function quizReviewExplainMessage(item, result) {
+  const documentItem = indexedDocuments.find((entry) => entry.id === activeDocumentId);
+  const documentName = documentItem ? `"${documentItem.title}" (${documentItem.id})` : `"${activeDocumentId}"`;
+  const isMatching = isMatchingQuestionType(item.questionType);
+  const isChoice = !isMatching && !isWrittenQuestionType(item.questionType);
+  const outcome = item.unanswered ? "I did not answer it" : (item.isCorrect ? "I answered it correctly" : "I answered it incorrectly");
+  const lines = [
+    `Explain more about this quiz question from the document ${documentName}.`,
+    `Question type: ${quizTypeLabel(item.questionType)}`,
+    `Question: ${isMatching ? matchingParts(item).instruction : item.question}`,
+  ];
+  if (isChoice && item.options.length) lines.push("Options:", ...item.options.map((option) => `  ${option}`));
+  if (isMatching) {
+    lines.push("My pairs:", ...(item.unanswered ? ["  (none)"] : reviewItemMatchingLines(item, item.selected)));
+    lines.push("Correct pairs:", ...reviewItemMatchingLines(item, item.correct));
+  } else {
+    lines.push(`My answer: ${item.unanswered ? "(no answer)" : reviewItemAnswerText(item, item.selected)}`);
+    lines.push(`Correct answer${item.correct.length > 1 && !isWrittenQuestionType(item.questionType) ? "s" : ""}: ${reviewItemAnswerText(item, item.correct)}`);
+  }
+  lines.push(`Result: ${outcome}.`);
+  if (item.explanation) lines.push(`Saved explanation: ${item.explanation}`);
+  const where = [item.topicName ? `topic "${item.topicName}"` : "", item.conceptName && item.conceptName !== item.topicName ? `concept "${item.conceptName}"` : ""].filter(Boolean);
+  if (where.length) lines.push(`Source in the document: ${where.join(", ")}.`);
+  lines.push(
+    "Please explain clearly, using only this document:",
+    "1. Why the correct answer is correct.",
+    item.isCorrect && !item.unanswered ? "2. (My answer was correct -- confirm what made it right.)" : "2. Why my answer is wrong or incomplete.",
+    "3. The underlying concept.",
+    "4. Optionally, a short simple example.",
+  );
+  return lines.join("\n");
+}
+
+async function explainReviewItemMore() {
+  const result = quizResultState?.result;
+  const item = result?.items?.[quizResultState.reviewIndex];
+  if (!item || quizExplanationPending || chatForm.classList.contains("is-sending")) return;
+  quizExplanationPending = true;
+  setReviewExplainMoreBusy(true);
+  revealTutor({ focus: false });   // reuse the existing Ask AI Tutor panel
+  try {
+    await sendTutorMessage(quizReviewExplainMessage(item, result));
+  } finally {
+    quizExplanationPending = false;
+    setReviewExplainMoreBusy(false);
+  }
 }
 
 function moveQuizReview(direction) {

@@ -132,6 +132,9 @@ const uploadStatus = document.getElementById("upload-status");
             <h4>Source</h4>
             <p id="quiz-review-source-text"></p>
           </section>
+          <div class="quiz-review-explain-more">
+            <button class="secondary-button" id="quiz-review-explain-more" type="button">Explain more</button>
+          </div>
         </article>
         <footer class="quiz-player-footer">
           <button class="secondary-button" id="quiz-review-previous" type="button">Previous</button>
@@ -1307,6 +1310,7 @@ document.getElementById("quiz-review-back-results")?.addEventListener("click", (
   renderQuizResultState();
 });
 document.getElementById("quiz-review-previous")?.addEventListener("click", () => moveQuizReview(-1));
+document.getElementById("quiz-review-explain-more")?.addEventListener("click", explainReviewItemMore);
 document.getElementById("quiz-review-next")?.addEventListener("click", () => moveQuizReview(1));
 
 authForm.addEventListener("submit", handleAuthentication);

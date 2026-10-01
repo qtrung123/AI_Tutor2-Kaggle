@@ -3034,6 +3034,7 @@ body[data-page="session"] [data-session-pane="quiz"].quiz-player-open #quiz-play
 .quiz-review-section { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--session-line, #e2e4f3); }
 .quiz-review-section h4 { margin: 0 0 6px; font-size: 13px; font-weight: 750; color: #3b4a6b; }
 .quiz-review-section p { margin: 0; font-size: 14px; line-height: 1.55; color: #3f475c; }
+.quiz-review-explain-more { margin-top: 18px; display: flex; justify-content: flex-start; }
 .quiz-review-section p.is-missing { color: var(--muted); font-style: italic; }
 .quiz-player-modal-backdrop {
   position: fixed; inset: 0; background: rgba(15, 20, 35, .45); display: flex;
