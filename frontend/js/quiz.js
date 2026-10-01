@@ -764,6 +764,7 @@ async function showQuizHistoryDetail(attemptId) {
 }
 
 async function loadSelectedQuiz(quizId) {
+  if (typeof quizId !== "string") quizId = "";   // also bound directly as a change handler (an Event)
   const documentId = quizDocumentSelect?.value;
   const requestedQuizKey = currentQuizKey();
   const requestSeq = ++quizDetailRequestSeq;
@@ -775,7 +776,10 @@ async function loadSelectedQuiz(quizId) {
   quizExplanations = {};
   quizQuestionIndex = 0;
   renderAssessmentQuiz();
-  if (!documentId) {
+  // Outside the focused player the Quiz tab stays the Library: a quiz is only loaded for an
+  // explicit quiz_id (Start/Resume), never "the document's default quiz" into the old stacked
+  // inline view.
+  if (!documentId || (!quizId && !quizPlayerOpen)) {
     return;
   }
 
@@ -890,7 +894,8 @@ async function generateAssessmentQuiz() {
   }
 }
 
-async function regenerateAssessmentQuiz() {
+async function regenerateAssessmentQuiz(options = {}) {
+  const inLibrary = Boolean(options?.inLibrary);   // also bound directly as a click handler (an Event)
   if (!quizDocumentSelect.value) {
     showToast("Choose an indexed document first");
     return;
@@ -900,7 +905,18 @@ async function regenerateAssessmentQuiz() {
 
   const generationRequest = selectedQuizGenerationRequest();
   const requestedQuizKey = quizGenerationRequestKey(generationRequest);
-  const pendingId = registerPendingQuiz(generationRequest, currentQuiz?.title || "");
+  const pendingId = registerPendingQuiz(generationRequest, inLibrary ? options.fallbackName || "" : currentQuiz?.title || "");
+  if (inLibrary) {
+    try {
+      await requestQuizRegeneration(generationRequest.document_id, generationRequest);
+      showToast("Quiz regenerated");
+    } catch (error) {
+      showToast(error.message || "Regenerate failed");
+    } finally {
+      await finishPendingQuiz(pendingId);
+    }
+    return;
+  }
   setAssessmentLoading(true);
   quizList.innerHTML = "";
   assessmentTitle.textContent = "Regenerating assessment";
@@ -963,31 +979,43 @@ async function selectHistoryQuizVariant(attempt) {
   }
 }
 
+// Retake opens the same saved questions in the focused Quiz Player, fresh from question 1.
 async function startHistoryQuizRetake(attempt) {
+  resetQuizAutosave();
+  setQuizPlayerVisible(true);
+  currentQuiz = null;
+  currentAttempt = null;
+  quizAnswers = {};
+  quizExplanations = {};
+  quizQuestionIndex = 0;
+  renderAssessmentQuiz();
   try {
     const detail = await requestQuizForRetake(attempt.attempt_id);
+    if (!quizPlayerOpen) return;
+    if (!detail?.quiz?.questions?.length) throw new Error("The saved quiz is no longer available. Regenerate it to create new questions.");
     currentQuiz = detail.quiz;
     quizAttemptSummary = detail.attempt_summary || null;
-    currentAttempt = null;
-    quizAnswers = {};
-    quizExplanations = {};
-    quizQuestionIndex = 0;
     quizHistoryDetail.hidden = true;
     renderAssessmentQuiz();
     showToast("Retake started with the same saved questions");
   } catch (error) {
+    closeQuizPlayerToLibrary();
     showToast(error.message || "Could not start this retake");
   }
 }
 
+// Regenerate from the Library never loads the old quiz into an inline view: the Library shows a
+// "generating" card, then the new quiz's own card to Start from.
 async function regenerateHistoryQuiz(attempt) {
-  try {
-    await selectHistoryQuizVariant(attempt);
-    quizHistoryDetail.hidden = true;
-    await regenerateAssessmentQuiz();
-  } catch (error) {
-    showToast(error.message || "Could not regenerate this quiz");
+  if ((attempt.topic_id || "document") !== "document") {
+    showToast("Quizzes are no longer created per topic. Create a quiz for the whole document instead.");
+    return;
   }
+  quizDocumentSelect.value = attempt.document_id;
+  quizDifficultySelect.value = attempt.difficulty || "easy";
+  quizScopeSelect.value = "document";
+  quizHistoryDetail.hidden = true;
+  await regenerateAssessmentQuiz({ inLibrary: true, fallbackName: (attempt.title || "").trim() });
 }
 
 function moveQuizQuestion(direction) {
@@ -1191,14 +1219,30 @@ function quizTypeLabel(questionType) {
     || questionType;
 }
 
+// Counted from the questions actually in the quiz (the plan's distribution is only a fallback): a
+// mixed quiz must read as its real mix, never as a generic "Multiple Choice".
 function documentQuizTypeBreakdown(quiz) {
-  if (quiz.assessment_plan?.type_distribution) return quiz.assessment_plan.type_distribution;
+  if (!quiz?.questions?.length) return quiz?.assessment_plan?.type_distribution || {};
   const counts = {};
-  (quiz.questions || []).forEach((question) => {
+  quiz.questions.forEach((question) => {
     const questionType = question.question_type || "single_choice";
     counts[questionType] = (counts[questionType] || 0) + 1;
   });
   return counts;
+}
+
+// "6 Multiple Choice · 3 True/False · 3 Fill in the Blank"; a single-type quiz reads as just its name.
+function quizTypeSummary(questionTypes) {
+  const counts = {};
+  questionTypes.forEach((questionType) => {
+    const key = questionType || "single_choice";
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  const order = ["single_choice", "true_false", "multi_select", "fill_blank", "short_answer", "matching"];
+  const types = [...order.filter((questionType) => counts[questionType]),
+    ...Object.keys(counts).filter((questionType) => !order.includes(questionType))];
+  if (types.length === 1) return quizTypeLabel(types[0]);
+  return types.map((questionType) => `${counts[questionType]} ${quizTypeLabel(questionType)}`).join(" · ");
 }
 
 function quizPartialSuffix(quiz) {
@@ -1304,6 +1348,7 @@ function renderQuizPlayer() {
     document.getElementById("quiz-player-nav").innerHTML = "";
     document.getElementById("quiz-player-difficulty").textContent = "";
     document.getElementById("quiz-player-model").hidden = true;
+    document.getElementById("quiz-player-types").textContent = "";
     return;
   }
   if (quizResultState) { renderQuizResultState(); return; }
@@ -1330,6 +1375,7 @@ function renderQuizPlayerQuestion() {
   const modelEl = document.getElementById("quiz-player-model");
   modelEl.textContent = modelInfo ? `Generated by ${modelLabel(modelInfo.model_id, modelInfo.name)}` : "";
   modelEl.hidden = !modelInfo;
+  document.getElementById("quiz-player-types").textContent = quizTypeSummary(currentQuiz.questions.map((item) => item.question_type));
   // Flashcard practice: one matching activity covers several cards ("Question 3 of 11 · covers 14 cards").
   const coveredCards = Number(currentQuiz.assessment_plan?.covered_cards) || 0;
   document.getElementById("quiz-player-position").textContent = `Question ${quizQuestionIndex + 1} of ${total}`
@@ -1483,6 +1529,7 @@ function buildQuizResult(attempt, quiz, fallback = {}) {
     correctCount,
     unansweredCount,
     incorrectCount: Math.max(0, total - correctCount - unansweredCount),
+    typeSummary: items.length ? quizTypeSummary(items.map((item) => item.questionType)) : "",
     partialNote: partial && requested && requested > total ? `This quiz has ${total} of the ${requested} requested questions.` : "",
     items,
   };
@@ -1533,6 +1580,9 @@ function renderQuizResults() {
   const model = document.getElementById("quiz-results-model");
   model.textContent = result.model ? `Generated by ${result.model}` : "";
   model.hidden = !result.model;
+  const types = document.getElementById("quiz-results-types");
+  types.textContent = result.typeSummary;
+  types.hidden = !result.typeSummary;
   document.getElementById("quiz-results-score").textContent = `${result.score} / ${result.total}`;
   document.getElementById("quiz-results-percentage").textContent = `${result.percentage}%`;
   document.getElementById("quiz-results-correct").textContent = String(result.correctCount);

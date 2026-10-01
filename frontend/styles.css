@@ -2874,6 +2874,8 @@ body[data-page="session"] [data-session-pane="quiz"].quiz-player-open #quiz-play
   font-size: 12px; font-weight: 650; text-transform: capitalize;
 }
 .quiz-player-model { font-size: 12px; color: var(--muted); }
+.quiz-player-types { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+.quiz-player-types:empty { display: none; }
 .quiz-player-progress { margin-top: 20px; }
 .quiz-player-progress-row { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
 .quiz-player-progress-track { height: 6px; border-radius: 999px; background: var(--session-line, #e2e4f3); overflow: hidden; }

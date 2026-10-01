@@ -58,6 +58,7 @@ const uploadStatus = document.getElementById("upload-status");
               <span class="quiz-player-badge" id="quiz-player-difficulty"></span>
               <span class="quiz-player-model" id="quiz-player-model" hidden></span>
             </div>
+            <p class="quiz-player-types" id="quiz-player-types"></p>
           </div>
         </header>
         <div class="quiz-player-progress">
@@ -88,6 +89,7 @@ const uploadStatus = document.getElementById("upload-status");
             <span class="quiz-player-badge" id="quiz-results-difficulty"></span>
             <span class="quiz-player-model" id="quiz-results-model" hidden></span>
           </div>
+          <p class="quiz-player-types" id="quiz-results-types" hidden></p>
         </header>
         <section class="quiz-results-score-card" aria-label="Score">
           <div class="quiz-results-score">
