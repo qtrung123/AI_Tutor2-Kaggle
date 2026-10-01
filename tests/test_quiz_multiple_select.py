@@ -165,6 +165,60 @@ class ValidationTests(unittest.TestCase):
         self.assertRejected(multi_candidate(16, 17), "duplicate_stem", accepted=[first])
 
 
+class DenseLectureDistractorTests(unittest.TestCase):
+    """Real lecture excerpts name most of their subject's terms in one passage. A plausible
+    same-subject distractor recombines words from DIFFERENT sentences and must stay valid; one
+    whose words are asserted together in one sentence is a true statement and is still refused."""
+
+    TEXTS = [
+        "CPU scheduling decides which process in the ready queue gets the CPU. First-Come First-Served (FCFS) "
+        "runs processes in arrival order and is non-preemptive. FCFS can cause the convoy effect when a long "
+        "process delays short ones.",
+        "Shortest Job First (SJF) selects the process with the smallest next CPU burst. SJF gives the minimum "
+        "average waiting time for a given set of processes. Its preemptive version is called Shortest Remaining "
+        "Time First.",
+        "Round Robin (RR) gives each process a fixed time quantum. When the quantum expires the process is "
+        "preempted and moved to the tail of the ready queue. If the quantum is very large, Round Robin behaves like FCFS.",
+        "Priority scheduling assigns a priority number to each process and runs the highest priority first. A major "
+        "problem is starvation, where low priority processes may never run. Aging gradually increases the priority "
+        "of processes that wait for a long time.",
+    ]
+
+    def setUp(self):
+        self.units = build_study_units([
+            {"content": text, "metadata": {"chunk_id": f"os_{index}", "document_id": "os.pdf"}}
+            for index, text in enumerate(self.TEXTS)
+        ])
+
+    def candidate(self, **overrides):
+        raw = {
+            "evidence_quotes": [
+                "FCFS can cause the convoy effect when a long process delays short ones.",
+                "First-Come First-Served (FCFS) runs processes in arrival order and is non-preemptive.",
+            ],
+            "question": "Which statements about First-Come First-Served scheduling are correct?",
+            "options": ["FCFS can cause the convoy effect", "FCFS always gives the minimum average waiting time",
+                        "FCFS runs processes in arrival order", "FCFS uses a fixed time quantum"],
+            "correct_answers": ["FCFS can cause the convoy effect", "FCFS runs processes in arrival order"],
+            "explanation": "Both statements are made in the excerpt about FCFS.",
+        }
+        raw.update(overrides)
+        return raw
+
+    def test_same_subject_distractors_from_other_sentences_are_valid(self):
+        question, _ = validate_multiple_select_candidate(self.candidate(), self.units, [], "medium", 1, SCOPE, 1)
+        self.assertEqual((question["question_type"], question["correct_answers"]), ("multi_select", ["A", "C"]))
+
+    def test_a_true_statement_in_one_sentence_is_still_refused(self):
+        for distractor in ("FCFS scheduling is non-preemptive", "Round Robin gives each process a fixed time quantum"):
+            with self.subTest(distractor=distractor):
+                raw = self.candidate()
+                raw["options"][3] = distractor
+                with self.assertRaises(CandidateRejected) as caught:
+                    validate_multiple_select_candidate(raw, self.units, [], "medium", 1, SCOPE, 1)
+                self.assertEqual(caught.exception.code, "supported_distractor")
+
+
 class ScoringTests(unittest.TestCase):
     def test_exact_set_grading(self):
         correct = ["A", "B"]

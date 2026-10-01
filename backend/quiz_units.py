@@ -658,14 +658,14 @@ def _token_supported(token: str, haystack_squashed: str) -> bool:
     return False
 
 
-def _distinctive_tokens(text: str, units: list[dict]) -> frozenset[str]:
+def _distinctive_tokens(text: str, units: list[dict], min_chars: int = QUIZ_LINK_TOKEN_MIN_CHARS) -> frozenset[str]:
     """Meaningful words of `text` that can actually tell one part of the context from another.
 
     Words present in more than QUIZ_COMMON_TOKEN_SHARE of the excerpts (function words, the
     document's own topic word) carry no evidence, in any language, so they are ignored. This
     replaces per-language stopword lists.
     """
-    tokens = content_tokens(text, QUIZ_LINK_TOKEN_MIN_CHARS)
+    tokens = content_tokens(text, min_chars)
     if len(units) < QUIZ_COMMON_MIN_UNITS:
         return tokens
     limit = QUIZ_COMMON_TOKEN_SHARE * len(units)
@@ -1082,6 +1082,7 @@ QUIZ_MULTI_SELECT_DISTRACTOR_MIN_CHARS = 8
 # A wrong option whose distinctive words occur TOGETHER in one excerpt (or two neighbouring ones) at
 # least this much is treated as a statement the material supports, i.e. possibly true.
 QUIZ_MULTI_SELECT_DISTRACTOR_SUPPORT = 0.75
+QUIZ_MULTI_SELECT_DISTRACTOR_TOKEN_MIN_CHARS = 3
 
 QUIZ_MULTI_SELECT_OUTPUT_SCHEMA = {
     "type": "object",
@@ -1162,20 +1163,35 @@ def _statement_supported_in_context(option: str, units: list[dict]) -> bool:
     Only a statement-like option is judged: one with at least QUIZ_MIN_ANSWER_MATCHES distinctive
     words (_distinctive_tokens). It counts as supported when it is written in an excerpt, or when
     QUIZ_MULTI_SELECT_DISTRACTOR_SUPPORT of its distinctive words -- matched like answers are
-    (_token_supported: glued text, accents, inflections) -- occur together in one excerpt. A good
-    distractor recombines words from different places; one whose words all sit in one passage is
-    refused, accepting some false rejections."""
-    tokens = _distinctive_tokens(option, units)
+    (_token_supported: glued text, accents, inflections) -- occur together in one SENTENCE (the
+    unit a statement is asserted in). A whole excerpt is too wide: a lecture passage names most of
+    its subject's terms, so every plausible same-subject distractor (exactly what the prompt asks
+    for) would be refused. A distractor recombining words from different sentences is accepted;
+    text without sentence punctuation stays one sentence, i.e. is judged as a whole (conservative)."""
+    # Short words count here (stopwords never do): the subject of a statement is often a short
+    # acronym (CPU, FCFS, SJF), and losing it would let a swapped-subject option match the other
+    # subject's sentence. Extra words can only make an option look MORE supported per sentence.
+    tokens = _distinctive_tokens(option, units, QUIZ_MULTI_SELECT_DISTRACTOR_TOKEN_MIN_CHARS)
     if len(tokens) < QUIZ_MIN_ANSWER_MATCHES:
         return False
     option_squashed = squash(option)
     for context in [*units, *_adjacent_pairs(units)]:
         if len(option_squashed) >= QUIZ_MULTI_SELECT_DISTRACTOR_MIN_CHARS and option_squashed in context["_squashed"]:
             return True
-        found = sum(_token_supported(token, context["_squashed"]) for token in tokens)
-        if found >= QUIZ_MIN_ANSWER_MATCHES and found / len(tokens) >= QUIZ_MULTI_SELECT_DISTRACTOR_SUPPORT:
-            return True
+    for unit in units:
+        for sentence in _SENTENCE_BREAK.split(unit["evidence_excerpt"]):
+            sentence_squashed = squash(sentence)
+            if not sentence_squashed:
+                continue
+            found = sum(_token_supported(token, sentence_squashed) for token in tokens)
+            if found >= QUIZ_MIN_ANSWER_MATCHES and found / len(tokens) >= QUIZ_MULTI_SELECT_DISTRACTOR_SUPPORT:
+                return True
     return False
+
+
+# Sentence ends (followed by whitespace, so decimals and glued text never split), line breaks and
+# bullet glyphs: where one asserted statement ends and the next begins.
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?;。！？])\s+|\n+|\s*[•▪●◦]\s*")
 
 
 def _option_key(option: str) -> str:
