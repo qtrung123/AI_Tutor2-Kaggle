@@ -3543,22 +3543,29 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
   .pcal-sheet{left:auto;right:0}
   .pcal-range{font-size:16px}
 }
-/* Collapsible side rails: Materials and Study queue fold to a 44px icon rail where they are side
-   columns (>=1280px); the calendar column takes the freed width. Narrower layouts keep them open. */
+/* Collapsible side rails: where Materials and Study queue are side columns (>=1280px) each folds
+   away completely -- its grid column is removed and the calendar takes the whole freed width -- and
+   only a small floating edge button (styled like Ask AI Tutor) remains to reopen it. Narrower
+   layouts keep them open. */
 .pcal-rail-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .pcal-queue-head .pcal-rail-title{flex:1;min-width:0}
 .pcal-rail-collapse,.pcal-rail-expand{display:none}
 @media (min-width:1280px){
   .pcal{transition:grid-template-columns .18s var(--pcal-ease)}
-  .pcal.is-materials-collapsed{grid-template-columns:44px minmax(0,1fr) 236px}
-  .pcal.is-queue-collapsed{grid-template-columns:196px minmax(0,1fr) 44px}
-  .pcal.is-materials-collapsed.is-queue-collapsed{grid-template-columns:44px minmax(0,1fr) 44px}
+  .pcal.is-materials-collapsed{grid-template-columns:minmax(0,1fr) 236px;grid-template-areas:"main queue"}
+  .pcal.is-queue-collapsed{grid-template-columns:196px minmax(0,1fr);grid-template-areas:"materials main"}
+  .pcal.is-materials-collapsed.is-queue-collapsed{grid-template-columns:minmax(0,1fr);grid-template-areas:"main"}
   .pcal-rail-collapse{display:inline-grid;place-items:center;flex:none;width:22px;height:22px;margin:-4px -4px -4px 0;padding:0;border:0;border-radius:6px;background:transparent;color:var(--muted);font-size:17px;line-height:1;cursor:pointer;transition:background-color .15s var(--pcal-ease),color .15s var(--pcal-ease)}
   .pcal-rail-collapse:hover{background:var(--pcal-line-soft);color:var(--ink)}
-  .pcal.is-materials-collapsed .pcal-materials,.pcal.is-queue-collapsed .pcal-queue{padding:8px 0;align-items:center;overflow:hidden}
+  /* A folded rail leaves the grid (absolutely positioned, zero size); only its edge button shows. */
+  .pcal.is-materials-collapsed .pcal-materials,.pcal.is-queue-collapsed .pcal-queue{position:absolute;top:50%;z-index:7;grid-area:auto;width:0;height:0;min-height:0;padding:0;border:0;background:transparent;overflow:visible}
+  .pcal.is-materials-collapsed .pcal-materials{left:6px}
+  .pcal.is-queue-collapsed .pcal-queue{right:6px}
   .pcal.is-materials-collapsed .pcal-materials>:not(.pcal-rail-expand),.pcal.is-queue-collapsed .pcal-queue>:not(.pcal-rail-expand){display:none!important}
-  .pcal.is-materials-collapsed .pcal-materials>.pcal-rail-expand,.pcal.is-queue-collapsed .pcal-queue>.pcal-rail-expand{display:inline-grid;place-items:center;width:30px;height:30px;padding:0;border:0;border-radius:8px;background:transparent;color:var(--pcal-ink-2);cursor:pointer;transition:background-color .15s var(--pcal-ease),color .15s var(--pcal-ease)}
-  .pcal-rail-expand:hover{background:var(--pcal-line-soft);color:var(--session-accent)}
+  .pcal.is-materials-collapsed .pcal-materials>.pcal-rail-expand,.pcal.is-queue-collapsed .pcal-queue>.pcal-rail-expand{display:inline-grid;place-items:center;position:absolute;top:0;width:40px;height:40px;padding:0;border:1px solid var(--session-accent,#6876f5);border-radius:999px;background:#fff;color:var(--session-accent,#6876f5);box-shadow:0 6px 18px rgba(20,24,60,.14);transform:translateY(-50%);cursor:pointer;transition:background-color .15s var(--pcal-ease),color .15s var(--pcal-ease)}
+  .pcal.is-materials-collapsed .pcal-materials>.pcal-rail-expand{left:0}
+  .pcal.is-queue-collapsed .pcal-queue>.pcal-rail-expand{right:0}
+  .pcal-rail-expand:hover{background:var(--session-accent,#6876f5);color:#fff}
   .pcal-rail-expand svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
   .pcal-rail-collapse:focus-visible,.pcal-rail-expand:focus-visible{outline:2px solid var(--session-accent);outline-offset:1px}
 }

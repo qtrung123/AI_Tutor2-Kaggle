@@ -1440,8 +1440,9 @@ function renderPlannerWorkspace() {
 }
 
 // -- collapsible side rails ---------------------------------------------------------
-// Materials and Study queue each fold to a slim icon rail (>=1280px, where they are side columns);
-// the calendar grid column takes the freed width. The state is a per-browser convenience.
+// Materials and Study queue each fold away completely (>=1280px, where they are side columns),
+// leaving a floating edge button; the calendar takes the freed width. The state is a per-browser
+// convenience.
 const PCAL_RAIL_STORAGE_KEYS = { materials: "planner_materials_collapsed", queue: "planner_queue_collapsed" };
 const pcalRails = Object.fromEntries(Object.entries(PCAL_RAIL_STORAGE_KEYS).map(([rail, key]) => {
   try {

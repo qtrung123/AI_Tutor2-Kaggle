@@ -4,8 +4,8 @@
 1. "Available" blocks are the learner's marked time minus Google busy time -- exactly the pieces the
    scheduler uses (the shared CASES of tests/test_planner_effective_availability.py) -- never one block
    drawn through a "Busy" block; with "Avoid conflicts" off the marked time is shown whole again.
-2. Materials and Study queue fold independently to a slim icon rail, the calendar takes the freed
-   width, and the state is remembered in localStorage (planner_materials_collapsed /
+2. Materials and Study queue fold independently to zero width (only a floating edge button stays),
+   the calendar takes the freed width, and the state is remembered in localStorage (planner_materials_collapsed /
    planner_queue_collapsed). "Now" is pinned to Mon 2026-09-21 08:00. Skipped without Chrome.
 """
 
@@ -41,7 +41,8 @@ const railState = () => ({classes: $("planner-workspace").className, widths: wid
   materialsExpand: visible($("pcal-materials-expand")), queueExpand: visible($("pcal-queue-expand")),
   materialsCollapse: [visible($("pcal-materials-collapse")), $("pcal-materials-collapse").getAttribute("aria-expanded")],
   queueCollapse: [visible($("pcal-queue-collapse")), $("pcal-queue-collapse").getAttribute("aria-expanded")],
-  gcalButtons: [...$("pcal-gcal").querySelectorAll("button, input")].map((b) => b.id), weekRange: $("pcal-range").textContent});
+  gcalButtons: [...$("pcal-gcal").querySelectorAll("button, input")].map((b) => b.id), weekRange: $("pcal-range").textContent,
+  expandButtonSizes: ["materials", "queue"].map((rail) => { const r = $(`pcal-${rail}-expand`).getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)]; })});
 (async () => {
   await sleep(1500);
   const noMotion = document.createElement("style"); noMotion.textContent = "*,*::before,*::after{transition:none!important;animation:none!important}"; document.head.appendChild(noMotion);
@@ -126,6 +127,9 @@ setTimeout(() => {
 """
 
 
+GAP = 10   # .pcal column gap, removed together with a folded rail's column
+
+
 def _driver():
     return (DRIVER.replace("__CASES__", json.dumps(CASES)).replace("__DAY__", DAY)
             .replace("__FROM__", AVAILABLE[0]).replace("__TO__", AVAILABLE[1]))
@@ -198,8 +202,8 @@ class EffectiveAvailabilityUiTests(unittest.TestCase):
         rails = self.out["rails"]
         expanded, folded = rails["expanded"], rails["materials"]
         self.assertIn("is-materials-collapsed", folded["classes"])
-        self.assertEqual(folded["widths"]["materials"], 44)
-        self.assertEqual(folded["widths"]["main"] - expanded["widths"]["main"], 196 - 44)   # no reserved blank column
+        self.assertEqual(folded["widths"]["materials"], 0)
+        self.assertEqual(folded["widths"]["main"] - expanded["widths"]["main"], 196 + GAP)   # column and its gap are gone
         self.assertEqual(folded["widths"]["queue"], 236)
         self.assertTrue(folded["materialsExpand"])
         self.assertFalse(folded["materialsList"] or folded["gcal"])
@@ -210,12 +214,13 @@ class EffectiveAvailabilityUiTests(unittest.TestCase):
     def test_both_collapsed_then_each_expands_independently(self):
         rails = self.out["rails"]
         both, queue = rails["both"], rails["queue"]
-        self.assertEqual((both["widths"]["materials"], both["widths"]["queue"]), (44, 44))
-        self.assertEqual(both["widths"]["main"] - rails["expanded"]["widths"]["main"], 196 - 44 + 236 - 44)
+        self.assertEqual((both["widths"]["materials"], both["widths"]["queue"]), (0, 0))
+        self.assertEqual(both["widths"]["main"] - rails["expanded"]["widths"]["main"], 196 + GAP + 236 + GAP)
+        self.assertEqual(both["expandButtonSizes"], [[40, 40], [40, 40]])
         self.assertEqual(both["stored"], ["true", "true"])
         self.assertTrue(both["materialsExpand"] and both["queueExpand"])
         # Materials reopened, queue still folded: Google Calendar controls are back.
-        self.assertEqual((queue["widths"]["materials"], queue["widths"]["queue"]), (196, 44))
+        self.assertEqual((queue["widths"]["materials"], queue["widths"]["queue"]), (196, 0))
         self.assertTrue(queue["gcal"] and queue["materialsList"])
         self.assertIn("pcal-gcal-avoid", queue["gcalButtons"])
         self.assertEqual(queue["stored"], ["false", "true"])
@@ -240,7 +245,7 @@ class PersistedRailStateUiTests(unittest.TestCase):
         self.assertEqual(out["errors"], [])
         self.assertIn("is-materials-collapsed", out["classes"])
         self.assertIn("is-queue-collapsed", out["classes"])
-        self.assertEqual((out["widths"]["materials"], out["widths"]["queue"]), (44, 44))
+        self.assertEqual((out["widths"]["materials"], out["widths"]["queue"]), (0, 0))
 
 
 if __name__ == "__main__":
