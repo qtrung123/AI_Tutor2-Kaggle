@@ -2991,6 +2991,31 @@ body[data-page="session"] [data-session-pane="quiz"].quiz-player-open #quiz-play
 .quiz-review-option.is-multi .quiz-review-option-indicator { border-radius: 6px; }
 .quiz-review-option.is-missed { border-style: dashed; background: #fff; }
 .quiz-review-option.is-missed .quiz-review-option-indicator { background: #fff; color: #1d8a4c; }
+/* Matching (flashcard practice): cards on the left, shuffled answers on the right; click or drag to pair. */
+.quiz-matching { display: grid; gap: 12px; }
+.quiz-matching-hint { margin: 0; font-size: 13px; font-weight: 650; color: var(--muted); }
+.quiz-matching-columns { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.quiz-matching-prompts { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.quiz-matching-row { display: flex; align-items: center; gap: 8px; }
+.quiz-matching-prompt, .quiz-matching-answer {
+  width: 100%; text-align: left; padding: 12px 14px; border-radius: 14px; border: 1.5px solid var(--session-line, #e2e4f3);
+  background: #fff; font: inherit; font-size: 14px; cursor: pointer; transition: border-color .15s ease, background .15s ease;
+}
+.quiz-matching-prompt { display: grid; gap: 6px; }
+.quiz-matching-prompt-text { font-weight: 650; }
+.quiz-matching-slot { padding: 6px 10px; border-radius: 10px; border: 1.5px dashed #c3c9ee; color: var(--muted); font-size: 13px; }
+.quiz-matching-prompt.is-paired .quiz-matching-slot { border-style: solid; border-color: var(--session-accent, #6876f5); background: var(--session-wash, #f2f3ff); color: #202b48; }
+.quiz-matching-prompt:hover, .quiz-matching-answer:hover { border-color: #b9c0ef; }
+.quiz-matching-prompt.is-active, .quiz-matching-answer.is-active, .quiz-matching-prompt.is-drop-target {
+  border-color: var(--session-accent, #6876f5); box-shadow: 0 0 0 3px rgba(104, 118, 245, .15);
+}
+.quiz-matching-answers { display: grid; gap: 10px; }
+.quiz-matching-answer[draggable="true"] { cursor: grab; }
+.quiz-matching-answer.is-used { opacity: .55; }
+.quiz-matching-clear { flex: none; font-size: 13px; }
+.quiz-review-option.is-unpaired { border-style: dashed; }
+.flashcard-quiz-summary { margin: 0; font-size: 13px; color: var(--muted); }
+@media (max-width: 640px) { .quiz-matching-columns { grid-template-columns: 1fr; } }
 /* Fill-in-the-blank: a text field in the player; review shows the learner's text and the accepted answer. */
 .quiz-player-fill-blank { display: grid; gap: 8px; }
 .quiz-player-fill-caption { font-size: 13px; font-weight: 650; color: var(--muted); }

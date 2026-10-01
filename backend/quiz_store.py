@@ -700,7 +700,7 @@ def _row_to_attempt(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
     answers = {
         str(answer["question_id"]): (
             json.loads(answer["selected_answers_json"] or "[]")
-            if (answer["question_type"] or "single_choice") == "multi_select"
+            if (answer["question_type"] or "single_choice") in ("multi_select", "matching")
             else answer["selected_answer"]
         )
         for answer in answer_rows
@@ -814,8 +814,9 @@ def _save_attempt_row(
     results = list(progress.get("question_results") or [])
     answers = {str(key): value for key, value in (progress.get("answers") or {}).items()}
     if not results:
-        # An in-progress answer that is a list is a multi_select selection: it is stored as an array
-        # (selected_answers_json) with its type, so resume returns the same array.
+        # An in-progress answer that is a list (a multi_select selection, or a matching answer's
+        # positional letters) is stored as an array (selected_answers_json) tagged multi_select, so
+        # resume returns the same array.
         results = [
             {
                 "question_id": int(question_id),

@@ -84,10 +84,27 @@ def _written_answer(question: dict, value) -> str:
     return _fill_blank_answer(value, 1000 if _question_type(question) == "short_answer" else 200)
 
 
+def _matching_answer(question: dict, value) -> list[str]:
+    """A matching answer: one option letter (or "" = not paired yet) per prompt, in prompt order.
+    Positional, so never sorted or deduplicated like an option selection."""
+    pairs = len(question.get("options") or [])
+    values = value if isinstance(value, list) else []
+    if len(values) != pairs or not all(isinstance(item, str) or item is None for item in values):
+        raise ValueError("A matching answer must give one option letter per prompt.")
+    letters = [str(item or "").strip().upper() for item in values]
+    valid = set("ABCD"[:pairs])
+    if any(letter and letter not in valid for letter in letters):
+        raise ValueError("A selected answer does not exist for its question.")
+    return letters
+
+
 def _saved_answer(question: dict, value):
     """Normalize one submitted/autosaved answer for its question type (None = unanswered)."""
     if _is_written(question):
         return _written_answer(question, value) or None
+    if _question_type(question) == "matching":
+        letters = _matching_answer(question, value) if value not in (None, "", []) else []
+        return letters if any(letters) else None
     if value in (None, "", []):
         return None
     selected = _selected_answers(value)
@@ -152,7 +169,8 @@ def load_quiz_with_attempt(
 def _quiz_from_attempt_snapshot(attempt: dict) -> dict | None:
     results = list(attempt.get("question_results") or [])
     if not results or any(
-        len(result.get("options") or []) != 4 and result.get("question_type") not in WRITTEN_QUESTION_TYPES for result in results
+        len(result.get("options") or []) != 4 and result.get("question_type") not in (*WRITTEN_QUESTION_TYPES, "matching")
+        for result in results
     ):
         return None
     topic_id = str(attempt.get("topic_id") or "document")
@@ -318,6 +336,12 @@ def submit_quiz_attempt(
                 normalized_answers[str(key)] = [text]
             elif not allow_unanswered:
                 raise ValueError("Every quiz question must be answered exactly once before submission.")
+        elif question is not None and _question_type(question) == "matching":
+            letters = _matching_answer(question, value) if value not in (None, "", []) else []
+            if any(letters):
+                normalized_answers[str(key)] = letters
+            elif not allow_unanswered:
+                raise ValueError("Every quiz question must be answered exactly once before submission.")
         elif not (allow_unanswered and value in (None, "", [])):
             normalized_answers[str(key)] = _selected_answers(value)
     expected_ids = {str(question.get("id")) for question in questions}
@@ -331,7 +355,7 @@ def submit_quiz_attempt(
             continue
         selected = normalized_answers[str(question.get("id"))]
         question_type = _question_type(question)
-        if question_type in WRITTEN_QUESTION_TYPES:
+        if question_type in WRITTEN_QUESTION_TYPES or question_type == "matching":
             continue
         valid_letters = set("ABCD"[:len(question.get("options") or [])])
         if any(answer not in valid_letters for answer in selected):
@@ -348,16 +372,21 @@ def submit_quiz_attempt(
             # (a flashcard short answer's self-check questions can later be marked by the learner).
             correct_answers = _fill_blank_correct_answers(question)
             is_correct = bool(selected_answers) and fill_blank_is_correct(selected_answers[0], correct_answers)
+        elif _question_type(question) == "matching":
+            # Positional: correct only when every prompt is paired with its own card's answer.
+            correct_answers = [str(value).strip().upper() for value in question.get("correct_answers") or []]
+            is_correct = bool(selected_answers) and selected_answers == correct_answers
         else:
             correct_answers = sorted(_correct_answers(question))
             is_correct = option_answers_correct(selected_answers, correct_answers)
+        matching = _question_type(question) == "matching"
         results.append({
             "question_id": int(question_id),
             "question": question.get("question", ""),
             "options": list(question.get("options", [])),
-            "selected_answer": selected_answers[0] if selected_answers else "",
+            "selected_answer": (",".join(selected_answers) if matching else selected_answers[0]) if selected_answers else "",
             "selected_answers": selected_answers,
-            "correct_answer": correct_answers[0],
+            "correct_answer": ",".join(correct_answers) if matching else correct_answers[0],
             "correct_answers": correct_answers,
             "question_type": _question_type(question),
             "is_correct": is_correct,

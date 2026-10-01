@@ -2,7 +2,8 @@
 mock): the sheet (Type / Questions / Start Quiz), the "No flashcards available" state, the request
 sent for the exact set on screen, opening the created quiz in the focused Quiz Player, text input for
 short_answer and fill_blank, autosave + resume of typed answers, Results/Review showing the typed and
-the canonical answer, and learner-marked self-check questions. Backend behavior is covered by
+the canonical answer, learner-marked self-check questions, and a matching activity (click-to-pair,
+drag and drop, moving and clearing a pair, per-pair review). Backend behavior is covered by
 tests/test_flashcard_written_quiz.py; the mock mirrors its normalized exact-match grading.
 
 Skipped when Chrome is not installed (set CHROME_PATH to point at it). No backend, no network.
@@ -51,6 +52,18 @@ window.fetch = async (input, init = {}) => {
   if (p === "/api/flashcards/lecture.pdf" && method === "GET") {
     return json({set_id: "set-1", model_id: "qwen-2.5-7b", cache_hit: true, cards: CARDS});
   }
+  if (p === "/api/flashcards/lecture.pdf/practice-quiz" && method === "POST" && JSON.parse(init.body).mode === "matching") {
+    window.__practiceBodies.push(JSON.parse(init.body));
+    const quiz = {quiz_id: "fc-match", document_id: "lecture.pdf", title: "Lecture · Flashcard practice (Matching)", difficulty: "easy",
+      topic_id: "document", topic_name: "Entire document", assessment_scope: "document", created_at: "2026-01-03T00:00:00Z",
+      assessment_plan: {planner_version: "flashcard_written_v1", source: "flashcards", self_check_question_ids: [],
+        covered_cards: 3, type_distribution: {matching: 1}},
+      questions: [{id: 1, question: "Match each card with its answer.\n" + CARDS.map((card, index) => `${index + 1}. ${card.front}`).join("\n"),
+        options: [`A. ${CARDS[1].back}`, `B. ${CARDS[2].back}`, `C. ${CARDS[0].back}`], correct_answer: "C,A,B", correct_answers: ["C", "A", "B"],
+        question_type: "matching", topic_id: "t1", topic_name: "Topic 1", difficulty: "easy", explanation: "Pairs from your flashcards.", source_chunk_ids: []}]};
+    window.__quizzes["fc-match"] = quiz;
+    return json(quiz);
+  }
   if (p === "/api/flashcards/lecture.pdf/practice-quiz" && method === "POST") {
     window.__practiceBodies.push(JSON.parse(init.body));
     const quiz = {quiz_id: "fc-quiz", document_id: "lecture.pdf", title: "Lecture · Flashcard practice (Mixed)", difficulty: "easy",
@@ -70,6 +83,14 @@ window.fetch = async (input, init = {}) => {
     const quiz = window.__quizzes[body.quiz_id];
     let score = 0;
     const question_results = quiz.questions.map((q) => {
+      if (q.question_type === "matching") {
+        const letters = body.answers[String(q.id)] || [];
+        const right = letters.length > 0 && letters.join(",") === q.correct_answers.join(",");
+        if (right) score += 1;
+        return {question_id: q.id, question: q.question, options: q.options, question_type: "matching", selected_answer: letters.join(","),
+          selected_answers: letters, correct_answer: q.correct_answer, correct_answers: q.correct_answers, is_correct: right,
+          explanation: q.explanation, topic_name: "Topic 1", source_chunk_ids: []};
+      }
       const selected = String(body.answers[String(q.id)] || "").trim();
       const correct = Boolean(selected) && q.correct_answers.some((answer) => normalizeText(answer) === normalizeText(selected));
       if (correct) score += 1;
@@ -175,6 +196,50 @@ const reviewRows = () => [...document.querySelectorAll("#quiz-review-options .qu
   out.markedScore = $("quiz-results-score").textContent;
   out.overflow = document.documentElement.scrollWidth > window.innerWidth;
 
+  // Matching: the sheet counts cards; one activity pairs the three cards.
+  await openStudySession("lecture.pdf", "flashcards");
+  await sleep(400);
+  $("practice-flashcards-quiz").click();
+  await sleep(50);
+  [...document.querySelectorAll("#flashcard-quiz-mode .quiz-segmented-option")].find((b) => b.textContent === "Matching").click();
+  await sleep(50);
+  out.matchingSheet = {modes: segments("flashcard-quiz-mode").map((m) => m.label), summary: $("flashcard-quiz-summary").textContent,
+    fieldLabels: [...dialog().querySelectorAll(".quiz-sheet-field > span")].map((label) => label.textContent)};
+  $("flashcard-quiz-start").click();
+  await sleep(600);
+  const prompts = () => [...document.querySelectorAll(".quiz-matching-prompt")];
+  const answers = () => [...document.querySelectorAll(".quiz-matching-answer")];
+  const slots = () => prompts().map((prompt) => prompt.querySelector(".quiz-matching-slot").textContent);
+  out.matchingOpened = {position: $("quiz-player-position").textContent, question: $("quiz-player-question").textContent,
+    prompts: prompts().map((prompt) => prompt.querySelector(".quiz-matching-prompt-text").textContent),
+    answers: answers().map((answer) => answer.textContent), draggable: answers().every((answer) => answer.draggable),
+    optionCards: document.querySelectorAll(".quiz-player-answer-card").length, hasInput: Boolean(input())};
+  prompts()[0].click(); await sleep(20);                       // card first, then its answer
+  out.promptActive = prompts()[0].classList.contains("is-active");
+  answers()[2].click(); await sleep(20);
+  const transfer = new DataTransfer();                          // drag A onto card 2
+  answers()[0].dispatchEvent(new DragEvent("dragstart", {bubbles: true, dataTransfer: transfer}));
+  prompts()[1].dispatchEvent(new DragEvent("dragover", {bubbles: true, cancelable: true, dataTransfer: transfer}));
+  prompts()[1].dispatchEvent(new DragEvent("drop", {bubbles: true, cancelable: true, dataTransfer: transfer}));
+  await sleep(20);
+  answers()[1].click(); prompts()[2].click(); await sleep(20);  // answer first, then the card
+  out.pairedAll = {slots: slots(), used: answers().map((answer) => answer.classList.contains("is-used")), answered: $("quiz-player-answered-count").textContent};
+  answers()[2].click(); prompts()[2].click(); await sleep(20);  // C moves from card 1 to card 3
+  out.moved = slots();
+  document.querySelector(".quiz-matching-clear").click(); await sleep(20);   // clear card 2 (card 1 is empty now)
+  out.cleared = {slots: slots(), clearButtons: document.querySelectorAll(".quiz-matching-clear").length};
+  prompts()[0].click(); answers()[1].click(); await sleep(20);  // B -> card 1
+  prompts()[1].click(); answers()[0].click(); await sleep(700); // A -> card 2 again
+  out.matchingAutosave = window.__lastProgressBody.answers;
+  $("quiz-player-next").click();   // Finish Quiz
+  await sleep(400);
+  out.matchingResults = {score: $("quiz-results-score").textContent, submitted: window.__lastSubmitBody.answers};
+  $("quiz-results-review").click(); await sleep(100);
+  out.matchingReview = {status: $("quiz-review-status").textContent, question: $("quiz-review-question").textContent, rows: reviewRows(),
+    classes: [...document.querySelectorAll("#quiz-review-options .quiz-review-option")].map((row) =>
+      row.classList.contains("is-correct") ? "correct" : (row.classList.contains("is-wrong") ? "wrong" : "other"))};
+  out.matchingOverflow = document.documentElement.scrollWidth > window.innerWidth;
+
   const pre = document.createElement("pre"); pre.id = "harness-out"; pre.textContent = JSON.stringify(out); document.body.appendChild(pre);
 })().catch((error) => { out.fatal = String(error && error.stack || error); const pre = document.createElement("pre"); pre.id = "harness-out"; pre.textContent = JSON.stringify(out); document.body.appendChild(pre); });
 """
@@ -221,7 +286,7 @@ class FlashcardPracticeQuizUiTests(unittest.TestCase):
         sheet = self.out["sheet"]
         self.assertEqual(sheet["title"], "Practice as Quiz")
         self.assertTrue(sheet["emptyHidden"])
-        self.assertEqual([m["label"] for m in sheet["modes"]], ["Mixed", "Short Answer", "Fill Blank"])
+        self.assertEqual([m["label"] for m in sheet["modes"]], ["Mixed", "Short Answer", "Fill Blank", "Matching"])
         self.assertTrue(sheet["modes"][0]["active"])
         # Three cards: 5 and 10 are unavailable, "All" is chosen.
         self.assertEqual(sheet["counts"], [
@@ -230,7 +295,7 @@ class FlashcardPracticeQuizUiTests(unittest.TestCase):
         self.assertEqual(sheet["start"], "Start Quiz")
 
     def test_start_uses_the_set_on_screen_and_opens_the_player(self):
-        self.assertEqual(self.out["request"], [{"mode": "mixed", "question_count": None, "set_id": "set-1"}])
+        self.assertEqual(self.out["request"][0], {"mode": "mixed", "question_count": None, "set_id": "set-1"})
         opened = self.out["opened"]
         self.assertTrue(opened["dialogClosed"])
         self.assertTrue(opened["playerVisible"])
@@ -255,6 +320,41 @@ class FlashcardPracticeQuizUiTests(unittest.TestCase):
         self.assertEqual(review3["rows"], ["Your answerLots of processes want the CPU",
                                            "Correct answerBecause many processes compete for a few CPU cores at once."])
         self.assertEqual(review3["buttons"], [{"label": "I got it right", "disabled": False}, {"label": "I missed it", "disabled": True}])
+
+    def test_sheet_counts_cards_and_offers_matching(self):
+        sheet = self.out["matchingSheet"]
+        self.assertEqual(sheet["fieldLabels"], ["Type", "Cards"])
+        self.assertEqual(sheet["summary"], "Covers 3 cards · a matching activity pairs up to 4 cards")
+        self.assertEqual(self.out["request"][-1], {"mode": "matching", "question_count": None, "set_id": "set-1"})
+
+    def test_matching_board_click_drag_move_and_clear(self):
+        opened = self.out["matchingOpened"]
+        self.assertEqual(opened["position"], "Question 1 of 1 · covers 3 cards")
+        self.assertEqual(opened["question"], "Match each card with its answer.")
+        self.assertEqual(opened["prompts"], ["1. Which component orders processes?", "2. What guards counters?",
+                                             "3. Why do processes need a scheduler?"])
+        self.assertEqual(opened["answers"], ["A. semaphore", "B. Because many processes compete for a few CPU cores at once.",
+                                             "C. The scheduler"])
+        self.assertTrue(opened["draggable"])
+        self.assertEqual((opened["optionCards"], opened["hasInput"]), (0, False))
+        self.assertTrue(self.out["promptActive"])
+        self.assertEqual(self.out["pairedAll"], {
+            "slots": ["C. The scheduler", "A. semaphore", "B. Because many processes compete for a few CPU cores at once."],
+            "used": [True, True, True], "answered": "1 answered"})
+        self.assertEqual(self.out["moved"], ["Choose an answer", "A. semaphore", "C. The scheduler"])
+        self.assertEqual(self.out["cleared"], {"slots": ["Choose an answer", "Choose an answer", "C. The scheduler"], "clearButtons": 1})
+        self.assertEqual(self.out["matchingAutosave"], {"1": ["B", "A", "C"]})
+
+    def test_matching_results_show_each_pair(self):
+        self.assertEqual(self.out["matchingResults"], {"score": "0 / 1", "submitted": {"1": ["B", "A", "C"]}})
+        review = self.out["matchingReview"]
+        self.assertEqual(review["status"], "Incorrect")
+        self.assertEqual(review["question"], "Match each card with its answer.")
+        self.assertEqual(review["classes"], ["wrong", "correct", "wrong"])
+        self.assertEqual(review["rows"][1], "✓2. What guards counters? → A. semaphoreCorrect pair")
+        self.assertEqual(review["rows"][0], "✕1. Which component orders processes? → B. Because many processes compete for a few CPU cores at once."
+                                            "Correct: C. The scheduler")
+        self.assertFalse(self.out["matchingOverflow"])
 
     def test_learner_can_mark_a_self_check_answer(self):
         marked = self.out["marked"]

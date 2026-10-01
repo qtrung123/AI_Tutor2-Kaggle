@@ -1,7 +1,8 @@
-"""Flashcards -> written practice quiz (backend/flashcard_quiz_service.py) through the real API and
-SQLite store: exact counts with no MCQ fallback, fill_blank grounded in the document's own chunks
-(never in flashcard text), short_answer fallback per card, Mixed ~50/50, the "No flashcards
-available" state, owner/document/set isolation, autosave/resume of typed answers, submit/results/
+"""Flashcards -> practice quiz (backend/flashcard_quiz_service.py) through the real API and SQLite
+store: every requested card covered with no MCQ fallback, deterministic fill_blank (a document
+sentence for a short answer, else a cloze of the card's own sentence), short_answer fallback per
+card, matching activities (front <-> back, shuffled, positional grading), the Mixed distribution,
+the "No flashcards available" state, owner/document/set isolation, autosave/resume, submit/results/
 history, learner-marked self-check questions, and compatibility with ordinary quizzes. No LLM is
 called anywhere in this flow.
 """
@@ -53,7 +54,9 @@ CARDS = [
     ("Why is memory split into pages?", "Fixed size pages let the kernel map memory flexibly and avoid external fragmentation problems.", "sync", ["c2"]),
     ("What happens without synchronization?", "Two threads can interleave their updates and the final counter value becomes wrong or lost.", "sync", ["c2"]),
 ]
-CONCISE_GROUNDED = 4
+CONCISE_GROUNDED = 4   # document-sentence blanks: Planner written quizzes only, never Practice as Quiz
+# Cards 6-10: a sentence answer whose one key word becomes the blank.
+CARD_CLOZE = 5
 
 
 def save_cards(owner_id: str, document_id: str, cards=CARDS, model_id: str = "model-a") -> dict:
@@ -144,9 +147,21 @@ class FlashcardWrittenQuizTests(unittest.TestCase):
         self.assertIn("Only 10 flashcards", too_many.json()["detail"])
 
     # 2 ------------------------------------------------------------------------------------------
-    def test_fill_blank_questions_are_document_sentences_with_the_card_answer_blanked(self):
+    def test_practice_fill_blanks_come_only_from_the_cards_never_from_document_sentences(self):
         quiz = self.create(mode="fill_blank", question_count=10).json()
+        self.chunks_mock.assert_not_called()   # the document text is not even read
         fills = [q for q in quiz["questions"] if q["question_type"] == "fill_blank"]
+        self.assertEqual(len(fills), CARD_CLOZE)
+        self.assertTrue(all(q["explanation"].startswith("From your flashcard:") for q in fills))
+        # Cards 1-4 have a short answer the document states, but no cloze of their own: short answers.
+        shorts = [q for q in quiz["questions"] if q["question_type"] == "short_answer"]
+        self.assertEqual([q["question"] for q in shorts], [card[0] for card in CARDS[:5]])
+
+    def test_planner_written_quiz_keeps_document_sentence_blanks(self):
+        # The Planner calls the service directly (no card_only_fill_blank): unchanged behavior.
+        quiz = flashcard_quiz_service.create_flashcard_written_quiz(self.alice, DOC, "fill_blank", 10)
+        fills = [q for q in quiz["questions"] if q["question_type"] == "fill_blank"
+                 and q["explanation"].startswith("From the document:")]
         self.assertEqual(len(fills), CONCISE_GROUNDED)
         document_text = squash(" ".join(chunk["content"] for chunk in CHUNKS))
         chunk_ids = {chunk["metadata"]["chunk_id"] for chunk in CHUNKS}
@@ -155,14 +170,31 @@ class FlashcardWrittenQuizTests(unittest.TestCase):
             completed = question["question"].replace(FILL_BLANK_MARKER, question["correct_answer"])
             self.assertIn(squash(completed), document_text)            # the whole sentence is the document's
             self.assertTrue(set(question["source_chunk_ids"]) <= chunk_ids)
-            self.assertTrue(question["explanation"].startswith("From the document:"))
             self.assertNotIn(question["question"], [card[0] for card in CARDS])   # not the flashcard prompt
-        by_concept = {q["concept_id"]: q for q in fills}
         scheduler = next(q for q in fills if "orders runnable processes" in q["question"])
         self.assertEqual(scheduler["question"], f"The {FILL_BLANK_MARKER} orders runnable processes for the CPU in every time slice.")
         self.assertEqual(scheduler["correct_answer"], "scheduler")
         self.assertIn("The scheduler", scheduler["correct_answers"])   # the flashcard answer is accepted as written
-        self.assertEqual(len(by_concept), CONCISE_GROUNDED)
+        self.assertEqual(len({q["concept_id"] for q in fills}), CONCISE_GROUNDED)
+
+    def test_sentence_answers_become_a_cloze_of_the_card_itself(self):
+        quiz = self.create(mode="fill_blank", question_count=10).json()
+        clozes = [q for q in quiz["questions"] if q["question_type"] == "fill_blank"]
+        self.assertEqual(len(clozes), CARD_CLOZE)
+        backs = {card[1] for card in CARDS}
+        for question in clozes:
+            front, blanked = question["question"].split(" — ", 1)
+            self.assertIn(front, {card[0] for card in CARDS})
+            self.assertEqual(blanked.count(FILL_BLANK_MARKER), 1)
+            self.assertIn(blanked.replace(FILL_BLANK_MARKER, question["correct_answer"]), backs)
+            self.assertNotIn(question["correct_answer"].lower(), front.lower())   # never a giveaway
+            self.assertEqual(len(question["correct_answer"].split()), 1)
+        fragmentation = next(q for q in clozes if q["question"].startswith("Why is memory split into pages?"))
+        self.assertEqual(fragmentation["correct_answer"], "fragmentation")
+        # Deterministic: the same cards always give the same blanks.
+        again = self.create(mode="fill_blank", question_count=10).json()
+        self.assertEqual([(q["question"], q["correct_answer"]) for q in again["questions"]],
+                         [(q["question"], q["correct_answer"]) for q in quiz["questions"]])
 
     def test_flashcard_text_is_never_used_as_evidence(self):
         # "Quantum tunneling" is written in a flashcard (its own back, and another card's front below)
@@ -179,19 +211,136 @@ class FlashcardWrittenQuizTests(unittest.TestCase):
         quiz = self.create(mode="fill_blank", question_count=10).json()
         self.assertEqual(len(quiz["questions"]), 10)
         self.assertEqual(sorted(set(self.types(quiz))), ["fill_blank", "short_answer"])
-        self.assertEqual(self.types(quiz).count("short_answer"), 10 - CONCISE_GROUNDED)
+        self.assertEqual(self.types(quiz).count("short_answer"), 10 - CARD_CLOZE)
         self.assertTrue(all(q["options"] == [] for q in quiz["questions"]))
-        # K smaller than the blankable cards: every slot is a grounded blank.
+        # K smaller than the blankable cards: every slot is a blank.
         self.assertEqual(self.types(self.create(mode="fill_blank", question_count=3).json()), ["fill_blank"] * 3)
 
     # 4 ------------------------------------------------------------------------------------------
-    def test_mixed_is_about_half_fill_blank_and_only_written_types(self):
-        for count, expected_fill in ((10, CONCISE_GROUNDED), (6, 3), (5, 2), (1, 0)):
+    def test_mixed_distribution_of_short_answer_fill_blank_and_matching(self):
+        blankable = {card[0] for card in CARDS[5:]}   # only cards 6-10 have a cloze of their own
+        # cards -> (fill_blank target, matching activities, cards in matching)
+        expected = {10: (3, 1, 4), 7: (2, 1, 4), 6: (2, 0, 0), 5: (2, 0, 0), 1: (0, 0, 0)}
+        for count, (fill_target, matching, matched_cards) in expected.items():
             quiz = self.create(mode="mixed", question_count=count).json()
             types = self.types(quiz)
-            self.assertEqual(len(types), count)
-            self.assertTrue(set(types) <= {"fill_blank", "short_answer"}, types)
-            self.assertEqual(types.count("fill_blank"), expected_fill, count)
+            # Fewer blanks than the target only when no blankable card is left as a short answer.
+            left_blankable = [q for q in quiz["questions"] if q["question_type"] == "short_answer" and q["question"] in blankable]
+            fill = types.count("fill_blank")
+            self.assertEqual(fill, min(fill_target, fill + len(left_blankable)), count)
+            self.assertEqual(types.count("matching"), matching, count)
+            self.assertEqual(types.count("short_answer"), count - fill - matched_cards, count)
+            covered = sum(len(q["options"]) if q["question_type"] == "matching" else 1 for q in quiz["questions"])
+            self.assertEqual(covered, count)
+            self.assertEqual(sum(len(q["options"]) for q in quiz["questions"] if q["question_type"] == "matching"), matched_cards)
+            self.assertEqual(quiz["assessment_plan"]["covered_cards"], count)
+            self.assertEqual(quiz["assessment_plan"]["actual_count"], len(types))
+            self.assertEqual(len({q["id"] for q in quiz["questions"]}), len(types))
+        ten = self.types(self.create(mode="mixed", question_count=10).json())
+        self.assertEqual((ten.count("short_answer"), ten.count("fill_blank"), ten.count("matching")), (3, 3, 1))
+
+    def test_mixed_with_fourteen_cards_is_six_short_four_fill_and_one_matching(self):
+        extra = [
+            ("Which unit maps pages to frames?", "the kernel", "sync", ["c2"]),
+            ("What runs in every time slice?", "runnable processes", "sched", ["c1"]),
+            ("Why do threads need a semaphore?", "Without one two threads could update shared counters together and corrupt them.", "sync", ["c2"]),
+            ("What is a time slice?", "A short fixed interval of processor time given to one runnable process by the scheduler.", "sched", ["c1"]),
+        ]
+        save_cards(self.alice, DOC, cards=[*CARDS, *extra])
+        quiz = self.create(mode="mixed").json()
+        types = self.types(quiz)
+        self.assertEqual((types.count("short_answer"), types.count("fill_blank"), types.count("matching")), (6, 4, 1))
+        self.assertEqual(len(types), 11)
+        matching = next(q for q in quiz["questions"] if q["question_type"] == "matching")
+        self.assertEqual(len(matching["options"]), 4)
+        self.assertEqual(quiz["assessment_plan"]["covered_cards"], 14)
+        self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"short_answer": 6, "fill_blank": 4, "matching": 1})
+        # Every card is covered exactly once.
+        fronts = [q["question"] for q in quiz["questions"] if q["question_type"] == "short_answer"]
+        fronts += [line.split(". ", 1)[1] for line in matching["question"].split("\n")[1:]]
+        concept_ids = {q["concept_id"] for q in quiz["questions"] if q["question_type"] == "fill_blank"}
+        self.assertEqual(len(fronts) + len(concept_ids), 14)
+        self.assertEqual(len(set(fronts)), len(fronts))
+
+    def test_without_matching_the_service_stays_written_only(self):
+        # The Planner's written_quiz sessions call the service directly, without include_matching.
+        quiz = flashcard_quiz_service.create_flashcard_written_quiz(self.alice, DOC, "mixed", 10, rng=random.Random(3))
+        types = self.types(quiz)
+        self.assertEqual(len(types), 10)
+        self.assertNotIn("matching", types)
+        self.assertEqual(types.count("fill_blank"), 5)   # the earlier half / half written split
+        with self.assertRaises(ValueError):
+            flashcard_quiz_service.create_flashcard_written_quiz(self.alice, DOC, "matching", 4)
+
+    # Matching -------------------------------------------------------------------------------------
+    def matching_quiz(self, count=10):
+        quiz = self.create(mode="matching", question_count=count).json()
+        cards = {card[0]: card[1] for card in CARDS}
+        for question in quiz["questions"]:
+            if question["question_type"] != "matching":
+                continue
+            instruction, *lines = question["question"].split("\n")
+            self.assertEqual(instruction, "Match each card with its answer.")
+            prompts = [line.split(". ", 1)[1] for line in lines]
+            question["_prompts"] = prompts
+            # option letter i of the answer belongs to prompt i's own card.
+            for prompt, letter in zip(prompts, question["correct_answers"]):
+                option = question["options"]["ABCD".index(letter)]
+                self.assertEqual(option, f"{letter}. {cards[prompt]}")
+        return quiz
+
+    def test_matching_pairs_fronts_with_shuffled_backs_without_any_llm(self):
+        quiz = self.matching_quiz()
+        self.assertEqual(self.types(quiz), ["matching"] * 3)   # 10 cards -> 4 + 3 + 3
+        self.assertEqual(sorted(len(q["options"]) for q in quiz["questions"]), [3, 3, 4])
+        self.assertEqual(quiz["assessment_plan"]["covered_cards"], 10)
+        for question in quiz["questions"]:
+            self.assertNotEqual(question["correct_answers"], sorted(question["correct_answers"]))   # shuffled
+            self.assertEqual(question["correct_answer"], ",".join(question["correct_answers"]))
+        self.chunks_mock.assert_not_called()
+        # 5 cards: one activity of 4, the card left over is a short answer.
+        self.assertEqual(sorted(self.types(self.create(mode="matching", question_count=5).json())), ["matching", "short_answer"])
+        # Too few cards for an activity: short answers.
+        self.assertEqual(self.types(self.create(mode="matching", question_count=2).json()), ["short_answer"] * 2)
+
+    def test_matching_autosave_submit_and_review(self):
+        quiz = self.matching_quiz()
+        first, second, third = quiz["questions"]
+        wrong = list(second["correct_answers"])
+        wrong[0], wrong[1] = wrong[1], wrong[0]
+        partial = [first["correct_answers"][0]] + [""] * (len(first["options"]) - 1)
+        progress = self.alice_client.patch(f"/api/quiz/{DOC}/progress", json={
+            "difficulty": "easy", "topic_id": "document", "quiz_id": quiz["quiz_id"], "current_question_index": 0,
+            "answers": {"1": partial},
+        })
+        self.assertEqual(progress.status_code, 200, progress.text)
+        detail = self.alice_client.get(f"/api/quiz/{DOC}", params={"topic_id": "document", "difficulty": "easy", "quiz_id": quiz["quiz_id"]}).json()
+        self.assertEqual(detail["latest_attempt"]["answers"]["1"], partial)   # positional, unpaired slots kept
+        bad = self.alice_client.patch(f"/api/quiz/{DOC}/progress", json={
+            "difficulty": "easy", "topic_id": "document", "quiz_id": quiz["quiz_id"], "answers": {"1": ["A", "B"]},
+        })
+        self.assertEqual(bad.status_code, 400)
+
+        submit = self.alice_client.post(f"/api/quiz/{DOC}/submit", json={
+            "quiz_id": quiz["quiz_id"], "difficulty": "easy", "topic_id": "document", "allow_unanswered": True,
+            "answers": {"1": first["correct_answers"], "2": wrong, "3": [""] * len(third["options"])},
+        })
+        self.assertEqual(submit.status_code, 200, submit.text)
+        attempt = submit.json()
+        results = {r["question_id"]: r for r in attempt["question_results"]}
+        self.assertEqual([results[qid]["is_correct"] for qid in (1, 2, 3)], [True, False, False])
+        self.assertEqual(results[2]["selected_answers"], wrong)                      # not sorted
+        self.assertEqual(results[2]["correct_answers"], second["correct_answers"])
+        self.assertEqual(results[3]["selected_answers"], [])                         # unanswered
+        self.assertEqual(attempt["score"], 1)
+        self.assertEqual(attempt["mastery_by_topic"], {})
+        history = self.alice_client.get(f"/api/quiz-history/{attempt['attempt_id']}").json()
+        stored = {r["question_id"]: r for r in history["question_results"]}
+        self.assertEqual(stored[2]["selected_answers"], wrong)
+        self.assertEqual(stored[2]["question_type"], "matching")
+        self.assertEqual(stored[1]["question"], first["question"])
+        self.assertEqual(quiz_store.list_completed_answer_snapshots(self.alice, DOC, "sched"), [])
+        self.assertEqual(self.alice_client.get(f"/api/quiz-history/{attempt['attempt_id']}/retake").status_code, 200)
 
     def test_selection_is_random_but_always_exact_and_distinct(self):
         seen = set()
@@ -355,7 +504,8 @@ class FlashcardWrittenQuizTests(unittest.TestCase):
         quiz = self.create(mode="mixed", question_count=10).json()
         submit = self.alice_client.post(f"/api/quiz/{DOC}/submit", json={
             "quiz_id": quiz["quiz_id"], "difficulty": "easy", "topic_id": "document",
-            "answers": {str(q["id"]): q["correct_answer"] for q in quiz["questions"]},
+            "answers": {str(q["id"]): q["correct_answers"] if q["question_type"] == "matching" else q["correct_answer"]
+                        for q in quiz["questions"]},
         })
         self.assertEqual(submit.json()["percentage"], 100.0)
         self.assertEqual(submit.json()["mastery_by_topic"], {})   # practice recomputes no mastery
@@ -402,7 +552,7 @@ class FlashcardWrittenQuizTests(unittest.TestCase):
         self.assertEqual(by_attempt[practice["attempt"]["attempt_id"]]["percentage"], 100)
         self.assertFalse(by_attempt[normal["attempt"]["attempt_id"]]["practice"])
         detail = self.alice_client.get(f"/api/quiz-history/{practice['attempt']['attempt_id']}").json()
-        self.assertEqual((detail["score"], detail["total"], detail["quiz"]["source"]), (10, 10, "flashcards"))
+        self.assertEqual((detail["score"], detail["total"], detail["quiz"]["source"]), (7, 7, "flashcards"))   # 10 cards -> 7 activities
 
     def test_practice_never_marks_a_normal_slot_saved_or_in_progress(self):
         normal = self.normal_quiz_at_40_percent()

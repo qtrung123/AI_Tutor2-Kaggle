@@ -272,9 +272,10 @@ async function showFlashcardsState() {
 }
 
 // ---- Flashcards -> "Practice as Quiz" ------------------------------------------------------------
-// Turns the flashcard set on screen into a written quiz (short answer / fill in the blank) without
-// generating anything new (backend/flashcard_quiz_service.py), then opens it in the Quiz Player.
-const FLASHCARD_QUIZ_MODES = [["mixed", "Mixed"], ["short_answer", "Short Answer"], ["fill_blank", "Fill Blank"]];
+// Turns the flashcard set on screen into a practice quiz (short answer / fill in the blank / matching)
+// without generating anything new (backend/flashcard_quiz_service.py), then opens it in the Quiz Player.
+// The count is in cards: one matching activity covers several cards.
+const FLASHCARD_QUIZ_MODES = [["mixed", "Mixed"], ["short_answer", "Short Answer"], ["fill_blank", "Fill Blank"], ["matching", "Matching"]];
 const FLASHCARD_QUIZ_COUNTS = [5, 10, "all"];
 let flashcardQuizDialog = null;
 let flashcardQuizSettings = { mode: "mixed", count: 10 };
@@ -307,6 +308,9 @@ function renderFlashcardQuizDialog() {
   renderFlashcardQuizSegments("flashcard-quiz-count",
     FLASHCARD_QUIZ_COUNTS.map((count) => [count, count === "all" ? `All (${available})` : String(count), count !== "all" && count > available]),
     flashcardQuizSettings.count, (count) => { flashcardQuizSettings.count = count; renderFlashcardQuizDialog(); });
+  const cards = flashcardQuizSettings.count === "all" ? available : flashcardQuizSettings.count;
+  flashcardQuizDialog.querySelector("#flashcard-quiz-summary").textContent = `Covers ${cards} card${cards === 1 ? "" : "s"}`
+    + (["mixed", "matching"].includes(flashcardQuizSettings.mode) ? " · a matching activity pairs up to 4 cards" : "");
   flashcardQuizDialog.querySelector("#flashcard-quiz-empty").hidden = available > 0;
   flashcardQuizDialog.querySelector("#flashcard-quiz-fields").hidden = available === 0;
   const start = flashcardQuizDialog.querySelector("#flashcard-quiz-start");
@@ -319,12 +323,13 @@ function openFlashcardQuizDialog() {
     flashcardQuizDialog = document.createElement("div");
     flashcardQuizDialog.className = "quiz-create-dialog flashcard-quiz-dialog";
     flashcardQuizDialog.innerHTML = '<div class="quiz-create-dialog-card" role="dialog" aria-modal="true" aria-labelledby="flashcard-quiz-title">'
-      + '<div class="quiz-dialog-heading"><div><h2 id="flashcard-quiz-title">Practice as Quiz</h2><p>Written questions from this document’s saved flashcards.</p></div>'
+      + '<div class="quiz-dialog-heading"><div><h2 id="flashcard-quiz-title">Practice as Quiz</h2><p>Practice activities from this document’s saved flashcards.</p></div>'
       + '<button class="text-button quiz-dialog-cancel" type="button">Cancel</button></div>'
       + '<p class="flashcard-quiz-empty" id="flashcard-quiz-empty" hidden>No flashcards available. Generate flashcards for this document first.</p>'
       + '<div class="flashcard-quiz-fields" id="flashcard-quiz-fields">'
       + '<div class="quiz-sheet-field"><span>Type</span><div class="quiz-segmented" role="radiogroup" id="flashcard-quiz-mode"></div></div>'
-      + '<div class="quiz-sheet-field"><span>Questions</span><div class="quiz-segmented" role="radiogroup" id="flashcard-quiz-count"></div></div></div>'
+      + '<div class="quiz-sheet-field"><span>Cards</span><div class="quiz-segmented" role="radiogroup" id="flashcard-quiz-count"></div></div>'
+      + '<p class="flashcard-quiz-summary" id="flashcard-quiz-summary"></p></div>'
       + '<p class="flashcard-quiz-error" id="flashcard-quiz-error" role="alert" hidden></p>'
       + '<button class="primary-button flashcard-quiz-start" id="flashcard-quiz-start" type="button">Start Quiz</button></div>';
     flashcardQuizDialog.querySelector(".quiz-dialog-cancel").addEventListener("click", () => closeFlashcardQuizDialog());
