@@ -1868,12 +1868,12 @@ function pcalEventBlock({ kind, session, change = null }) {
   const label = change ? PCAL_CHANGE_KIND_LABELS[change.type] : PCAL_KIND_LABELS[kind];
   block.setAttribute("aria-label", `${label}: ${pcalActivity(session.activity_type)} · ${title}, ${pcalShortDay(session.scheduled_start.slice(0, 10))} ${pcalSessionTimes(session)}`);
   pcalPlace(block, start, end);
-  block.classList.toggle("is-compact", end - start < 40);
+  block.classList.toggle("is-compact", end - start < 30);
   // Like a calendar event, the content compacts with the block's height (its real duration):
-  // roomy/tall = title, time, activity on their own lines; medium = title + "time · activity";
+  // roomy/tall = title, time, activity on their own lines; medium = title + time;
   // short = one row, title + time; tiny = the title only. The full text stays in aria-label.
   const minutes = end - start;
-  block.classList.add(`pcal-event--${minutes >= 95 ? "roomy" : minutes >= 75 ? "tall" : minutes >= 45 ? "medium" : minutes >= 20 ? "short" : "tiny"}`);
+  block.classList.add(`pcal-event--${minutes >= 60 ? "roomy" : minutes >= 45 ? "tall" : minutes >= 30 ? "medium" : minutes >= 20 ? "short" : "tiny"}`);
   if (change) {
     // A proposed change: tagged, reviewable, not draggable until the learner decides.
     block.classList.add("pcal-change", `pcal-change--${change.type}`);

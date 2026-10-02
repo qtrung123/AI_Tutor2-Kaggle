@@ -71,7 +71,7 @@ const press = (label) => [...$("pcal-popover").querySelectorAll(".pcal-session-a
     session("s-cancelled", "mkt.pdf", "review", "2026-09-23T20:00:00", "2026-09-23T20:15:00", 15, "cancelled"),
   ]};
   setPage("planner"); await sleep(600);
-  $("pcal-scroll").scrollTop = 8 * 48;
+  $("pcal-scroll").scrollTop = 8 * 80;
   out.onCalendar = [...document.querySelectorAll(".pcal-event")].map((e) => e.dataset.sessionId).sort();
 
   // Event blocks: height = duration; content compacts with it (visible parts only, no overflow).
@@ -122,14 +122,15 @@ const press = (label) => [...$("pcal-popover").querySelectorAll(".pcal-session-a
 class PopoverAssertions:
     def test_event_blocks_reflect_duration_and_compact_their_content(self):
         blocks = self.out["blocks"]
-        # 18:00-18:45 (45m): title + "time · activity"; height and top follow the scheduled times.
-        self.assertEqual(blocks["s-ahead"]["tier"], "medium")
-        self.assertEqual((blocks["s-ahead"]["top"], blocks["s-ahead"]["height"]), (18 * 48, 45 * 48 // 60 - 2))
+        # 18:00-18:45 (45m, 58px): title, time and activity; height and top follow the scheduled times.
+        self.assertEqual(blocks["s-ahead"]["tier"], "tall")
+        self.assertEqual((blocks["s-ahead"]["top"], blocks["s-ahead"]["height"]), (18 * 80, 45 * 80 // 60 - 2))
         self.assertEqual((blocks["s-ahead"]["title"], blocks["s-ahead"]["time"], blocks["s-ahead"]["activity"]),
                          ("Marketing", "18:00–18:45", "Summary"))
-        # 40m and 20m: one row, title + time.
-        for key in ("s-skipped", "s-start"):
-            self.assertEqual(blocks[key]["tier"], "short")
+        # 40m: title + time; 20m: one row, title + time.
+        for key, tier in (("s-skipped", "medium"), ("s-start", "short")):
+            self.assertEqual(blocks[key]["tier"], tier)
+            self.assertIsNotNone(blocks[key]["title"])
             self.assertIsNotNone(blocks[key]["time"])
             self.assertIsNone(blocks[key]["activity"])
         # 15m: the title only.

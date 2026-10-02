@@ -94,7 +94,7 @@ const popover = () => ({pill: $("pcal-popover").querySelector(".pcal-kind")?.tex
 
   // 3. A suggested session explains itself (next week holds the suggestions).
   $("pcal-next").click(); await sleep(100);
-  $("pcal-scroll").scrollTop = 17 * 48;
+  $("pcal-scroll").scrollTop = 17 * 80;
   ghost("Marketing", "Summary").click(); await sleep(100);
   out.deadlineGhost = popover();
   ghost("Statistics", "Summary").click(); await sleep(100);

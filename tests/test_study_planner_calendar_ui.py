@@ -62,7 +62,7 @@ const noOverflow = () => document.documentElement.scrollWidth <= window.innerWid
 // A drag on a day column, in real pointer events (down on the column, move/up on the document).
 const drag = async (date, fromMinute, toMinute) => {
   const col = column(date);
-  const y = (minute) => col.getBoundingClientRect().top + (minute + 10) * 0.8;
+  const y = (minute) => col.getBoundingClientRect().top + (minute + 10) * (80 / 60);
   col.dispatchEvent(new PointerEvent("pointerdown", {bubbles: true, cancelable: true, button: 0, clientY: y(fromMinute)}));
   if (toMinute !== undefined) document.dispatchEvent(new PointerEvent("pointermove", {bubbles: true, clientY: y(toMinute)}));
   document.dispatchEvent(new PointerEvent("pointerup", {bubbles: true}));
@@ -247,11 +247,11 @@ class CalendarPlannerAssertions:
         self.assertEqual(first["dayHeads"], ["Mon21", "Tue22", "Wed23", "Thu24", "Fri25", "Sat26", "Sun27"])
         self.assertEqual(first["today"], "Mon21")
         self.assertRegex(first["range"], r"^21\D.*27, 2026$")
-        self.assertEqual((first["nowLine"], first["nowTop"]), (True, "384px"))   # 08:00 on a 48px/hour grid
+        self.assertEqual((first["nowLine"], first["nowTop"]), (True, "640px"))   # 08:00 on an 80px/hour grid
         self.assertEqual(first["hours"], 23)
         self.assertEqual(first["stickyHead"], "sticky")
         self.assertTrue(first["innerScroll"])
-        self.assertEqual(first["scrolledTo"], 7 * 48)   # opens around the morning
+        self.assertEqual(first["scrolledTo"], 7 * 80)   # opens around the morning
         self.assertEqual(first["notice"], "Add the materials you want to study.Add materials")
         self.assertEqual((first["status"], first["acceptShown"], first["autoPlanShown"]), ("", False, False))
         self.assertEqual(first["plans"], 0)   # nothing is created just by opening the planner
@@ -313,16 +313,16 @@ class CalendarPlannerAssertions:
             ("2026-09-28", "suggested", "Marketing", "Summary · 18:00–18:45"),
             ("2026-09-28", "suggested", "Statistics", "Summary · 18:55–19:40"),
             ("2026-09-29", "suggested", "Marketing", "Quiz · 20:00–20:30")])
-        self.assertEqual((ghosts[0]["top"], ghosts[0]["height"]), ("864px", "34px"))   # 18:00, 45 minutes
-        self.assertEqual(ghosts[1]["top"], "908px")
-        self.assertEqual(ghosts[2]["top"], "960px")
+        self.assertEqual((ghosts[0]["top"], ghosts[0]["height"]), ("1440px", "58px"))   # 18:00, 45 minutes
+        self.assertEqual(ghosts[1]["top"], "1513.33px")   # 18:55
+        self.assertEqual(ghosts[2]["top"], "1600px")
         self.assertTrue(all(e["border"] == "dashed" for e in ghosts))
 
     def test_availability_is_visually_distinct_and_larger_than_the_study(self):
         blocks = self.out["nextWeek"]["availability"]
         self.assertEqual(len(blocks), 2)   # the recurring Monday slots repeat next week
         window = blocks[1]
-        self.assertEqual((window["top"], window["height"]), ("888px", "166px"))   # 18:30-22:00
+        self.assertEqual((window["top"], window["height"]), ("1480px", "278px"))   # 18:30-22:00
         self.assertIn("Available", window["text"])
         self.assertIn("3h 30m", window["text"])
         ghosts = self.out["nextWeek"]["events"]

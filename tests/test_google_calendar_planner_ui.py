@@ -197,7 +197,7 @@ class GoogleCalendarPlannerUiTests(unittest.TestCase):
                              ("DIV", None, -1, False, "none"))
             self.assertIn("repeating-linear-gradient", block["background"])   # hatched, unlike availability/sessions
             self.assertTrue(block["label"].startswith("Busy in Google Calendar"))
-        self.assertEqual((busy[0]["top"], busy[0]["height"]), ("624px", "94px"))
+        self.assertEqual((busy[0]["top"], busy[0]["height"]), ("1040px", "158px"))
         self.assertNotEqual(self.out["connected"]["hitTarget"], "pcal-busy")
         self.assertFalse(self.out["popoverAfterBusyClick"])
         self.assertRegex(self.out["connected"]["busyCall"], r"/busy\?start=2026-09-21&days=7&utc_offset_minutes=-?\d+$")

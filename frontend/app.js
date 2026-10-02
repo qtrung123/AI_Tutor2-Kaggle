@@ -1402,7 +1402,7 @@ const PCAL_CHANGE_KIND_LABELS = {
 // endpoint fills the week with suggested (ghost) sessions; Accept plan confirms them in place.
 // Same plan state and APIs as the step flow above, which stays the small-screen experience.
 
-const PCAL_HOUR_PX = 48;
+const PCAL_HOUR_PX = 80;
 const PCAL_MINUTE_PX = PCAL_HOUR_PX / 60;
 const PCAL_DAY_MINUTES = 24 * 60;
 const PCAL_PREVIEW_DELAY_MS = 450;

@@ -150,14 +150,14 @@ const eventOf = (title, activity) => events().find((e) => e.querySelector(".pcal
   && e.querySelector(".pcal-event-meta").textContent.startsWith(activity));
 const noOverflow = () => document.documentElement.scrollWidth <= window.innerWidth + 1
   && $("planner-workspace").getBoundingClientRect().bottom <= window.innerHeight + 1;
-const show = (minute) => { $("pcal-scroll").scrollTop = Math.max(0, (minute - 60) * 0.8); };
-// A real pointer drag: press 4px below the element's top (5 grid minutes), move in steps, release.
+const show = (minute) => { $("pcal-scroll").scrollTop = Math.max(0, (minute - 60) * (80 / 60)); };
+// A real pointer drag: press 5 grid minutes below the element's top, move in steps, release.
 const drag = async (element, date, minute, {inspect} = {}) => {
   const box = element.getBoundingClientRect();
-  const from = {x: box.left + Math.min(20, box.width / 2), y: box.top + 4};
+  const from = {x: box.left + Math.min(20, box.width / 2), y: box.top + 5 * 80 / 60};
   element.dispatchEvent(new PointerEvent("pointerdown", {bubbles: true, cancelable: true, button: 0, clientX: from.x, clientY: from.y}));
   const col = column(date).getBoundingClientRect();
-  const to = {x: col.left + col.width / 2, y: col.top + (minute + (element.classList.contains("pcal-event") ? 5 : 0)) * 0.8 + 1};
+  const to = {x: col.left + col.width / 2, y: col.top + (minute + (element.classList.contains("pcal-event") ? 5 : 0)) * (80 / 60) + 1};
   for (let step = 1; step <= 6; step += 1) {
     document.dispatchEvent(new PointerEvent("pointermove", {bubbles: true, clientX: from.x + (to.x - from.x) * step / 6, clientY: from.y + (to.y - from.y) * step / 6}));
   }
@@ -275,7 +275,7 @@ class CalendarDragAssertions:
         self.assertIn(["2026-09-28", "suggested", "Marketing", "Summary · 18:00–18:45"], self.out["ghosts"])
         during = self.out["ghostDuring"]
         self.assertEqual((during["moving"], during["preview"], during["invalid"], during["time"], during["top"]),
-                         (True, True, False, "20:00–20:45", 960))   # 20:00, relative to the grid
+                         (True, True, False, "20:00–20:45", 1600))   # 20:00, relative to the grid
         self.assertEqual(during["cursor"], "grabbing")
         moved = self.out["ghostMoved"]
         self.assertEqual(moved["previews"], 1)

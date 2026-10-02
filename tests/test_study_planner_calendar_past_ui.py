@@ -29,8 +29,8 @@ const column = (date) => document.querySelector(`#pcal-body .pcal-col[data-date=
 const addCalls = () => P.calls.filter((c) => c === "POST /api/planner/availability").length;
 const noOverflow = () => document.documentElement.scrollWidth <= window.innerWidth + 1
   && $("planner-workspace").getBoundingClientRect().bottom <= window.innerHeight + 1;
-const show = (minute) => { $("pcal-scroll").scrollTop = Math.max(0, (minute - 60) * 0.8); };
-const y = (date, minute) => column(date).getBoundingClientRect().top + (minute + 10) * 0.8;
+const show = (minute) => { $("pcal-scroll").scrollTop = Math.max(0, (minute - 60) * (80 / 60)); };
+const y = (date, minute) => column(date).getBoundingClientRect().top + (minute + 10) * (80 / 60);
 // Drag on an empty stretch of a day column (creates availability when allowed).
 const paint = async (date, from, to) => {
   const col = column(date);
@@ -45,7 +45,7 @@ const move = async (element, date, minute) => {
   const from = {x: box.left + 10, y: box.top + 4};
   element.dispatchEvent(new PointerEvent("pointerdown", {bubbles: true, cancelable: true, button: 0, clientX: from.x, clientY: from.y}));
   const col = column(date).getBoundingClientRect();
-  const to = {x: col.left + col.width / 2, y: col.top + (minute + 5) * 0.8 + 1};
+  const to = {x: col.left + col.width / 2, y: col.top + (minute + 5) * (80 / 60) + 1};
   for (let step = 1; step <= 6; step += 1) {
     document.dispatchEvent(new PointerEvent("pointermove", {bubbles: true, clientX: from.x + (to.x - from.x) * step / 6, clientY: from.y + (to.y - from.y) * step / 6}));
   }
@@ -150,8 +150,8 @@ class PastReadOnlyAssertions:
     def test_past_is_muted_with_no_create_cursor(self):
         visual = self.out["visual"]
         self.assertEqual(visual["past"], [[f"2026-09-{day}", day < 24] for day in range(21, 28)])
-        self.assertEqual(visual["shade"], "672px")           # 14:00 on a 48px/hour grid
-        self.assertEqual(visual["nowLine"], "672px")
+        self.assertEqual(visual["shade"], "1120px")          # 14:00 on an 80px/hour grid
+        self.assertEqual(visual["nowLine"], "1120px")
         self.assertEqual((visual["pastCursor"], visual["shadeCursor"], visual["futureCursor"]), ("default", "default", "crosshair"))
         self.assertIn(["2026-09-22", True], visual["pastAvailability"])    # a past date
         self.assertIn(["2026-09-24", True], visual["pastAvailability"])    # today, over before now

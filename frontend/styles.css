@@ -3397,10 +3397,10 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-deadline-marker{display:block;padding:1px 6px;border-radius:4px;background:#fff3e4;color:#8f4f14;font-size:11px;font-weight:600;line-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pcal-deadline-marker::before{content:"\2691  ";font-size:10px}
 .pcal-deadline-marker.is-past{background:#f1f2f5;color:var(--muted)}
-.pcal-body{display:grid;grid-template-columns:52px repeat(7,minmax(0,1fr));height:1152px;position:relative}
+.pcal-body{display:grid;grid-template-columns:52px repeat(7,minmax(0,1fr));height:1920px;position:relative}
 .pcal-gutter{position:relative}
 .pcal-hour{position:absolute;right:8px;transform:translateY(-50%);font-size:10.5px;color:#8b93a1;font-variant-numeric:tabular-nums}
-.pcal-col{position:relative;border-left:1px solid var(--pcal-line);cursor:crosshair;touch-action:none;background-image:linear-gradient(to bottom,var(--pcal-line) 1px,transparent 1px);background-size:100% 48px}
+.pcal-col{position:relative;border-left:1px solid var(--pcal-line);cursor:crosshair;touch-action:none;background-image:linear-gradient(to bottom,var(--pcal-line) 1px,transparent 1px);background-size:100% 80px}
 .pcal-col.is-today{background-color:#fbfbff}
 /* the past is read-only history: muted, no create cursor */
 .pcal-col.is-past{background-color:#f8f9fb;cursor:default}
@@ -3437,7 +3437,7 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-event.is-compact{flex-direction:row;align-items:center;gap:6px;padding-top:0;padding-bottom:0}
 .pcal-event.is-compact .pcal-event-title{display:block;white-space:nowrap;text-overflow:ellipsis;flex:0 1 auto;min-width:0;font-size:11.5px;line-height:13px}
 .pcal-event.is-compact .pcal-event-meta{flex:0 0 auto;line-height:13px}
-.pcal-event--short .pcal-event-activity,.pcal-event--short .pcal-event-sep,.pcal-event--tiny .pcal-event-meta{display:none}
+.pcal-event--medium .pcal-event-activity,.pcal-event--medium .pcal-event-sep,.pcal-event--short .pcal-event-activity,.pcal-event--short .pcal-event-sep,.pcal-event--tiny .pcal-event-meta{display:none}
 .pcal-event--tiny{padding:0 6px}
 .pcal-event--tiny .pcal-event-title{font-size:10.5px;line-height:11px}
 .pcal-event--suggested{background:var(--pcal-ghost);border:1px dashed var(--pcal-ghost-edge);color:var(--pcal-ghost-ink)}
