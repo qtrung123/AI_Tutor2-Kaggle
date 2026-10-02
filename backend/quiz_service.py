@@ -35,6 +35,7 @@ from backend.quiz_units import (
     QUIZ_UNUSED_CHARS_PER_QUESTION,
     QUIZ_TOTAL_DEADLINE_S,
     QUIZ_MULTI_SELECT_MAX_CALLS,
+    QUIZ_MULTI_SELECT_RESERVE_S,
     build_multiple_select_prompt,
     build_generation_prompt,
     build_study_units,
@@ -224,11 +225,13 @@ def _generate_quiz_from_units(
     call_log: list[dict] = []
     stalled_calls = 0
     stop_reason = ""
+    # Single-choice calls stop short of the total deadline so the multiple_select step keeps its own budget.
+    single_choice_deadline_s = QUIZ_TOTAL_DEADLINE_S - (QUIZ_MULTI_SELECT_RESERVE_S if multi_select_count > 0 else 0)
 
     for call_number in range(1, max_calls + 1):
         first_call = call_number == 1
         elapsed_s = time.perf_counter() - total_started
-        remaining_s = QUIZ_TOTAL_DEADLINE_S - elapsed_s
+        remaining_s = single_choice_deadline_s - elapsed_s
         if first_call:
             requested = pool_target
             shown_units = select_context_units(units, context_budget(requested))

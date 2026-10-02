@@ -8,13 +8,15 @@ The persisted type is the existing "multi_select" token (the one the store, grad
 Player already understood); options stay A-D and correct_answers are the sorted correct letters.
 """
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from quiz_fixtures import (
-    MULTI_FACT_PAIRS, FakeModel, candidates, fact_sentence, make_chunks, multi_candidate, multi_payload,
+    MULTI_FACT_PAIRS, FakeModel, candidates, fact_sentence, flashcard, make_chunks, multi_candidate, multi_payload,
 )
 
 from backend import quiz_attempt_service, quiz_service, quiz_store
@@ -22,8 +24,9 @@ from backend.api.quiz_generation import QuizQuestion
 from backend.quiz_attempt_service import option_answers_correct
 from backend.quiz_service import _generate_quiz_from_units
 from backend.quiz_units import (
-    QUIZ_MULTI_SELECT_MAX_CALLS, QUIZ_MULTI_SELECT_OUTPUT_SCHEMA, CandidateRejected, build_generation_prompt,
-    build_multiple_select_prompt, build_study_units, multiple_select_target, validate_candidate,
+    QUIZ_MIN_CALL_S, QUIZ_MULTI_SELECT_MAX_CALLS, QUIZ_MULTI_SELECT_OUTPUT_SCHEMA, QUIZ_MULTI_SELECT_RESERVE_S,
+    QUIZ_TOTAL_DEADLINE_S, CandidateRejected, build_generation_prompt, build_multiple_select_prompt,
+    build_study_units, fill_blank_target, multiple_select_target, validate_candidate,
     validate_multiple_select_candidate,
 )
 
@@ -450,6 +453,62 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.multi_prompts(), [])
         self.assertNotIn("multiple_select", quiz["assessment_plan"])
         self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 12})
+
+
+class SlowSingleChoiceBudgetTests(unittest.TestCase):
+    """A slow GPU: every single-choice call streams until its own deadline is reached. The
+    multiple_select step must still get its reserved budget and keep its 3-question allocation."""
+
+    SINGLE_CHOICE_PAYLOADS = ({"questions": candidates(range(10))}, {"questions": []}, {"questions": []})
+
+    def run_slow_engine(self, fill_blank_cards=(), fill_blank_count=0):
+        clock = [0.0]
+        real_generate = quiz_service._generate_with_deadline
+
+        def slow_single_choice(llm, prompt, deadline_s):
+            if "multiple-select" in prompt:   # fast, answered whenever the step gets to run
+                FakeModel.prompts.append(prompt)
+                return json.dumps(multi_payload()), {}, False
+            text, metadata, _cut = real_generate(llm, prompt, deadline_s)
+            clock[0] += deadline_s            # the single-choice call streamed until its deadline
+            return text, metadata, True
+
+        FakeModel.reset(self.SINGLE_CHOICE_PAYLOADS)
+        with (
+            patch.object(quiz_service, "time", SimpleNamespace(perf_counter=lambda: clock[0])),
+            patch.object(quiz_service, "_generate_with_deadline", slow_single_choice),
+            patch.object(quiz_service, "ChatOllama", FakeModel),
+            patch.object(quiz_service, "save_quiz_validation_event"),
+            patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _o: quiz),
+        ):
+            quiz = _generate_quiz_from_units(
+                document=DOCUMENT, scope="document", scope_topic_id="document", scope_topic_name="Entire document",
+                chunks=make_chunks(12, 2), difficulty="easy", owner_id="owner", model_id="qwen-test",
+                regenerate=False, question_count=12, multi_select_count=multiple_select_target(12),
+                fill_blank_count=fill_blank_count, fill_blank_cards=list(fill_blank_cards),
+            )
+        return quiz, clock[0]
+
+    def test_slow_single_choice_cannot_starve_multiple_select(self):
+        # 10 valid single-choice on call 1 (300 s), then empty follow-ups until the single-choice share
+        # of the budget is gone; without the reserve the follow-ups ran to 570 s and multi_select got 0 calls.
+        quiz, elapsed = self.run_slow_engine()
+        self.assertLessEqual(elapsed, QUIZ_TOTAL_DEADLINE_S - QUIZ_MULTI_SELECT_RESERVE_S)
+        info = quiz["assessment_plan"]["multiple_select"]
+        self.assertEqual((info["target"], info["calls"], info["accepted"], info["stop"]), (3, 1, 3, "target reached"))
+        self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 9, "multi_select": 3})
+        self.assertEqual((len(quiz["questions"]), quiz["assessment_plan"]["status"]), (12, "complete"))
+        self.assertIn("time budget used up", " ".join(quiz["assessment_plan"]["generation_warnings"]))
+        multi_kwargs = [kwargs for kwargs, prompt in zip(FakeModel.kwargs, FakeModel.prompts) if "multiple-select" in prompt]
+        self.assertGreaterEqual(multi_kwargs[0]["client_kwargs"]["timeout"], QUIZ_MIN_CALL_S)
+
+    def test_slow_single_choice_keeps_multiple_select_with_fill_blank(self):
+        cards = [flashcard(fact) for fact in (20, 21)]
+        quiz, _elapsed = self.run_slow_engine(fill_blank_cards=cards, fill_blank_count=fill_blank_target(12))
+        self.assertEqual(quiz["assessment_plan"]["multiple_select"]["accepted"], 3)
+        self.assertEqual(quiz["assessment_plan"]["type_distribution"],
+                         {"single_choice": 7, "multi_select": 3, "fill_blank": 2})
+        self.assertEqual(len(quiz["questions"]), 12)
 
 
 class LiveEntryPointTests(unittest.TestCase):

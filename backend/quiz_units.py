@@ -1078,6 +1078,10 @@ MULTI_SELECT_QUESTION_TYPE = "multi_select"
 QUIZ_MULTI_SELECT_SHARE = 0.25
 QUIZ_MULTI_SELECT_MIN_CORRECT = 2
 QUIZ_MULTI_SELECT_MAX_CALLS = 2       # one call plus one retry when the pool is still short
+# Wall-clock time held back from the single-choice calls when a quiz asks for multiple_select, so a
+# slow single-choice phase can never use up QUIZ_TOTAL_DEADLINE_S before the multiple_select step:
+# it always gets at least one full follow-up-sized call.
+QUIZ_MULTI_SELECT_RESERVE_S = QUIZ_FOLLOWUP_DEADLINE_S
 QUIZ_MULTI_SELECT_DISTRACTOR_MIN_CHARS = 8
 # A wrong option whose distinctive words occur TOGETHER in one excerpt (or two neighbouring ones) at
 # least this much is treated as a statement the material supports, i.e. possibly true.
