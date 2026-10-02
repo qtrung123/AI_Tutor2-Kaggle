@@ -3,6 +3,15 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 
+# Local dev convenience: pull untracked settings (e.g. Google OAuth) from <repo>/.env.local.
+# override=False keeps real environment variables authoritative; a missing file (Kaggle) is a no-op.
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - python-dotenv is in requirements.txt
+    load_dotenv = None
+if load_dotenv is not None:
+    load_dotenv(BASE_DIR / ".env.local", override=False)
+
 
 def _env_path(name: str, default: Path) -> Path:
     """Return an absolute, cross-platform runtime path from an environment variable."""
