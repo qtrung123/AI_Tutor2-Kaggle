@@ -3309,12 +3309,20 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 @media(max-width:720px){.progress-panel--wide{grid-column:auto}.session-shell .learning-overview .stat-card:last-child:nth-child(odd){grid-column:1 / -1;border-right:0}}
 
 /* ---- Study Planner: desktop calendar workspace (>=1024px) ---------------------------------- */
-.pcal{--pcal-line:#eceef4;--pcal-line-soft:#f5f6fa;--pcal-ink-2:#5b6478;--pcal-avail:#f1f8f3;--pcal-avail-strong:#e4f2e9;--pcal-avail-edge:#b5dcc2;--pcal-avail-ink:#3b7556;--pcal-ghost:#f7f8ff;--pcal-ghost-edge:#9aa3f5;--pcal-ghost-ink:#3d46a8;--pcal-warn-bg:#fcf5ef;--pcal-warn-edge:#ecd3bf;--pcal-warn-ink:#8a5230;--pcal-ease:cubic-bezier(.2,0,0,1);position:relative;flex:1;min-width:0;min-height:0;display:grid;grid-template-columns:196px minmax(0,1fr) 236px;grid-template-areas:"materials main queue";gap:10px}
+.pcal{--pcal-line:#eceef4;--pcal-line-soft:#f5f6fa;--pcal-ink-2:#5b6478;--pcal-avail:#f1f8f3;--pcal-avail-strong:#e4f2e9;--pcal-avail-edge:#b5dcc2;--pcal-avail-ink:#3b7556;--pcal-ghost:#f7f8ff;--pcal-ghost-edge:#9aa3f5;--pcal-ghost-ink:#3d46a8;--pcal-warn-bg:#fcf5ef;--pcal-warn-edge:#ecd3bf;--pcal-warn-ink:#8a5230;--pcal-ease:cubic-bezier(.2,0,0,1);position:relative;flex:1;min-width:0;min-height:0;display:grid;grid-template-columns:minmax(0,1fr);grid-template-areas:"main";gap:10px}
 .pcal[hidden]{display:none!important}
 .pcal-rail,.pcal-main{background:var(--card);border:1px solid var(--session-line);border-radius:14px;min-width:0;min-height:0}
-.pcal-rail{padding:14px 12px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;scrollbar-width:thin}
-.pcal-materials{grid-area:materials}
-.pcal-queue{grid-area:queue}
+/* Materials / Study queue: popovers anchored under their toolbar buttons (top/right/max-height set by
+   pcalPositionPanel), over the full-width calendar -- they never take a grid column. */
+.pcal-rail{position:absolute;z-index:20;width:300px;max-width:calc(100% - 20px);box-sizing:border-box;padding:14px 12px;overflow-y:auto;display:none;flex-direction:column;gap:6px;scrollbar-width:thin;box-shadow:0 16px 40px rgba(20,24,60,.16),0 0 0 1px rgba(20,24,60,.06)}
+.pcal.is-materials-open .pcal-materials,.pcal.is-queue-open .pcal-queue{display:flex;animation:pcal-pop .16s var(--pcal-ease)}
+.pcal.is-moving .pcal-rail{opacity:.3;pointer-events:none}
+.pcal-panel-toggles{display:flex;gap:2px;flex:none;margin-left:4px;padding-left:8px;border-left:1px solid var(--pcal-line)}
+.pcal-panel-toggle{width:34px;height:34px;display:inline-grid;place-items:center;padding:0;border:0;border-radius:8px;background:transparent;color:var(--pcal-ink-2);cursor:pointer;transition:background-color .15s var(--pcal-ease),color .15s var(--pcal-ease)}
+.pcal-panel-toggle:hover{background:var(--pcal-line-soft);color:var(--ink)}
+.pcal-panel-toggle[aria-expanded="true"]{background:#eef0ff;color:var(--session-accent)}
+.pcal-panel-toggle:focus-visible{outline:2px solid var(--session-accent);outline-offset:1px}
+.pcal-panel-toggle svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
 .pcal-main{grid-area:main;display:flex;flex-direction:column;overflow:hidden}
 .pcal-rail-title{margin:0;font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
 .pcal button{font-family:inherit}
@@ -3551,39 +3559,10 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
   body[data-page="planner"] .toast{padding:9px 14px;border-radius:10px;font-size:13px;right:16px;bottom:16px;box-shadow:0 8px 24px rgba(16,32,29,.18);pointer-events:none}
 }
 @media (min-width:1024px) and (max-width:1279px){
-  /* Narrower desktop: the calendar keeps its width; materials and queue share one right column. */
-  .pcal{grid-template-columns:minmax(0,1fr) 236px;grid-template-rows:auto minmax(0,1fr);grid-template-areas:"main materials" "main queue"}
-  .pcal-materials{max-height:40vh}
-  .pcal-sheet{left:auto;right:0}
   .pcal-range{font-size:16px}
 }
-/* Collapsible side rails: where Materials and Study queue are side columns (>=1280px) each folds
-   away completely -- its grid column is removed and the calendar takes the whole freed width -- and
-   only a small floating edge button (styled like Ask AI Tutor) remains to reopen it. Narrower
-   layouts keep them open. */
 .pcal-rail-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .pcal-queue-head .pcal-rail-title{flex:1;min-width:0}
-.pcal-rail-collapse,.pcal-rail-expand{display:none}
-@media (min-width:1280px){
-  .pcal{transition:grid-template-columns .18s var(--pcal-ease)}
-  .pcal.is-materials-collapsed{grid-template-columns:minmax(0,1fr) 236px;grid-template-areas:"main queue"}
-  .pcal.is-queue-collapsed{grid-template-columns:196px minmax(0,1fr);grid-template-areas:"materials main"}
-  .pcal.is-materials-collapsed.is-queue-collapsed{grid-template-columns:minmax(0,1fr);grid-template-areas:"main"}
-  .pcal-rail-collapse{display:inline-grid;place-items:center;flex:none;width:22px;height:22px;margin:-4px -4px -4px 0;padding:0;border:0;border-radius:6px;background:transparent;color:var(--muted);font-size:17px;line-height:1;cursor:pointer;transition:background-color .15s var(--pcal-ease),color .15s var(--pcal-ease)}
-  .pcal-rail-collapse:hover{background:var(--pcal-line-soft);color:var(--ink)}
-  /* A folded rail leaves the grid (absolutely positioned, zero size); only its edge button shows. */
-  .pcal.is-materials-collapsed .pcal-materials,.pcal.is-queue-collapsed .pcal-queue{position:absolute;top:50%;z-index:7;grid-area:auto;width:0;height:0;min-height:0;padding:0;border:0;background:transparent;overflow:visible}
-  .pcal.is-materials-collapsed .pcal-materials{left:6px}
-  .pcal.is-queue-collapsed .pcal-queue{right:6px}
-  .pcal.is-materials-collapsed .pcal-materials>:not(.pcal-rail-expand),.pcal.is-queue-collapsed .pcal-queue>:not(.pcal-rail-expand){display:none!important}
-  .pcal.is-materials-collapsed .pcal-materials>.pcal-rail-expand,.pcal.is-queue-collapsed .pcal-queue>.pcal-rail-expand{display:inline-grid;place-items:center;position:absolute;top:0;width:40px;height:40px;padding:0;border:1px solid var(--session-accent,#6876f5);border-radius:999px;background:#fff;color:var(--session-accent,#6876f5);box-shadow:0 6px 18px rgba(20,24,60,.14);transform:translateY(-50%);cursor:pointer;transition:background-color .15s var(--pcal-ease),color .15s var(--pcal-ease)}
-  .pcal.is-materials-collapsed .pcal-materials>.pcal-rail-expand{left:0}
-  .pcal.is-queue-collapsed .pcal-queue>.pcal-rail-expand{right:0}
-  .pcal-rail-expand:hover{background:var(--session-accent,#6876f5);color:#fff}
-  .pcal-rail-expand svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
-  .pcal-rail-collapse:focus-visible,.pcal-rail-expand:focus-visible{outline:2px solid var(--session-accent);outline-offset:1px}
-}
-@media (min-width:1280px) and (prefers-reduced-motion:reduce){.pcal{transition:none}}
 /* Collapsible AI Tutor (desktop >=1024px): the learning content keeps the full workspace width and
    the tutor slides over from the right when "Ask AI Tutor" is pressed. Below 1024px the tutor stays
    inline under the content, as before, and these controls are hidden. */

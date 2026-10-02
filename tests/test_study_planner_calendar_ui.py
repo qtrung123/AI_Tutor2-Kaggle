@@ -184,6 +184,7 @@ const clickBlock = async (block) => {
   $("pcal-next").click(); await sleep(100);
   out.reloaded.events = events().map((e) => e.dataset.kind);
   out.reloaded.previews = P.previewBodies.length - previewsBeforeReload;
+  $("pcal-materials-toggle").click();   // "Start a new plan" sits in the Materials panel
   out.reloaded.newPlanShown = visible($("pcal-new-plan"));
 
   out.text = $("planner-workspace").textContent;

@@ -1,12 +1,13 @@
-"""Real-browser tests for the desktop Planner: effective availability and the collapsible side rails
+"""Real-browser tests for the desktop Planner: effective availability and the Materials / Study queue panels
 (headless Chrome, mocked API from tests/test_google_calendar_planner_ui.py).
 
 1. "Available" blocks are the learner's marked time minus Google busy time -- exactly the pieces the
    scheduler uses (the shared CASES of tests/test_planner_effective_availability.py) -- never one block
    drawn through a "Busy" block; with "Avoid conflicts" off the marked time is shown whole again.
-2. Materials and Study queue fold independently to zero width (only a floating edge button stays),
-   the calendar takes the freed width, and the state is remembered in localStorage (planner_materials_collapsed /
-   planner_queue_collapsed). "Now" is pinned to Mon 2026-09-21 08:00. Skipped without Chrome.
+2. Materials and Study queue open from two icon buttons at the top right of the calendar header, as
+   popovers anchored under them; the calendar keeps its full width (no grid column is ever added). One
+   panel at a time; the same button, a click outside or Escape closes it. Old stored collapse flags are
+   ignored. "Now" is pinned to Mon 2026-09-21 08:00. Skipped without Chrome.
 """
 
 import json
@@ -34,15 +35,14 @@ const DAY = "__DAY__";
 const blocks = (selector) => [...document.querySelectorAll(`#pcal-body .pcal-col[data-date="${DAY}"] ${selector}`)].map((b) => ({
   start: b.dataset.start, end: b.dataset.end, time: b.querySelector(".pcal-avail-time")?.textContent || null,
   label: b.getAttribute("aria-label"), top: parseFloat(b.style.top), bottom: parseFloat(b.style.top) + parseFloat(b.style.height)}));
-const widths = () => Object.fromEntries(["materials", "main", "queue"].map((name) => [name, Math.round(document.querySelector(`.pcal-${name}`).getBoundingClientRect().width)]));
-const railState = () => ({classes: $("planner-workspace").className, widths: widths(),
-  stored: [localStorage.getItem("planner_materials_collapsed"), localStorage.getItem("planner_queue_collapsed")],
+const box = (el) => { const r = el.getBoundingClientRect(); return {left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom), width: Math.round(r.width)}; };
+const panelState = () => ({classes: $("planner-workspace").className, workspace: box($("planner-workspace")), main: box(document.querySelector(".pcal-main")),
+  columns: getComputedStyle($("planner-workspace")).gridTemplateColumns.split(" ").length, scrollTop: box($("pcal-scroll")).top,
   materialsList: visible($("pcal-material-list")), gcal: visible($("pcal-gcal")), queueList: visible($("pcal-queue")),
-  materialsExpand: visible($("pcal-materials-expand")), queueExpand: visible($("pcal-queue-expand")),
-  materialsCollapse: [visible($("pcal-materials-collapse")), $("pcal-materials-collapse").getAttribute("aria-expanded")],
-  queueCollapse: [visible($("pcal-queue-collapse")), $("pcal-queue-collapse").getAttribute("aria-expanded")],
-  gcalButtons: [...$("pcal-gcal").querySelectorAll("button, input")].map((b) => b.id), weekRange: $("pcal-range").textContent,
-  expandButtonSizes: ["materials", "queue"].map((rail) => { const r = $(`pcal-${rail}-expand`).getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)]; })});
+  expanded: ["materials", "queue"].map((panel) => $(`pcal-${panel}-toggle`).getAttribute("aria-expanded")),
+  toggles: box(document.querySelector(".pcal-panel-toggles")), materials: box($("pcal-materials-rail")), queue: box($("pcal-queue-rail")),
+  gcalButtons: [...$("pcal-gcal").querySelectorAll("button, input")].map((b) => b.id), focus: document.activeElement?.id,
+  weekRange: $("pcal-range").textContent});
 (async () => {
   await sleep(1500);
   const noMotion = document.createElement("style"); noMotion.textContent = "*,*::before,*::after{transition:none!important;animation:none!important}"; document.head.appendChild(noMotion);
@@ -86,26 +86,39 @@ const railState = () => ({classes: $("planner-workspace").className, widths: wid
   $("pcal-gcal-avoid").click(); await sleep(500);
   out.avoidOn = {available: blocks(".pcal-avail"), busy: blocks(".pcal-busy")};
 
-  // 2. Collapsible rails.
-  out.rails = {expanded: railState()};
-  $("pcal-materials-collapse").click(); await sleep(100);
-  out.rails.materials = {...railState(), focus: document.activeElement?.id};
-  $("pcal-queue-collapse").click(); await sleep(100);
-  out.rails.both = railState();
-  $("pcal-materials-expand").click(); await sleep(100);
-  out.rails.queue = {...railState(), focus: document.activeElement?.id};
-  $("pcal-queue-expand").click(); await sleep(100);
-  out.rails.restored = railState();
-  // The calendar still works with folded rails: week navigation and the grid render.
-  $("pcal-materials-collapse").click(); $("pcal-queue-collapse").click(); await sleep(100);
+  // 2. Materials / Study queue panels.
+  out.panels = {closed: panelState()};
+  $("pcal-materials-toggle").click(); await sleep(100);
+  out.panels.materials = panelState();
+  $("pcal-queue-toggle").click(); await sleep(100);
+  out.panels.queue = panelState();                       // switching: the other one closes
+  $("pcal-queue-toggle").click(); await sleep(100);
+  out.panels.toggledOff = panelState();                  // the same button closes it
+  $("pcal-materials-toggle").click(); await sleep(100);
+  $("pcal-material-list").dispatchEvent(new PointerEvent("pointerdown", {bubbles: true}));
+  out.panels.insideClick = panelState();
+  $("pcal-range").dispatchEvent(new PointerEvent("pointerdown", {bubbles: true}));
+  out.panels.outsideClick = panelState();
+  // A calendar block stops its pointerdown from bubbling; the panel still closes.
+  $("pcal-queue-toggle").click(); await sleep(100);
+  const avail = document.querySelector("#pcal-body .pcal-avail");
+  avail.dispatchEvent(new PointerEvent("pointerdown", {bubbles: true, cancelable: true, button: 0, clientY: avail.getBoundingClientRect().top + 4}));
+  document.dispatchEvent(new PointerEvent("pointerup", {bubbles: true}));
+  out.panels.blockClick = panelState();
+  document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape"}));
+  $("pcal-queue-toggle").click(); await sleep(100);
+  document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape"}));
+  out.panels.escape = panelState();
+  // The calendar still works with a panel open: week navigation and the grid render.
+  $("pcal-materials-toggle").click(); await sleep(100);
   $("pcal-next").click(); await sleep(300); $("pcal-today").click(); await sleep(300);
-  out.rails.navigated = {...railState(), columns: document.querySelectorAll("#pcal-body .pcal-col").length};
+  out.panels.navigated = {...panelState(), columns7: document.querySelectorAll("#pcal-body .pcal-col").length};
   publish();
 })().catch((error) => { out.fatal = String(error && error.stack || error); publish(); });
 }
 """
 
-# A second page load with both rails stored as collapsed: they start folded.
+# A narrower desktop with the old stored "collapsed" flags: they no longer affect the layout.
 PERSISTED_MOCK = MOCK + r"""
 localStorage.setItem("planner_materials_collapsed", "true");
 localStorage.setItem("planner_queue_collapsed", "true");
@@ -114,20 +127,26 @@ PERSISTED_DRIVER = r"""
 {
 const out = {errors: []};
 window.addEventListener("error", (e) => out.errors.push(String(e.message)));
+const box = (el) => { const r = el.getBoundingClientRect(); return {left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom), width: Math.round(r.width)}; };
 setTimeout(() => {
   setPage("planner");
   setTimeout(() => {
-    const w = (name) => Math.round(document.querySelector(`.pcal-${name}`).getBoundingClientRect().width);
-    out.classes = document.getElementById("planner-workspace").className;
-    out.widths = {materials: w("materials"), main: w("main"), queue: w("queue")};
-    window.parent.postMessage(JSON.stringify(out), "*");
+    const workspace = document.getElementById("planner-workspace");
+    out.classes = workspace.className;
+    out.workspace = box(workspace);
+    out.main = box(document.querySelector(".pcal-main"));
+    document.getElementById("pcal-queue-toggle").click();
+    setTimeout(() => {
+      out.openMain = box(document.querySelector(".pcal-main"));
+      out.queue = box(document.getElementById("pcal-queue-rail"));
+      out.toggles = box(document.querySelector(".pcal-panel-toggles"));
+      out.viewport = window.innerWidth;
+      window.parent.postMessage(JSON.stringify(out), "*");
+    }, 150);
   }, 800);
 }, 1500);
 }
 """
-
-
-GAP = 10   # .pcal column gap, removed together with a folded rail's column
 
 
 def _driver():
@@ -189,63 +208,80 @@ class EffectiveAvailabilityUiTests(unittest.TestCase):
         self.assertIsNone(off["placement"])
         self.assert_pieces(self.out["avoidOn"]["available"], CASES["busy_inside"][1])
 
-    def test_rails_start_expanded(self):
-        expanded = self.out["rails"]["expanded"]
-        self.assertNotIn("collapsed", self.out["initial"]["classes"])
-        self.assertEqual((expanded["widths"]["materials"], expanded["widths"]["queue"]), (196, 236))
-        self.assertTrue(expanded["materialsList"] and expanded["gcal"] and expanded["queueList"])
-        self.assertFalse(expanded["materialsExpand"] or expanded["queueExpand"])
-        self.assertEqual((expanded["materialsCollapse"], expanded["queueCollapse"]), ([True, "true"], [True, "true"]))
-        self.assertEqual(expanded["stored"], [None, None])
+    def test_panels_start_closed_and_the_calendar_has_full_width(self):
+        closed = self.out["panels"]["closed"]
+        self.assertNotIn("-open", closed["classes"])
+        self.assertNotIn("collapsed", closed["classes"])
+        self.assertEqual(closed["expanded"], ["false", "false"])
+        self.assertFalse(closed["materialsList"] or closed["gcal"] or closed["queueList"])
+        self.assertEqual(closed["columns"], 1)
+        self.assertEqual((closed["main"]["left"], closed["main"]["right"]), (closed["workspace"]["left"], closed["workspace"]["right"]))
+        # Both buttons sit side by side at the top right of the calendar header.
+        toggles = closed["toggles"]
+        self.assertLessEqual(closed["main"]["right"] - toggles["right"], 24)
+        self.assertLess(toggles["bottom"], closed["scrollTop"])
+        self.assertLessEqual(toggles["width"], 90)
 
-    def test_materials_collapse_gives_the_calendar_its_width(self):
-        rails = self.out["rails"]
-        expanded, folded = rails["expanded"], rails["materials"]
-        self.assertIn("is-materials-collapsed", folded["classes"])
-        self.assertEqual(folded["widths"]["materials"], 0)
-        self.assertEqual(folded["widths"]["main"] - expanded["widths"]["main"], 196 + GAP)   # column and its gap are gone
-        self.assertEqual(folded["widths"]["queue"], 236)
-        self.assertTrue(folded["materialsExpand"])
-        self.assertFalse(folded["materialsList"] or folded["gcal"])
-        self.assertTrue(folded["queueList"])
-        self.assertEqual(folded["stored"], ["true", None])
-        self.assertEqual(folded["focus"], "pcal-materials-expand")
+    def test_materials_opens_as_an_anchored_popover_without_shrinking_the_calendar(self):
+        panels = self.out["panels"]
+        closed, opened = panels["closed"], panels["materials"]
+        self.assertIn("is-materials-open", opened["classes"])
+        self.assertEqual(opened["expanded"], ["true", "false"])
+        self.assertTrue(opened["materialsList"] and opened["gcal"])
+        self.assertIn("pcal-gcal-avoid", opened["gcalButtons"])
+        self.assertFalse(opened["queueList"])
+        self.assertEqual((opened["main"], opened["columns"]), (closed["main"], 1))
+        panel = opened["materials"]
+        self.assertGreaterEqual(panel["top"], opened["toggles"]["bottom"])
+        self.assertLessEqual(panel["top"] - opened["toggles"]["bottom"], 12)
+        self.assertEqual(panel["right"], opened["toggles"]["right"])
+        self.assertGreaterEqual(panel["left"], opened["workspace"]["left"])
+        self.assertLessEqual(panel["bottom"], opened["workspace"]["bottom"])
 
-    def test_both_collapsed_then_each_expands_independently(self):
-        rails = self.out["rails"]
-        both, queue = rails["both"], rails["queue"]
-        self.assertEqual((both["widths"]["materials"], both["widths"]["queue"]), (0, 0))
-        self.assertEqual(both["widths"]["main"] - rails["expanded"]["widths"]["main"], 196 + GAP + 236 + GAP)
-        self.assertEqual(both["expandButtonSizes"], [[40, 40], [40, 40]])
-        self.assertEqual(both["stored"], ["true", "true"])
-        self.assertTrue(both["materialsExpand"] and both["queueExpand"])
-        # Materials reopened, queue still folded: Google Calendar controls are back.
-        self.assertEqual((queue["widths"]["materials"], queue["widths"]["queue"]), (196, 0))
-        self.assertTrue(queue["gcal"] and queue["materialsList"])
-        self.assertIn("pcal-gcal-avoid", queue["gcalButtons"])
-        self.assertEqual(queue["stored"], ["false", "true"])
-        self.assertEqual(queue["focus"], "pcal-materials-collapse")
-        restored = rails["restored"]
-        self.assertEqual(restored["widths"], rails["expanded"]["widths"])
-        self.assertTrue(restored["queueList"] and restored["gcal"])
-        self.assertEqual(restored["stored"], ["false", "false"])
+    def test_only_one_panel_and_the_same_button_closes_it(self):
+        panels = self.out["panels"]
+        queue = panels["queue"]
+        self.assertIn("is-queue-open", queue["classes"])
+        self.assertNotIn("is-materials-open", queue["classes"])
+        self.assertEqual(queue["expanded"], ["false", "true"])
+        self.assertTrue(queue["queueList"])
+        self.assertFalse(queue["materialsList"] or queue["gcal"])
+        self.assertEqual(queue["main"], panels["closed"]["main"])
+        self.assertEqual(queue["queue"]["right"], queue["toggles"]["right"])
+        off = panels["toggledOff"]
+        self.assertEqual(off["expanded"], ["false", "false"])
+        self.assertFalse(off["materialsList"] or off["queueList"])
 
-    def test_week_navigation_with_folded_rails(self):
-        navigated = self.out["rails"]["navigated"]
-        self.assertEqual(navigated["columns"], 7)
-        self.assertEqual(navigated["weekRange"], self.out["rails"]["expanded"]["weekRange"])
-        self.assertIn("is-materials-collapsed", navigated["classes"])
-        self.assertIn("is-queue-collapsed", navigated["classes"])
+    def test_click_outside_and_escape_close_the_panel(self):
+        panels = self.out["panels"]
+        self.assertTrue(panels["insideClick"]["materialsList"])        # a click inside keeps it open
+        self.assertFalse(panels["outsideClick"]["materialsList"])
+        self.assertEqual(panels["outsideClick"]["expanded"], ["false", "false"])
+        self.assertFalse(panels["blockClick"]["queueList"])            # also from a calendar block
+        escape = panels["escape"]
+        self.assertFalse(escape["queueList"])
+        self.assertEqual(escape["expanded"], ["false", "false"])
+        self.assertEqual(escape["focus"], "pcal-queue-toggle")
+
+    def test_week_navigation_with_a_panel_open(self):
+        navigated = self.out["panels"]["navigated"]
+        self.assertEqual(navigated["columns7"], 7)
+        self.assertEqual(navigated["weekRange"], self.out["panels"]["closed"]["weekRange"])
+        self.assertTrue(navigated["materialsList"])
+        self.assertEqual(navigated["main"], self.out["panels"]["closed"]["main"])
 
 
 @unittest.skipUnless(find_chrome(), "Chrome is not installed")
-class PersistedRailStateUiTests(unittest.TestCase):
-    def test_stored_collapsed_rails_start_folded(self):
-        out = run_at_width(1440, 900, mock=PERSISTED_MOCK, driver=PERSISTED_DRIVER)
+class NarrowDesktopPanelUiTests(unittest.TestCase):
+    def test_old_stored_flags_are_ignored_and_the_panel_fits(self):
+        out = run_at_width(1100, 800, mock=PERSISTED_MOCK, driver=PERSISTED_DRIVER)
         self.assertEqual(out["errors"], [])
-        self.assertIn("is-materials-collapsed", out["classes"])
-        self.assertIn("is-queue-collapsed", out["classes"])
-        self.assertEqual((out["widths"]["materials"], out["widths"]["queue"]), (0, 0))
+        self.assertNotIn("collapsed", out["classes"])
+        self.assertEqual((out["main"]["left"], out["main"]["right"]), (out["workspace"]["left"], out["workspace"]["right"]))
+        self.assertEqual(out["openMain"], out["main"])
+        self.assertEqual(out["queue"]["right"], out["toggles"]["right"])
+        self.assertGreaterEqual(out["queue"]["left"], out["workspace"]["left"])
+        self.assertLessEqual(out["queue"]["right"], out["viewport"])
 
 
 if __name__ == "__main__":

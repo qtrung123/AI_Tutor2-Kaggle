@@ -1439,39 +1439,40 @@ function renderPlannerWorkspace() {
   pcalRenderGoogleCalendar();
 }
 
-// -- collapsible side rails ---------------------------------------------------------
-// Materials and Study queue each fold away completely (>=1280px, where they are side columns),
-// leaving a floating edge button; the calendar takes the freed width. The state is a per-browser
-// convenience.
-const PCAL_RAIL_STORAGE_KEYS = { materials: "planner_materials_collapsed", queue: "planner_queue_collapsed" };
-const pcalRails = Object.fromEntries(Object.entries(PCAL_RAIL_STORAGE_KEYS).map(([rail, key]) => {
-  try {
-    return [rail, localStorage.getItem(key) === "true"];
-  } catch {
-    return [rail, false];   // storage blocked: start expanded
-  }
-}));
+// -- Materials / Study queue panels -------------------------------------------------
+// Two icon buttons at the top right of the calendar header open these panels as popovers anchored
+// under the buttons; the calendar always keeps its full width. One panel at a time; the same
+// button, a click outside or Escape closes it. Panels start closed on every page load.
+let pcalOpenPanel = null;   // "materials" | "queue" | null
 
-function pcalApplyRailState() {
+function pcalSetPanel(panel, { focusToggle = false } = {}) {
   if (!plannerWorkspace) return;
-  Object.entries(pcalRails).forEach(([rail, collapsed]) => {
-    plannerWorkspace.classList.toggle(`is-${rail}-collapsed`, collapsed);
-    document.getElementById(`pcal-${rail}-collapse`)?.setAttribute("aria-expanded", String(!collapsed));
-    document.getElementById(`pcal-${rail}-expand`)?.setAttribute("aria-expanded", String(!collapsed));
+  const previous = pcalOpenPanel;
+  pcalOpenPanel = panel;
+  if (previous === "materials" && panel !== "materials") pcalCloseSheet();
+  ["materials", "queue"].forEach((name) => {
+    plannerWorkspace.classList.toggle(`is-${name}-open`, name === panel);
+    document.getElementById(`pcal-${name}-toggle`)?.setAttribute("aria-expanded", String(name === panel));
   });
+  if (panel) pcalPositionPanel(panel);
+  if (focusToggle && previous) document.getElementById(`pcal-${previous}-toggle`)?.focus();
 }
 
-function pcalSetRailCollapsed(rail, collapsed) {
-  pcalRails[rail] = collapsed;
-  try {
-    localStorage.setItem(PCAL_RAIL_STORAGE_KEYS[rail], String(collapsed));
-  } catch {
-    // Storage blocked: the rail still folds for this page view.
-  }
-  if (rail === "materials" && collapsed) pcalCloseSheet();
+function pcalTogglePanel(panel) {
   pcalClosePopover();
-  pcalApplyRailState();
-  document.getElementById(collapsed ? `pcal-${rail}-expand` : `pcal-${rail}-collapse`)?.focus();
+  pcalSetPanel(pcalOpenPanel === panel ? null : panel);
+}
+
+function pcalPositionPanel(panel) {
+  // Right-aligned with the toolbar buttons, just below them.
+  const rail = document.getElementById(`pcal-${panel}-rail`);
+  const toggles = plannerWorkspace?.querySelector(".pcal-panel-toggles");
+  if (!rail || !toggles) return;
+  const box = plannerWorkspace.getBoundingClientRect(), anchor = toggles.getBoundingClientRect();
+  const top = Math.round(anchor.bottom - box.top + 6);
+  rail.style.top = `${top}px`;
+  rail.style.right = `${Math.max(0, Math.round(box.right - anchor.right))}px`;
+  rail.style.maxHeight = `${Math.max(160, Math.round(box.height - top - 10))}px`;
 }
 
 function pcalRenderMaterials() {

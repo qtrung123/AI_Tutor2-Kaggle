@@ -62,7 +62,9 @@ window.addEventListener("unhandledrejection", (e) => out.errors.push("rejection:
 const $ = (id) => document.getElementById(id);
 const visible = (el) => !!el && el.offsetParent !== null && !el.closest("[hidden]");
 const column = (date) => document.querySelector(`#pcal-body .pcal-col[data-date="${date}"]`);
-const section = () => ({shown: visible($("pcal-gcal")), text: $("pcal-gcal").textContent,
+// The Google Calendar controls live in the Materials panel: open it (toolbar button) before reading them.
+const openMaterials = () => { if (!$("planner-workspace").classList.contains("is-materials-open")) $("pcal-materials-toggle").click(); };
+const section = () => (openMaterials(), {shown: visible($("pcal-gcal")), text: $("pcal-gcal").textContent,
   buttons: [...$("pcal-gcal").querySelectorAll("button")].map((b) => [b.id, b.textContent, b.disabled]),
   toggles: [...$("pcal-gcal").querySelectorAll("input[type=checkbox]")].map((i) => [i.id, i.checked, i.closest("label").textContent]),
   syncError: visible($("pcal-gcal-sync-error")) ? $("pcal-gcal-sync-error").textContent : null});
