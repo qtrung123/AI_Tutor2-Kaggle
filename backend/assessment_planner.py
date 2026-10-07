@@ -4,7 +4,7 @@ import json
 import re
 import time
 
-from langchain_ollama import ChatOllama
+from backend.llm_backend import ChatOllama
 
 from backend import quiz_diagnostics
 

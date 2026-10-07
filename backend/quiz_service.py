@@ -3,7 +3,7 @@ import time
 from collections import Counter
 from uuid import uuid4
 
-from langchain_ollama import ChatOllama
+from backend.llm_backend import ChatOllama
 
 from backend.quiz_store import (
     FLASHCARD_WRITTEN_PLANNER_VERSION,

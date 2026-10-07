@@ -4,7 +4,7 @@ import json
 import re
 import time
 
-from langchain_ollama import ChatOllama
+from backend.llm_backend import ChatOllama
 
 from backend.indexed_document_store import get_indexed_document
 from backend.llm_json import parse_json_object

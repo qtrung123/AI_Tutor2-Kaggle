@@ -26,7 +26,8 @@ import time
 from dataclasses import dataclass, replace
 
 import httpx
-from config import CHAT_MODEL, DEFAULT_GENERATION_MODEL, GENERATION_MODELS, OLLAMA_BASE_URL
+from backend.llm_backend import vllm_model_for, vllm_model_ready
+from config import CHAT_MODEL, DEFAULT_GENERATION_MODEL, GENERATION_MODELS, LLM_BACKEND, OLLAMA_BASE_URL, VLLM_BASE_URL, VLLM_MODEL
 
 
 def _parse_reference(reference: str) -> tuple[str, str | None]:
@@ -164,6 +165,13 @@ def describe_generation_model(ollama_model: str) -> dict:
 
 
 def _is_installed(model: str) -> bool:
+    if LLM_BACKEND == "vllm":
+        # Served by the vLLM server (loaded once at its startup), never by Ollama.
+        try:
+            vllm_model_for(model)
+        except ValueError:
+            return False
+        return vllm_model_ready()
     try:
         with httpx.Client(timeout=3) as client:
             names = {item.get("name") for item in client.get(f"{OLLAMA_BASE_URL}/api/tags").json().get("models", [])}
@@ -214,6 +222,11 @@ def _ensure_installed(model: str) -> bool:
     Returns True if a pull actually happened. Raises `httpx.HTTPError` on a failed pull - callers
     never catch that to fall back to another model; the caller's request simply fails, loudly.
     """
+    if LLM_BACKEND == "vllm":
+        vllm_model_for(model)  # ValueError for a model vLLM does not serve
+        if not vllm_model_ready():
+            raise RuntimeError(f"vLLM is not serving {VLLM_MODEL} at {VLLM_BASE_URL}; start it with deployment/start_vllm.sh.")
+        return False  # nothing is ever pulled for vLLM
     if _is_installed(model):
         return False
     with httpx.Client(timeout=900) as client:
@@ -265,6 +278,12 @@ def warm_generation_model(model_id: str, num_ctx: int, keep_alive: str) -> dict:
     """
     model = resolve_generation_model(model_id)
     started = time.perf_counter()
+    if LLM_BACKEND == "vllm":
+        # vLLM loaded the model once at its startup: only confirm it is served, never load it into Ollama.
+        _ensure_installed(model)
+        warm_ms = round((time.perf_counter() - started) * 1000)
+        print(f"[model-warm] model_id={model_id} backend=vllm warm_ms={warm_ms}")
+        return {"model_id": model_id, "warm_ms": warm_ms, "ollama_load_ms": None}
     with httpx.Client(timeout=900) as client:
         response = client.post(f"{OLLAMA_BASE_URL}/api/generate", json={
             "model": model, "prompt": "", "stream": False, "keep_alive": keep_alive,

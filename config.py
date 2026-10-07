@@ -48,13 +48,23 @@ QUIZ_MODEL_BENCHMARK_RESULTS_PATH = _env_path(
 
 COLLECTION_NAME = "study_documents"
 
+# Chat-generation backend: "ollama" (default) or "vllm" (a local OpenAI-compatible vLLM server
+# serving Qwen 2.5 7B; see backend/llm_backend.py and deployment/start_vllm.sh). Any other value
+# falls back to Ollama. Embeddings always stay on Ollama.
+_REQUESTED_LLM_BACKEND = os.getenv("LLM_BACKEND", "ollama").strip().lower() or "ollama"
+LLM_BACKEND = _REQUESTED_LLM_BACKEND if _REQUESTED_LLM_BACKEND in {"ollama", "vllm"} else "ollama"
+VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://127.0.0.1:8001/v1").rstrip("/")
+VLLM_MODEL = os.getenv("VLLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+VLLM_API_KEY = os.getenv("VLLM_API_KEY", "EMPTY")
+
 # Model dùng để trả lời
 CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M")
 # Comma-separated allowlist: which models the Study Session selector offers/resolves (never which
 # models are pulled at Kaggle startup - only Qwen, the default, is pulled/warmed there; every other
 # configured model here is pulled lazily on first use, see backend/model_registry.py and
 # deployment/start_kaggle.sh). Existing OLLAMA_CHAT_MODEL deployments continue to expose one model.
-_DEFAULT_GENERATION_MODELS = "qwen-2.5-7b,gemma3-12b"
+# vLLM serves Qwen 2.5 7B only, so Gemma is not offered there.
+_DEFAULT_GENERATION_MODELS = "qwen-2.5-7b" if LLM_BACKEND == "vllm" else "qwen-2.5-7b,gemma3-12b"
 GENERATION_MODELS = tuple(dict.fromkeys(
     model.strip() for model in os.getenv("OLLAMA_GENERATION_MODELS", _DEFAULT_GENERATION_MODELS).split(",") if model.strip()
 )) or tuple(_DEFAULT_GENERATION_MODELS.split(","))

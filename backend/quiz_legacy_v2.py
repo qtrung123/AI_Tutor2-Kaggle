@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from langchain_ollama import ChatOllama
+from backend.llm_backend import ChatOllama
 
 from backend.quiz_store import (
     delete_document_attempts,

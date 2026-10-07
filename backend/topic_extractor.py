@@ -262,7 +262,7 @@ class TopicExtractor:
 
 def ollama_heading_refiner(model: str):
     """Create a bounded classifier that cannot alter detected candidates."""
-    from langchain_ollama import ChatOllama
+    from backend.llm_backend import ChatOllama
     def refine(payload: dict) -> list[dict]:
         prompt = (
             "Classify each ordered candidate as role major or subtopic. Copy id and heading exactly. "

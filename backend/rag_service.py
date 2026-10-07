@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from langchain_chroma import Chroma
-from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_ollama import OllamaEmbeddings
 
 from backend.conversation_store import (
     add_message,
@@ -19,6 +19,7 @@ from config import (
     TOP_K,
     VECTORSTORE_DIR,
 )
+from backend.llm_backend import ChatOllama
 from backend.model_registry import resolve_generation_model
 
 

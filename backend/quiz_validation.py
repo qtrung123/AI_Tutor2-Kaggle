@@ -3,7 +3,7 @@ import re
 import time
 from dataclasses import asdict, dataclass
 
-from langchain_ollama import ChatOllama
+from backend.llm_backend import ChatOllama
 
 from config import (
     QUIZ_SEMANTIC_VALIDATION_ENABLED,

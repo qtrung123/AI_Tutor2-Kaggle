@@ -21,10 +21,11 @@ from backend.api.quiz_generation import router as quiz_generation_router
 from backend.api.quiz_library import router as quiz_library_router
 from backend.api.summary import router as summary_router
 from backend.api.deps import require_admin_user, require_current_user
+from backend.llm_backend import backend_description, vllm_model_ready
 from backend.model_registry import list_generation_models, prepare_generation_model
 from backend.model_comparison_service import get_quiz_model_comparison
 from backend.model_benchmark_service import DEFAULT_RUNS as BENCHMARK_DEFAULT_RUNS, BenchmarkAlreadyRunning, start_benchmark
-from config import CHAT_MODEL, EMBEDDING_MODEL, OLLAMA_BASE_URL
+from config import CHAT_MODEL, EMBEDDING_MODEL, LLM_BACKEND, OLLAMA_BASE_URL, VLLM_MODEL
 
 
 class HealthResponse(BaseModel):
@@ -46,6 +47,7 @@ class ServiceHealthResponse(BaseModel):
 
 # FastAPI application object. Uvicorn imports this as backend.main:app.
 app = FastAPI(title="Tutoring Backend")
+print(backend_description())
 
 # CORS allows the frontend dev server on port 3000 to call the backend on 8000.
 cors_origins = [
@@ -137,10 +139,14 @@ def service_health() -> ServiceHealthResponse:
             str(item.get("name", ""))
             for item in response.json().get("models", [])
         }
+        # With LLM_BACKEND=vllm, Ollama only serves embeddings; the chat model is checked on vLLM.
+        ollama_models = (EMBEDDING_MODEL,) if LLM_BACKEND == "vllm" else (CHAT_MODEL, EMBEDDING_MODEL)
         missing = [
-            model for model in (CHAT_MODEL, EMBEDDING_MODEL)
+            model for model in ollama_models
             if model not in available and f"{model}:latest" not in available
         ]
+        if LLM_BACKEND == "vllm" and not vllm_model_ready():
+            missing.append(VLLM_MODEL)
         return ServiceHealthResponse(
             status="ok" if not missing else "degraded",
             ollama=True,
@@ -148,7 +154,7 @@ def service_health() -> ServiceHealthResponse:
             embedding_model=EMBEDDING_MODEL,
             models_ready=not missing,
             missing_models=missing,
-            error=(f"Missing Ollama model(s): {', '.join(missing)}" if missing else None),
+            error=(f"Missing {'' if LLM_BACKEND == 'vllm' else 'Ollama '}model(s): {', '.join(missing)}" if missing else None),
         )
     except Exception as error:
         return ServiceHealthResponse(

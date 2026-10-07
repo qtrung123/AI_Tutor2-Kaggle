@@ -2,7 +2,7 @@
 
 import re
 
-from langchain_ollama import ChatOllama
+from backend.llm_backend import ChatOllama
 
 from backend.document_retrieval import get_topic_chunks
 from backend.flashcard_store import get_compatible_flashcards, save_flashcards

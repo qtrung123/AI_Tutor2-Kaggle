@@ -14,14 +14,23 @@ OLLAMA_CHAT_MODEL="${OLLAMA_CHAT_MODEL:-hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF
 # reference, not Hugging Face GGUF. (DeepSeek and GLM are temporarily inactive: not configured here.)
 OLLAMA_GEMMA3_12B_MODEL="${OLLAMA_GEMMA3_12B_MODEL:-gemma3:12b-it-q4_K_M}"
 OLLAMA_GENERATION_MODELS="${OLLAMA_GENERATION_MODELS:-}"
-# Repairs the app-level model allowlist only (which models the Study Session selector offers and
-# resolves) - it does not affect what gets pulled or warmed at startup, which is Qwen alone below.
-for required_model_id in qwen-2.5-7b gemma3-12b; do
-  case ",$OLLAMA_GENERATION_MODELS," in
-    *",$required_model_id,"*) ;;
-    *) OLLAMA_GENERATION_MODELS="${OLLAMA_GENERATION_MODELS:+$OLLAMA_GENERATION_MODELS,}$required_model_id" ;;
-  esac
-done
+# Chat backend: "ollama" (default) or "vllm" (Qwen 2.5 7B on a local vLLM server, see
+# deployment/start_vllm.sh). With vllm, Ollama only serves embeddings and Gemma is not offered.
+LLM_BACKEND="${LLM_BACKEND:-ollama}"
+VLLM_PORT="${VLLM_PORT:-8001}"
+VLLM_BASE_URL="${VLLM_BASE_URL:-http://127.0.0.1:$VLLM_PORT/v1}"
+if [[ "$LLM_BACKEND" == "vllm" ]]; then
+  OLLAMA_GENERATION_MODELS="qwen-2.5-7b"
+else
+  # Repairs the app-level model allowlist only (which models the Study Session selector offers and
+  # resolves) - it does not affect what gets pulled or warmed at startup, which is Qwen alone below.
+  for required_model_id in qwen-2.5-7b gemma3-12b; do
+    case ",$OLLAMA_GENERATION_MODELS," in
+      *",$required_model_id,"*) ;;
+      *) OLLAMA_GENERATION_MODELS="${OLLAMA_GENERATION_MODELS:+$OLLAMA_GENERATION_MODELS,}$required_model_id" ;;
+    esac
+  done
+fi
 DEFAULT_MODEL="${OLLAMA_DEFAULT_GENERATION_MODEL:-qwen-2.5-7b}"
 QUIZ_DEFAULT_MODEL="${OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL:-qwen-2.5-7b}"
 # Only consulted when PRELOAD_ALL_MODELS=true (benchmarking): every configured model, pulled once
@@ -34,6 +43,7 @@ RECREATE_OLLAMA_MODEL="${RECREATE_OLLAMA_MODEL:-0}"
 REBUILD_CHROMA_ON_EMBEDDING_CHANGE="${REBUILD_CHROMA_ON_EMBEDDING_CHANGE:-1}"
 
 export PROJECT_ROOT BACKEND_PORT FRONTEND_PORT PUBLIC_PORT OLLAMA_HOST
+export LLM_BACKEND VLLM_PORT VLLM_BASE_URL
 export OLLAMA_CHAT_MODEL OLLAMA_GEMMA3_12B_MODEL
 export OLLAMA_GENERATION_MODELS OLLAMA_DEFAULT_GENERATION_MODEL="$DEFAULT_MODEL"
 export OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL="$QUIZ_DEFAULT_MODEL" OLLAMA_EMBEDDING_MODEL
@@ -51,7 +61,7 @@ fail() { log "ERROR: $1"; [[ $# -lt 2 ]] || tail_log "$2"; exit 1; }
 on_error() {
   local exit_code=$?
   log "Command failed at line $1 (exit $exit_code)."
-  for file in ollama backend frontend nginx; do tail_log "$LOG_DIR/$file.log"; done
+  for file in ollama vllm backend frontend nginx; do tail_log "$LOG_DIR/$file.log"; done
   exit "$exit_code"
 }
 trap 'on_error $LINENO' ERR
@@ -178,10 +188,14 @@ warm_models_once() {
     log "Model warmup already completed in this runtime"
     return
   fi
-  log "Warming chat model"
-  curl --fail --silent --show-error --max-time 600 \
-    -H 'Content-Type: application/json' "$OLLAMA_HOST/api/generate" \
-    -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_CHAT_MODEL"], "prompt": "Reply with OK.", "stream": False, "keep_alive": 0}))')" >/dev/null
+  if [[ "$LLM_BACKEND" == "vllm" ]]; then
+    log "Chat model is served by vLLM (loaded at its startup); skipping the Ollama chat warmup"
+  else
+    log "Warming chat model"
+    curl --fail --silent --show-error --max-time 600 \
+      -H 'Content-Type: application/json' "$OLLAMA_HOST/api/generate" \
+      -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_CHAT_MODEL"], "prompt": "Reply with OK.", "stream": False, "keep_alive": 0}))')" >/dev/null
+  fi
   log "Warming embedding model"
   curl --fail --silent --show-error --max-time 180 \
     -H 'Content-Type: application/json' "$OLLAMA_HOST/api/embed" \
@@ -201,14 +215,18 @@ assert_health_models() {
   HEALTH_PAYLOAD="$payload" python -c 'import json, os, sys; data=json.loads(os.environ["HEALTH_PAYLOAD"]); expected=(os.environ["OLLAMA_CHAT_MODEL"], os.environ["OLLAMA_EMBEDDING_MODEL"]); actual=(data.get("chat_model"), data.get("embedding_model")); sys.exit(0 if data.get("status") == "ok" and actual == expected else f"Health model mismatch or degraded: expected={expected}, actual={actual}, response={data}")'
 }
 
-for service in nginx frontend backend ollama; do stop_pid "$service"; done
+for service in nginx frontend backend vllm ollama; do stop_pid "$service"; done
 nginx -s stop -c "$PROJECT_ROOT/deployment/nginx.kaggle.conf" 2>/dev/null || true
 
 log "Starting Ollama"
 ollama serve >"$LOG_DIR/ollama.log" 2>&1 & echo $! >"$RUNTIME_DIR/ollama.pid"
 wait_http "Ollama" "$OLLAMA_HOST/api/tags" 120 "$LOG_DIR/ollama.log"
 
-if [[ "$OLLAMA_CHAT_MODEL" == hf.co/* ]] && ! ollama_has_model "$OLLAMA_CHAT_MODEL"; then
+if [[ "$LLM_BACKEND" == "vllm" ]]; then
+  # Started before the embedding model is warmed so vLLM can reserve its GPU memory share first.
+  log "LLM_BACKEND=vllm: starting vLLM instead of pulling $OLLAMA_CHAT_MODEL into Ollama"
+  VLLM_PORT="$VLLM_PORT" bash "$PROJECT_ROOT/deployment/start_vllm.sh"
+elif [[ "$OLLAMA_CHAT_MODEL" == hf.co/* ]] && ! ollama_has_model "$OLLAMA_CHAT_MODEL"; then
   log "Pulling Hugging Face chat model $OLLAMA_CHAT_MODEL"
   pull_model "$OLLAMA_CHAT_MODEL"
 elif [[ "$RECREATE_OLLAMA_MODEL" == "1" ]] || ! ollama_has_model "$OLLAMA_CHAT_MODEL"; then
@@ -223,7 +241,9 @@ fi
 # Gemma is lazy: only Qwen (above) is pulled at startup. Every other configured
 # model is pulled on demand the first time a user actually selects and uses it (see
 # backend.model_registry.prepare_generation_model, reached through /api/models/{id}/prepare).
-if [[ "$PRELOAD_ALL_MODELS" == "true" || "$PRELOAD_ALL_MODELS" == "1" ]]; then
+if [[ "$LLM_BACKEND" == "vllm" ]]; then
+  log "LLM_BACKEND=vllm: no optional Ollama generation models are preloaded."
+elif [[ "$PRELOAD_ALL_MODELS" == "true" || "$PRELOAD_ALL_MODELS" == "1" ]]; then
   IFS=',' read -r -a generation_models <<< "$AVAILABLE_MODELS"
   for generation_model in "${generation_models[@]}"; do
     generation_model="${generation_model//[[:space:]]/}"
@@ -276,7 +296,7 @@ log "Proxied health:"
 assert_health_models "http://127.0.0.1:$PUBLIC_PORT/api/health"
 
 log "All services are running"
-for service in ollama backend frontend nginx; do
+for service in ollama vllm backend frontend nginx; do
   pid="$(cat "$RUNTIME_DIR/$service.pid" 2>/dev/null || true)"
   printf '%-10s PID=%s status=%s\n' "$service" "${pid:-unknown}" "$([[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && echo running || echo unknown)"
 done
