@@ -1797,6 +1797,36 @@ body[data-page="tutor"] .tutor-layout {
   padding: 14px 24px 24px;
 }
 
+.quiz-list-section,
+.quiz-list-section-cards {
+  display: grid;
+  gap: inherit;
+}
+
+.quiz-practice-empty {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 10px 14px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  color: #65708c;
+  font-size: 13px;
+}
+
+.quiz-practice-empty p {
+  margin: 0;
+}
+
+.quiz-list-section-heading {
+  margin: 6px 0 0;
+  color: #65708c;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .quiz-history-filters {
   display: flex;
   justify-content: flex-end;

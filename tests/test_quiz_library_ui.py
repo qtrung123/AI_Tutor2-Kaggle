@@ -40,11 +40,19 @@ window.__variants = [
    question_count: 15, requested_count: 15, status: "complete", model_id: "gemma3-12b", model_name: "Gemma 3 12B",
    assessment_scope: "document", created_at: "2026-01-02T00:00:00Z", updated_at: "2026-01-02T01:00:00Z",
    progress_status: "in_progress", answered: 7, total: 15, score: null, percentage: null},
+  {quiz_id: "p1", title: "Flashcard Practice", topic_id: "document", topic_name: "Entire document", difficulty: "medium",
+   question_count: 8, requested_count: 8, status: "complete", model_id: null, model_name: null,
+   assessment_scope: "document", created_at: "2026-01-04T00:00:00Z", updated_at: "2026-01-04T00:00:00Z",
+   progress_status: "not_started", answered: 0, total: 8, score: null, percentage: null, practice: true},
 ];
 window.__history = [{
   attempt_id: "a1", quiz_id: "q3", document_id: "lecture.pdf", title: "Completed Quiz", difficulty: "difficult",
   topic_id: "document", topic_name: "", score: 9, total: 12, percentage: 75, attempt_number: 1,
   completed_at: "2026-01-03T00:00:00Z",
+}, {
+  attempt_id: "a2", quiz_id: "p2", document_id: "lecture.pdf", title: "Completed Practice", difficulty: "easy",
+  topic_id: "document", topic_name: "", score: 6, total: 8, percentage: 75, attempt_number: 1,
+  completed_at: "2026-01-05T00:00:00Z", practice: true,
 }];
 window.__deleted = [];
 const json = (data, status = 200) => new Response(JSON.stringify(data), {status, headers: {"Content-Type": "application/json"}});
@@ -99,8 +107,12 @@ const cardText = (card) => card.textContent;
     buttonText: header?.querySelector("button")?.textContent, visible: header && !header.hidden,
   };
 
-  const cards = () => [...document.getElementById("quiz-history-list").children];
+  const cards = () => [...document.querySelectorAll("#quiz-history-list .quiz-history-card")];
   out.cardCount = cards().length;
+  out.sections = [...document.getElementById("quiz-history-list").children].map((section) => ({
+    heading: section.querySelector(".quiz-list-section-heading")?.textContent,
+    titles: [...section.querySelectorAll(".quiz-history-card")].map((c) => c.querySelector("strong")?.textContent),
+  }));
   const byTitle = (title) => cards().find((card) => card.querySelector("strong")?.textContent === title);
 
   const notStarted = byTitle("Not Started Quiz");
@@ -120,6 +132,18 @@ const cardText = (card) => card.textContent;
     hasMenu: Boolean(completed.querySelector(".quiz-card-menu")),
   } : null;
 
+  const buttons = (card) => [...card.querySelectorAll(".quiz-history-actions > button")].map((b) => b.textContent);
+  const practiceSaved = byTitle("Flashcard Practice");
+  out.practiceSaved = practiceSaved ? {
+    meta: practiceSaved.querySelector(".quiz-history-meta")?.textContent, text: cardText(practiceSaved), buttons: buttons(practiceSaved),
+  } : null;
+  const practiceDone = byTitle("Completed Practice");
+  out.practiceDone = practiceDone ? {
+    meta: practiceDone.querySelector(".quiz-history-meta")?.textContent, buttons: buttons(practiceDone),
+    hasMenu: Boolean(practiceDone.querySelector(".quiz-card-menu")),
+  } : null;
+  out.completedButtons = completed ? buttons(completed) : null;
+
   // Switching the selected model must never hide any quiz from the library.
   const modelSelect = document.getElementById("generation-model-select");
   modelSelect.value = "gemma3-12b"; modelSelect.dispatchEvent(new Event("change", {bubbles: true})); await sleep(200);
@@ -133,8 +157,28 @@ const cardText = (card) => card.textContent;
   deleteButton.click();
   await sleep(300);
   out.afterDelete = {
-    cardCount: cards().length, deletedIds: window.__deleted, titles: cards().map((c) => c.querySelector("strong")?.textContent),
+    cardCount: cards().length, deletedIds: [...window.__deleted], titles: cards().map((c) => c.querySelector("strong")?.textContent),
   };
+
+  out.practiceEmptyBefore = Boolean(document.querySelector("#quiz-history-list .quiz-practice-empty"));
+  // Delete both Practice items: the toast says Practice and the section turns into its empty state.
+  for (const title of ["Flashcard Practice", "Completed Practice"]) {
+    const practiceMenu = byTitle(title).querySelector(".quiz-card-menu");
+    practiceMenu.open = true;
+    [...practiceMenu.querySelectorAll("button")].find((b) => b.textContent === "Delete").click();
+    await sleep(300);
+  }
+  const practiceSection = document.querySelector("#quiz-history-list .quiz-list-section-practice");
+  out.practiceEmpty = {
+    toast: document.getElementById("toast").textContent,
+    heading: practiceSection?.querySelector(".quiz-list-section-heading")?.textContent,
+    text: practiceSection?.querySelector(".quiz-practice-empty p")?.textContent,
+    action: practiceSection?.querySelector(".quiz-practice-empty button")?.textContent,
+    cardTitles: cards().map((c) => c.querySelector("strong")?.textContent),
+  };
+  practiceSection?.querySelector(".quiz-practice-empty button")?.click();
+  await sleep(300);
+  out.practiceEmpty.sessionTab = document.body.dataset.sessionTab;
 
   const pre = document.createElement("pre"); pre.id = "harness-out"; pre.textContent = JSON.stringify(out); document.body.appendChild(pre);
 })().catch((error) => { out.fatal = String(error && error.stack || error); const pre = document.createElement("pre"); pre.id = "harness-out"; pre.textContent = JSON.stringify(out); document.body.appendChild(pre); });
@@ -176,8 +220,42 @@ class QuizLibraryUiTests(unittest.TestCase):
         self.assertEqual(header["subtitle"], "Test your knowledge and track your progress")
         self.assertEqual(header["buttonText"], "+ New Quiz")
 
-    def test_all_three_quizzes_are_listed_by_default(self):
-        self.assertEqual(self.out["cardCount"], 3)
+    def test_all_quizzes_and_practice_are_listed_by_default(self):
+        self.assertEqual(self.out["cardCount"], 5)
+
+    def test_flashcard_practice_is_listed_under_practice_not_quizzes(self):
+        sections = {section["heading"]: set(section["titles"]) for section in self.out["sections"]}
+        self.assertEqual([section["heading"] for section in self.out["sections"]], ["Quizzes", "Practice"])
+        self.assertEqual(sections["Quizzes"], {"Not Started Quiz", "In Progress Quiz", "Completed Quiz"})
+        self.assertEqual(sections["Practice"], {"Flashcard Practice", "Completed Practice"})
+
+    def test_practice_cards_use_practice_wording(self):
+        saved, done = self.out["practiceSaved"], self.out["practiceDone"]
+        self.assertEqual(saved["meta"], "Flashcard practice")
+        self.assertIn("From your flashcards", saved["text"])
+        self.assertNotIn("Saved quiz", saved["text"])
+        self.assertEqual(saved["buttons"], ["Start"])
+        self.assertEqual(done["meta"], "Flashcard practice")
+        self.assertTrue(done["hasMenu"])
+
+    def test_completed_practice_never_offers_regenerate_quiz(self):
+        self.assertEqual(self.out["practiceDone"]["buttons"], ["Retake Practice", "Review Answers"])
+
+    def test_practice_empty_state_only_when_no_practice_exists(self):
+        self.assertFalse(self.out["practiceEmptyBefore"])
+        empty = self.out["practiceEmpty"]
+        self.assertEqual(empty["toast"], "Practice deleted")
+        self.assertEqual(empty["heading"], "Practice")
+        self.assertEqual(empty["text"], "Practice is created from your flashcards.")
+        self.assertEqual(set(empty["cardTitles"]), {"In Progress Quiz", "Completed Quiz"})
+
+    def test_practice_empty_state_without_loaded_flashcards_goes_to_the_flashcards_tab(self):
+        # The mock has no saved flashcards, so availability is unknown here: the action navigates.
+        self.assertEqual(self.out["practiceEmpty"]["action"], "Go to Flashcards")
+        self.assertEqual(self.out["practiceEmpty"]["sessionTab"], "flashcards")
+
+    def test_completed_normal_quiz_keeps_its_actions(self):
+        self.assertEqual(self.out["completedButtons"], ["Retake Quiz", "Review Answers", "Regenerate Quiz"])
 
     def test_not_started_card_shows_required_fields_and_a_start_action(self):
         card = self.out["notStarted"]
@@ -208,14 +286,14 @@ class QuizLibraryUiTests(unittest.TestCase):
 
     def test_switching_the_selected_model_never_hides_a_quiz(self):
         after = self.out["afterModelSwitch"]
-        self.assertEqual(after["cardCount"], 3)
-        self.assertEqual(set(after["titles"]), {"Not Started Quiz", "In Progress Quiz", "Completed Quiz"})
+        self.assertEqual(after["cardCount"], 5)
+        self.assertEqual(set(after["titles"]), {"Not Started Quiz", "In Progress Quiz", "Completed Quiz", "Flashcard Practice", "Completed Practice"})
 
     def test_delete_via_the_menu_removes_only_that_quiz(self):
         after = self.out["afterDelete"]
         self.assertEqual(after["deletedIds"], ["q1"])
-        self.assertEqual(after["cardCount"], 2)
-        self.assertEqual(set(after["titles"]), {"In Progress Quiz", "Completed Quiz"})
+        self.assertEqual(after["cardCount"], 4)
+        self.assertEqual(set(after["titles"]), {"In Progress Quiz", "Completed Quiz", "Flashcard Practice", "Completed Practice"})
 
 
 if __name__ == "__main__":

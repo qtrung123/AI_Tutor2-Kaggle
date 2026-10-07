@@ -200,6 +200,13 @@ class QuizzesScreenStateTests(unittest.TestCase):
         self.assertEqual([v["quiz_id"] for v in result["visibleSaved"]], ["q2"])
         self.assertEqual(len(result["visibleGroups"]), 1)
 
+    def test_has_practice_reports_saved_or_attempted_practice_regardless_of_filters(self):
+        practice = {**self.VARIANT, "quiz_id": "p1", "practice": True}
+        self.assertFalse(self.state([{"document_id": "lecture.pdf", "variants": [self.VARIANT]}], [])["hasPractice"])
+        self.assertTrue(self.state([{"document_id": "lecture.pdf", "variants": [practice]}], [], difficulty="difficult")["hasPractice"])
+        group = {"quizId": "p2", "latest": {"difficulty": "easy", "topic_id": "document"}, "attempts": [{"practice": True}]}
+        self.assertTrue(self.state([{"document_id": "lecture.pdf", "variants": []}], [], [group])["hasPractice"])
+
     def test_only_when_there_is_nothing_at_all_the_screen_says_no_quizzes_yet(self):
         self.assertEqual(self.state([], [])["emptyMessage"], "No quizzes yet. Create one to get started.")
         self.assertEqual(self.state([{"document_id": "lecture.pdf", "variants": [self.VARIANT]}], [], difficulty="difficult")["emptyMessage"],

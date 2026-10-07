@@ -184,7 +184,7 @@ const generateCalls = () => window.__calls.filter((c) => c.startsWith("POST /api
     requestBody: window.__lastGenerateBody,
     isLanding: document.querySelector('[data-session-pane="quiz"]').classList.contains("quiz-landing"),
     playerHasQuiz: Boolean(currentQuiz), toast: document.getElementById("toast").textContent,
-    libraryCardCount: document.getElementById("quiz-history-list").children.length,
+    libraryCardCount: document.querySelectorAll("#quiz-history-list .quiz-history-card").length,
   };
 
   // 6) Partial generation is treated as success (sheet closes, subtle message, no error state).

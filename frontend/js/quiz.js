@@ -446,7 +446,8 @@ function quizListState(groups) {
   let emptyMessage = "";
   if (!groups.length && !savedVariants.length && !pending.length) emptyMessage = "No quizzes yet. Create one to get started.";
   else if (!visibleGroups.length && !visibleSaved.length && !visiblePending.length) emptyMessage = "No quizzes match these filters.";
-  return { visibleGroups, visibleSaved, visiblePending, emptyMessage };
+  const hasPractice = groups.some((group) => group.attempts.some((attempt) => attempt.practice)) || savedVariants.some((variant) => variant.practice);
+  return { visibleGroups, visibleSaved, visiblePending, emptyMessage, hasPractice };
 }
 
 function renderQuizHistory() {
@@ -490,7 +491,7 @@ function renderQuizHistory() {
   const filterSelects = filters.querySelectorAll("select");
   filterSelects[0].value = quizHistoryDifficultyFilter;
 
-  const { visibleGroups, visibleSaved, visiblePending, emptyMessage } = quizListState(groups);
+  const { visibleGroups, visibleSaved, visiblePending, emptyMessage, hasPractice } = quizListState(groups);
   if (emptyMessage) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
@@ -506,22 +507,31 @@ function renderQuizHistory() {
       create.addEventListener("click", openQuizCreateDialog);
       quizHistoryList.appendChild(create);
     }
+    if (!hasPractice) quizHistoryList.appendChild(createPracticeEmptySection());
     return;
   }
-  visiblePending.forEach((pending) => quizHistoryList.appendChild(createPendingQuizCard(pending)));
-  visibleSaved.forEach((variant) => quizHistoryList.appendChild(createSavedQuizCard(variant)));
+  // Flashcard written practice (backend `practice` flag, planner_version flashcard_written_v1) is
+  // listed under its own "Practice" section, apart from the document's normal quizzes.
+  const quizzesSection = createQuizListSection("Quizzes", "quiz-list-section-quizzes");
+  const practiceSection = createQuizListSection("Practice", "quiz-list-section-practice");
+  const sectionListFor = (isPractice) => (isPractice ? practiceSection : quizzesSection).list;
+  visiblePending.forEach((pending) => quizzesSection.list.appendChild(createPendingQuizCard(pending)));
+  visibleSaved.forEach((variant) => sectionListFor(variant.practice).appendChild(createSavedQuizCard(variant)));
 
   visibleGroups.forEach((group) => {
     const attempt = group.latest;
+    const isPractice = group.attempts.some((pastAttempt) => pastAttempt.practice);
+    const titleText = (attempt.title || "").trim() || (isPractice ? "Untitled Practice" : "Untitled Quiz");
     const card = document.createElement("article");
     card.className = "quiz-history-card";
     const info = document.createElement("div");
     const title = document.createElement("strong");
-    title.textContent = (attempt.title || "").trim() || "Untitled Quiz";
+    title.textContent = titleText;
     const scopeName = attempt.topic_id === "document" ? "Entire Document" : (attempt.topic_name || attempt.topic_id || "Topic");
     const meta = document.createElement("small");
     meta.className = "quiz-history-meta";
-    meta.textContent = `${scopeName} · ${attempt.difficulty}`;
+    // Practice has no real difficulty (the backend stores a fixed placeholder), so it is not shown.
+    meta.textContent = isPractice ? "Flashcard practice" : `${scopeName} · ${attempt.difficulty}`;
     const date = document.createElement("small");
     date.textContent = attempt.completed_at ? `Latest activity ${new Date(attempt.completed_at).toLocaleString()}` : "Activity time unavailable";
     const status = document.createElement("span");
@@ -539,7 +549,7 @@ function renderQuizHistory() {
     const retake = document.createElement("button");
     retake.className = "text-button";
     retake.type = "button";
-    retake.textContent = "Retake Quiz";
+    retake.textContent = isPractice ? "Retake Practice" : "Retake Quiz";
     retake.addEventListener("click", () => startHistoryQuizRetake(attempt));
     const review = document.createElement("button");
     review.className = "text-button";
@@ -552,9 +562,10 @@ function renderQuizHistory() {
     regenerate.textContent = "Regenerate Quiz";
     regenerate.addEventListener("click", () => regenerateHistoryQuiz(attempt));
     // Older quizzes made per topic can still be retaken/reviewed, but new quizzes are whole-document only.
-    if ((attempt.topic_id || "document") === "document") actions.append(retake, review, regenerate);
+    // Practice is never regenerated here: "Regenerate Quiz" would generate a normal quiz instead.
+    if (!isPractice && (attempt.topic_id || "document") === "document") actions.append(retake, review, regenerate);
     else actions.append(retake, review);
-    if (attempt.quiz_id) actions.appendChild(createQuizCardMenu(attempt.quiz_id, (attempt.title || "").trim() || "Untitled Quiz"));
+    if (attempt.quiz_id) actions.appendChild(createQuizCardMenu(attempt.quiz_id, titleText, isPractice));
     const history = document.createElement("details");
     history.className = "quiz-attempt-history";
     const historySummary = document.createElement("summary");
@@ -570,8 +581,45 @@ function renderQuizHistory() {
       history.appendChild(row);
     });
     card.append(info, score, actions, history);
-    quizHistoryList.appendChild(card);
+    sectionListFor(isPractice).appendChild(card);
   });
+  // An empty section is hidden, except that a document with no Practice at all says where it comes from.
+  [quizzesSection, practiceSection].forEach(({ section, list }) => {
+    if (list.children.length) quizHistoryList.appendChild(section);
+  });
+  if (!hasPractice) quizHistoryList.appendChild(createPracticeEmptySection());
+}
+
+// `flashcards` holds this document's saved set only once the Flashcards tab has looked it up (for the
+// selected model/language), so an empty list means "not known here", not "no flashcards": then the
+// action opens the Flashcards tab, which shows either the deck (with Practice as Quiz) or Generate.
+function createPracticeEmptySection() {
+  const { section, list } = createQuizListSection("Practice", "quiz-list-section-practice");
+  const empty = document.createElement("div");
+  empty.className = "quiz-practice-empty";
+  const text = document.createElement("p");
+  text.textContent = "Practice is created from your flashcards.";
+  const action = document.createElement("button");
+  action.className = "text-button";
+  action.type = "button";
+  const flashcardsLoaded = flashcards.length > 0 && loadedFlashcardKey === flashcardsKey();
+  action.textContent = flashcardsLoaded ? "Create Practice" : "Go to Flashcards";
+  action.addEventListener("click", () => (flashcardsLoaded ? openFlashcardQuizDialog() : setSessionTab("flashcards")));
+  empty.append(text, action);
+  list.appendChild(empty);
+  return section;
+}
+
+function createQuizListSection(headingText, className) {
+  const section = document.createElement("section");
+  section.className = `quiz-list-section ${className}`;
+  const heading = document.createElement("h3");
+  heading.className = "quiz-list-section-heading";
+  heading.textContent = headingText;
+  const list = document.createElement("div");
+  list.className = "quiz-list-section-cards";
+  section.append(heading, list);
+  return { section, list };
 }
 
 function createQuizStatusCard(className, titleText, metaText, statusText, detailText) {
@@ -602,7 +650,7 @@ function createPendingQuizCard(pending) {
 
 // "..." menu: Delete only, for now -- Rename has no backend support yet (see backend/main.py,
 // there is no quiz-title PATCH endpoint), so it is intentionally left out rather than half-built.
-function createQuizCardMenu(quizId, titleText) {
+function createQuizCardMenu(quizId, titleText, isPractice = false) {
   const menu = document.createElement("details");
   menu.className = "quiz-card-menu";
   const summary = document.createElement("summary");
@@ -623,7 +671,7 @@ function createQuizCardMenu(quizId, titleText) {
       await loadQuizStatuses();
       await loadQuizHistory();
       await loadDashboard();
-      showToast("Quiz deleted");
+      showToast(isPractice ? "Practice deleted" : "Quiz deleted");
     } catch (error) { showToast(error.message || "Could not delete quiz"); }
   });
   list.appendChild(remove);
@@ -650,9 +698,10 @@ function createSavedQuizCard(variant) {
   const statusLabel = inProgress ? "In Progress" : "Not Started";
   const progressText = inProgress ? `${variant.answered || 0} / ${variant.total || variant.question_count} answered` : "";
   const updated = formatQuizCardTimestamp(variant.updated_at || variant.created_at);
-  const detailParts = [counts, progressText, model ? `Generated by ${model}` : "Saved quiz", updated].filter(Boolean);
+  const detailParts = [counts, progressText, model ? `Generated by ${model}` : (variant.practice ? "From your flashcards" : "Saved quiz"), updated].filter(Boolean);
+  const titleText = (variant.title || "").trim() || (variant.practice ? "Untitled Practice" : "Untitled Quiz");
   const { card } = createQuizStatusCard(
-    "quiz-saved-card", (variant.title || "").trim() || "Untitled Quiz", `${scopeName} · ${variant.difficulty}`,
+    "quiz-saved-card", titleText, variant.practice ? "Flashcard practice" : `${scopeName} · ${variant.difficulty}`,
     statusLabel, detailParts.join(" · "),
   );
   const actions = document.createElement("div");
@@ -666,7 +715,7 @@ function createSavedQuizCard(variant) {
     catch (error) { showToast(error.message || "Could not open this quiz"); }
   });
   actions.appendChild(start);
-  if (variant.quiz_id) actions.appendChild(createQuizCardMenu(variant.quiz_id, (variant.title || "").trim() || "Untitled Quiz"));
+  if (variant.quiz_id) actions.appendChild(createQuizCardMenu(variant.quiz_id, titleText, Boolean(variant.practice)));
   card.appendChild(actions);
   return card;
 }
@@ -951,13 +1000,14 @@ async function regenerateAssessmentQuiz(options = {}) {
 async function deleteAssessmentQuiz() {
   const quizId = currentQuiz?.quiz_id;
   if (!quizId) return;
-  if (!window.confirm("Delete this quiz? Its questions, attempts, and answers cannot be recovered.")) return;
+  const itemName = isPracticeQuiz(currentQuiz) ? "Practice" : "Quiz";
+  if (!window.confirm(`Delete this ${itemName.toLowerCase()}? Its questions, attempts, and answers cannot be recovered.`)) return;
   try {
     await fetchJson(`${QUIZZES_API_URL}/${encodeURIComponent(quizId)}`, { method: "DELETE" });
     backToQuizzes();
     await loadQuizStatuses();
     await loadDashboard();
-    showToast("Quiz deleted");
+    showToast(`${itemName} deleted`);
   } catch (error) {
     showToast(error.message || "Could not delete quiz");
   }
@@ -1120,11 +1170,12 @@ function renderCompletedQuizReview(container, attempt, questions, callbacks) {
   metrics.innerHTML = `<strong>${score}/${total}</strong><span>${percentage}%</span><span>${correctCount} correct</span><span>${total - correctCount} incorrect</span>`;
   const actions = document.createElement("div");
   actions.className = "quiz-review-summary-actions";
+  // Practice is never regenerated from here: "Regenerate Quiz" would generate a normal quiz instead.
   [
     ["← Back to Quizzes", "text-button", callbacks.back],
-    ["Retake Quiz", "primary-button", callbacks.retake],
-    ["Regenerate Quiz", "text-button", callbacks.regenerate],
-    ["Delete Quiz", "text-button danger-button", callbacks.remove],
+    [callbacks.practice ? "Retake Practice" : "Retake Quiz", "primary-button", callbacks.retake],
+    ...(callbacks.practice ? [] : [["Regenerate Quiz", "text-button", callbacks.regenerate]]),
+    [callbacks.practice ? "Delete Practice" : "Delete Quiz", "text-button danger-button", callbacks.remove],
   ].forEach(([label, className, handler]) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -2147,6 +2198,7 @@ function renderAssessmentQuiz() {
       retake: resetAssessmentQuiz,
       regenerate: regenerateAssessmentQuiz,
       remove: deleteAssessmentQuiz,
+      practice: isPracticeQuiz(currentQuiz),
     });
     updateAssessmentSummary();
     return;
