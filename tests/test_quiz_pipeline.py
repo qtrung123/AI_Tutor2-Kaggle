@@ -1070,8 +1070,8 @@ class CacheAndMetadataTests(unittest.TestCase):
 
     @staticmethod
     def candidate_prompts():
-        # the live path's candidate-generation prompts (the bounded multiple_select call is separate)
-        return [prompt for prompt in FakeModel.prompts if "multiple-select" not in prompt]
+        # the live path's candidate-generation prompts (every call is one: Normal Quiz is single-choice only)
+        return list(FakeModel.prompts)
 
     def test_a_quiz_saved_by_an_older_engine_never_hides_the_new_pipeline(self):
         for old in ("simple_context_v7_old", "study_units_v6", "study_units_v5", "study_units_v4",
@@ -1208,8 +1208,8 @@ class PersistenceRoundTripTests(unittest.TestCase):
         self.temp.cleanup()
 
     def generate(self, count, payload):
-        # candidates, up to two follow-ups, then the multiple_select call (answered empty here)
-        FakeModel.reset([{"questions": payload}, {"questions": []}, {"questions": []}, {"questions": []}])
+        # candidates, then up to two follow-ups
+        FakeModel.reset([{"questions": payload}, {"questions": []}, {"questions": []}])
         with (
             patch.object(quiz_service, "_document_lookup", return_value={DOCUMENT["id"]: DOCUMENT}),
             patch.object(quiz_service, "get_document_chunks", return_value=make_chunks(12, 2)),
@@ -1232,8 +1232,8 @@ class PersistenceRoundTripTests(unittest.TestCase):
             self.assertIn(question["correct_answer"], "ABCD")
             self.assertEqual(question["correct_answers"], [question["correct_answer"]])
             self.assertTrue(question["source_chunk_ids"])
-        # call 1, then two follow-ups that added nothing (stall guard), then the multiple_select call
-        self.assertEqual(len(FakeModel.prompts), 4)
+        # call 1, then two follow-ups that added nothing (stall guard)
+        self.assertEqual(len(FakeModel.prompts), 3)
         again = self.generate(18, candidates(range(16)))            # the same request is served from the database
         self.assertEqual(again["quiz_id"], first["quiz_id"])
         self.assertEqual(len(FakeModel.prompts), 0)

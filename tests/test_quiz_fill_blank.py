@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from quiz_fixtures import FakeModel, candidates, flashcard, make_chunks, multi_payload, raw_candidate
+from quiz_fixtures import FakeModel, candidates, flashcard, make_chunks, raw_candidate
 
 from backend import quiz_attempt_service, quiz_service, quiz_store
 from backend.api.quiz_generation import QuizQuestion
@@ -23,8 +23,8 @@ from backend.quiz_units import (
 
 DOCUMENT = {"id": "lecture.pdf", "title": "Lecture", "hash": "hash", "topic_schema_version": 2}
 SCOPE = {"topic_id": "document", "name": "Entire document"}
-# Facts 15, 20 and 21 are tested by none of the single-choice (candidates(range(15))) or
-# multiple_select (multi_payload()) fixtures, so their clozes are not duplicates.
+# Facts 15, 20 and 21 are tested by none of the single-choice (candidates(range(15))) fixtures,
+# so their clozes are not duplicates.
 FREE_FACTS = (20, 21, 15)
 
 
@@ -174,7 +174,7 @@ class GradingTests(unittest.TestCase):
 
 
 class EngineTests(unittest.TestCase):
-    def run_engine(self, payloads, cards, fill_blank_count=2, multi_select_count=0):
+    def run_engine(self, payloads, cards, fill_blank_count=2):
         FakeModel.reset(payloads)
         with (
             patch.object(quiz_service, "ChatOllama", FakeModel),
@@ -185,7 +185,6 @@ class EngineTests(unittest.TestCase):
                 document=DOCUMENT, scope="document", scope_topic_id="document", scope_topic_name="Entire document",
                 chunks=make_chunks(12, 2), difficulty="easy", owner_id="owner", model_id="qwen-test", regenerate=False,
                 question_count=12, fill_blank_count=fill_blank_count, fill_blank_cards=list(cards),
-                multi_select_count=multi_select_count,
             )
 
     def test_flashcard_clozes_replace_single_choice_without_any_model_call(self):
@@ -215,10 +214,9 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 12})
 
     def test_full_normal_quiz_mix(self):
-        quiz = self.run_engine([{"questions": candidates(range(15))}, multi_payload()],
-                               [flashcard(fact) for fact in FREE_FACTS], multi_select_count=3)
-        self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 7, "multi_select": 3, "fill_blank": 2})
-        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 2)       # candidates + multiple_select, none for fill_blank
+        quiz = self.run_engine([{"questions": candidates(range(15))}], [flashcard(fact) for fact in FREE_FACTS])
+        self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 10, "fill_blank": 2})
+        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 1)       # candidates only, none for fill_blank
 
 
 class LiveEntryPointTests(unittest.TestCase):
@@ -226,7 +224,7 @@ class LiveEntryPointTests(unittest.TestCase):
 
     def generate(self, cards):
         document = {**DOCUMENT, "topics": []}
-        FakeModel.reset([{"questions": candidates(range(15))}, {"questions": []}])   # candidates, multiple_select (empty)
+        FakeModel.reset([{"questions": candidates(range(15))}])   # the candidate call only
         with (
             patch.object(quiz_service, "_document_lookup", return_value={DOCUMENT["id"]: document}),
             patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"),
@@ -247,12 +245,12 @@ class LiveEntryPointTests(unittest.TestCase):
         listing.assert_called_once_with("owner", DOCUMENT["id"], "set-1")
         self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 10, "fill_blank": 2})
         self.assertEqual(quiz["assessment_plan"]["fill_blank"]["available_flashcards"], 2)   # the empty card is not usable
-        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 2)
+        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 1)
         self.assertEqual(len(quiz["questions"]), 12)
 
     def test_no_flashcards_makes_no_fill_blank_questions(self):
         quiz, _ = self.generate([])
-        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 2)   # candidates + multiple_select
+        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 1)   # candidates only
         self.assertNotIn("fill_blank", quiz["assessment_plan"])
         self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 12})
 

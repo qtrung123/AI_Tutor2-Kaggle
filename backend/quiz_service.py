@@ -34,9 +34,6 @@ from backend.quiz_units import (
     QUIZ_TOKENS_PER_QUESTION,
     QUIZ_UNUSED_CHARS_PER_QUESTION,
     QUIZ_TOTAL_DEADLINE_S,
-    QUIZ_MULTI_SELECT_MAX_CALLS,
-    QUIZ_MULTI_SELECT_RESERVE_S,
-    build_multiple_select_prompt,
     build_generation_prompt,
     build_study_units,
     fill_blank_target,
@@ -46,8 +43,6 @@ from backend.quiz_units import (
     followup_request,
     followup_units,
     max_llm_calls,
-    multiple_select_output_schema,
-    multiple_select_target,
     output_schema_for,
     parse_candidates,
     public_unit,
@@ -55,8 +50,6 @@ from backend.quiz_units import (
     select_flashcard_fill_blanks,
     select_questions,
     validate_candidate,
-    validate_multiple_select_candidate,
-    _rank as _rank_question,
 )
 from backend.flashcard_store import get_latest_flashcard_set_info, list_flashcards
 from backend.model_registry import describe_generation_model
@@ -148,15 +141,10 @@ def _generate_quiz_from_units(
     retrieval_ms: int = 0,
     fill_blank_count: int = 0,
     fill_blank_cards: list[dict] | None = None,
-    multi_select_count: int = 0,
 ) -> dict:
     """Live Quiz generation: one simple pipeline for ANY document.
 
-    With `multi_select_count` > 0 a bounded multiple_select step runs after the single-choice pool
-    (see _generate_multiple_select_pool): up to that many validated multiple_select questions take
-    the place of single-choice ones. The backend decides the count (the live entry point asks for
-    multiple_select_target(count)); when fewer valid ones exist, valid single-choice questions fill
-    the rest, so the total is unchanged whenever the pool allows it.
+    Every model call writes single-choice questions; there is no multiple_select step.
 
     With `fill_blank_count` > 0 and `fill_blank_cards` (the document's persisted usable flashcards),
     up to that many fill_blank questions are derived DETERMINISTICALLY from the cards, without any
@@ -225,13 +213,10 @@ def _generate_quiz_from_units(
     call_log: list[dict] = []
     stalled_calls = 0
     stop_reason = ""
-    # Single-choice calls stop short of the total deadline so the multiple_select step keeps its own budget.
-    single_choice_deadline_s = QUIZ_TOTAL_DEADLINE_S - (QUIZ_MULTI_SELECT_RESERVE_S if multi_select_count > 0 else 0)
-
     for call_number in range(1, max_calls + 1):
         first_call = call_number == 1
         elapsed_s = time.perf_counter() - total_started
-        remaining_s = single_choice_deadline_s - elapsed_s
+        remaining_s = QUIZ_TOTAL_DEADLINE_S - elapsed_s
         if first_call:
             requested = pool_target
             shown_units = select_context_units(units, context_budget(requested))
@@ -463,37 +448,19 @@ def _generate_quiz_from_units(
             failure_summary=summary,
         )
 
-    multi_pool, multi_info = [], None
-    if multi_select_count > 0:
-        multi_pool, multi_info = _generate_multiple_select_pool(
-            model_id=model_id, scope_label=scope_label, difficulty=difficulty, units=units, accepted=accepted,
-            scope_topic=scope_topic, target=multi_select_count, first_index=candidate_counter,
-            deadline_s=QUIZ_TOTAL_DEADLINE_S - (time.perf_counter() - total_started),
-        )
-        candidate_counter += multi_info["rejected"] + multi_info["accepted"]
-        llm_calls += multi_info["calls"]
-
     fill_selected, fill_info = [], None
     if fill_blank_count > 0 and fill_blank_cards:
         # No model call: clozes are derived from the flashcards themselves.
         fill_selected, fill_info = select_flashcard_fill_blanks(
-            fill_blank_cards, units, accepted + multi_pool, difficulty, scope_topic, fill_blank_count, candidate_counter,
+            fill_blank_cards, units, accepted, difficulty, scope_topic, fill_blank_count, candidate_counter,
         )
         fill_info["flashcard_set_id"] = fill_blank_cards[0].get("set_id")
         print(f"[quiz-units-fill-blank] {json.dumps(fill_info)}")
 
     # final_count = min(valid candidates, requested_count). Short is "partial", never a failure.
-    # Fill_blank and multiple_select questions REPLACE single-choice ones, so the requested total is
-    # unchanged. Priority: validity, then the total, then the type mix -- when too few valid
-    # single-choice questions remain, surplus valid multiple_select ones fill the gap.
-    ranked_multi = sorted(multi_pool, key=_rank_question)
-    multi_selected = ranked_multi[:max(0, min(multi_select_count, question_count - len(fill_selected)))]
-    single_target = question_count - len(fill_selected) - len(multi_selected)
-    single_selected = select_questions(accepted, single_target)
-    shortfall = single_target - len(single_selected)
-    if shortfall > 0:
-        multi_selected += ranked_multi[len(multi_selected):len(multi_selected) + shortfall]
-    combined = single_selected + multi_selected + fill_selected
+    # Fill_blank questions REPLACE single-choice ones, so the requested total is unchanged.
+    single_selected = select_questions(accepted, question_count - len(fill_selected))
+    combined = single_selected + fill_selected
     combined.sort(key=lambda question: (question["_meta"]["unit_index"], question["_meta"]["index"]))
     selected, question_evidence = finalize_questions(combined)
     actual_count = len(selected)
@@ -533,7 +500,6 @@ def _generate_quiz_from_units(
             "candidate_pool_size": len(accepted),
             "partial": status == "partial",
             "type_distribution": dict(Counter(question["question_type"] for question in selected)),
-            **({"multiple_select": multi_info} if multi_info else {}),
             **({"fill_blank": fill_info} if fill_info else {}),
             "generation_warnings": validation_results["reasons"],
             "validation_results": validation_results,
@@ -560,82 +526,6 @@ def _generate_quiz_from_units(
     print(f"[quiz-units-timing] {json.dumps({**timings, 'llm_calls': llm_calls, 'questions': actual_count})}")
     diag.absorb_pipeline_timings({**timings, "llm_calls": llm_calls})
     return saved
-
-
-def _generate_multiple_select_pool(
-    *, model_id: str, scope_label: str, difficulty: str, units: list[dict], accepted: list[dict],
-    scope_topic: dict, target: int, first_index: int, deadline_s: float,
-) -> tuple[list[dict], dict]:
-    """The bounded multiple_select step of the live pipeline, run after the single-choice pool.
-
-    Each call asks for what is still missing (plus one) and is shown the least-used excerpts. A
-    second call follows only when the pool is still short after malformed output, all-invalid
-    candidates or too few valid ones; a valid EMPTY answer and a model failure are not retried.
-    Every candidate goes through validate_multiple_select_candidate; an invalid one is dropped,
-    never converted. Never raises: without enough valid candidates single-choice questions fill in.
-    """
-    diag = quiz_diagnostics.get_current()
-    started = time.perf_counter()
-    pool: list[dict] = []
-    info = {"target": target, "calls": 0, "accepted": 0, "rejected": 0, "rejected_by": {}, "errors": [], "stop": ""}
-    index = first_index
-    for call_number in range(1, QUIZ_MULTI_SELECT_MAX_CALLS + 1):
-        missing = target - len(pool)
-        if missing <= 0:
-            break
-        remaining_s = deadline_s - (time.perf_counter() - started)
-        if remaining_s < QUIZ_MIN_CALL_S:
-            info["stop"] = "time budget used up"
-            break
-        ask = missing + 1
-        budget = context_budget(ask)
-        shown = followup_units(units, accepted + pool, budget, QUIZ_UNUSED_CHARS_PER_QUESTION * 2 * ask)
-        prompt = build_multiple_select_prompt(scope_label, difficulty, shown, ask, [q["question"] for q in accepted + pool])
-        llm = ChatOllama(
-            model=model_id, reasoning=False, temperature=0.1 if call_number == 1 else 0.3,
-            format=multiple_select_output_schema(ask), num_ctx=QUIZ_NUM_CTX,
-            num_predict=min(QUIZ_MAX_NEW_TOKENS, max(600, (ask + QUIZ_MAX_ITEMS_EXTRA) * QUIZ_TOKENS_PER_QUESTION)),
-            keep_alive=QUIZ_GENERATION_KEEP_ALIVE,
-            client_kwargs={"timeout": min(QUIZ_LLM_TIMEOUT_S, max(30, remaining_s))},
-        )
-        info["calls"] += 1
-        invocation_started = time.perf_counter()
-        try:
-            response_text, _metadata, _cut = _generate_with_deadline(llm, prompt, min(QUIZ_FOLLOWUP_DEADLINE_S, remaining_s))
-        except Exception as error:   # the model/runtime failed: no retry, no extra latency
-            info["errors"].append(f"call {call_number}: {type(error).__name__}: {error}"[:200])
-            info["stop"] = "model call failed"
-            diag.record_llm_call(stage="multiple_select", model=model_id, success=False, attempt=call_number,
-                                 elapsed_ms=(time.perf_counter() - invocation_started) * 1000,
-                                 exception_type=type(error).__name__, reason=str(error)[:200])
-            break
-        diag.record_llm_call(stage="multiple_select", model=model_id, success=True, attempt=call_number,
-                             elapsed_ms=(time.perf_counter() - invocation_started) * 1000)
-        try:
-            candidates = parse_candidates(response_text)
-        except ValueError as error:   # malformed output: retry
-            info["errors"].append(f"call {call_number}: malformed output: {error}"[:200])
-            info["stop"] = "malformed output"
-            continue
-        if not candidates:            # a valid, empty answer: the excerpts hold nothing suitable
-            info["stop"] = "empty result"
-            break
-        for raw in candidates:
-            index += 1
-            try:
-                question, _warnings = validate_multiple_select_candidate(
-                    raw, shown, accepted + pool, difficulty, 0, scope_topic, index,
-                )
-            except (ValueError, TypeError, KeyError, AttributeError) as error:
-                code = getattr(error, "code", None) or "structure"
-                info["rejected"] += 1
-                info["rejected_by"][code] = info["rejected_by"].get(code, 0) + 1
-                continue
-            pool.append(question)
-        info["stop"] = "target reached" if len(pool) >= target else "too few valid candidates"
-    info["accepted"] = len(pool)
-    print(f"[quiz-units-multiple-select] {json.dumps(info)}")
-    return pool, info
 
 
 def _usable_flashcards(document: dict, owner_id: str) -> list[dict]:
@@ -869,7 +759,6 @@ def _generate_quiz(
     retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000)
 
     return _generate_quiz_from_units(
-        multi_select_count=multiple_select_target(question_count),
         fill_blank_count=fill_blank_target(question_count),
         fill_blank_cards=_usable_flashcards(document, owner_id),
         document=document,

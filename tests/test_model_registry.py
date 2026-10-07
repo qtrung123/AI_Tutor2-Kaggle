@@ -146,15 +146,15 @@ class ModelRegistryTests(unittest.TestCase):
         startup = (ROOT / "deployment" / "start_kaggle.sh").read_text(encoding="utf-8")
         notebook = (ROOT / "kaggle_run.ipynb").read_text(encoding="utf-8")
 
-        # Live pipeline (incl. the multiple_select step's call; fill_blank needs no call) plus the legacy V2 engines.
-        self.assertEqual(quiz.count("reasoning=False"), 2)
+        # Live pipeline (single-choice calls only; fill_blank needs no call) plus the legacy V2 engines.
+        self.assertEqual(quiz.count("reasoning=False"), 1)
         self.assertEqual(legacy.count("reasoning=False"), 6)
-        self.assertEqual(quiz.count("reasoning=False") + legacy.count("reasoning=False"), 8)
+        self.assertEqual(quiz.count("reasoning=False") + legacy.count("reasoning=False"), 7)
         self.assertIn('QUIZ_GENERATION_KEEP_ALIVE = "5m"', quiz)
-        self.assertEqual(quiz.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 2)
+        self.assertEqual(quiz.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 1)
         self.assertEqual(legacy.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 6)
         self.assertEqual(
-            quiz.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE") + legacy.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 8
+            quiz.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE") + legacy.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 7
         )
         self.assertIn('OLLAMA_GEMMA3_12B_MODEL="${OLLAMA_GEMMA3_12B_MODEL:-gemma3:12b-it-q4_K_M}"', startup)
         self.assertIn('"keep_alive": 0', startup)
