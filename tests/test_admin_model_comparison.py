@@ -1,10 +1,10 @@
-"""Tests for the Quiz Model Comparison tab.
+"""Tests for the Quiz Model Comparison backend.
 
 Covers: the admin allowlist gate, the benchmark results store, the
 model-comparison service (Qwen vs Gemma roster + production/candidate status),
-the API routes (comparison readable by any signed-in user, benchmark start
-admin-only), and frontend wiring (nav visible to every signed-in user, an
-admin-only "Run benchmark" form, no subjective quality score and no overall winner).
+and the API routes (comparison readable by any signed-in user, benchmark start
+admin-only). The Model Comparison page itself was removed from the frontend; the
+last test class checks that no navigation or page code for it remains.
 The benchmark runner itself is covered by tests/test_quiz_model_benchmark.py.
 """
 
@@ -222,80 +222,31 @@ class AdminRouteAccessTests(unittest.TestCase):
             self.assertFalse(login_body["is_admin"])
 
 
-class FrontendAdminModelComparisonWiringTests(unittest.TestCase):
+class FrontendModelComparisonRemovedTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         root = Path(__file__).parents[1]
         cls.markup = (root / "frontend" / "index.html").read_text(encoding="utf-8")
+        cls.styles = (root / "frontend" / "styles.css").read_text(encoding="utf-8")
         cls.script = frontend_script_text()
 
-    def test_nav_item_exists_and_is_hidden_by_default(self):
-        self.assertIn('id="admin-model-comparison-nav"', self.markup)
-        self.assertIn('data-page="model-comparison"', self.markup)
-        # The button tag itself must carry the hidden attribute in the markup.
-        start = self.markup.index('data-page="model-comparison"')
-        tag_slice = self.markup[max(0, start - 80):start + 150]
-        self.assertIn("hidden", tag_slice)
+    def test_no_sidebar_item_or_view(self):
+        for marker in ('id="admin-model-comparison-nav"', 'data-page="model-comparison"',
+                       'id="model-comparison-view"', "Model Comparison"):
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, self.markup)
 
-    def test_view_section_exists(self):
-        self.assertIn('id="model-comparison-view"', self.markup)
+    def test_no_page_code_or_api_calls(self):
+        for marker in ('"model-comparison"', "admin-model-comparison-nav", "loadQuizModelComparison",
+                       "renderQuizModelComparison", "buildBenchmarkForm", "ADMIN_QUIZ_MODEL_COMPARISON_API_URL",
+                       "ADMIN_QUIZ_MODEL_BENCHMARK_API_URL", "/api/admin/quiz-model"):
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, self.script)
 
-    def test_nav_is_shown_to_every_authenticated_user(self):
-        start = self.script.index("function showAuthenticatedShell(user)")
-        body = self.script[start:self.script.index("\n}\n", start)]
-        self.assertIn('document.getElementById("admin-model-comparison-nav")?.removeAttribute("hidden");', body)
-        self.assertNotIn("is_admin", body)
-
-    def test_nav_is_hidden_again_on_sign_out(self):
-        start = self.script.index("function showAuthentication()")
-        body = self.script[start:self.script.index("\n}\n", start)]
-        self.assertIn('document.getElementById("admin-model-comparison-nav")?.setAttribute("hidden", "");', body)
-
-    def test_run_benchmark_form_is_only_built_for_admins(self):
-        self.assertIn("if (currentUser?.is_admin) panel.append(buildBenchmarkForm(data));", self.script)
-        self.assertEqual(self.script.count("panel.append(buildBenchmarkForm(data))"), 1)
-        self.assertIn("if (runButton) runButton.disabled", self.script)
-
-    def test_page_load_calls_comparison_loader(self):
-        self.assertIn('if (page === "model-comparison") loadQuizModelComparison();', self.script)
-        self.assertIn("ADMIN_QUIZ_MODEL_COMPARISON_API_URL", self.script)
-
-    def test_table_shows_only_the_requested_measured_metrics(self):
-        for label in ("Success Rate", "Final-question Rate", "Grounding", "Avg Latency", '"p50"', '"p95"',
-                      "Avg Retries", "Avg tokens/s", "Failures", "Questions/min"):
-            self.assertIn(label, self.script)
-        self.assertNotIn("VRAM", self.script)
-
-    def test_status_badges_present(self):
-        self.assertIn('"Current Production"', self.script)
-        self.assertIn('"Benchmark Candidate"', self.script)
-
-    def test_last_benchmark_timestamp_present(self):
-        self.assertIn("Last benchmark:", self.script)
-
-    def test_run_benchmark_form_posts_to_the_real_admin_endpoint(self):
-        self.assertIn('const ADMIN_QUIZ_MODEL_BENCHMARK_API_URL = apiUrl("/api/admin/quiz-model-benchmark");', self.script)
-        self.assertIn(">Run benchmark</button>", self.script)
-        self.assertIn('fetchJson(ADMIN_QUIZ_MODEL_BENCHMARK_API_URL, {\n        method: "POST"', self.script)
-        for field in ('name="document_ids"', 'name="difficulty"', 'name="question_count"', 'name="runs"'):
-            self.assertIn(field, self.script)
-
-    def test_raw_runs_are_expandable_and_progress_is_polled(self):
-        self.assertIn('details.className = "benchmark-raw-runs";', self.script)
-        self.assertIn("Raw runs \u2014", self.script)
-        self.assertIn("All recorded fields (JSON)", self.script)
-        self.assertIn("benchmarkPollTimer = setTimeout(loadQuizModelComparison, 5000);", self.script)
-
-    def test_cold_start_is_shown_separately_from_latency(self):
-        self.assertIn("Cold start (warm-up before measured runs)", self.script)
-        self.assertIn("const warmups = data.warmups || [];", self.script)
-        self.assertIn('"Load in run"', self.script)
-        self.assertNotIn("run.model_prepare_ms", self.script)
-
-    def test_no_subjective_quality_score_or_winner_surfaced(self):
-        self.assertNotIn("quality_score", self.script)
-        self.assertNotIn("qualityScore", self.script)
-        self.assertNotIn("winner", self.script.lower())
+    def test_no_page_only_styles(self):
+        for marker in (".model-comparison-", ".benchmark-", ".soft-badge.production", ".soft-badge.candidate"):
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, self.styles)
 
 
 if __name__ == "__main__":

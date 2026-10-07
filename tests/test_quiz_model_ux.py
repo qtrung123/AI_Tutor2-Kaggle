@@ -394,7 +394,7 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(SOURCE.count('select.id = "generation-model-select"'), 1)             # created once, in the Study Session header
         self.assertIn('document.querySelector(".session-header")', SOURCE)
         self.assertNotIn("<select", "".join(re.findall(r'<[^>]*model[^>]*>', html)))            # no model <select> in the static markup either
-        self.assertEqual(re.findall(r'id="([^"]*model[^"]*)"', html), ["admin-model-comparison-nav", "model-comparison-view"])   # (admin page only)
+        self.assertEqual(re.findall(r'id="([^"]*model[^"]*)"', html), [])
         for extra in ("quiz-model-select", "quizModelSelect", '"Quiz model"', "modelSelects", 'class="generation-model-select"',
                       "generate-model-control"):
             self.assertNotIn(extra, SOURCE)

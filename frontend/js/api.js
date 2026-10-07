@@ -57,8 +57,6 @@ const PLANNER_PLANS_API_URL = apiUrl("/api/planner/plans");
 
 const PLANNER_SESSIONS_API_URL = apiUrl("/api/planner/sessions");
 
-const ADMIN_QUIZ_MODEL_COMPARISON_API_URL = apiUrl("/api/admin/quiz-model-comparison");
-
 const PROGRESS_API_BASE_URL = apiUrl("/api/progress/documents");
 
 const GOOGLE_CALENDAR_API_URL = apiUrl("/api/integrations/google-calendar");
