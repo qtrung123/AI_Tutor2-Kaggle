@@ -35,6 +35,36 @@ def _generation_kwargs(attempt_index: int) -> dict:
     return _GENERATION_ATTEMPT_OPTIONS[min(attempt_index, len(_GENERATION_ATTEMPT_OPTIONS) - 1)]
 
 
+# Without an explicit num_ctx Ollama loads the model with a 4096-token window, smaller than a
+# normal lecture's evidence prompt plus its JSON reply: the prompt is truncated (instructions lost)
+# or the reply is cut off mid-JSON. Context tiers reuse the Quiz (16384) and Summary (32768) sizes
+# so switching features does not force extra model reloads.
+_NUM_CTX_TIERS = (16384, 32768)
+_CHARS_PER_TOKEN_ESTIMATE = 2  # conservative: mixed English/Vietnamese PDF text measures ~2.2
+_OUTPUT_TOKENS_PER_CARD_ESTIMATE = 90
+
+
+def _num_ctx_for(prompt: str, topic_count: int) -> int:
+    needed = len(prompt) // _CHARS_PER_TOKEN_ESTIMATE + topic_count * FLASHCARD_MAX_CARDS_PER_TOPIC * _OUTPUT_TOKENS_PER_CARD_ESTIMATE
+    return next((tier for tier in _NUM_CTX_TIERS if needed <= tier), _NUM_CTX_TIERS[-1])
+
+
+def _chunk_id(chunk: dict) -> str:
+    metadata = chunk.get("metadata") or {}
+    return str(metadata.get("chunk_id") or metadata.get("chunk") or "")
+
+
+def _chunk_refs(evidence_groups: list[tuple[dict, list[dict]]]) -> dict[str, str]:
+    """Short prompt aliases (C1, C2, ...) for chunk IDs. Real IDs are 64-hex-char hashes that cost
+    ~40 output tokens per citation and that a quantized model often mangles, which silently drops
+    otherwise valid cards for missing provenance."""
+    refs: dict[str, str] = {}
+    for _topic, chunks in evidence_groups:
+        for chunk in chunks:
+            refs.setdefault(_chunk_id(chunk), f"C{len(refs) + 1}")
+    return refs
+
+
 class FlashcardGenerationError(ValueError):
     """Structured flashcard-generation failure.
 
@@ -161,13 +191,15 @@ _BILINGUAL_INSTRUCTIONS = (
 )
 
 
-def _prompt(document_id: str, evidence_groups: list[tuple[dict, list[dict]]], language: str) -> str:
+def _prompt(document_id: str, evidence_groups: list[tuple[dict, list[dict]]], language: str,
+            chunk_refs: dict[str, str] | None = None) -> str:
+    chunk_refs = chunk_refs or {}
     blocks = []
     for topic, chunks in evidence_groups:
         evidence = []
         for chunk in chunks:
             metadata = chunk.get("metadata") or {}
-            chunk_id = str(metadata.get("chunk_id") or metadata.get("chunk") or "")
+            chunk_id = chunk_refs.get(_chunk_id(chunk), _chunk_id(chunk))
             evidence.append(
                 f"[chunk_id={chunk_id} subtopic_id={metadata.get('subtopic_id') or 'TOPIC_LEVEL'}]\n"
                 f"{str(chunk.get('content') or '').strip()[:MAX_CHARS_PER_CHUNK]}"
@@ -200,6 +232,66 @@ Return JSON only, with no extra text before or after it, in exactly this shape:
 DOCUMENT: {document_id}
 
 {chr(10).join(blocks)}"""
+
+
+def _bind_topic_groups(raw_topics, groups: list[tuple[dict, list[dict]]]) -> dict[str, dict]:
+    """Map the reply's topic groups to the requested topics by topic_id; fall back to position only
+    when no group carries a requested topic_id and the counts match. One missing or extra group no
+    longer discards the cards of every other topic."""
+    if not isinstance(raw_topics, list):
+        return {}
+    requested = [str(topic["topic_id"]) for topic, _chunks in groups]
+    by_id: dict[str, dict] = {}
+    for raw_group in raw_topics:
+        if isinstance(raw_group, dict) and str(raw_group.get("topic_id") or "") in requested:
+            by_id.setdefault(str(raw_group["topic_id"]), raw_group)
+    if not by_id and len(raw_topics) == len(requested):
+        by_id = {topic_id: group for topic_id, group in zip(requested, raw_topics) if isinstance(group, dict)}
+    return by_id
+
+
+def _topic_cards(topic: dict, chunks: list[dict], raw_group: dict | None, ref_to_chunk_id: dict[str, str],
+                 language: str, seen: set[tuple[str, str]], rejected: dict[str, int]) -> list[dict]:
+    """Validate one topic's raw cards; every rule is unchanged, rejections are only counted."""
+    if not isinstance(raw_group, dict) or not isinstance(raw_group.get("cards"), list):
+        rejected["missing_group"] += 1
+        return []
+    subtopics = {str(item["subtopic_id"]): item for item in topic.get("subtopics") or [] if item.get("subtopic_id")}
+    chunk_ids = {_chunk_id(chunk) for chunk in chunks}
+    cards = []
+    for raw in raw_group["cards"][:FLASHCARD_MAX_CARDS_PER_TOPIC]:
+        if not isinstance(raw, dict):
+            rejected["malformed"] += 1
+            continue
+        front = _clean_inline_text(raw.get("front") or "")
+        back = _clean_inline_text(raw.get("back") or "")
+        # Accept the prompt alias (C3) or a real chunk ID, but only if it belongs to this topic.
+        cited = (ref_to_chunk_id.get(str(value).strip(), str(value).strip()) for value in raw.get("source_chunk_ids") or [])
+        source_ids = list(dict.fromkeys(value for value in cited if value in chunk_ids))
+        subtopic_id = str(raw.get("subtopic_id") or "").strip() or None
+        if not source_ids or (subtopic_id and subtopic_id not in subtopics):
+            rejected["provenance"] += 1
+            continue
+        if not _is_well_formed_card_text(front, back) or not _is_language_consistent_card(front, back):
+            rejected["quality"] += 1
+            continue
+        if language != "auto":
+            observed = _card_language(front, back)
+            if observed and observed != language:
+                rejected["language"] += 1
+                continue
+        duplicate_key = (" ".join(front.lower().split()), " ".join(back.lower().split()))
+        if duplicate_key in seen:
+            rejected["duplicate"] += 1
+            continue
+        seen.add(duplicate_key)
+        cards.append({
+            "topic_id": str(topic["topic_id"]), "topic_name": str(topic.get("name") or topic["topic_id"]),
+            "subtopic_id": subtopic_id,
+            "subtopic_name": str(subtopics[subtopic_id].get("name") or subtopic_id) if subtopic_id else None,
+            "front": front, "back": back, "source_chunk_ids": source_ids,
+        })
+    return cards
 
 
 def _topic_maps(document: dict) -> tuple[list[dict], dict[str, dict]]:
@@ -247,77 +339,72 @@ def generate_flashcards(owner_id: str, document_id: str, topic_ids: list[str] | 
 
     llm_calls = 0
     cards: list[dict] = []
+    cards_by_topic: dict[str, list[dict]] = {}
+    seen: set[tuple[str, str]] = set()
+    pending = list(groups)
     missing_topic_ids: list[str] = list(selected_ids)
     generation_errors: list[str] = []
     retry_limit = max(1, FLASHCARD_GENERATION_RETRY_LIMIT)
-    # A bounded retry (never infinite -- see FLASHCARD_GENERATION_RETRY_LIMIT) covers three
-    # distinct failure shapes with the same next attempt: a set that comes back with zero valid
-    # cards for the whole set or for any individual selected topic after quality/language
-    # filtering; a malformed/truncated JSON reply; and a raised runtime error from the model call
-    # itself (e.g. Ollama's "token repeat limit reached" abort). None of these ever falls back to
-    # another model -- only sampling options change between attempts, see _generation_kwargs.
+    chunk_refs = _chunk_refs(groups)
+    ref_to_chunk_id = {ref: chunk_id for chunk_id, ref in chunk_refs.items()}
+    # A bounded retry (never infinite -- see FLASHCARD_GENERATION_RETRY_LIMIT) covers a selected
+    # topic left with zero valid cards after quality/language filtering, a malformed/truncated JSON
+    # reply, and a raised runtime error from the model call itself (e.g. Ollama's "token repeat
+    # limit reached" abort). Valid cards are kept between attempts and a retry asks only for the
+    # topics still missing, so it is a targeted fill rather than a full regeneration. None of these
+    # ever falls back to another model -- only sampling options change, see _generation_kwargs.
     for attempt_index in range(retry_limit):
+        if not pending:
+            break
         llm_calls += 1
+        prompt = _prompt(document_id, pending, requested_language, chunk_refs)
+        num_ctx = _num_ctx_for(prompt, len(pending))
         try:
             response = ChatOllama(
-                model=runtime_model, format="json", **_generation_kwargs(attempt_index),
-            ).invoke(_prompt(document_id, groups, requested_language))
+                model=runtime_model, format="json", num_ctx=num_ctx, **_generation_kwargs(attempt_index),
+            ).invoke(prompt)
             raw_topics = parse_json_object(response.content, "Flashcard").get("topics")
         except Exception as error:  # malformed output or a raised model/runtime failure
             generation_errors.append(f"attempt {attempt_index + 1}: {error}")
             print(f"[flashcards] generation attempt {attempt_index + 1} failed: {error}")
             continue
-        if not isinstance(raw_topics, list) or len(raw_topics) != len(selected):
-            generation_errors.append(
-                f"attempt {attempt_index + 1}: model returned an unexpected topic structure"
-            )
+        raw_by_topic = _bind_topic_groups(raw_topics, pending)
+        if not raw_by_topic:
+            generation_errors.append(f"attempt {attempt_index + 1}: model returned an unexpected topic structure")
+            print(f"[flashcards] generation attempt {attempt_index + 1} returned an unexpected topic structure")
             continue
 
-        candidate_cards: list[dict] = []
-        seen: set[tuple[str, str]] = set()
-        for position, (topic, chunks) in enumerate(groups):
-            raw_group = raw_topics[position]
-            if not isinstance(raw_group, dict) or not isinstance(raw_group.get("cards"), list):
-                continue
-            subtopics = {str(item["subtopic_id"]): item for item in topic.get("subtopics") or [] if item.get("subtopic_id")}
-            chunk_ids = {str((chunk.get("metadata") or {}).get("chunk_id") or (chunk.get("metadata") or {}).get("chunk") or "") for chunk in chunks}
-            for raw in raw_group["cards"][:FLASHCARD_MAX_CARDS_PER_TOPIC]:
-                if not isinstance(raw, dict):
-                    continue
-                front = _clean_inline_text(raw.get("front") or "")
-                back = _clean_inline_text(raw.get("back") or "")
-                source_ids = list(dict.fromkeys(str(value) for value in raw.get("source_chunk_ids") or [] if str(value) in chunk_ids))
-                subtopic_id = str(raw.get("subtopic_id") or "").strip() or None
-                if not source_ids or (subtopic_id and subtopic_id not in subtopics):
-                    continue
-                if not _is_well_formed_card_text(front, back) or not _is_language_consistent_card(front, back):
-                    continue
-                if requested_language != "auto":
-                    observed = _card_language(front, back)
-                    if observed and observed != requested_language:
-                        continue
-                duplicate_key = (" ".join(front.lower().split()), " ".join(back.lower().split()))
-                if duplicate_key in seen:
-                    continue
-                seen.add(duplicate_key)
-                candidate_cards.append({
-                    "topic_id": str(topic["topic_id"]), "topic_name": str(topic.get("name") or topic["topic_id"]),
-                    "subtopic_id": subtopic_id,
-                    "subtopic_name": str(subtopics[subtopic_id].get("name") or subtopic_id) if subtopic_id else None,
-                    "front": front, "back": back, "source_chunk_ids": source_ids,
-                })
-
+        rejected = dict.fromkeys(("missing_group", "malformed", "provenance", "quality", "language", "duplicate"), 0)
+        for topic, chunks in pending:
+            topic_id = str(topic["topic_id"])
+            cards_by_topic[topic_id] = cards_by_topic.get(topic_id, []) + _topic_cards(
+                topic, chunks, raw_by_topic.get(topic_id), ref_to_chunk_id, requested_language, seen, rejected,
+            )
+        candidate_cards = [card for topic_id in selected_ids for card in cards_by_topic.get(topic_id, [])]
         if requested_language == "auto" and candidate_cards:
-            candidate_cards = _keep_majority_language(candidate_cards)
+            kept_cards = _keep_majority_language(candidate_cards)
+            rejected["language"] += len(candidate_cards) - len(kept_cards)
+            candidate_cards = kept_cards
+            cards_by_topic = {}
+            for card in candidate_cards:
+                cards_by_topic.setdefault(card["topic_id"], []).append(card)
 
-        covered_topic_ids = {card["topic_id"] for card in candidate_cards}
-        missing_topic_ids = [topic_id for topic_id in selected_ids if topic_id not in covered_topic_ids]
         # Never persist a set missing an entire selected topic (e.g. 13 generated cards
         # collapsing to 1-3 after language/quality filtering) -- every selected topic must have
         # at least one valid card, not an arbitrary fixed count per topic.
+        requested_count = len(pending)
+        missing_topic_ids = [topic_id for topic_id in selected_ids if not cards_by_topic.get(topic_id)]
+        pending = [(topic, chunks) for topic, chunks in groups if str(topic["topic_id"]) in missing_topic_ids]
+        metadata = dict(getattr(response, "response_metadata", {}) or {})
+        print(
+            f"[flashcards] attempt={attempt_index + 1} topics_requested={requested_count} num_ctx={num_ctx} "
+            f"prompt_tokens={metadata.get('prompt_eval_count')} output_tokens={metadata.get('eval_count')} "
+            f"done_reason={metadata.get('done_reason')} "
+            f"kept={ {topic_id: len(cards_by_topic.get(topic_id, [])) for topic_id in selected_ids} } "
+            f"rejected={rejected} missing={missing_topic_ids}"
+        )
         if candidate_cards and not missing_topic_ids:
             cards = candidate_cards
-            break
 
     if not cards:
         message = (

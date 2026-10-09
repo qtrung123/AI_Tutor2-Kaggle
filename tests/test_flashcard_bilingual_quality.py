@@ -273,6 +273,63 @@ class FlashcardTopicCoverageTests(unittest.TestCase):
         self.assertEqual(len(FakeLlm.calls), 2)
         self.assertEqual(flashcard_store.list_flashcards(self.owner, "notes.pdf"), [])
 
+    def test_retry_is_a_targeted_fill_that_keeps_valid_cards(self):
+        beta_only = _multi_topic_response([("beta", [self._beta_card()])])
+        result = self.generate([self._incomplete_response(), beta_only])
+        self.assertEqual(result["llm_calls"], 2)
+        first_prompt, retry_prompt = FakeLlm.calls
+        self.assertIn("TOPIC_ID: alpha", first_prompt)
+        self.assertIn("TOPIC_ID: beta", first_prompt)
+        self.assertNotIn("TOPIC_ID: alpha", retry_prompt)  # alpha's valid card from attempt 1 is kept
+        self.assertIn("TOPIC_ID: beta", retry_prompt)
+        self.assertEqual([(card["topic_id"], card["front"]) for card in result["cards"]],
+                         [("alpha", "What is Alpha?"), ("beta", "What is Beta?")])
+
+    def test_a_missing_topic_group_does_not_discard_the_other_topics_cards(self):
+        # The model returns only one of two groups (a count mismatch used to discard the whole reply).
+        alpha_only = _multi_topic_response([("alpha", [self._alpha_card()])])
+        beta_only = _multi_topic_response([("beta", [self._beta_card()])])
+        result = self.generate([alpha_only, beta_only])
+        self.assertEqual(result["llm_calls"], 2)
+        self.assertEqual({card["topic_id"] for card in result["cards"]}, {"alpha", "beta"})
+
+    def test_prompt_uses_short_chunk_refs_and_grounding_is_still_per_topic(self):
+        response = _multi_topic_response([
+            ("alpha", [{"front": "What is Alpha?", "back": "Alpha is the first concept.", "source_chunk_ids": ["C1"]}]),
+            ("beta", [
+                {"front": "What is Beta?", "back": "Beta is the second concept.", "source_chunk_ids": ["C2"]},
+                {"front": "Is Beta first?", "back": "No, Alpha comes before it.", "source_chunk_ids": ["C1"]},
+            ]),
+        ])
+        result = self.generate([response])
+        self.assertIn("[chunk_id=C1 ", FakeLlm.calls[0])
+        self.assertNotIn("[chunk_id=a1 ", FakeLlm.calls[0])
+        # Aliases are stored as the real chunk IDs; beta's card citing alpha's chunk is still rejected.
+        self.assertEqual([(card["topic_id"], card["source_chunk_ids"]) for card in result["cards"]],
+                         [("alpha", ["a1"]), ("beta", ["b1"])])
+        persisted = flashcard_store.list_flashcards(self.owner, "notes.pdf", result["set_id"])
+        self.assertEqual(sorted(card["source_chunk_ids"][0] for card in persisted), ["a1", "b1"])
+
+    def test_every_attempt_sets_a_context_window_larger_than_ollamas_4096_default(self):
+        kwargs_calls = []
+
+        class RecordingLlm(FakeLlm):
+            def __init__(self, **kwargs):
+                kwargs_calls.append(kwargs)
+
+        FakeLlm.responses = [self._incomplete_response(), _multi_topic_response([("beta", [self._beta_card()])])]
+        FakeLlm.calls = []
+        with patch.object(flashcard_service, "ChatOllama", RecordingLlm), \
+             patch.object(flashcard_service, "get_topic_chunks", side_effect=self.chunks), \
+             patch.object(flashcard_service, "resolve_generation_model", return_value="runtime-model"):
+            flashcard_service.generate_flashcards(self.owner, "notes.pdf", ["alpha", "beta"], "model-a")
+        self.assertEqual([kwargs["num_ctx"] for kwargs in kwargs_calls], [16384, 16384])
+
+    def test_context_window_grows_with_a_large_document_prompt(self):
+        self.assertEqual(flashcard_service._num_ctx_for("x" * 9000, 4), 16384)  # ~Embedded Systems.pdf size
+        self.assertEqual(flashcard_service._num_ctx_for("x" * 40000, 4), 32768)
+        self.assertEqual(flashcard_service._num_ctx_for("x" * 400000, 4), 32768)  # capped at the Summary tier
+
 
 class FlashcardLayoutCssTests(unittest.TestCase):
     def test_flashcard_copy_and_card_have_defensive_wrap_css(self):
