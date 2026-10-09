@@ -134,8 +134,8 @@ async function loadPlannerData({ keepWeek = false } = {}) {
       plannerQueueAutoPreview(0);
       plannerLoadLiveCandidates();
       plannerLoadDocStates();
-      plannerLoadGoogleCalendar();
     }
+    plannerLoadGoogleCalendar();   // every layout: the toolbar Connect control must not need the desktop calendar
   } catch (error) {
     showToast(error.message || "Could not load Study Planner data");
   }
@@ -2535,8 +2535,9 @@ async function plannerLoadGoogleCalendar() {
     const status = await plannerRequest(plannerGoogleUrl(`/status?utc_offset_minutes=${plannerUtcOffsetMinutes()}`));
     plannerGoogle = status && typeof status === "object" && "connected" in status ? status : null;
   } catch (error) {
-    plannerGoogle = null;   // unknown: the section stays hidden and the Planner works as before
+    plannerGoogle = null;   // unknown: the settings section stays hidden and the Planner works as before
   }
+  plannerGoogleStatusFailed = !plannerGoogle;   // the toolbar slot shows an error + Retry instead of vanishing
   if (plannerGoogle) plannerGoogleSyncFailed = plannerGoogle.sync_errors > 0;
   plannerGoogleBusyWeek = null;
   plannerGoogleWarning = plannerGoogle?.reconnect_required ? "google_calendar_reconnect" : null;
@@ -2624,7 +2625,44 @@ function pcalGoogleToggle(id, text, checked, field) {
   return label;
 }
 
+// The always-visible toolbar control (desktop calendar toolbar and the step-by-step layout's header):
+// the full settings stay in the Materials panel, which is a closed popover by default.
+function plannerRenderGoogleCta() {
+  document.querySelectorAll(".planner-gcal-cta").forEach((slot) => {
+    slot.innerHTML = "";
+    slot.hidden = !plannerGoogle && !plannerGoogleStatusFailed;   // hidden only before the first status answer
+    if (!plannerGoogle) {
+      if (!plannerGoogleStatusFailed) return;
+      // Status unknown: never guess "configured" or start OAuth; offer a retry of the status request.
+      const unavailable = pcalEl("span", "planner-gcal-unavailable", "Google Calendar unavailable");
+      unavailable.setAttribute("role", "status");
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "pcal-button planner-gcal-retry";
+      retry.textContent = "Retry";
+      retry.addEventListener("click", () => plannerLoadGoogleCalendar());
+      slot.append(unavailable, retry);
+      return;
+    }
+    if (plannerGoogle.connected && !plannerGoogle.reconnect_required) {
+      const state = pcalEl("span", "planner-gcal-connected", "✓ Google Calendar connected");
+      state.setAttribute("role", "status");
+      slot.appendChild(state);
+      return;
+    }
+    const connect = document.createElement("button");
+    connect.type = "button";
+    connect.className = "pcal-button planner-gcal-connect";
+    connect.textContent = plannerGoogle.reconnect_required ? "Reconnect Google Calendar" : "Connect Google Calendar";
+    connect.disabled = !plannerGoogle.configured;
+    if (!plannerGoogle.configured) connect.title = "Google Calendar is not set up on this server yet.";
+    connect.addEventListener("click", () => plannerGoogleNavigate(plannerGoogleUrl("/connect")));
+    slot.appendChild(connect);
+  });
+}
+
 function pcalRenderGoogleCalendar() {
+  plannerRenderGoogleCta();
   const box = pcal.gcal;
   if (!box) return;
   box.innerHTML = "";

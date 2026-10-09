@@ -3636,5 +3636,12 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-gcal-actions{display:flex;flex-wrap:wrap;gap:6px}
 .pcal-gcal .pcal-button{padding:4px 10px;font-size:12px}
 .pcal-gcal .pcal-button:disabled{opacity:.55;cursor:not-allowed}
+.planner-gcal-cta{display:flex;align-items:center;gap:6px;flex:none}
+.planner-gcal-unavailable{font-size:12.5px;font-weight:600;white-space:nowrap;color:var(--pcal-warn-ink)}
+.planner-gcal-cta[hidden]{display:none}
+.planner-toolbar .planner-gcal-cta{margin-top:10px}
+.planner-gcal-connect{white-space:nowrap}
+.planner-gcal-connect:disabled{opacity:.55;cursor:not-allowed}
+.planner-gcal-connected{font-size:12.5px;font-weight:600;white-space:nowrap;color:var(--pcal-avail-ink)}
 .pcal-busy{position:absolute;left:0;right:0;z-index:2;box-sizing:border-box;padding:2px 6px;overflow:hidden;pointer-events:none;border-left:2px solid #b9bec9;color:#5f6675;background:repeating-linear-gradient(135deg,rgba(116,124,142,.17) 0 6px,rgba(116,124,142,.07) 6px 12px)}
 .pcal-busy-label{font-size:9.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase}

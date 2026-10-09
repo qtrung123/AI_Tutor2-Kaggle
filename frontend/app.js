@@ -281,7 +281,7 @@ const FLASHCARD_LANGUAGE_LABELS = { auto: "Auto", english: "English", vietnamese
 const plannerView = document.getElementById("planner-view");
 if (plannerView) {
   plannerView.innerHTML = `<div class="planner-shell">
-  <div class="planner-toolbar"><div><p class="eyebrow">Study Planner</p><h2>Plan your study time</h2><p class="planner-lead">Choose documents, add a deadline if there is one, and mark when you could study. We’ll suggest a balanced plan.</p></div></div>
+  <div class="planner-toolbar"><div><p class="eyebrow">Study Planner</p><h2>Plan your study time</h2><p class="planner-lead">Choose documents, add a deadline if there is one, and mark when you could study. We’ll suggest a balanced plan.</p></div><div class="planner-gcal-cta" id="planner-gcal-cta" hidden></div></div>
   <ol class="planner-steps" aria-label="Planner steps"><li data-step-indicator="materials"><span>1</span>Materials</li><li data-step-indicator="availability"><span>2</span>Availability</li><li data-step-indicator="preview"><span>3</span>Preview</li><li data-step-indicator="plan"><span>4</span>Plan</li></ol>
   <section class="panel planner-step" data-planner-step="materials">
     <div class="planner-step-heading"><p class="eyebrow">Step 1</p><h3>What do you want to study?</h3><p class="planner-hint">Pick documents and, if there is one, a deadline for each.</p></div>
@@ -326,6 +326,7 @@ if (plannerView) {
         <h2 class="pcal-range" id="pcal-range"></h2>
         <span class="pcal-view-pill">Week</span>
         <div class="pcal-actions"><button class="pcal-button pcal-secondary" id="pcal-auto-plan" type="button">Auto Plan</button><button class="primary-button pcal-accept" id="pcal-accept" type="button">Accept plan</button></div>
+        <div class="planner-gcal-cta" id="pcal-gcal-cta" hidden></div>
         <div class="pcal-panel-toggles" role="group" aria-label="Planner panels">
           <button class="pcal-panel-toggle" id="pcal-materials-toggle" type="button" aria-label="Materials" title="Materials" aria-haspopup="dialog" aria-expanded="false" aria-controls="pcal-materials-rail"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 3.5h3v13h-3zM8.5 3.5h3v13h-3zM13.2 4.3l2.8-.8 3 12.6-2.9.8z"/></svg></button>
           <button class="pcal-panel-toggle" id="pcal-queue-toggle" type="button" aria-label="Study queue" title="Study queue" aria-haspopup="dialog" aria-expanded="false" aria-controls="pcal-queue-rail"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4.5l1.5 1.5L7 3.5M3 10l1.5 1.5L7 9M3 15.5L4.5 17 7 14.5M9.5 5h8M9.5 10.5h8M9.5 16h8"/></svg></button>

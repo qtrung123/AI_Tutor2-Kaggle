@@ -143,6 +143,8 @@ let plannerBusy = false;         // a preview/confirm request is in flight (no d
 // Google Calendar (desktop planner): connection status only -- no token ever reaches the page.
 let plannerGoogle = null;           // GET /api/integrations/google-calendar/status, null = unknown
 
+let plannerGoogleStatusFailed = false; // the last status request failed (not merely "not loaded yet")
+
 let plannerGoogleBusy = [];         // read-only busy blocks ({start, end} naive local) of the shown week
 
 let plannerGoogleBusyWeek = null;   // the Monday key plannerGoogleBusy was loaded for
