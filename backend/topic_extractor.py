@@ -5,7 +5,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable
 
-TOPIC_SCHEMA_VERSION = 5
+# 6: invalidates restored pre-refresh rows (e.g. stale topic_document_overview) so startup re-extracts them once.
+TOPIC_SCHEMA_VERSION = 6
 _HIERARCHY_CACHE: dict[tuple[str, int], tuple[list[dict], list["HeadingCandidate"]]] = {}
 _HIGH_CONFIDENCE = 0.85
 

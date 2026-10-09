@@ -13,6 +13,7 @@ from backend.auth_store import LEGACY_USER_ID
 from backend.indexed_document_store import (
     delete_indexed_document,
     list_indexed_documents,
+    list_stale_topic_documents,
     upsert_indexed_document,
 )
 
@@ -145,6 +146,82 @@ def delete_stale_source_vectors(vectorstore, owner_id: str, document_id: str, cu
     return stale_ids
 
 
+def load_document_chunks(file_path: Path, owner_id: str, file_hash: str):
+    """Load pages and split them into chunks carrying the document's ownership metadata."""
+    documents = clean_documents(load_single_file(file_path))
+    for doc in documents:
+        doc.metadata["source"] = file_path.name
+        doc.metadata["document_id"] = file_path.name
+        doc.metadata["owner_id"] = owner_id
+        doc.metadata["file_hash"] = file_hash
+    return documents, (split_documents(documents) if documents else [])
+
+
+def owner_vector_ids(owner_id: str, provenance_ids: list[str]) -> list[str]:
+    # Chroma IDs are owner-namespaced for isolation. Provenance IDs remain
+    # stable document-chunk identities and are carried in metadata.
+    return [
+        provenance_id if owner_id == LEGACY_USER_ID else f"{owner_id}_{provenance_id}"
+        for provenance_id in provenance_ids
+    ]
+
+
+def refresh_topic_metadata(vectorstore, file_path: Path, owner_id: str, info: dict) -> dict | None:
+    """Re-extract topics for an unchanged file whose stored topic schema is stale.
+
+    Only the topic metadata is rebuilt: chunk text, IDs and embeddings stay as they are, and the
+    Chroma chunk metadata is updated in place. Returns the updated document info, or None when it
+    cannot prove the stored vectors are exactly a fresh split of this file (the caller then falls
+    back to a full re-index); topics are never attached to mismatched vectors.
+    """
+    file_hash = str(info.get("hash") or "")
+    if not file_hash or calculate_file_hash(file_path) != file_hash:
+        return None
+    document_id = str(info.get("document_id") or file_path.name)
+    documents, chunks = load_document_chunks(file_path, owner_id, file_hash)
+    if not chunks or len(chunks) != int(info.get("chunks") or 0):
+        return None
+    provenance_ids = [f"{file_hash}_{i}" for i in range(len(chunks))]
+    vector_ids = owner_vector_ids(owner_id, provenance_ids)
+    document_vectors = vectorstore.get(where={"$and": [{"owner_id": owner_id}, {"document_id": document_id}]}, include=[])
+    if sorted(document_vectors.get("ids") or []) != sorted(vector_ids):
+        return None
+    stored = vectorstore.get(ids=vector_ids, include=["documents"])
+    stored_text = dict(zip(stored.get("ids") or [], stored.get("documents") or []))
+    if any(stored_text.get(vector_id) != chunk.page_content for vector_id, chunk in zip(vector_ids, chunks)):
+        return None
+    topics = add_topic_metadata(documents, chunks, provenance_ids)
+    vectorstore._collection.update(ids=vector_ids, metadatas=[chunk.metadata for chunk in chunks])
+    refreshed = {**info, "topic_schema_version": TOPIC_SCHEMA_VERSION, "topics": topics}
+    upsert_indexed_document(owner_id, document_id, refreshed)
+    print(f"Refreshed topics without re-embedding: {file_path.name} ({len(topics)} topics)")
+    return refreshed
+
+
+def refresh_stale_topic_documents() -> dict:
+    """At startup, bring every owner's stale-schema documents up to the current topic extractor.
+
+    Documents already at the current schema are not touched, so this is a single SQLite query when
+    nothing is stale. Unchanged files get a metadata-only refresh; anything else is re-indexed.
+    """
+    refreshed, reindexed, missing = [], [], []
+    stale = list_stale_topic_documents(TOPIC_SCHEMA_VERSION)
+    vectorstore = get_vectorstore() if stale else None
+    for info in stale:
+        file_path = Path(str(info.get("path") or ""))
+        label = f"{info['owner_id']}/{info['document_id']}"
+        if not file_path.is_file():
+            print(f"Cannot refresh topics, source file is missing: {label}")
+            missing.append(label)
+            continue
+        if refresh_topic_metadata(vectorstore, file_path, info["owner_id"], info):
+            refreshed.append(label)
+            continue
+        index_files([file_path], info["owner_id"])
+        reindexed.append(label)
+    return {"refreshed": refreshed, "reindexed": reindexed, "missing": missing}
+
+
 def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
     """
     Incremental indexing:
@@ -161,6 +238,7 @@ def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
     total_new_files = 0
     total_chunks = 0
     skipped_files = []
+    topic_refreshed_files = []
 
     # Process each file in the given list
     for file_path in file_paths:
@@ -178,33 +256,24 @@ def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
                 print(f"Skipping already indexed file: {file_path.name}")
                 skipped_files.append(file_path.name)
                 continue
+            refreshed = refresh_topic_metadata(vectorstore, file_path, owner_id, indexed_files[file_key])
+            if refreshed:
+                indexed_files[file_key] = refreshed
+                topic_refreshed_files.append(file_path.name)
+                continue
 
-        documents = load_single_file(file_path)
-        documents = clean_documents(documents)
+        documents, chunks = load_document_chunks(file_path, owner_id, file_hash)
 
         if not documents:
             print(f"No extractable text found in: {file_path.name}")
             continue
 
-        for doc in documents:
-            doc.metadata["source"] = file_path.name
-            doc.metadata["document_id"] = file_path.name
-            doc.metadata["owner_id"] = owner_id
-            doc.metadata["file_hash"] = file_hash
-
-        chunks = split_documents(documents)
-
         if not chunks:
             print(f"No chunks created for: {file_path.name}")
             continue
 
-        # Chroma IDs are owner-namespaced for isolation. Provenance IDs remain
-        # stable document-chunk identities and are carried in metadata.
         provenance_ids = [f"{file_hash}_{i}" for i in range(len(chunks))]
-        vector_ids = [
-            provenance_id if owner_id == LEGACY_USER_ID else f"{owner_id}_{provenance_id}"
-            for provenance_id in provenance_ids
-        ]
+        vector_ids = owner_vector_ids(owner_id, provenance_ids)
 
         topics = add_topic_metadata(documents, chunks, provenance_ids)
 
@@ -233,6 +302,7 @@ def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
         "new_files": total_new_files,
         "new_chunks": total_chunks,
         "skipped_files": skipped_files,
+        "topic_refreshed_files": topic_refreshed_files,
         "total_indexed_files": len(indexed_files),
     }
 
@@ -295,6 +365,10 @@ def index_all_data_files(owner_id: str = LEGACY_USER_ID):
 
 def main():
     print("Starting Incremental Indexing Pipeline...")
+
+    topic_refresh = refresh_stale_topic_documents()
+    print(f"Topic schema refresh: {len(topic_refresh['refreshed'])} refreshed in place, "
+          f"{len(topic_refresh['reindexed'])} re-indexed, {len(topic_refresh['missing'])} missing source files")
 
     result = index_all_data_files()
 

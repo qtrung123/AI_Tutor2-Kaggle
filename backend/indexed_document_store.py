@@ -95,16 +95,28 @@ def list_indexed_documents(owner_id: str) -> list[dict]:
             "SELECT * FROM indexed_documents WHERE owner_id = ? ORDER BY updated_at DESC, document_id",
             (owner_id,),
         ).fetchall()
-    return [
-        {
-            "owner_id": row["owner_id"], "document_id": row["document_id"],
-            "display_name": row["display_name"], "hash": row["file_hash"],
-            "chunks": row["chunk_count"], "path": row["storage_path"],
-            "topic_schema_version": row["topic_schema_version"],
-            "topics": json.loads(row["topics_json"] or "[]"),
-        }
-        for row in rows
-    ]
+    return [_row_to_document(row) for row in rows]
+
+
+def _row_to_document(row: sqlite3.Row) -> dict:
+    return {
+        "owner_id": row["owner_id"], "document_id": row["document_id"],
+        "display_name": row["display_name"], "hash": row["file_hash"],
+        "chunks": row["chunk_count"], "path": row["storage_path"],
+        "topic_schema_version": row["topic_schema_version"],
+        "topics": json.loads(row["topics_json"] or "[]"),
+    }
+
+
+def list_stale_topic_documents(current_topic_schema_version: int) -> list[dict]:
+    """Every owner's documents whose stored topics predate the current topic extractor schema."""
+    initialize_indexed_document_store()
+    with _connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM indexed_documents WHERE topic_schema_version < ? ORDER BY owner_id, document_id",
+            (int(current_topic_schema_version),),
+        ).fetchall()
+    return [_row_to_document(row) for row in rows]
 
 
 def get_indexed_document(owner_id: str, document_id: str) -> dict | None:
