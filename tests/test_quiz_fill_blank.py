@@ -1,7 +1,7 @@
-"""Fill-in-the-blank questions of the Normal Quiz, derived DETERMINISTICALLY from the document's
-persisted flashcards (no LLM call): the cloze algorithm and its rejection rules, the persisted
-question shape, selection inside the live pipeline with single_choice fill-in, deterministic grading,
-and persistence/resume/submit through the real SQLite store. Only exact (normalized) matches against
+"""Fill-in-the-blank support, derived DETERMINISTICALLY from flashcards (no LLM call): the cloze
+algorithm and its rejection rules, the persisted question shape, deterministic grading, and
+persistence/resume/submit of saved fill_blank quizzes through the real SQLite store. A newly
+generated Normal Quiz no longer contains fill_blank questions (single_choice only, engine v9). Only exact (normalized) matches against
 the answer stored with the question are correct -- no fuzzy matching and no invented synonyms.
 """
 
@@ -12,9 +12,8 @@ from unittest.mock import patch
 
 from quiz_fixtures import FakeModel, candidates, flashcard, make_chunks, raw_candidate
 
-from backend import quiz_attempt_service, quiz_service, quiz_store
+from backend import quiz_attempt_service, quiz_service, quiz_store, quiz_units
 from backend.api.quiz_generation import QuizQuestion
-from backend.quiz_service import _generate_quiz_from_units
 from backend.quiz_units import (
     FILL_BLANK_MARKER, CandidateRejected, build_flashcard_fill_blank, build_study_units, fill_blank_is_correct,
     fill_blank_target, flashcard_cloze, flashcard_hint_terms, normalize_fill_blank_answer, select_flashcard_fill_blanks,
@@ -173,56 +172,11 @@ class GradingTests(unittest.TestCase):
         self.assertFalse(fill_blank_is_correct("C", ["C++"]))
 
 
-class EngineTests(unittest.TestCase):
-    def run_engine(self, payloads, cards, fill_blank_count=2):
-        FakeModel.reset(payloads)
-        with (
-            patch.object(quiz_service, "ChatOllama", FakeModel),
-            patch.object(quiz_service, "save_quiz_validation_event"),
-            patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _o: quiz),
-        ):
-            return _generate_quiz_from_units(
-                document=DOCUMENT, scope="document", scope_topic_id="document", scope_topic_name="Entire document",
-                chunks=make_chunks(12, 2), difficulty="easy", owner_id="owner", model_id="qwen-test", regenerate=False,
-                question_count=12, fill_blank_count=fill_blank_count, fill_blank_cards=list(cards),
-            )
-
-    def test_flashcard_clozes_replace_single_choice_without_any_model_call(self):
-        quiz = self.run_engine([{"questions": candidates(range(15))}], [flashcard(fact) for fact in FREE_FACTS])
-        self.assertEqual(len(FakeModel.prompts), 1)                     # the candidate call only
-        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 1)
-        self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 10, "fill_blank": 2})
-        self.assertEqual((len(quiz["questions"]), quiz["assessment_plan"]["status"]), (12, "complete"))
-        self.assertEqual([q["id"] for q in quiz["questions"]], list(range(1, 13)))
-        self.assertTrue(all("_meta" not in q for q in quiz["questions"]))
-        info = quiz["assessment_plan"]["fill_blank"]
-        self.assertEqual((info["source"], info["target"], info["accepted"], info["flashcard_set_id"]), ("flashcards", 2, 2, "set-1"))
-        self.assertEqual(info["flashcard_ids"], ["fc-20-term", "fc-21-term"])
-        linked = {record["flashcard_id"] for record in quiz["assessment_plan"]["question_evidence"] if "flashcard_id" in record}
-        self.assertEqual(linked, {"fc-20-term", "fc-21-term"})
-
-    def test_ineligible_flashcards_fall_back_to_single_choice(self):
-        deck = [card("Deadlock", "A situation where processes wait forever."), flashcard(13), flashcard(20)]
-        quiz = self.run_engine([{"questions": candidates(range(15))}], deck)
-        self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 11, "fill_blank": 1})
-        self.assertEqual(quiz["assessment_plan"]["fill_blank"]["rejected_by"], {"term_not_once": 1, "duplicate": 1})
-        self.assertEqual(len(quiz["questions"]), 12)
-
-    def test_no_flashcards_means_an_unchanged_quiz(self):
-        quiz = self.run_engine([{"questions": candidates(range(15))}], [])
-        self.assertNotIn("fill_blank", quiz["assessment_plan"])
-        self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 12})
-
-    def test_full_normal_quiz_mix(self):
-        quiz = self.run_engine([{"questions": candidates(range(15))}], [flashcard(fact) for fact in FREE_FACTS])
-        self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 10, "fill_blank": 2})
-        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 1)       # candidates only, none for fill_blank
-
-
 class LiveEntryPointTests(unittest.TestCase):
-    """generate_quiz reads the document's CURRENT persisted flashcards (never generates them)."""
+    """The Normal Quiz is single_choice only (engine v9): generate_quiz never reads the flashcards
+    and never builds a fill_blank question, even when the document has usable flashcards."""
 
-    def generate(self, cards):
+    def test_normal_quiz_makes_no_fill_blank_questions_even_with_flashcards(self):
         document = {**DOCUMENT, "topics": []}
         FakeModel.reset([{"questions": candidates(range(15))}])   # the candidate call only
         with (
@@ -233,26 +187,16 @@ class LiveEntryPointTests(unittest.TestCase):
             patch.object(quiz_service, "ChatOllama", FakeModel),
             patch.object(quiz_service, "save_quiz_validation_event"),
             patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _o: quiz),
-            patch.object(quiz_service, "get_latest_flashcard_set_info", return_value={"set_id": "set-1"} if cards else None),
-            patch.object(quiz_service, "list_flashcards", return_value=cards) as listing,
+            patch("backend.flashcard_store.list_flashcards", return_value=[flashcard(20), flashcard(21)]) as listing,
+            patch.object(quiz_units, "select_flashcard_fill_blanks") as cloze_step,
         ):
             quiz = quiz_service.generate_quiz(DOCUMENT["id"], "easy", "document", question_count=12, owner_id="owner")
-        return quiz, listing
-
-    def test_persisted_flashcards_become_fill_blank_questions(self):
-        cards = [card("Empty", "", flashcard_id="fc-empty"), flashcard(20), flashcard(21)]
-        quiz, listing = self.generate(cards)
-        listing.assert_called_once_with("owner", DOCUMENT["id"], "set-1")
-        self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 10, "fill_blank": 2})
-        self.assertEqual(quiz["assessment_plan"]["fill_blank"]["available_flashcards"], 2)   # the empty card is not usable
-        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 1)
-        self.assertEqual(len(quiz["questions"]), 12)
-
-    def test_no_flashcards_makes_no_fill_blank_questions(self):
-        quiz, _ = self.generate([])
-        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 1)   # candidates only
-        self.assertNotIn("fill_blank", quiz["assessment_plan"])
+        listing.assert_not_called()
+        cloze_step.assert_not_called()
         self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"single_choice": 12})
+        self.assertNotIn("fill_blank", quiz["assessment_plan"])
+        self.assertEqual(quiz["assessment_plan"]["llm_calls"], 1)
+        self.assertEqual(len(FakeModel.prompts), 1)
 
 
 def mixed_quiz(quiz_id: str) -> dict:

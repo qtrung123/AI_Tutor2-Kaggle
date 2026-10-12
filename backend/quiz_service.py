@@ -36,9 +36,9 @@ from backend.quiz_units import (
     QUIZ_TOTAL_DEADLINE_S,
     build_generation_prompt,
     build_study_units,
-    fill_blank_target,
     candidate_target,
     context_budget,
+    detect_quiz_language,
     finalize_questions,
     followup_request,
     followup_units,
@@ -47,11 +47,9 @@ from backend.quiz_units import (
     parse_candidates,
     public_unit,
     select_context_units,
-    select_flashcard_fill_blanks,
     select_questions,
     validate_candidate,
 )
-from backend.flashcard_store import get_latest_flashcard_set_info, list_flashcards
 from backend.model_registry import describe_generation_model
 from backend.mastery_service import calculate_mastery, recompute_topic_mastery
 from backend import quiz_diagnostics
@@ -139,19 +137,13 @@ def _generate_quiz_from_units(
     question_count: int = 12,
     quiz_title: str | None = None,
     retrieval_ms: int = 0,
-    fill_blank_count: int = 0,
-    fill_blank_cards: list[dict] | None = None,
 ) -> dict:
     """Live Quiz generation: one simple pipeline for ANY document.
 
-    Every model call writes single-choice questions; there is no multiple_select step.
-
-    With `fill_blank_count` > 0 and `fill_blank_cards` (the document's persisted usable flashcards),
-    up to that many fill_blank questions are derived DETERMINISTICALLY from the cards, without any
-    model call (quiz_units.select_flashcard_fill_blanks: one cloze per suitable card, deck order).
-    They take the place of single-choice ones, so the total is unchanged; cards that yield no safe
-    cloze are skipped and single-choice questions fill in. The live entry point asks for
-    fill_blank_target(count) with the document's current flashcards.
+    The quiz is single_choice ONLY (4 options, exactly 1 correct): no multiple_select and no
+    fill_blank step. It is written in ONE language, detected deterministically from the excerpts
+    before the first call (detect_quiz_language), stated in every call's prompt, and enforced by
+    validate_candidate (a wrong-language candidate is rejected like any other invalid one).
 
         chunks -> excerpts -> context that fits a fixed budget
         -> call 1 writes a surplus of candidates (12 -> 15, 15 -> 18, 18 -> 22, 20 -> 24)
@@ -189,6 +181,8 @@ def _generate_quiz_from_units(
             target_questions=question_count,
         )
     units_by_id = {unit["unit_id"]: unit for unit in units}
+    language = detect_quiz_language([unit["evidence_excerpt"] for unit in units])
+    print(f"[quiz-units-language] {language}")
     pool_target = candidate_target(question_count)
     max_calls = max_llm_calls(question_count)
     # The model every call below is sent to (ChatOllama(model=model_id)); stored with the quiz.
@@ -253,7 +247,9 @@ def _generate_quiz_from_units(
         shown_ids.update(unit["unit_id"] for unit in shown_units)
         # Grounding is judged against everything the model has been shown so far.
         context_units = [unit for unit in units if unit["unit_id"] in shown_ids]
-        prompt = build_generation_prompt(scope_label, difficulty, shown_units, requested, avoid_stems, avoid_quotes)
+        prompt = build_generation_prompt(
+            scope_label, difficulty, shown_units, requested, avoid_stems, avoid_quotes, language=language,
+        )
         material_chars = sum(unit["char_count"] for unit in shown_units)
         output_schema = output_schema_for(requested, material_chars)
         num_predict = min(QUIZ_MAX_NEW_TOKENS, max(600, (requested + QUIZ_MAX_ITEMS_EXTRA) * QUIZ_TOKENS_PER_QUESTION))
@@ -332,6 +328,7 @@ def _generate_quiz_from_units(
             try:
                 normalized, warnings = validate_candidate(
                     raw, context_units, accepted, difficulty, len(accepted) + 1, scope_topic, candidate_counter,
+                    language=language,
                 )
             except (ValueError, TypeError, KeyError, AttributeError) as error:
                 category = getattr(error, "category", "structure")
@@ -448,21 +445,8 @@ def _generate_quiz_from_units(
             failure_summary=summary,
         )
 
-    fill_selected, fill_info = [], None
-    if fill_blank_count > 0 and fill_blank_cards:
-        # No model call: clozes are derived from the flashcards themselves.
-        fill_selected, fill_info = select_flashcard_fill_blanks(
-            fill_blank_cards, units, accepted, difficulty, scope_topic, fill_blank_count, candidate_counter,
-        )
-        fill_info["flashcard_set_id"] = fill_blank_cards[0].get("set_id")
-        print(f"[quiz-units-fill-blank] {json.dumps(fill_info)}")
-
     # final_count = min(valid candidates, requested_count). Short is "partial", never a failure.
-    # Fill_blank questions REPLACE single-choice ones, so the requested total is unchanged.
-    single_selected = select_questions(accepted, question_count - len(fill_selected))
-    combined = single_selected + fill_selected
-    combined.sort(key=lambda question: (question["_meta"]["unit_index"], question["_meta"]["index"]))
-    selected, question_evidence = finalize_questions(combined)
+    selected, question_evidence = finalize_questions(select_questions(accepted, question_count))
     actual_count = len(selected)
     missing_count = max(0, question_count - actual_count)
     status = "complete" if actual_count >= question_count else "partial"
@@ -500,7 +484,7 @@ def _generate_quiz_from_units(
             "candidate_pool_size": len(accepted),
             "partial": status == "partial",
             "type_distribution": dict(Counter(question["question_type"] for question in selected)),
-            **({"fill_blank": fill_info} if fill_info else {}),
+            "language": language,
             "generation_warnings": validation_results["reasons"],
             "validation_results": validation_results,
             "question_evidence": question_evidence,
@@ -526,23 +510,6 @@ def _generate_quiz_from_units(
     print(f"[quiz-units-timing] {json.dumps({**timings, 'llm_calls': llm_calls, 'questions': actual_count})}")
     diag.absorb_pipeline_timings({**timings, "llm_calls": llm_calls})
     return saved
-
-
-def _usable_flashcards(document: dict, owner_id: str) -> list[dict]:
-    """The document's current persisted flashcards with both sides filled, in deck order -- the
-    source of Normal Quiz fill_blank questions (same set lookup as the Flashcards view). No
-    flashcards, or any read problem -> none (the quiz keeps single-choice questions)."""
-    try:
-        from backend.flashcard_service import FLASHCARD_VERSION   # inside the try: any failure means no cards
-        info = get_latest_flashcard_set_info(
-            owner_id, document["id"], str(document.get("hash") or ""), int(document.get("topic_schema_version") or 0),
-            FLASHCARD_VERSION,
-        )
-        cards = list_flashcards(owner_id, document["id"], info["set_id"]) if info else []
-    except Exception as error:
-        print(f"[quiz-units-fill-blank] flashcards unavailable: {type(error).__name__}: {error}")
-        return []
-    return [card for card in cards if str(card.get("front") or "").strip() and str(card.get("back") or "").strip()]
 
 
 def _resolve_quiz_title(quiz_name: str | None, previous_title: str | None, fallback: str) -> str:
@@ -759,8 +726,6 @@ def _generate_quiz(
     retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000)
 
     return _generate_quiz_from_units(
-        fill_blank_count=fill_blank_target(question_count),
-        fill_blank_cards=_usable_flashcards(document, owner_id),
         document=document,
         scope=assessment_scope,
         scope_topic_id=scope_topic_id,

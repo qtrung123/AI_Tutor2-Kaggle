@@ -37,8 +37,10 @@ import re
 import unicodedata
 from collections import Counter
 
-QUIZ_ENGINE_VERSION = "simple_context_v8"
-QUIZ_PROMPT_VERSION = "simple_context_v8_single_choice"
+# v9: single_choice ONLY (no flashcard fill_blank in the Normal Quiz) and one target language per
+# quiz -- bumped so cached v8 quizzes (mixed types / mixed languages) are never silently reused.
+QUIZ_ENGINE_VERSION = "simple_context_v9"
+QUIZ_PROMPT_VERSION = "simple_context_v9_single_choice_language"
 
 # --- how many questions / candidates ------------------------------------------------------------
 QUIZ_ALLOWED_QUESTION_COUNTS = (12, 15, 18, 20)
@@ -258,6 +260,94 @@ def squash(text: str) -> str:
     return re.sub(r"[\W_]+", "", folded)
 
 
+# ---------------------------------------------------------------------------------------------
+# Quiz language: ONE target language per quiz, chosen deterministically from the source text
+# before any model call (same conservative signal as the Flashcard language handling).
+# ---------------------------------------------------------------------------------------------
+
+QUIZ_LANGUAGES = ("english", "vietnamese")
+QUIZ_DEFAULT_LANGUAGE = "english"
+# Letters that plain English text never uses; Vietnamese prose is full of them.
+_VIETNAMESE_LETTERS = re.compile(r"[ăâđêôơưàáãèéìíòóõùúýĂÂĐÊÔƠƯÀÁÃÈÉÌÍÒÓÕÙÚÝẠ-ỹ]")
+_LETTER_WORD = re.compile(r"[^\W\d_]{2,}", flags=re.UNICODE)
+QUIZ_LANGUAGE_UNIT_MIN_WORDS = 20       # an excerpt needs this many natural words to vote
+QUIZ_LANGUAGE_FIELD_MIN_WORDS = 4       # a question/explanation needs this many to be judged on its own
+QUIZ_LANGUAGE_TEXT_MIN_WORDS = 6        # the whole question (stem + options + explanation)
+QUIZ_VIETNAMESE_SHARE = 0.3             # share of natural words with Vietnamese letters: clearly Vietnamese
+QUIZ_ENGLISH_MAX_SHARE = 0.1            # ... at most this share: clearly English
+QUIZ_VIETNAMESE_MIN_SHARE = 0.2         # a Vietnamese question below this share is (mostly) another language
+QUIZ_ENGLISH_MAX_VI_WORDS = 1           # an English question may carry one stray accented word (a name)
+
+_LANGUAGE_DIRECTIVES = {
+    "english": "Write ALL question text, answer options and explanations in English only.",
+    "vietnamese": (
+        "Write ALL question text, answer options and explanations in Vietnamese only. "
+        "Preserve technical identifiers such as eCos, TinyOS, HAL, FIFO exactly."
+    ),
+}
+
+
+def _natural_words(text: str) -> list[str]:
+    """Words that carry a language signal. Acronyms and identifiers (HAL, FIFO, eCos, TinyOS) do not:
+    a word in capitals or with a capital after its first letter is a technical name, not prose."""
+    words = _LETTER_WORD.findall(unicodedata.normalize("NFC", str(text or "")))
+    return [word for word in words if not any(char.isupper() for char in word[1:])]
+
+
+def vietnamese_share(text: str) -> tuple[int, int]:
+    """(natural words, natural words containing a Vietnamese-specific letter)."""
+    words = _natural_words(text)
+    return len(words), sum(1 for word in words if _VIETNAMESE_LETTERS.search(word))
+
+
+def detect_quiz_language(texts: list[str]) -> str:
+    """The ONE language of a quiz, from the source text it is generated from (deterministic).
+
+    Every excerpt with enough natural words votes "vietnamese" (>= QUIZ_VIETNAMESE_SHARE of its words
+    carry Vietnamese letters) or "english" (<= QUIZ_ENGLISH_MAX_SHARE); mixed excerpts abstain. The
+    majority wins; a tie or no vote falls back to the share over all the text. Technical terms and
+    acronyms are not counted, so they never decide the language."""
+    votes = Counter()
+    total_words = total_vi = 0
+    for text in texts:
+        words, vi = vietnamese_share(text)
+        total_words += words
+        total_vi += vi
+        if words < QUIZ_LANGUAGE_UNIT_MIN_WORDS:
+            continue
+        share = vi / words
+        if share >= QUIZ_VIETNAMESE_SHARE:
+            votes["vietnamese"] += 1
+        elif share <= QUIZ_ENGLISH_MAX_SHARE:
+            votes["english"] += 1
+    if votes["vietnamese"] != votes["english"]:
+        return "vietnamese" if votes["vietnamese"] > votes["english"] else "english"
+    if total_words and total_vi / total_words >= QUIZ_VIETNAMESE_SHARE:
+        return "vietnamese"
+    return QUIZ_DEFAULT_LANGUAGE
+
+
+def language_mismatch(stem: str, options: list[str], explanation: str, language: str) -> bool:
+    """True when a question is not written in the quiz's target language (or mixes languages).
+
+    Judged on the natural-language text the learner reads -- stem, options and explanation together,
+    plus the stem, the explanation and EACH option on its own (a field is judged alone only when it
+    has QUIZ_LANGUAGE_FIELD_MIN_WORDS natural words) -- never on the copied evidence quote. Acronyms
+    and identifiers are not words here, so "eCos", "TinyOS", "HAL" or "FIFO" never cause a rejection,
+    and a short term-like option is neutral."""
+    if language not in QUIZ_LANGUAGES:
+        return False
+    words, vi = vietnamese_share(" ".join([stem, *options, explanation]))
+    fields = [vietnamese_share(text) for text in (stem, explanation, *options)]
+    if language == "english":
+        if vi > QUIZ_ENGLISH_MAX_VI_WORDS and vi / max(words, 1) > QUIZ_ENGLISH_MAX_SHARE:
+            return True
+        return any(n >= QUIZ_LANGUAGE_FIELD_MIN_WORDS and v / n >= QUIZ_VIETNAMESE_SHARE for n, v in fields)
+    if words >= QUIZ_LANGUAGE_TEXT_MIN_WORDS and vi / words < QUIZ_VIETNAMESE_MIN_SHARE:
+        return True
+    return any(n >= QUIZ_LANGUAGE_FIELD_MIN_WORDS and v / n < QUIZ_ENGLISH_MAX_SHARE for n, v in fields)
+
+
 def content_tokens(text: str, min_chars: int = 3) -> frozenset[str]:
     return frozenset(
         token for token in re.findall(rf"\w{{{min_chars},}}", _normalize(text), flags=re.UNICODE)
@@ -422,10 +512,13 @@ def build_generation_prompt(
     count: int,
     avoid_stems: list[str] | None = None,
     avoid_quotes: list[str] | None = None,
+    language: str = QUIZ_DEFAULT_LANGUAGE,
 ) -> str:
     """`avoid_stems` / `avoid_quotes` (same order) describe the questions that already exist: a
     follow-up call is shown each stem with the sentence it was written from, so it can pick other
-    facts instead of asking the same one again."""
+    facts instead of asking the same one again. `language` is the quiz's ONE target language
+    (detect_quiz_language), stated in every call -- the first one and every follow-up."""
+    directive = _LANGUAGE_DIRECTIVES.get(language, _LANGUAGE_DIRECTIVES[QUIZ_DEFAULT_LANGUAGE])
     excerpts = "\n\n".join(f"[{unit['unit_id']}]\n{unit['evidence_excerpt']}" for unit in units)
     avoid = ""
     if avoid_stems:
@@ -452,6 +545,7 @@ def build_generation_prompt(
         f"Write exactly {count} {difficulty} multiple-choice revision questions about \"{scope_name}\", "
         "using ONLY the excerpts below. Every fact in a question and in its correct answer must be stated "
         "in the excerpts; never add knowledge from outside them.\n"
+        f"LANGUAGE: {directive}\n"
         'Return JSON only: {"questions":[{"evidence_quote":"...","question":"...",'
         '"options":["...","...","...","..."],"answer_index":0,"explanation":"..."}]}\n'
         "Rules:\n"
@@ -469,7 +563,7 @@ def build_generation_prompt(
         "incorrect or false (or their equivalent in the excerpts' language) -- never ask which option is NOT true; "
         "ask what the excerpts positively state.\n"
         f"- Write ALL {count} questions: do not stop early.\n"
-        "- Write in the main language of the excerpts. Question <=25 words, each option <=15 words, "
+        f"- {directive} Never mix languages. Question <=25 words, each option <=15 words, "
         "explanation <=25 words. No markdown, no extra fields.\n"
         f"{_DIFFICULTY_CONTRACTS[difficulty]}\n"
         f"{avoid}"
@@ -767,6 +861,7 @@ def validate_candidate(
     scope_topic: dict,
     generation_index: int,
     assessment_capacity: int | None = None,
+    language: str | None = None,
 ) -> tuple[dict, list[str]]:
     """Validate one raw candidate against the context the model saw and the questions accepted so far.
 
@@ -816,6 +911,10 @@ def validate_candidate(
         raise CandidateRejected("structure", "answer_index must be a single integer 0-3.")
 
     explanation = _clean_inline(raw.get("explanation"))
+    # The whole quiz is in ONE language: a candidate in another one (or mixing two) is rejected and
+    # the existing bounded follow-up calls replace it.
+    if language and language_mismatch(stem, options, explanation, language):
+        raise CandidateRejected("structure", f"Question is not written in the quiz language ({language}).", "language_mismatch")
 
     quote = _clean_inline(raw.get("evidence_quote"))
     located = locate_evidence(quote, units)
@@ -1067,7 +1166,11 @@ def finalize_questions(selected: list[dict]) -> tuple[list[dict], list[dict]]:
 # ---------------------------------------------------------------------------------------------
 # Fill-in-the-blank, derived from the document's persisted flashcards (no LLM call)
 # ---------------------------------------------------------------------------------------------
-# A Normal Quiz fill_blank question is a cloze built deterministically from ONE usable flashcard:
+# NOT on the live Normal Quiz path: a generated Normal Quiz is single_choice only (engine v9). The
+# cloze builder serves Flashcard Practice (flashcard_cloze) and the grading helpers below grade
+# every saved fill_blank question (old Normal Quizzes and Flashcard Practice alike).
+#
+# A fill_blank question is a cloze built deterministically from ONE usable flashcard:
 # the card's own declarative sentence with ONE short key span replaced by a blank; the removed span
 # is the only accepted answer. Nothing is invented (no synonyms, no outside facts) and the document
 # is not re-read: the flashcard -- itself generated from the document's chunks, whose ids it keeps --
@@ -1316,8 +1419,7 @@ def select_flashcard_fill_blanks(
 
 
 # Flashcard terms (compact concept/answer terms of a document's flashcards). Used by the admin Quiz
-# model benchmark to fingerprint its flashcard input; Normal Quiz fill_blank questions come from
-# select_flashcard_fill_blanks above.
+# model benchmark to fingerprint its flashcard input.
 _HINT_QUESTION_START = re.compile(
     r"^(?:what|which|who|whom|whose|why|how|when|where|define|describe|explain|name|list|give)\b", re.IGNORECASE,
 )
