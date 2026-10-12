@@ -261,8 +261,8 @@ def squash(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------------------------
-# Quiz language: ONE target language per quiz, chosen deterministically from the source text
-# before any model call (same conservative signal as the Flashcard language handling).
+# Quiz language: ONE target language per quiz -- the document's primary/source language, chosen
+# deterministically before any model call (detect_quiz_language), then enforced per question.
 # ---------------------------------------------------------------------------------------------
 
 QUIZ_LANGUAGES = ("english", "vietnamese")
@@ -270,7 +270,16 @@ QUIZ_DEFAULT_LANGUAGE = "english"
 # Letters that plain English text never uses; Vietnamese prose is full of them.
 _VIETNAMESE_LETTERS = re.compile(r"[ăâđêôơưàáãèéìíòóõùúýĂÂĐÊÔƠƯÀÁÃÈÉÌÍÒÓÕÙÚÝẠ-ỹ]")
 _LETTER_WORD = re.compile(r"[^\W\d_]{2,}", flags=re.UNICODE)
-QUIZ_LANGUAGE_UNIT_MIN_WORDS = 20       # an excerpt needs this many natural words to vote
+QUIZ_IDENTIFIER_MAX_CHARS = 15          # a capitalised token up to this long is an identifier, not prose
+QUIZ_SEGMENT_MIN_LETTERS = 12           # a source sentence needs this many natural letters to vote
+QUIZ_LABEL_MIN_LETTERS = 6              # ... a heading / topic name this many
+QUIZ_SEGMENT_VIETNAMESE_LETTER_SHARE = 0.05   # share of Vietnamese-specific letters: clearly Vietnamese
+QUIZ_SEGMENT_ENGLISH_LETTER_SHARE = 0.01      # ... at most this share: clearly English
+QUIZ_STRUCTURE_MIN_LABELS = 2
+QUIZ_STRUCTURE_WIN_SHARE = 2 / 3
+QUIZ_BILINGUAL_MIN_PAIRS = 3
+QUIZ_BILINGUAL_WIN_SHARE = 0.6
+_SEGMENT_SPLIT = re.compile(r"(?<=[.!?])|→")
 QUIZ_LANGUAGE_FIELD_MIN_WORDS = 4       # a question/explanation needs this many to be judged on its own
 QUIZ_LANGUAGE_TEXT_MIN_WORDS = 6        # the whole question (stem + options + explanation)
 QUIZ_VIETNAMESE_SHARE = 0.3             # share of natural words with Vietnamese letters: clearly Vietnamese
@@ -300,31 +309,130 @@ def vietnamese_share(text: str) -> tuple[int, int]:
     return len(words), sum(1 for word in words if _VIETNAMESE_LETTERS.search(word))
 
 
-def detect_quiz_language(texts: list[str]) -> str:
-    """The ONE language of a quiz, from the source text it is generated from (deterministic).
+def _is_identifier(token: str) -> bool:
+    """An acronym or technical name (HAL, FIFO, eCos, TinyOS): no language evidence. A LONG token
+    with capitals is glued PDF prose ("TheeCoskernelwasdesigned"), so it still counts."""
+    return len(token) <= QUIZ_IDENTIFIER_MAX_CHARS and (token.isupper() or any(char.isupper() for char in token[1:]))
 
-    Every excerpt with enough natural words votes "vietnamese" (>= QUIZ_VIETNAMESE_SHARE of its words
-    carry Vietnamese letters) or "english" (<= QUIZ_ENGLISH_MAX_SHARE); mixed excerpts abstain. The
-    majority wins; a tie or no vote falls back to the share over all the text. Technical terms and
-    acronyms are not counted, so they never decide the language."""
-    votes = Counter()
-    total_words = total_vi = 0
-    for text in texts:
-        words, vi = vietnamese_share(text)
-        total_words += words
-        total_vi += vi
-        if words < QUIZ_LANGUAGE_UNIT_MIN_WORDS:
-            continue
-        share = vi / words
-        if share >= QUIZ_VIETNAMESE_SHARE:
-            votes["vietnamese"] += 1
-        elif share <= QUIZ_ENGLISH_MAX_SHARE:
-            votes["english"] += 1
-    if votes["vietnamese"] != votes["english"]:
-        return "vietnamese" if votes["vietnamese"] > votes["english"] else "english"
-    if total_words and total_vi / total_words >= QUIZ_VIETNAMESE_SHARE:
+
+def text_language(text: str, min_letters: int = QUIZ_SEGMENT_MIN_LETTERS) -> str | None:
+    """"english", "vietnamese" or None (too little natural text, or mixed) for one short text.
+
+    Measured on LETTERS, not words, so glued PDF text (no spaces) is judged as well as spaced text:
+    Vietnamese prose has many Vietnamese-specific letters, English none. Identifiers are ignored."""
+    tokens = [token for token in _LETTER_WORD.findall(unicodedata.normalize("NFC", str(text or ""))) if not _is_identifier(token)]
+    letters = sum(len(token) for token in tokens)
+    if letters < min_letters:
+        return None
+    share = sum(len(_VIETNAMESE_LETTERS.findall(token)) for token in tokens) / letters
+    if share >= QUIZ_SEGMENT_VIETNAMESE_LETTER_SHARE:
         return "vietnamese"
-    return QUIZ_DEFAULT_LANGUAGE
+    if share <= QUIZ_SEGMENT_ENGLISH_LETTER_SHARE:
+        return "english"
+    return None
+
+
+def _line_segments(line: str) -> list[dict]:
+    """One line cut into sentence-sized segments: after . ! ? (even with no space after it, as in
+    glued PDF text) and at an arrow. `body` marks a sentence (ends with . ! ?); a heading-like piece
+    without one is not body text."""
+    segments = []
+    for piece in _SEGMENT_SPLIT.split(line):
+        piece = piece.strip(" \t○●•▪◦■□◆◇▶►➢✓✔-")
+        if piece:
+            segments.append({"text": piece, "body": piece.endswith((".", "!", "?")), "language": text_language(piece)})
+    return segments
+
+
+def source_segments(texts: list[str]) -> list[dict]:
+    """The source text in ORIGINAL order as segments (see _line_segments)."""
+    return [segment for text in texts for line in str(text or "").splitlines() for segment in _line_segments(line)]
+
+
+def _pair_runs(languages: list[str], pairs: Counter) -> None:
+    """Pair a sequence of sentence languages: consecutive sentences in the same language are ONE
+    run first (a translation may take two sentences; an untranslated sentence joins its neighbour),
+    then the runs are paired two by two from the start: (source run, translation run)."""
+    runs = [language for index, language in enumerate(languages) if index == 0 or language != languages[index - 1]]
+    for index in range(0, len(runs) - 1, 2):
+        pairs[(runs[index], runs[index + 1])] += 1
+
+
+def bilingual_pairs(texts: list[str]) -> Counter:
+    """(source language, translation language) pairs, in original order.
+
+    * A line holding sentences in both languages is paired on its own ("English sentence.Vietnamese
+      translation." on one PDF line).
+    * Lines holding ONE sentence form a block that is paired as a whole; a block ends at every
+      heading-like line and blank line, so an anomaly cannot shift the pairing of a whole document.
+    Across a block, alternating EN/VI sentences look alike in both directions; what tells the source
+    from the translation is which language STARTS each line / block (source first, then translation)."""
+    pairs = Counter()
+    block: list[str] = []
+
+    def close_block():
+        _pair_runs(block, pairs)
+        block.clear()
+
+    for text in texts:
+        for line in str(text or "").splitlines():
+            segments = _line_segments(line)
+            languages = [segment["language"] for segment in segments if segment["body"] and segment["language"]]
+            if not segments or any(not segment["body"] and segment["language"] for segment in segments):
+                close_block()                                # blank line or heading: restart
+            if len(set(languages)) == 2:
+                close_block()
+                _pair_runs(languages, pairs)
+            else:
+                block.extend(languages)
+    close_block()
+    return pairs
+
+
+def _clear_winner(first: int, second: int, minimum: int, share: float) -> str | None:
+    total = first + second
+    if max(first, second) >= minimum and total and max(first, second) / total >= share:
+        return "english" if first > second else "vietnamese"
+    return None
+
+
+def detect_quiz_language(texts: list[str], structure_labels: list[str] | tuple = ()) -> dict:
+    """The ONE canonical language of a quiz: the document's PRIMARY/SOURCE language (deterministic,
+    before any model call). Returns {"detected_language", "detection_basis", vote counters}.
+
+    1. structural -- the document title, topic and subtopic names: with >= 2 confident labels and a
+       clear (>= 2/3) winner, that language. Headings are written in the source language even when
+       every paragraph is followed by its translation.
+    2. bilingual_order -- body sentences in original order, a sentence directly followed by one in
+       the other language is a (source -> translation) pair (bilingual_pairs). With >= 3 pairs and
+       >= 60% in one direction: EN -> VI means English is the source, VI -> EN means Vietnamese.
+    3. body_fallback -- one vote per confident segment (never weighted by length); a tie goes to the
+       first confident segment; no evidence at all -> English.
+    Identifiers and acronyms (eCos, TinyOS, HAL, FIFO) are never language evidence."""
+    structural = Counter(text_language(label, QUIZ_LABEL_MIN_LETTERS) for label in structure_labels)
+    segments = source_segments(texts)
+    pairs = bilingual_pairs(texts)
+    votes = Counter(segment["language"] for segment in segments if segment["language"])
+    report = {
+        "structural_en_votes": structural["english"], "structural_vi_votes": structural["vietnamese"],
+        "en_to_vi_transitions": pairs[("english", "vietnamese")], "vi_to_en_transitions": pairs[("vietnamese", "english")],
+        "body_en_votes": votes["english"], "body_vi_votes": votes["vietnamese"],
+    }
+    language = _clear_winner(
+        structural["english"], structural["vietnamese"], QUIZ_STRUCTURE_MIN_LABELS, QUIZ_STRUCTURE_WIN_SHARE,
+    ) if structural["english"] + structural["vietnamese"] >= QUIZ_STRUCTURE_MIN_LABELS else None
+    basis = "structural"
+    if language is None:
+        basis = "bilingual_order"
+        language = _clear_winner(report["en_to_vi_transitions"], report["vi_to_en_transitions"],
+                                 QUIZ_BILINGUAL_MIN_PAIRS, QUIZ_BILINGUAL_WIN_SHARE)
+    if language is None:
+        basis = "body_fallback"
+        if votes["english"] != votes["vietnamese"]:
+            language = "english" if votes["english"] > votes["vietnamese"] else "vietnamese"
+        else:
+            language = next((segment["language"] for segment in segments if segment["language"]), QUIZ_DEFAULT_LANGUAGE)
+    return {"detected_language": language, "detection_basis": basis, **report}
 
 
 def language_mismatch(stem: str, options: list[str], explanation: str, language: str) -> bool:

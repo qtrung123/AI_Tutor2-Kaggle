@@ -320,11 +320,8 @@ class FollowUpsPreferUnusedEvidenceTests(unittest.TestCase):
                              raw_candidate(f)["options"][1:]) for f in range(6)]
         second = [candidate(fact_sentence(f), f"What does the {fact_sentence(f).split()[1]} do?", raw_candidate(f)["options"][0],
                             raw_candidate(f)["options"][1:]) for f in range(6, 12)]
-        # This bilingual fixture's Vietnamese translations outweigh its English bullets, so the
-        # detected quiz language would be Vietnamese; this test is about evidence masking, so the
-        # language is pinned to the (English) language of its candidates.
-        with patch.object(quiz_service, "detect_quiz_language", return_value="english"):
-            result = self.run_engine([{"questions": english}, {"questions": second}], chunks)
+        result = self.run_engine([{"questions": english}, {"questions": second}], chunks)
+        self.assertEqual(result["assessment_plan"]["language"], "english")          # EN -> VI bullets: English is the source
         plan = result["assessment_plan"]
         self.assertEqual((len(result["questions"]), plan["llm_calls"], plan["status"]), (12, 2, "complete"))
         excerpts = FakeModel.prompts[1][FakeModel.prompts[1].index("EXCERPTS:"):]

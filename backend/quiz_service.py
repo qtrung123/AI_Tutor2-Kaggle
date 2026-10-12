@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from collections import Counter
 from uuid import uuid4
@@ -141,8 +142,10 @@ def _generate_quiz_from_units(
     """Live Quiz generation: one simple pipeline for ANY document.
 
     The quiz is single_choice ONLY (4 options, exactly 1 correct): no multiple_select and no
-    fill_blank step. It is written in ONE language, detected deterministically from the excerpts
-    before the first call (detect_quiz_language), stated in every call's prompt, and enforced by
+    fill_blank step. It is written in ONE language -- the document's primary/source language,
+    detected deterministically before the first call from its structure (title, topic and subtopic
+    names) and its source text in original order (detect_quiz_language) -- stated in every call's
+    prompt, and enforced by
     validate_candidate (a wrong-language candidate is rejected like any other invalid one).
 
         chunks -> excerpts -> context that fits a fixed budget
@@ -181,8 +184,13 @@ def _generate_quiz_from_units(
             target_questions=question_count,
         )
     units_by_id = {unit["unit_id"]: unit for unit in units}
-    language = detect_quiz_language([unit["evidence_excerpt"] for unit in units])
-    print(f"[quiz-units-language] {language}")
+    # Raw chunk text (line breaks kept, in document order), not the whitespace-collapsed excerpts:
+    # the order of a sentence and its translation is part of the evidence.
+    language_detection = detect_quiz_language(
+        [str(chunk.get("content") or "") for chunk in chunks], _structure_labels(document),
+    )
+    language = language_detection["detected_language"]
+    print(f"[quiz-units-language] {json.dumps(language_detection)}")
     pool_target = candidate_target(question_count)
     max_calls = max_llm_calls(question_count)
     # The model every call below is sent to (ChatOllama(model=model_id)); stored with the quiz.
@@ -485,6 +493,7 @@ def _generate_quiz_from_units(
             "partial": status == "partial",
             "type_distribution": dict(Counter(question["question_type"] for question in selected)),
             "language": language,
+            "language_detection": language_detection,
             "generation_warnings": validation_results["reasons"],
             "validation_results": validation_results,
             "question_evidence": question_evidence,
@@ -510,6 +519,17 @@ def _generate_quiz_from_units(
     print(f"[quiz-units-timing] {json.dumps({**timings, 'llm_calls': llm_calls, 'questions': actual_count})}")
     diag.absorb_pipeline_timings({**timings, "llm_calls": llm_calls})
     return saved
+
+
+def _structure_labels(document: dict) -> list[str]:
+    """The document's structural labels in order: its title (file extension removed), then every
+    topic name and subtopic name. Used only to detect the quiz language."""
+    title = re.sub(r"\.(?:pdf|docx?|pptx?|txt|md)$", "", str(document.get("title") or ""), flags=re.IGNORECASE)
+    labels = [title.replace("_", " ")]
+    for topic in document.get("topics") or []:
+        labels.append(str(topic.get("name") or ""))
+        labels.extend(str(subtopic.get("name") or "") for subtopic in topic.get("subtopics") or [])
+    return [label for label in labels if label.strip()]
 
 
 def _resolve_quiz_title(quiz_name: str | None, previous_title: str | None, fallback: str) -> str:
