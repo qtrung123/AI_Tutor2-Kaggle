@@ -23,12 +23,16 @@ class DeterministicEmbeddings(Embeddings):
         return [float(len(text) % 11), 1.0, 0.5]
 
 
+EMBEDDED_PDF = Path(__file__).parents[1] / "data" / "Embedded Systems.pdf"
+
+
 class TopicExtractorTests(unittest.TestCase):
     def _extract_text(self, text):
         return TopicExtractor().extract([Document(page_content=text, metadata={"page": 0})])[0]
 
+    @unittest.skipUnless(EMBEDDED_PDF.is_file(), "local Embedded Systems.pdf not present (data/ is git-ignored)")
     def test_embedded_systems_golden_hierarchy(self):
-        path = Path(__file__).parents[1] / "data" / "Embedded Systems.pdf"
+        path = EMBEDDED_PDF
         documents = clean_documents(load_single_file(path))
         topics, _ = TopicExtractor().extract(documents)
         self.assertEqual([topic["name"] for topic in topics], [

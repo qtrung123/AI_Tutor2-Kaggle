@@ -275,7 +275,7 @@ fi
 
 log "Starting FastAPI"
 cd "$PROJECT_ROOT"
-python -m uvicorn backend.main:app --host 127.0.0.1 --port "$BACKEND_PORT" >"$LOG_DIR/backend.log" 2>&1 &
+python -m uvicorn backend.main:app --host 127.0.0.1 --port "$BACKEND_PORT" >>"$LOG_DIR/backend.log" 2>&1 &
 echo $! >"$RUNTIME_DIR/backend.pid"
 wait_http "FastAPI" "http://127.0.0.1:$BACKEND_PORT/api/health" 120 "$LOG_DIR/backend.log"
 log "Backend health:"

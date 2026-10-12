@@ -7,7 +7,7 @@ langchain-community
 langchain-ollama
 langchain-chroma
 chromadb
-pypdf
+pypdf>=4
 python-dotenv
 argon2-cffi
 cryptography

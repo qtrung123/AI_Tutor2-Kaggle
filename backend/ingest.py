@@ -1,4 +1,5 @@
 import hashlib
+import re
 from pathlib import Path
 from typing import List
 
@@ -7,7 +8,13 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 
-from backend.topic_extractor import TOPIC_SCHEMA_VERSION, TopicExtractor, ollama_heading_refiner
+from backend.topic_extractor import (
+    MIN_MEANINGFUL_SPAN,
+    TOPIC_SCHEMA_VERSION,
+    TopicExtractor,
+    _HIGH_CONFIDENCE as HIGH_STRUCTURE_CONFIDENCE,
+    ollama_heading_refiner,
+)
 from backend.assessment_planner import resolve_topic_evidence
 from backend.auth_store import LEGACY_USER_ID
 from backend.indexed_document_store import (
@@ -55,14 +62,58 @@ def load_indexed_files(owner_id: str = LEGACY_USER_ID) -> dict:
     return {document["document_id"]: document for document in list_indexed_documents(owner_id)}
 
 
+def _normalize_layout_text(documents):
+    """Collapse layout-mode padding to single spaces while keeping each extracted line."""
+    for doc in documents:
+        lines = (re.sub(r"[ \t]+", " ", line).strip() for line in doc.page_content.splitlines())
+        doc.page_content = "\n".join(line for line in lines if line)
+    return documents
+
+
+def _visible_length(documents) -> int:
+    return sum(len(re.sub(r"\s+", "", doc.page_content or "")) for doc in documents)
+
+
+def _has_reliable_structure(documents) -> bool:
+    """Apply TopicExtractor's deterministic major-topic selection (no LLM refinement) and require a
+    confident multi-topic hierarchy whose every topic governs a meaningful span of text, so stray
+    layout labels (e.g. numbered diagram steps) cannot pass as document structure."""
+    extractor = TopicExtractor()
+    headings = sorted(extractor.detect_headings(documents), key=lambda heading: heading.document_offset)
+    document_length = sum(len(doc.page_content or "") + 1 for doc in documents)
+    selected, confidence = extractor._select_major_candidates(headings, document_length)
+    if len(selected) < 2 or confidence < HIGH_STRUCTURE_CONFIDENCE:
+        return False
+    offsets = sorted(heading.document_offset for heading in selected) + [document_length]
+    return all(end - start >= MIN_MEANINGFUL_SPAN for start, end in zip(offsets, offsets[1:]))
+
+
+def load_pdf_pages(file_path: Path):
+    """Load PDF pages with explicit pypdf extraction modes.
+
+    Plain extraction is used whenever it keeps heading lines. Some pypdf versions collapse a page's
+    line structure, which leaves no heading candidates; layout extraction rebuilds lines from glyph
+    positions, so it replaces plain only when it keeps the text and yields a confident hierarchy.
+    """
+    documents = clean_documents(PyPDFLoader(str(file_path), extraction_mode="plain").load())
+    if not documents or TopicExtractor().detect_headings(documents):
+        return documents
+    layout = clean_documents(_normalize_layout_text(PyPDFLoader(
+        str(file_path), extraction_mode="layout", extraction_kwargs={"layout_mode_space_vertically": False},
+    ).load()))
+    if layout and _visible_length(layout) >= 0.9 * _visible_length(documents) and _has_reliable_structure(layout):
+        print(f"Plain PDF extraction lost heading lines; using layout extraction: {file_path.name}")
+        return layout
+    return documents
+
+
 def load_single_file(file_path: Path):
     """Load one PDF or TXT file."""
     suffix = file_path.suffix.lower()
 
     if suffix == ".pdf":
         print(f"Loading PDF: {file_path.name}")
-        loader = PyPDFLoader(str(file_path))
-        return loader.load()
+        return load_pdf_pages(file_path)
 
     if suffix == ".txt":
         print(f"Loading TXT: {file_path.name}")

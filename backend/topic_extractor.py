@@ -6,9 +6,12 @@ from dataclasses import dataclass
 from typing import Callable
 
 # 6: invalidates restored pre-refresh rows (e.g. stale topic_document_overview) so startup re-extracts them once.
-TOPIC_SCHEMA_VERSION = 6
+# 7: PDFs whose plain extraction lost heading lines are re-loaded with layout extraction (backend.ingest.load_pdf_pages).
+TOPIC_SCHEMA_VERSION = 7
 _HIERARCHY_CACHE: dict[tuple[str, int], tuple[list[dict], list["HeadingCandidate"]]] = {}
 _HIGH_CONFIDENCE = 0.85
+# A heading must govern at least this many characters to count as a meaningful section.
+MIN_MEANINGFUL_SPAN = 120
 
 @dataclass(frozen=True)
 class HeadingCandidate:
@@ -144,7 +147,7 @@ class TopicExtractor:
             return [], 0.0
         ordered = sorted(headings, key=lambda item: item.document_offset)
         spans = [(ordered[i + 1].document_offset if i + 1 < len(ordered) else document_length) - h.document_offset for i, h in enumerate(ordered)]
-        meaningful = [heading for heading, span in zip(ordered, spans) if span >= 120]
+        meaningful = [heading for heading, span in zip(ordered, spans) if span >= MIN_MEANINGFUL_SPAN]
         return (meaningful or ordered), (0.68 if meaningful else 0.52)
 
     def extract(self, documents) -> tuple[list[dict], list[HeadingCandidate]]:
