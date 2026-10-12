@@ -99,6 +99,14 @@ let loadedSummaryKey = "";
 
 let summaryInFlightKey = "";
 
+let summaryPollTimer = null;
+
+let summaryPollJobId = "";
+
+const SUMMARY_JOB_POLL_MS = 2000;
+
+const SUMMARY_JOB_MAX_POLL_ERRORS = 5;
+
 let flashcardsInFlightKey = "";
 
 let flashcardSet = null;

@@ -91,6 +91,15 @@ def get_compatible_summary(identity: dict) -> dict | None:
     return _decode(row)
 
 
+def get_summary_by_id(owner_id: str, summary_id: str) -> dict | None:
+    initialize_summary_store()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM document_summaries WHERE summary_id=? AND owner_id=?", (summary_id, owner_id)
+        ).fetchone()
+    return _decode(row)
+
+
 def save_summary(identity: dict, topic_summaries: list[dict], final_summary: dict, metrics: dict) -> dict:
     initialize_summary_store()
     created_at = datetime.now(timezone.utc).isoformat()

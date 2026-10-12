@@ -548,7 +548,8 @@ function updateSummaryChrome(key) {
   regenerateSummaryButton.hidden = !has;
 }
 
-// Opening the tab (or changing model) only LOOKS for a saved summary; nothing is generated.
+// Opening the tab (or changing model) only LOOKS for a saved summary; nothing is generated. A
+// generation still running in the backend (refresh/reopen, or polling paused by leaving) is resumed.
 async function showSummaryState() {
   if (!activeDocumentId || !summaryContent) return;
   const requestDocumentId = activeDocumentId, key = `${requestDocumentId}:${selectedModelId}`;
@@ -557,18 +558,70 @@ async function showSummaryState() {
   if (loadedSummaryKey === key && summaryContent.children.length) { summaryContent.hidden = false; updateSummaryChrome(key); return; }
   if (summaryInFlightKey === key) { summaryContent.innerHTML = ""; summaryGenerate.hidden = true; regenerateSummaryButton.hidden = true; return; }
   summaryContent.innerHTML = ""; loadedSummaryKey = ""; summaryGenerate.hidden = true; regenerateSummaryButton.hidden = true;
-  let saved = null;
-  try { saved = await fetchJson(`${SUMMARY_API_BASE_URL}/${encodeURIComponent(requestDocumentId)}?model_id=${encodeURIComponent(selectedModelId)}&cache_only=true`); } catch (error) { saved = null; }
+  const query = `model_id=${encodeURIComponent(selectedModelId)}`;
+  const [saved, active] = (await Promise.allSettled([
+    fetchJson(`${SUMMARY_API_BASE_URL}/${encodeURIComponent(requestDocumentId)}?${query}&cache_only=true`),
+    fetchJson(`${SUMMARY_API_BASE_URL}/jobs?document_id=${encodeURIComponent(requestDocumentId)}&${query}`),
+  ])).map((result) => (result.status === "fulfilled" ? result.value : null));
   if (activeDocumentId !== requestDocumentId || key !== `${activeDocumentId}:${selectedModelId}`) return;
   if (saved && saved.status !== "not_generated" && saved.final_summary) { renderDocumentSummary(saved); loadedSummaryKey = key; summaryContent.hidden = false; }
+  if (active?.status === "processing" && active.job_id && summaryInFlightKey !== key) { showSummaryGenerating(key); pollSummaryJob(active.job_id, key); return; }
   updateSummaryChrome(key);
 }
 
-// Only the Generate / Regenerate buttons reach this: it is the one place that generates.
+function showSummaryGenerating(key) {
+  summaryInFlightKey = key;
+  summaryLoading.hidden = false; summaryError.hidden = true; summaryContent.hidden = true; summaryGenerate.hidden = true;
+  regenerateSummaryButton.disabled = true;
+}
+
+function finishSummaryGeneration(key, summary, errorMessage) {
+  if (summaryInFlightKey === key) summaryInFlightKey = "";
+  if (key !== `${activeDocumentId}:${selectedModelId}`) return;   // another document/model is on screen now
+  if (summary) { renderDocumentSummary(summary); loadedSummaryKey = key; }
+  else { summaryError.textContent = errorMessage || "Could not generate summary."; summaryError.hidden = false; }
+  summaryLoading.hidden = true; summaryContent.hidden = false; regenerateSummaryButton.disabled = false; updateSummaryChrome(key);
+}
+
+function stopSummaryPolling() {
+  clearTimeout(summaryPollTimer);
+  summaryPollTimer = null; summaryPollJobId = "";
+}
+
+// Polls a background Summary job until it completes or fails. Leaving the Summary (another
+// document/model or tab) only stops this polling; the backend keeps generating, and reopening
+// the tab rediscovers the running job instead of starting another one.
+function pollSummaryJob(jobId, key) {
+  stopSummaryPolling();
+  summaryPollJobId = jobId;
+  let consecutiveErrors = 0;
+  const stillWatching = () => summaryPollJobId === jobId;
+  const onScreen = () => key === `${activeDocumentId}:${selectedModelId}` && document.body.dataset.sessionTab === "summary";
+  const tick = async () => {
+    if (!stillWatching()) return;
+    if (!onScreen()) { stopSummaryPolling(); if (summaryInFlightKey === key) summaryInFlightKey = ""; return; }
+    let job = null;
+    try { job = await fetchJson(`${SUMMARY_API_BASE_URL}/jobs/${encodeURIComponent(jobId)}`); consecutiveErrors = 0; }
+    catch (error) {
+      if (++consecutiveErrors >= SUMMARY_JOB_MAX_POLL_ERRORS && stillWatching()) { stopSummaryPolling(); finishSummaryGeneration(key, null, error.message || "Could not check summary progress."); return; }
+    }
+    if (!stillWatching()) return;
+    if (!job || job.status === "processing") { summaryPollTimer = setTimeout(tick, SUMMARY_JOB_POLL_MS); return; }
+    stopSummaryPolling();
+    if (job.status === "complete") finishSummaryGeneration(key, job.summary, "");
+    else finishSummaryGeneration(key, null, job.error?.message || "Could not generate summary.");
+  };
+  summaryPollTimer = setTimeout(tick, SUMMARY_JOB_POLL_MS);
+}
+
+// Only the Generate / Regenerate buttons reach this: it is the one place that starts a generation.
+// The backend answers at once (a saved summary, or 202 + job_id) and the job is then polled, so no
+// request stays open while the model runs.
 async function loadDocumentSummary(regenerate = false) {
   if (!activeDocumentId || !summaryContent) return;
   const requestDocumentId = activeDocumentId;
   const key = `${requestDocumentId}:${selectedModelId}`;
+  if (summaryInFlightKey === key) return;   // this summary is already generating: never start a second job
   if (!regenerate && loadedSummaryKey === key && summaryContent.children.length) return;
   // Model preparation happens BEFORE generation timing starts, not inside the "Generating…" state.
   try { await ensureSelectedModelReadyWithStatus(); }
@@ -577,20 +630,17 @@ async function loadDocumentSummary(regenerate = false) {
     return;
   }
   if (activeDocumentId !== requestDocumentId || key !== `${activeDocumentId}:${selectedModelId}`) return;   // another document/model is on screen now
-  summaryLoading.hidden = false; summaryError.hidden = true; summaryContent.hidden = true; summaryGenerate.hidden = true;
-  regenerateSummaryButton.disabled = true; summaryInFlightKey = key;
+  if (summaryInFlightKey === key) return;
+  showSummaryGenerating(key);
   try {
-    const url = `${SUMMARY_API_BASE_URL}/${encodeURIComponent(requestDocumentId)}`;
-    const summary = await fetchJson(regenerate ? `${url}/regenerate` : `${url}?model_id=${encodeURIComponent(selectedModelId)}`, regenerate ? {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model_id: selectedModelId || null })
-    } : {});
-    if (activeDocumentId !== requestDocumentId || key !== `${activeDocumentId}:${selectedModelId}`) return;   // another document/model is on screen now
-    renderDocumentSummary(summary); loadedSummaryKey = key;
+    const result = await fetchJson(`${SUMMARY_API_BASE_URL}/generate`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document_id: requestDocumentId, model_id: selectedModelId || null, regenerate }),
+    });
+    if (result?.status === "processing" && result.job_id) { pollSummaryJob(result.job_id, key); return; }
+    finishSummaryGeneration(key, result, "");   // a compatible saved summary came back immediately
   } catch (error) {
-    if (activeDocumentId === requestDocumentId) { summaryError.textContent = error.message || "Could not load summary."; summaryError.hidden = false; }
-  } finally {
-    if (summaryInFlightKey === key) summaryInFlightKey = "";
-    if (activeDocumentId === requestDocumentId) { summaryLoading.hidden = true; summaryContent.hidden = false; regenerateSummaryButton.disabled = false; updateSummaryChrome(`${activeDocumentId}:${selectedModelId}`); }
+    finishSummaryGeneration(key, null, error.message || "Could not load summary.");
   }
 }
 

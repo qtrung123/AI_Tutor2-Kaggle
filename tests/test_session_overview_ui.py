@@ -187,7 +187,8 @@ class SessionOverviewUiTests(unittest.TestCase):
     def test_overview_never_triggers_generation(self):
         calls = self.out["calls"]
         self.assertFalse([c for c in calls if c.startswith("POST ") and re.search(r"/api/(summary|flashcards|quiz/generate)", c)])
-        reads = [c for c in calls if re.match(r"GET /api/(summary|flashcards)/", c)]
+        # The active-job lookup (/api/summary/jobs) is read-only: it only finds a running job to resume polling.
+        reads = [c for c in calls if re.match(r"GET /api/(summary|flashcards)/", c) and not c.startswith("GET /api/summary/jobs")]
         self.assertTrue(reads)
         self.assertTrue(all("cache_only=true" in c for c in reads), reads)
 
