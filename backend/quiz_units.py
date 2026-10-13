@@ -19,7 +19,9 @@ language, subject or layout of a document:
 * parse_candidates      -- tolerant JSON parsing (salvages complete questions from truncated output)
 * validate_candidate    -- 4 options / 1 answer + grounding in the provided context + duplicates
                           (PDF-artifact tolerant; refuses negative "NOT/EXCEPT" questions; a question is a
-                          duplicate when it tests the same FACT, not merely the same sentence)
+                          duplicate only when it asks essentially the same thing -- one fact may be asked
+                          about again for a different aspect; bad distractors and too-short quotes are
+                          repaired locally by repair_options / repair_evidence, without an LLM call)
 * followup_units        -- what a follow-up call is shown: unused text preferred, used text only if needed
 * select_questions      -- best-ranked candidates, returned in document order
 
@@ -39,20 +41,19 @@ from collections import Counter
 
 # v9: single_choice ONLY (no flashcard fill_blank in the Normal Quiz) and one target language per
 # quiz -- bumped so cached v8 quizzes (mixed types / mixed languages) are never silently reused.
-QUIZ_ENGINE_VERSION = "simple_context_v9"
-QUIZ_PROMPT_VERSION = "simple_context_v9_single_choice_language"
+# v10: local option/evidence repair, aspect-aware duplicates, at most 3 calls -- cached v9 quizzes
+# are regenerated rather than served as current.
+QUIZ_ENGINE_VERSION = "simple_context_v10"
+QUIZ_PROMPT_VERSION = "simple_context_v10_single_choice_repair"
 
 # --- how many questions / candidates ------------------------------------------------------------
 QUIZ_ALLOWED_QUESTION_COUNTS = (12, 15, 18, 20)
-QUIZ_CANDIDATE_BUFFER_RATIO = 0.2     # 12 -> 15, 15 -> 18, 18 -> 22, 20 -> 24
-# Models tend to write far fewer questions than asked in one big list, so after the first call
-# the pipeline keeps asking, in moderate batches, until the target is met or the calls run out.
-QUIZ_MAX_CALLS = {12: 4, 15: 4, 18: 5, 20: 5}
-QUIZ_DEFAULT_MAX_CALLS = 4
-QUIZ_FOLLOWUP_MIN_BUFFER = 2          # a follow-up asks for the missing questions + a small surplus
-QUIZ_FOLLOWUP_BUFFER_RATIO = 0.25
-QUIZ_FOLLOWUP_MIN_ASK = 3
-QUIZ_FOLLOWUP_MAX_ASK = 8             # ... but never a big batch: that is what models under-deliver
+QUIZ_CANDIDATE_BUFFER_RATIO = 1 / 6   # 12 -> 14, 15 -> 18, 18 -> 21, 20 -> 24
+# Bad distractors and too-short quotes are repaired locally (no LLM call), so a small surplus is
+# enough. At most 3 calls for every count: call 2 asks for what is missing + 2, call 3 for what is
+# missing + 1, and there is never a 4th call.
+QUIZ_MAX_CALLS = 3
+QUIZ_FOLLOWUP_EXTRA = {2: 2, 3: 1}    # call number -> surplus on top of the missing questions
 QUIZ_STALL_LIMIT = 2                  # stop after this many calls in a row that add no valid question
 QUIZ_MIN_ITEMS_RATIO = 0.7            # the schema makes the model write at least this share of the ask
 QUIZ_MAX_ITEMS_EXTRA = 3              # ... and at most `ask` + this many
@@ -122,6 +123,16 @@ QUIZ_MIN_REMAINING_CHARS = 100        # an excerpt with less unused text than th
 QUIZ_MIN_STEM_CHARS = 12
 QUIZ_MAX_STEM_CHARS = 320
 QUIZ_MAX_OPTION_CHARS = 200
+QUIZ_STEM_PREFIX_CHARS = 5            # stems differing only by inflection ("array"/"arrays") are one question
+QUIZ_ASPECT_MAX_OVERLAP = 0.2         # same answer, same statement: stems sharing at most this much meaning ask different aspects
+
+# --- local repair (no LLM call) -------------------------------------------------------------------
+QUIZ_REPAIR_MIN_OPTIONS = 3           # fewer options than this is not a 4-option question to repair
+QUIZ_MAX_RAW_OPTIONS = 6              # ... more than this is not one either (5-6 are cut to 4)
+QUIZ_REPAIR_MIN_ANCHOR_CHARS = 6      # a too-short quote is expanded only when this much of it is found verbatim
+QUIZ_REPAIR_NOT_FOUND_SHARE = 0.5     # a quote not found is repaired when one verbatim run covers this share of it
+QUIZ_REPAIR_MAX_QUOTE_CHARS = 300     # a repaired quote longer than this is cut to the words around the anchor
+QUIZ_REPAIR_WINDOW_CHARS = 40         # ... squashed characters the word window grows to
 
 OPTION_LETTERS = "ABCD"
 
@@ -164,20 +175,19 @@ class CandidateRejected(ValueError):
 
 
 def candidate_target(question_count: int) -> int:
-    """How many candidates the first call writes: the target plus a 20% surplus."""
-    return question_count + math.ceil(QUIZ_CANDIDATE_BUFFER_RATIO * question_count)
+    """How many candidates the first call writes: the target plus a small surplus (12 -> 14)."""
+    return question_count + math.ceil(round(QUIZ_CANDIDATE_BUFFER_RATIO * question_count, 6))
 
 
 def max_llm_calls(question_count: int) -> int:
-    """Upper bound on model calls for one quiz: 12 -> 4, 15 -> 4, 18 -> 5, 20 -> 5."""
-    return QUIZ_MAX_CALLS.get(question_count, QUIZ_DEFAULT_MAX_CALLS)
+    """Upper bound on model calls for one quiz: 3 for every count."""
+    return QUIZ_MAX_CALLS
 
 
-def followup_request(missing: int) -> int:
-    """How many candidates a follow-up call writes: what is missing plus a small surplus, but a
-    moderate batch (3-8) -- a model asked for a long list stops early, a short one it completes."""
-    wanted = missing + max(QUIZ_FOLLOWUP_MIN_BUFFER, math.ceil(QUIZ_FOLLOWUP_BUFFER_RATIO * missing))
-    return max(QUIZ_FOLLOWUP_MIN_ASK, min(QUIZ_FOLLOWUP_MAX_ASK, wanted))
+def followup_request(missing: int, call_number: int = 2) -> int:
+    """How many candidates a follow-up call writes: call 2 asks for what is missing + 2, call 3 for
+    what is missing + 1."""
+    return max(1, missing) + QUIZ_FOLLOWUP_EXTRA.get(call_number, 1)
 
 
 def min_items_for(ask: int, material_chars: int | None = None) -> int:
@@ -637,20 +647,22 @@ def build_generation_prompt(
             lines.append(f'- {stem}  [source: "{source}"]' if source else f"- {stem}")
         avoid = (
             "The list below holds the questions that already exist (each with the sentence it used). "
-            "Do not repeat them, do not reword them, and do not ask about the same or a nearly identical "
-            "fact again; choose OTHER facts. Questions already written:\n"
+            "Do not repeat them and do not reword them: never ask the same thing again. A listed sentence "
+            "may be used again only to ask about a DIFFERENT aspect of it. Questions already written:\n"
             + "\n".join(lines) + "\n"
         )
     spread_rule = (
         "- The questions already written are listed below the rules; prefer sentences and parts of the "
-        "excerpts that they did not use. A sentence they used may still hold a different fact: ask about "
-        "it only if none of the listed questions tests that fact.\n"
+        "excerpts that they did not use. A sentence they used may still hold a different fact or aspect: "
+        "ask about it only if none of the listed questions asks that.\n"
         if avoid_stems else
-        "- Each question tests a different fact; never ask the same fact twice, even reworded. Draw the "
-        "questions from different excerpts (at most 2 per excerpt) whenever the material allows.\n"
+        "- Spread the questions over the excerpts whenever the material allows. The same fact or sentence "
+        "may be reused for a DIFFERENT aspect (e.g. for net.Listen(\"tcp\", \":8080\"): the function, the "
+        "port, the protocol, the purpose), but never write two questions that ask essentially the same "
+        "thing, even reworded.\n"
     )
     return (
-        f"Write exactly {count} {difficulty} multiple-choice revision questions about \"{scope_name}\", "
+        f"Write exactly {count} {difficulty} single_choice revision questions about \"{scope_name}\", "
         "using ONLY the excerpts below. Every fact in a question and in its correct answer must be stated "
         "in the excerpts; never add knowledge from outside them.\n"
         f"LANGUAGE: {directive}\n"
@@ -661,9 +673,11 @@ def build_generation_prompt(
         "as written from an excerpt. Do not paraphrase, translate, or fix its spelling or spacing.\n"
         "- Then write a question whose correct answer is stated in that quote. Never ask about something "
         "the quote does not say.\n"
-        "- Exactly 4 options and exactly 1 correct option; answer_index is the 0-based position (0-3) of the "
-        "correct option. Vary the position of the correct option.\n"
-        "- The 3 wrong options must be plausible but clearly wrong according to the excerpts.\n"
+        "- single_choice only: exactly 4 options, exactly 1 correct option; answer_index is the 0-based "
+        "position (0-3) of the correct option. Vary the position of the correct option.\n"
+        "- The 3 wrong options are distinct, plausible distractors that are clearly incorrect. They do NOT "
+        "need to appear in the excerpts: related concepts, nearby values, opposite actions or invented "
+        "alternatives are fine, as long as none of them is also correct.\n"
         "- The 4 options must have clearly different meanings: never write two options that say the same "
         "thing in different words, and no option may be a shorter or longer version of another.\n"
         f"{spread_rule}"
@@ -671,8 +685,8 @@ def build_generation_prompt(
         "incorrect or false (or their equivalent in the excerpts' language) -- never ask which option is NOT true; "
         "ask what the excerpts positively state.\n"
         f"- Write ALL {count} questions: do not stop early.\n"
-        f"- {directive} Never mix languages. Question <=25 words, each option <=15 words, "
-        "explanation <=25 words. No markdown, no extra fields.\n"
+        f"- {directive} Never mix languages. Be concise: question <=20 words, each option <=10 words, "
+        "explanation <=20 words. No markdown, no extra fields.\n"
         f"{_DIFFICULTY_CONTRACTS[difficulty]}\n"
         f"{avoid}"
         f"EXCERPTS:\n{excerpts}"
@@ -911,28 +925,43 @@ def context_support(stem: str, correct_option: str, unit: dict, units: list[dict
 # Validation
 # ---------------------------------------------------------------------------------------------
 
-def _options_too_similar(options: list[str]) -> bool:
-    """Two options that are one answer written twice.
-
-    Compared as bags of meaningful words: identical bags (order, articles and punctuation
-    changed), or -- for options of 3+ words -- bags that overlap by QUIZ_OPTION_BAG_JACCARD after
-    cutting every word to its first 4 letters (moved/moves, process/processes). Deliberately
-    narrow: an antonym pair ("increases ..." / "decreases ...") and nested names ("Preemptive" /
-    "Non-preemptive", "I/O bound" / "CPU bound") are good distractors and are NOT flagged.
-    """
-    bags = [content_tokens(option, 2) for option in options]
-    for left in range(len(bags)):
-        for right in range(left + 1, len(bags)):
-            first, second = bags[left], bags[right]
-            if not first or not second:
-                continue
-            if first == second:
-                return True
-            if min(len(first), len(second)) >= 3:
-                stems_first, stems_second = frozenset(t[:4] for t in first), frozenset(t[:4] for t in second)
-                if _jaccard(stems_first, stems_second) >= QUIZ_OPTION_BAG_JACCARD:
-                    return True
+def _bags_alike(first_option: str, second_option: str) -> bool:
+    """Two options that are one answer written twice, compared as bags of meaningful words:
+    identical bags (order, articles and punctuation changed), or -- for options of 3+ words -- bags
+    that overlap by QUIZ_OPTION_BAG_JACCARD after cutting every word to its first 4 letters
+    (moved/moves, process/processes). Deliberately narrow: an antonym pair ("increases ..." /
+    "decreases ...") and nested names ("Preemptive" / "Non-preemptive", "I/O bound" / "CPU bound")
+    are good distractors and are NOT flagged."""
+    first, second = content_tokens(first_option, 2), content_tokens(second_option, 2)
+    if not first or not second:
+        return False
+    if first == second:
+        return True
+    if min(len(first), len(second)) >= 3:
+        stems_first, stems_second = frozenset(t[:4] for t in first), frozenset(t[:4] for t in second)
+        return _jaccard(stems_first, stems_second) >= QUIZ_OPTION_BAG_JACCARD
     return False
+
+
+def _options_alike(first: str, second: str) -> bool:
+    """One answer written twice: the same text (case and punctuation aside), nearly the same
+    characters with the same words up to inflection, or the same bag of meaningful words. An
+    opposite ("Increases ..." / "Decreases ...") is nearly the same characters but a different word:
+    a good distractor, not a repeat."""
+    left, right = _normalize(first).strip(" ."), _normalize(second).strip(" .")
+    if left == right or _bags_alike(first, second):
+        return True
+    same_words = {token[:4] for token in content_tokens(first, 2)} == {token[:4] for token in content_tokens(second, 2)}
+    return same_words and difflib.SequenceMatcher(None, left, right).ratio() >= QUIZ_OPTION_DUPLICATE_RATIO
+
+
+def _option_problem(option: str) -> str | None:
+    if not option:
+        return "empty"
+    if (_normalize(option).strip(" .") in _GENERIC_OPTIONS or len(option) > QUIZ_MAX_OPTION_CHARS
+            or _SCAFFOLDING.search(option)):
+        return "generic"
+    return None
 
 
 def _same_target(new_tokens, new_key: str, old_tokens, old_key: str) -> bool:
@@ -960,6 +989,412 @@ def _evidence_overlap(new_spans, old_spans) -> float:
     return best
 
 
+def _stem_prefix_bag(stem: str) -> frozenset[str]:
+    return frozenset(token[:QUIZ_STEM_PREFIX_CHARS] for token in content_tokens(stem))
+
+
+def _near_duplicate_stem(stem: str, answer_tokens, answer_key: str, existing: dict) -> bool:
+    """The same question asked again. Identical stems always are; nearly identical stems are only
+    when the difference is inflection/wording (same meaningful words) or the answer is the same.
+    "What port does net.Listen(...) use?" and "What protocol does net.Listen(...) use?" ask
+    different aspects of one statement and are both kept."""
+    stem_key, existing_key = squash(stem), squash(existing["question"])
+    if stem_key == existing_key:
+        return True
+    if difflib.SequenceMatcher(None, stem_key, existing_key).ratio() < QUIZ_STEM_DUPLICATE_RATIO:
+        return False
+    meta = existing["_meta"]
+    shorter, longer = sorted((answer_key, meta["answer_key"]), key=len)
+    return (_stem_prefix_bag(stem) == _stem_prefix_bag(existing["question"])
+            or _same_target(answer_tokens, answer_key, meta["answer_tokens"], meta["answer_key"])
+            or bool(shorter) and shorter in longer)
+
+
+_QUOTE_STATEMENT_BREAK = re.compile(r"(?<=[.!?;])\s+|[○●•▪◦■□◆◇▶►➢✓✔]")
+
+
+def _pointed_statements(stem: str, answer: str, quote: str) -> frozenset[str]:
+    """The statements (sentences / bullets) of its evidence quote that a question points at: those
+    containing the most of the stem's meaningful words, leaving out the answer's own words. A stem that
+    points at nothing in particular covers the whole quote. A sentence and its translation after an
+    arrow stay ONE statement."""
+    statements = [squash(part) for part in _QUOTE_STATEMENT_BREAK.split(quote) if len(squash(part)) >= 3]
+    answer_prefixes = {token[:QUIZ_STEM_PREFIX_CHARS] for token in content_tokens(answer)}
+    anchors = [token for token in content_tokens(stem) if token[:QUIZ_STEM_PREFIX_CHARS] not in answer_prefixes]
+    hits = {statement: sum(_token_supported(token, statement) for token in anchors) for statement in statements}
+    best = max(hits.values(), default=0)
+    # the statement(s) the stem matches best: a word shared by every statement ("net", "server")
+    # does not make a question point at all of them
+    return frozenset(statement for statement, count in hits.items() if count == best) if best else frozenset(statements)
+
+
+def _question_meaning(stem: str, answer: str, quote: str) -> tuple[frozenset[str], frozenset[str]]:
+    """(meaning, frame) of a question: `meaning` is its stem's meaningful words without the answer's
+    own words (as prefixes, so "listening"/"listen" agree); `frame` is the part of them the evidence
+    quote does not contain -- the words that name WHAT is asked (function, port, variable, error ...)."""
+    answer_prefixes = {token[:QUIZ_STEM_PREFIX_CHARS] for token in content_tokens(answer)}
+    tokens = [token for token in content_tokens(stem) if token[:QUIZ_STEM_PREFIX_CHARS] not in answer_prefixes]
+    quote_squashed = squash(quote)
+    meaning = frozenset(token[:QUIZ_STEM_PREFIX_CHARS] for token in tokens)
+    frame = frozenset(token[:QUIZ_STEM_PREFIX_CHARS] for token in tokens if not _token_supported(token, quote_squashed))
+    return meaning, frame
+
+
+def _same_proposition(stem: str, answer: str, quote: str, existing: dict) -> bool:
+    """Do two questions with the same correct answer on overlapping evidence test the same
+    proposition? Driven by the question meaning, not by the evidence:
+
+    * stems pointing at DIFFERENT statements of the evidence ask different things ("Which protocol
+      does the server pass?" / "... the client pass?", both "tcp");
+    * on the SAME statement -- even a single code line such as ln, err := net.Listen("tcp", ":8080")
+      -- they are still different when their meanings barely overlap and each names its own aspect
+      with words the evidence does not contain ("Which function creates the listener?" / "Which
+      call's error result is stored in err?", both net.Listen);
+    * otherwise it is one question reworded ("Which port does the server listen on?" / "What is the
+      server's listening port?"), including a stem that merely restates the evidence."""
+    meta = existing["_meta"]
+    old_answer, old_quote = meta.get("answer_text", ""), meta.get("quote", "")
+    if not _pointed_statements(stem, answer, quote) & _pointed_statements(existing["question"], old_answer, old_quote):
+        return False
+    meaning, frame = _question_meaning(stem, answer, quote)
+    old_meaning, old_frame = _question_meaning(existing["question"], old_answer, old_quote)
+    different_aspects = bool(frame) and bool(old_frame) and _jaccard(meaning, old_meaning) <= QUIZ_ASPECT_MAX_OVERLAP
+    return not different_aspects
+
+
+# ---------------------------------------------------------------------------------------------
+# Local repair (no LLM call)
+# ---------------------------------------------------------------------------------------------
+# Wrong options: a candidate whose stem, correct answer and evidence are fine but whose
+# distractors are bad (duplicates, generic, wrong language, also correct, missing/extra) keeps its
+# stem, correct answer and evidence; only the bad distractors are replaced and the question is
+# validated again. Distractors need not be in the source: nearby values, other identifiers of the
+# material, opposite actions and the options other candidates of the same call wrote.
+# Evidence: a too-short or slightly-off quote is replaced by the exact source statement it sits in.
+# Nothing here invents a fact: the correct answer and the evidence always come from the model and
+# the material, and every grounding rule still runs on the result.
+
+_NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?(?!\w)")
+_DOTTED_IDENTIFIER = re.compile(r"(?<![\w.])[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+(?:\(\))?")
+_CODE_IDENTIFIER = re.compile(r"(?<![\w.])(?:[a-z]+[A-Z]\w*|[A-Z][a-z0-9]+[A-Z]\w*|[a-z]+_\w+)(?:\(\))?(?![\w.])")
+_ACRONYM = re.compile(r"(?<!\w)[A-Z]{2,6}(?!\w)")
+_OPPOSITE_WORDS = (
+    ("increase", "decrease"), ("increases", "decreases"), ("open", "close"), ("opens", "closes"),
+    ("client", "server"), ("send", "receive"), ("sends", "receives"), ("read", "write"), ("reads", "writes"),
+    ("start", "stop"), ("starts", "stops"), ("before", "after"), ("first", "last"),
+    ("synchronous", "asynchronous"), ("blocking", "non-blocking"), ("static", "dynamic"), ("fixed", "variable"),
+    ("enable", "disable"), ("enables", "disables"), ("connect", "disconnect"), ("accept", "reject"),
+    ("accepts", "rejects"), ("input", "output"), ("minimum", "maximum"), ("more", "less"), ("higher", "lower"),
+    ("faster", "slower"), ("larger", "smaller"), ("local", "remote"), ("public", "private"), ("always", "never"),
+    ("upload", "download"), ("encrypt", "decrypt"), ("lock", "unlock"),
+    ("tăng", "giảm"), ("gửi", "nhận"), ("đọc", "ghi"), ("trước", "sau"), ("mở", "đóng"), ("lớn", "nhỏ"), ("cao", "thấp"),
+)
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?;])\s+")
+_LIST_SPLIT = re.compile(r"[○●•▪◦■□◆◇▶►➢✓✔;,]|\s(?:and|or|và|hoặc)\s", flags=re.IGNORECASE)
+
+
+def _answer_kind(text: str, acronyms=frozenset()) -> str:
+    """"number", "identifier", "acronym" or "text": decides which replacement distractors fit."""
+    text = text.strip().strip("`")
+    numbers = list(_NUMBER.finditer(text))
+    if len(numbers) == 1:
+        rest = text[:numbers[0].start()] + text[numbers[0].end():]
+        if len(_LETTER_WORD.findall(rest)) <= 2:
+            return "number"
+    if _DOTTED_IDENTIFIER.fullmatch(text) or _CODE_IDENTIFIER.fullmatch(text):
+        return "identifier"
+    if re.fullmatch(r"[A-Za-z]{2,6}", text) and (text.isupper() or text.upper() in acronyms):
+        return "acronym"
+    return "text"
+
+
+def _nearby_numbers(correct: str) -> list[str]:
+    """0 -> -1, 1, 2 ...; 2007 -> 2005, 2008, 2010 ...; the text around the number is kept."""
+    match = _NUMBER.search(correct)
+    value = match.group()
+    decimals = len(value.split(".", 1)[1]) if "." in value else 0
+    scale = 10 ** decimals
+    base = round(float(value) * scale)
+    offsets = (-1, 1, 2, 3, -2, 4) if decimals == 0 and abs(base) < 10 else (-2, 1, 3, -1, 2, 4, 5)
+    found = []
+    for offset in offsets:
+        number = base + offset
+        text = f"{number / scale:.{decimals}f}" if decimals else str(number)
+        found.append(correct[:match.start()] + text + correct[match.end():])
+    return found
+
+
+def _identifier_alternatives(correct: str, texts: list[str]) -> list[str]:
+    """Other identifiers of the same shape in the material: net.Dial -> net.Listen, fmt.Println, ...
+    (same package first, then in document order)."""
+    bare = correct.strip("`")
+    pattern = _DOTTED_IDENTIFIER if _DOTTED_IDENTIFIER.fullmatch(bare) else _CODE_IDENTIFIER
+    parens = bare.endswith("()")
+    package = bare.split(".", 1)[0] if "." in bare else None
+    seen, found = {squash(bare)}, []
+    for text in texts:
+        for match in pattern.finditer(text):
+            name = match.group()
+            name = name[:-2] if name.endswith("()") else name
+            key = squash(name)
+            if len(name) < 4 or key in seen:
+                continue
+            seen.add(key)
+            found.append(name + ("()" if parens else ""))
+    return sorted(found, key=lambda name: package is None or name.split(".", 1)[0] != package)
+
+
+def _acronym_alternatives(correct: str, texts: list[str]) -> list[str]:
+    lower = correct.islower()
+    seen, found = {correct.upper()}, []
+    for text in texts:
+        for token in _ACRONYM.findall(text):
+            if token not in seen:
+                seen.add(token)
+                found.append(token.lower() if lower else token)
+    return found
+
+
+def _opposite_alternatives(correct: str) -> list[str]:
+    """The opposite action/property: "opens the socket" -> "closes the socket"."""
+    found = []
+    for left, right in _OPPOSITE_WORDS:
+        for source, target in ((left, right), (right, left)):
+            match = re.search(rf"(?<![\w-]){re.escape(source)}(?![\w-])", correct, flags=re.IGNORECASE)
+            if match:
+                word = target[0].upper() + target[1:] if match.group()[0].isupper() else target
+                found.append(correct[:match.start()] + word + correct[match.end():])
+    return found
+
+
+def _bank_alternatives(correct: str, kind: str, bank, stem: str, quote: str, acronyms) -> list[str]:
+    """Options other candidates of the same call wrote, of the same kind and size, the ones sharing
+    vocabulary with this question first (related concepts)."""
+    words = len(correct.split())
+    topic = content_tokens(f"{stem} {quote}")
+    scored, seen = [], set()
+    for position, item in enumerate(bank or ()):
+        text = _clean_inline(_LABEL.sub("", str(item or "")))
+        key = squash(text)
+        if not key or key in seen or _answer_kind(text, acronyms) != kind:
+            continue
+        seen.add(key)
+        if kind == "text" and not max(1, words // 2) <= len(text.split()) <= words * 2 + 1:
+            continue
+        scored.append((-len(content_tokens(text) & topic), abs(len(text.split()) - words), position, text))
+    return [text for *_rank, text in sorted(scored)]
+
+
+def _distractor_alternatives(correct: str, stem: str, quote: str, units: list[dict], bank, extra: list[str]) -> list[str]:
+    texts = [unit["evidence_excerpt"] for unit in units] + [str(item or "") for item in bank or ()]
+    acronyms = frozenset(token for text in texts for token in _ACRONYM.findall(text))
+    kind = _answer_kind(correct, acronyms)
+    found = list(extra)
+    if kind == "number":
+        found += _nearby_numbers(correct)
+    elif kind == "identifier":
+        found += _identifier_alternatives(correct, texts)
+    elif kind == "acronym":
+        found += _acronym_alternatives(correct, texts)
+    found += _opposite_alternatives(correct)
+    found += _bank_alternatives(correct, kind, bank, stem, quote, acronyms)
+    stem_key = squash(stem)
+    # an option that repeats part of the stem gives the answer away (or is nonsense): skipped
+    return [text for text in found if not (len(squash(text)) >= 4 and squash(text) in stem_key)]
+
+
+def _list_items(quote: str) -> list[str]:
+    return [key for key in (squash(part) for part in _LIST_SPLIT.split(quote)) if len(key) >= 3]
+
+
+def _is_list_item(key: str, items: list[str]) -> bool:
+    """Is this (squashed) option one item of a list in the quote? The first and last items may carry
+    the sentence around the list ("Robert Griesemer, Ken Thompson, and Rob Pike started the
+    project": "Rob Pike" starts the last item)."""
+    return len(key) >= 3 and any(item == key or (len(key) >= 4 and (item.startswith(key) or item.endswith(key))) for item in items)
+
+
+def _also_correct(option: str, correct: str, stem: str, quote: str) -> bool:
+    """A wrong option the evidence supports as much as the correct answer: the correct answer and
+    this option are items of ONE list in a sentence of the quote, AND that sentence is what the
+    question asks about -- at least half of the stem's meaningful words (other than the two
+    options' own words) are stated in it outside the item names.
+
+    "Robert Griesemer, Ken Thompson, and Rob Pike started the project." / "Who started the
+    project?": the sentence answers the question for every member, so Rob Pike is also correct.
+    "Go supports arrays, slices, maps. Arrays have fixed size." / "Which type has fixed size?": the
+    list sentence says nothing about a fixed size, so Slices and Maps stay valid distractors."""
+    key, correct_key = squash(option), squash(correct)
+    if key == correct_key:
+        return False
+    own = {token[:QUIZ_STEM_PREFIX_CHARS] for token in content_tokens(f"{option} {correct}")}
+    asked = [token for token in content_tokens(stem) if token[:QUIZ_STEM_PREFIX_CHARS] not in own]
+    for sentence in _SENTENCE_BREAK.split(quote):
+        items = _list_items(sentence)
+        if len(items) < 2 or not (_is_list_item(key, items) and _is_list_item(correct_key, items)):
+            continue
+        rest = squash(sentence).replace(key, "").replace(correct_key, "")
+        if not asked or sum(_token_supported(token, rest) for token in asked) * 2 >= len(asked):
+            return True
+    return False
+
+
+def repair_options(
+    options: list[str], answer_index: int, stem: str, quote: str, units: list[dict],
+    bank=None, language: str | None = None,
+) -> tuple[list[str], int, bool]:
+    """Exactly 4 options with the correct one unchanged: (options, answer position, changed).
+
+    Good distractors are kept in their order; a bad one (empty, generic, too long, a repeat of
+    another option, in another language, or also correct according to the quote) is replaced, as is a
+    missing 4th option; options beyond four are dropped (and used first as replacements). Raises
+    CandidateRejected when no usable replacement exists -- code "multiple_correct" when a second
+    supported option could not be replaced."""
+    correct = options[answer_index]
+    supported, foreign = [], []
+
+    def usable(option: str, kept: list[str]) -> bool:
+        if _option_problem(option) or any(_options_alike(option, other) for other in kept):
+            return False
+        if _also_correct(option, correct, stem, quote):
+            supported.append(option)
+            return False
+        if language and language_mismatch("", [option], "", language):
+            foreign.append(option)
+            return False
+        return True
+
+    others = [option for position, option in enumerate(options) if position != answer_index]
+    kept, slots = [correct], []
+    for option in others[:3]:
+        if usable(option, kept):
+            slots.append(option)
+            kept.append(option)
+        else:
+            slots.append(None)
+    slots += [None] * (3 - len(slots))
+    missing = [index for index, slot in enumerate(slots) if slot is None]
+    if missing:
+        replacements = iter(_distractor_alternatives(correct, stem, quote, units, bank, others[3:]))
+        for index in missing:
+            for replacement in replacements:
+                replacement = _clean_inline(replacement)
+                if usable(replacement, kept):
+                    slots[index] = replacement
+                    kept.append(replacement)
+                    break
+            else:
+                if supported:
+                    raise CandidateRejected("structure", "Another option is also correct according to the material.", "multiple_correct")
+                if foreign:
+                    raise CandidateRejected("structure", f"An option is not written in the quiz language ({language}).", "language_mismatch")
+                raise CandidateRejected("structure", "Options are not distinct and could not be repaired.", "options")
+    position = min(answer_index, 3)
+    final = list(slots)
+    final.insert(position, correct)
+    return final, position, bool(missing) or len(options) != 4
+
+
+def _statement_breaks(text: str) -> list[int]:
+    """Boundaries of the bullets / sentences / code statements of an excerpt (raw positions)."""
+    cuts = {0, len(text)}
+    for match in re.finditer(r"[○●•▪◦■□◆◇▶►➢✓✔→]|(?<=[.!?;{}])\s+", text):
+        cuts.add(match.end() if match.group().isspace() else match.start())
+    return sorted(cuts)
+
+
+def _statement_around(unit: dict, start: int, end: int) -> str | None:
+    """The exact source text of the statement(s) around the squashed span [start, end): the
+    containing sentence / bullet / code statement, widened to its neighbours (previous first, e.g. a
+    heading) until it is long enough to prove something; a very long statement is cut to the words
+    around the span instead."""
+    text = unit["evidence_excerpt"]
+    raw_of = _raw_positions(text)
+    if len(raw_of) != len(unit["_squashed"]) or not 0 <= start < end <= len(raw_of):
+        return None
+    low, high = raw_of[start], raw_of[end - 1] + 1
+    cuts = _statement_breaks(text)
+    first = max(index for index, cut in enumerate(cuts) if cut <= low)
+    last = min(index for index, cut in enumerate(cuts) if cut >= high)
+
+    def piece(a: int, b: int) -> str:
+        return text[cuts[a]:cuts[b]].strip(" \t○●•▪◦■□◆◇▶►➢✓✔→-")
+
+    toggle = True
+    while len(squash(piece(first, last))) < QUIZ_MIN_QUOTE_CHARS and (first > 0 or last < len(cuts) - 1):
+        if (toggle and first > 0) or last == len(cuts) - 1:
+            first -= 1
+        else:
+            last += 1
+        toggle = not toggle
+    result = piece(first, last)
+    if len(result) > QUIZ_REPAIR_MAX_QUOTE_CHARS:
+        words = [match.span() for match in re.finditer(r"\S+", text)]
+        inside = [index for index, (a, b) in enumerate(words) if b > low and a < high]
+        if not inside:
+            return None
+        left, right = inside[0], inside[-1]
+        while len(squash(text[words[left][0]:words[right][1]])) < QUIZ_REPAIR_WINDOW_CHARS and (left > 0 or right < len(words) - 1):
+            left, right = max(0, left - 1), min(len(words) - 1, right + 1)
+        result = text[words[left][0]:words[right][1]]
+    return result if len(squash(result)) >= QUIZ_MIN_QUOTE_CHARS else None
+
+
+def repair_evidence(quote: str, units: list[dict], correct: str = "") -> tuple[str, tuple[dict, float]] | None:
+    """A too-short or not-found quote replaced by the exact source statement it comes from.
+
+    * too short: the quote is found verbatim (squashed) in an excerpt and widened to its statement;
+    * not found: one verbatim run of the quote covering QUIZ_REPAIR_NOT_FOUND_SHARE of it is found in
+      an excerpt (the model added, cut or changed a few words) and widened to its statement.
+    The result is exact source text, located again like any quote, and it must itself state the
+    correct answer: a generic partial overlap ("to the server") never attaches a candidate to
+    unrelated source text. None when nothing reliable is found."""
+    quote_squashed = squash(quote)
+    if len(quote_squashed) < QUIZ_REPAIR_MIN_ANCHOR_CHARS:
+        return None
+    anchors: list[tuple[dict, int, int]] = []
+    if len(quote_squashed) < QUIZ_MIN_QUOTE_CHARS:
+        for unit in units:
+            position = unit["_squashed"].find(quote_squashed)
+            while position >= 0 and len(anchors) < 8:
+                anchors.append((unit, position, position + len(quote_squashed)))
+                position = unit["_squashed"].find(quote_squashed, position + 1)
+    else:
+        need = max(QUIZ_MIN_QUOTE_CHARS, math.ceil(QUIZ_REPAIR_NOT_FOUND_SHARE * len(quote_squashed)))
+        for unit in units:
+            match = difflib.SequenceMatcher(None, unit["_squashed"], quote_squashed, autojunk=False).find_longest_match(
+                0, len(unit["_squashed"]), 0, len(quote_squashed))
+            if match.size >= need:
+                anchors.append((unit, match.a, match.a + match.size))
+        anchors.sort(key=lambda anchor: anchor[1] - anchor[2])
+    for unit, start, end in anchors:
+        text = _statement_around(unit, start, end)
+        if not text or not _answer_supported_by(correct, text):
+            continue
+        located = locate_evidence(text, units)
+        if located:
+            return text, located
+    return None
+
+
+def _answer_supported_by(answer: str, text: str) -> bool:
+    """The correct answer is stated in `text`: written in it, or at least half of its meaningful
+    words and never fewer than QUIZ_MIN_ANSWER_MATCHES of them are (all of a short answer;
+    inflections allowed) -- one shared word ("net" of net.Listen) is not support."""
+    key, text_squashed = squash(answer), squash(text)
+    if key and key in text_squashed:
+        return True
+    tokens = content_tokens(answer)
+    found = sum(_token_supported(token, text_squashed) for token in tokens)
+    return bool(tokens) and found * 2 >= len(tokens) and found >= min(len(tokens), QUIZ_MIN_ANSWER_MATCHES)
+
+
+def _answer_in_quote(answer: str, quote: str) -> bool:
+    """The whole answer written in the quote as its own token(s): "0" in "Index starts at 0"."""
+    core = _normalize(answer).strip(" .,:;()[]\"'`")
+    return bool(core) and re.search(rf"(?<!\w){re.escape(core)}(?!\w)", _normalize(quote)) is not None
+
+
 def validate_candidate(
     raw,
     units: list[dict],
@@ -970,12 +1405,15 @@ def validate_candidate(
     generation_index: int,
     assessment_capacity: int | None = None,
     language: str | None = None,
+    distractor_bank=None,
 ) -> tuple[dict, list[str]]:
     """Validate one raw candidate against the context the model saw and the questions accepted so far.
 
     `units` are the excerpts the model was given. Hard rejections raise CandidateRejected; soft
     findings are returned as warnings and only lower the candidate's rank during selection.
-    Provenance is derived here from the located evidence.
+    Provenance is derived here from the located evidence. Bad distractors and a too-short /
+    slightly-off quote are repaired locally (repair_options, repair_evidence); `distractor_bank` holds
+    the options other candidates of the same call wrote, a source of replacement distractors.
     """
     if not isinstance(raw, dict):
         raise CandidateRejected("structure", "Question must be a JSON object.")
@@ -992,87 +1430,86 @@ def validate_candidate(
         )
 
     raw_options = raw.get("options")
-    if not isinstance(raw_options, list) or len(raw_options) != 4 or not all(isinstance(o, str) for o in raw_options):
+    if (not isinstance(raw_options, list) or not all(isinstance(o, str) for o in raw_options)
+            or not QUIZ_REPAIR_MIN_OPTIONS <= len(raw_options) <= QUIZ_MAX_RAW_OPTIONS):
         raise CandidateRejected("structure", "Question must contain exactly 4 options.", "options")
     # Only an explicit "A." / "A)" / "(A)" label is stripped: the generic label stripper in
     # backend.quiz_options would also eat the article of an option such as "A process ...".
     options = [_clean_inline(_LABEL.sub("", option)) for option in raw_options]
-    if any(not option for option in options):
-        raise CandidateRejected("structure", "Question has an empty option.")
-    for option in options:
-        if (
-            _normalize(option).strip(" .") in _GENERIC_OPTIONS or len(option) > QUIZ_MAX_OPTION_CHARS
-            or _SCAFFOLDING.search(option)
-        ):
-            raise CandidateRejected("structure", "Option is generic, scaffolding, or copied raw text.")
-    normalized_options = [_normalize(option).strip(" .") for option in options]
-    if len(set(normalized_options)) != 4 or any(
-        difflib.SequenceMatcher(None, normalized_options[a], normalized_options[b]).ratio() >= QUIZ_OPTION_DUPLICATE_RATIO
-        for a in range(4) for b in range(a + 1, 4)
-    ):
-        raise CandidateRejected("structure", "Options are not distinct.", "options")
-    if _options_too_similar(options):
-        raise CandidateRejected("structure", "Two options say the same thing in different words.", "options")
 
     answer_index = raw.get("answer_index")
-    if isinstance(answer_index, bool) or not isinstance(answer_index, int) or answer_index not in range(4):
+    if isinstance(answer_index, bool) or not isinstance(answer_index, int) or answer_index not in range(len(options)):
         raise CandidateRejected("structure", "answer_index must be a single integer 0-3.")
+    correct = options[answer_index]
+    if _option_problem(correct):
+        raise CandidateRejected("structure", "The correct option is empty, generic, or copied raw text.", "options")
 
     explanation = _clean_inline(raw.get("explanation"))
-    # The whole quiz is in ONE language: a candidate in another one (or mixing two) is rejected and
-    # the existing bounded follow-up calls replace it.
-    if language and language_mismatch(stem, options, explanation, language):
+    # The whole quiz is in ONE language: a question in another one (or mixing two) is rejected and
+    # the existing bounded follow-up calls replace it. A distractor in another language is repaired.
+    if language and language_mismatch(stem, [correct], explanation, language):
         raise CandidateRejected("structure", f"Question is not written in the quiz language ({language}).", "language_mismatch")
 
     quote = _clean_inline(raw.get("evidence_quote"))
+    options, answer_index, options_repaired = repair_options(options, answer_index, stem, quote, units, distractor_bank, language)
+
     located = locate_evidence(quote, units)
+    evidence_repaired = False
     if located is None:
         code = "quote_too_short" if len(squash(quote)) < QUIZ_MIN_QUOTE_CHARS else "quote_not_found"
-        raise CandidateRejected("grounding", "evidence_quote was not found in the provided context.", code)
+        repaired = repair_evidence(quote, units, correct)
+        if repaired is None:
+            raise CandidateRejected("grounding", "evidence_quote was not found in the provided context.", code)
+        quote, located = repaired
+        evidence_repaired = True
+        # the widened quote may show that another option is also correct: validate the options again
+        options, answer_index, changed = repair_options(options, answer_index, stem, quote, units, distractor_bank, language)
+        options_repaired = options_repaired or changed
     unit, alignment = located
     quote_squashed = squash(quote)
-    link, answer_link = context_support(stem, options[answer_index], unit, units)
+    link, answer_link = context_support(stem, correct, unit, units)
     if link is not None and link < QUIZ_MIN_LINK_SUPPORT:
         raise CandidateRejected("grounding", "The question and its answer are not supported by the context.", "question_not_supported")
     # One matching word is not an anchor: in glued PDF text a 5-letter word occurs inside other
     # words by chance, so at least half of the answer's distinctive words must be found.
     if answer_link is not None and answer_link < QUIZ_MIN_ANSWER_ANCHOR:
         raise CandidateRejected("grounding", "The correct answer is not stated in the provided context.", "answer_not_in_context")
+    if language and language_mismatch(stem, options, explanation, language):
+        raise CandidateRejected("structure", f"Question is not written in the quiz language ({language}).", "language_mismatch")
 
-    stem_key = squash(stem)
+    # Duplicates: the same QUESTION, not the same fact, sentence or answer. One fact / sentence may
+    # be asked about several times, even with the same answer, when the questions test different
+    # aspects of it (the function, the port, the protocol of one code line): a repeat is a
+    # near-identical stem, the same correct answer asked with largely the same words, or the same
+    # correct answer on the same evidence with a stem pointing at the same statement of it.
+    answer_tokens, answer_key = content_tokens(correct), squash(correct)
     for existing in accepted:
-        existing_key = squash(existing["question"])
-        if stem_key == existing_key or difflib.SequenceMatcher(None, stem_key, existing_key).ratio() >= QUIZ_STEM_DUPLICATE_RATIO:
+        if _near_duplicate_stem(stem, answer_tokens, answer_key, existing):
             raise CandidateRejected("duplicate", "Question duplicates an accepted question.", "duplicate_stem")
-    # Two questions may be built on the same sentence when they test different facts of it. They
-    # are the same question when they rest on (mostly) the same evidence AND their correct answers
-    # are the same fact.
     spans = evidence_spans(quote, unit)
-    answer_tokens, answer_key = content_tokens(options[answer_index]), squash(options[answer_index])
-    for existing in accepted:
-        meta = existing["_meta"]
-        if (_evidence_overlap(spans, meta.get("spans", ())) >= QUIZ_EVIDENCE_OVERLAP_MAX
-                and _same_target(answer_tokens, answer_key, meta["answer_tokens"], meta["answer_key"])):
-            raise CandidateRejected("duplicate", "Question tests the same fact as an accepted question on the same evidence.", "duplicate_evidence")
-    signature = content_tokens(f"{stem} {options[answer_index]}")
+    signature = content_tokens(f"{stem} {correct}")
     quote_shingles = _shingles(quote_squashed)
     for existing in accepted:
         meta = existing["_meta"]
+        if not _same_target(answer_tokens, answer_key, meta["answer_tokens"], meta["answer_key"]):
+            continue
+        # the same answer asked with largely the same words: the same question, whatever its evidence
         if signature and _jaccard(signature, meta["signature"]) >= QUIZ_CONTENT_DUPLICATE_JACCARD:
             raise CandidateRejected("duplicate", "Question tests the same fact or concept as an accepted question.", "duplicate_content")
-        # the same sentence quoted again is a duplicate only when the same fact is asked (a sentence can hold several)
-        if (_jaccard(quote_shingles, meta["quote_shingles"]) >= QUIZ_QUOTE_DUPLICATE_JACCARD
-                and _same_target(answer_tokens, answer_key, meta["answer_tokens"], meta["answer_key"])):
-            raise CandidateRejected("duplicate", "Question asks the same fact as an accepted question on the same sentence.", "duplicate_quote")
+        # same answer + overlapping evidence is NOT enough on its own: the stems must also point at
+        # the same statement of that evidence
+        same_evidence = (_evidence_overlap(spans, meta.get("spans", ())) >= QUIZ_EVIDENCE_OVERLAP_MAX
+                         or _jaccard(quote_shingles, meta["quote_shingles"]) >= QUIZ_QUOTE_DUPLICATE_JACCARD)
+        if same_evidence and _same_proposition(stem, correct, quote, existing):
+            raise CandidateRejected("duplicate", "Question tests the same fact as an accepted question on the same evidence.", "duplicate_evidence")
 
     warnings: list[str] = []
-    answer_squashed = squash(options[answer_index])
-    # ONE definition, the one acceptance used: the answer's distinctive words were found in the
-    # material (answer_link is not None means they passed QUIZ_MIN_ANSWER_ANCHOR above), or -- for an
-    # answer with no distinctive word (an acronym, a number) -- the whole answer text occurs in it.
-    # (It used to be "the whole answer is a substring of the quote's excerpt", which is False for a
-    # supported answer that is reordered, inflected or found in a neighbouring excerpt.)
-    answer_in_evidence = answer_link is not None or (
+    answer_squashed = squash(correct)
+    # ONE definition: the answer's distinctive words were found in the material (answer_link is not
+    # None means they passed QUIZ_MIN_ANSWER_ANCHOR above), or -- for an answer with no distinctive
+    # word (a number, an acronym) -- the answer is written as its own token in the evidence quote
+    # ("0" in "Index starts at 0"), or a 4+ character answer occurs in the material.
+    answer_in_evidence = answer_link is not None or _answer_in_quote(correct, quote) or (
         len(answer_squashed) >= 4 and any(answer_squashed in context["_squashed"] for context in units)
     )
     if alignment < 1.0:
@@ -1089,6 +1526,10 @@ def validate_candidate(
         warnings.append("short_explanation")
     if difficulty in {"medium", "difficult"} and len(stem.split()) < 6:
         warnings.append("shallow_stem")
+    if options_repaired:
+        warnings.append("options_repaired")
+    if evidence_repaired:
+        warnings.append("evidence_repaired")
 
     normalized = {
         "id": question_id,
@@ -1114,7 +1555,8 @@ def validate_candidate(
             "index": generation_index, "unit_index": unit["index"], "signature": signature,
             "quote_shingles": quote_shingles, "quote": quote, "alignment": alignment, "link": link,
             "answer_in_evidence": answer_in_evidence, "spans": spans,
-            "answer_tokens": answer_tokens, "answer_key": answer_key,
+            "answer_tokens": answer_tokens, "answer_key": answer_key, "answer_text": correct,
+            "options_repaired": options_repaired, "evidence_repaired": evidence_repaired,
         },
     }
     return normalized, sorted(set(warnings))

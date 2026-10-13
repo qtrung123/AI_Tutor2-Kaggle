@@ -1,5 +1,5 @@
 """Live Quiz pipeline: chunks -> excerpts -> context -> call 1 writes surplus candidates -> validate
--> pool -> enough? stop, else another (moderate, told what exists) call, at most 4 (12/15) or 5 (18/20).
+(with local repair) -> pool -> enough? stop, else another (told what exists) call, at most 3 in total.
 
 The requested count is a TARGET, never a condition of success: final_count = min(valid, requested).
 
@@ -58,19 +58,17 @@ def marked_chunks(count: int, size: int = 700) -> list[dict]:
 class SizingTests(unittest.TestCase):
     def test_the_four_question_counts_and_their_candidate_surplus(self):
         self.assertEqual(quiz_units.QUIZ_ALLOWED_QUESTION_COUNTS, (12, 15, 18, 20))
-        self.assertEqual([candidate_target(n) for n in (12, 15, 18, 20)], [15, 18, 22, 24])
+        self.assertEqual([candidate_target(n) for n in (12, 15, 18, 20)], [14, 18, 21, 24])
         self.assertEqual(quiz_service.QUIZ_V2_ALLOWED_QUESTION_COUNTS, {12, 15, 18, 20})
         self.assertLessEqual(candidate_target(20), quiz_units.QUIZ_OUTPUT_SCHEMA["properties"]["questions"]["maxItems"])
 
     def test_the_call_budget_depends_on_the_requested_count(self):
-        self.assertEqual({n: max_llm_calls(n) for n in (12, 15, 18, 20)}, {12: 4, 15: 4, 18: 5, 20: 5})
+        self.assertEqual({n: max_llm_calls(n) for n in (12, 15, 18, 20)}, {12: 3, 15: 3, 18: 3, 20: 3})
 
-    def test_a_follow_up_writes_a_moderate_batch_of_what_is_missing(self):
-        self.assertEqual([followup_request(m) for m in range(1, 15)], [3, 4, 5, 6, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8])
+    def test_a_follow_up_writes_what_is_missing_plus_a_small_surplus(self):
         for missing in range(1, 21):
-            ask = followup_request(missing)
-            self.assertTrue(quiz_units.QUIZ_FOLLOWUP_MIN_ASK <= ask <= quiz_units.QUIZ_FOLLOWUP_MAX_ASK)
-            self.assertLess(ask, candidate_target(12))  # never the size of the first call
+            self.assertEqual(followup_request(missing, 2), missing + 2)   # call 2: missing + 2
+            self.assertEqual(followup_request(missing, 3), missing + 1)   # call 3: missing + 1
 
     def test_the_schema_of_every_call_bounds_the_list_so_the_decoder_cannot_stop_early(self):
         for ask in (3, 8, 15, 18, 22, 24):
@@ -289,12 +287,13 @@ class PromptSchemaValidatorAgreementTests(unittest.TestCase):
         listed = prompt[prompt.index("Questions already written"):prompt.index("EXCERPTS:")]
         self.assertLess(max(len(line) for line in listed.splitlines()), 200)        # quotes are shortened
         self.assertIn("The list below holds the questions that already exist", prompt)
-        self.assertIn("do not ask about the same or a nearly identical fact again; choose OTHER facts", prompt)
+        self.assertIn("never ask the same thing again", prompt)
+        self.assertIn("used again only to ask about a DIFFERENT aspect", prompt)
         self.assertIn("The questions already written are listed below the rules", prompt)
         self.assertNotIn("questions above", prompt)                                  # the list is BELOW the rules
         self.assertLess(prompt.index("The questions already written are listed below the rules"), prompt.index("Questions already written:"))
         self.assertLess(prompt.index("Questions already written:"), prompt.index("EXCERPTS:"))
-        self.assertNotIn("at most 2 per excerpt", prompt)                            # first-call rule does not apply
+        self.assertNotIn("Spread the questions over the excerpts", prompt)          # first-call rule does not apply
         plain = build_generation_prompt("Lecture", "easy", build_study_units(make_chunks(4)), 5, ["Only a stem?"])
         self.assertIn("- Only a stem?", plain)
 
@@ -302,7 +301,10 @@ class PromptSchemaValidatorAgreementTests(unittest.TestCase):
         first = build_generation_prompt("Lecture", "easy", build_study_units(make_chunks(4)), 15)
         self.assertIn("Write ALL 15 questions: do not stop early", first)
         self.assertIn("clearly different meanings", first)
-        self.assertIn("at most 2 per excerpt", first)
+        self.assertIn("may be reused for a DIFFERENT aspect", first)
+        self.assertIn("single_choice only: exactly 4 options, exactly 1 correct option", first)
+        self.assertIn("do NOT need to appear in the excerpts", first)
+        self.assertIn("never write two questions that ask essentially the same thing", first)
         self.assertNotIn("Questions already written", first)
 
 
@@ -429,8 +431,11 @@ class ValidationTests(unittest.TestCase):
 
     def test_only_four_options_are_accepted(self):
         good = raw_candidate(0)
-        for options in (good["options"][:2], good["options"][:3], good["options"] + ["A fifth option here"], ["True", "False"]):
-            self.rejected({**good, "options": options}, "structure")
+        for options in (good["options"][:2], good["options"][:3], ["True", "False"]):
+            self.rejected({**good, "options": options}, "structure")   # nothing to repair a missing option from
+        question, warnings = validate({**good, "options": good["options"] + ["A fifth option here"]}, self.units)
+        self.assertEqual(question["options"], [f"{l}. {o}" for l, o in zip("ABCD", good["options"])])   # the extra one is dropped
+        self.assertIn("options_repaired", warnings)
         for options in ("A. B. C. D.", None, [1, 2, 3, 4]):
             self.rejected({**good, "options": options}, "structure")
 
@@ -465,7 +470,8 @@ class ValidationTests(unittest.TestCase):
             ["CPU-bound processes", "I/O-bound processes", "Both equally", "Neither"],
             ["Scheduler", "Scheduling", "Dispatcher", "Loader"],
         ):
-            self.assertTrue(quiz_units._options_too_similar(options) is False, options)
+            self.assertFalse(any(quiz_units._options_alike(options[a], options[b])
+                                 for a in range(4) for b in range(a + 1, 4)), options)
 
     def test_option_labels_are_stripped_but_articles_are_kept(self):
         raw = {**raw_candidate(0), "question": "What does the mutex reserve?",
@@ -758,7 +764,7 @@ class EngineTests(unittest.TestCase):
 
     # --- the four counts ---------------------------------------------------------------------
     def test_each_requested_count_writes_its_surplus_in_one_call_and_returns_exactly_the_target(self):
-        for requested, pool in ((12, 15), (15, 18), (18, 22), (20, 24)):
+        for requested, pool in ((12, 14), (15, 18), (18, 21), (20, 24)):
             with self.subTest(requested=requested):
                 result, saved = self.run_engine([{"questions": candidates(range(pool))}], question_count=requested)
                 self.assert_valid_quiz(result, requested)
@@ -811,23 +817,22 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(second.count("[source:"), 9)                              # every existing question is listed with its sentence
         self.assertIn(f'- What does the mutex do?  [source: "{fact_sentence(0)}"]', second)
 
-    def test_the_pipeline_keeps_asking_in_small_batches_until_the_target_is_met_then_stops(self):
-        # 20 questions: the model delivers only 6, 4, 5 and 5 valid questions per call
+    def test_the_pipeline_asks_missing_plus_2_then_missing_plus_1_and_never_a_4th_time(self):
+        # 20 questions: the model delivers only 6, 4 and 5 valid questions per call
         payloads = [{"questions": candidates(range(0, 6))}, {"questions": candidates(range(6, 10))},
-                    {"questions": candidates(range(10, 15))}, {"questions": candidates(range(15, 20))},
-                    {"questions": candidates(range(20, 24))}]
+                    {"questions": candidates(range(10, 15))}, {"questions": candidates(range(15, 20))}]
         result, _ = self.run_engine(payloads, question_count=20)
-        self.assert_valid_quiz(result, 20)
+        self.assert_valid_quiz(result, 15)
         plan = result["assessment_plan"]
-        self.assertEqual((plan["status"], plan["llm_calls"], len(FakeModel.prompts)), ("complete", 4, 4))
-        self.assertEqual(len(FakeModel.payloads), 1)                               # the 5th call was never made: enough
+        self.assertEqual((plan["status"], plan["llm_calls"], len(FakeModel.prompts)), ("partial", 3, 3))
+        self.assertEqual(len(FakeModel.payloads), 1)                               # a 4th call is never made
         asks = [int(re.search(r"Write exactly (\d+)", prompt).group(1)) for prompt in FakeModel.prompts]
-        self.assertEqual(asks, [24, 8, 8, 7])                                     # 14, 10 and 5 missing -> 8, 8 and 7
-        self.assertEqual([call["valid_added"] for call in plan["calls"]], [6, 4, 5, 5])
-        self.assertEqual([len(prompt.split("[source:")) - 1 for prompt in FakeModel.prompts], [0, 6, 10, 15])
+        self.assertEqual(asks, [24, 16, 11])                                      # 14 missing + 2, then 10 missing + 1
+        self.assertEqual([call["valid_added"] for call in plan["calls"]], [6, 4, 5])
+        self.assertEqual([len(prompt.split("[source:")) - 1 for prompt in FakeModel.prompts], [0, 6, 10])
 
     def test_the_call_ceiling_per_requested_count(self):
-        for requested, ceiling in ((12, 4), (15, 4), (18, 5), (20, 5)):
+        for requested, ceiling in ((12, 3), (15, 3), (18, 3), (20, 3)):
             with self.subTest(requested=requested):
                 # the model adds exactly one new valid question per call, forever
                 payloads = [{"questions": candidates([call])} for call in range(10)]
@@ -853,7 +858,8 @@ class EngineTests(unittest.TestCase):
         payloads = [{"questions": candidates(range(3))}, {"questions": []},
                     {"questions": [raw_candidate(5, evidence_quote="a sentence that is nowhere in the document")]},
                     {"questions": candidates(range(3, 9))}]
-        result, _ = self.run_engine(payloads, question_count=20)
+        with patch.object(quiz_units, "QUIZ_MAX_CALLS", 4):   # a ceiling above the stall limit, to see the stall stop
+            result, _ = self.run_engine(payloads, question_count=20)
         plan = result["assessment_plan"]
         self.assertEqual((len(FakeModel.prompts), plan["llm_calls"]), (3, 3))     # 4th call never made
         self.assertEqual(len(FakeModel.payloads), 1)
@@ -888,13 +894,14 @@ class EngineTests(unittest.TestCase):
         calls = result["assessment_plan"]["calls"]
         self.assertEqual([call["call"] for call in calls], [1, 2, 3, 4][:len(calls)])
         first = calls[0]
-        self.assertEqual((first["asked"], first["returned"], first["valid_added"], first["rejected"]), (15, 4, 4, 0))
-        self.assertEqual(first["min_items"], int(15 * quiz_units.QUIZ_MIN_ITEMS_RATIO))
+        self.assertEqual((first["asked"], first["returned"], first["valid_added"], first["rejected"]), (14, 4, 4, 0))
+        self.assertEqual(first["min_items"], int(14 * quiz_units.QUIZ_MIN_ITEMS_RATIO))
         self.assertEqual((first["generated_tokens"], first["prompt_tokens"], first["done_reason"]), (123, 456, "stop"))
         self.assertEqual((first["cut"], first["salvaged"], first["quote_keys"], first["error"]), (False, False, 4, None))
-        self.assertEqual(first["num_predict"], min(quiz_units.QUIZ_MAX_NEW_TOKENS, (15 + quiz_units.QUIZ_MAX_ITEMS_EXTRA) * quiz_units.QUIZ_TOKENS_PER_QUESTION))
+        self.assertEqual(first["num_predict"], min(quiz_units.QUIZ_MAX_NEW_TOKENS, (14 + quiz_units.QUIZ_MAX_ITEMS_EXTRA) * quiz_units.QUIZ_TOKENS_PER_QUESTION))
         self.assertGreater(first["tokens_per_s"], 0)
-        self.assertEqual(calls[1]["asked"], followup_request(8))
+        self.assertEqual(calls[1]["asked"], followup_request(8, 2))
+        self.assertEqual(calls[2]["asked"], followup_request(5, 3))
 
     def test_a_failed_call_is_logged_as_an_error_not_as_rejections(self):
         result, _ = self.run_engine(["not json at all", {"questions": candidates(range(14))}])
@@ -911,11 +918,13 @@ class EngineTests(unittest.TestCase):
         quotes = {record["evidence_quote"] for record in result["assessment_plan"]["question_evidence"]}
         self.assertTrue(all(quote in " ".join(c["content"] for c in make_chunks(12, 2)) for quote in quotes))
 
-    def test_options_that_repeat_each_other_are_rejected_inside_the_pipeline(self):
+    def test_options_that_repeat_each_other_are_repaired_inside_the_pipeline(self):
         twin = raw_candidate(0, options=["reserves the shared resources", "reserves shared resources", "orders tasks", "maps names"])
         result, _ = self.run_engine([{"questions": [twin] + candidates(range(1, 14))}])
         self.assert_valid_quiz(result, 12)
-        self.assertEqual(result["assessment_plan"]["validation_results"]["structural_rejections"], 1)
+        results = result["assessment_plan"]["validation_results"]
+        self.assertEqual((results["structural_rejections"], results["options_repaired"]), (0, 1))
+        self.assertEqual(result["assessment_plan"]["llm_calls"], 1)
 
     # --- failure only when there is no valid question ------------------------------------------
     def test_zero_valid_candidates_is_the_only_failure(self):
@@ -1004,17 +1013,17 @@ class EngineTests(unittest.TestCase):
         result, _ = self.run_engine([{"questions": candidates(range(4))}, {"questions": []}, {"questions": []}], chunks=small)
         first = result["assessment_plan"]["calls"][0]
         self.assertLess(first["material_chars"], 2000)
-        self.assertEqual(first["asked"], 15)
+        self.assertEqual(first["asked"], 14)
         self.assertEqual(first["min_items"], max(1, first["material_chars"] // quiz_units.QUIZ_CHARS_PER_MIN_ITEM))
-        self.assertLess(first["min_items"], int(15 * quiz_units.QUIZ_MIN_ITEMS_RATIO))
-        self.assertEqual(FakeModel.kwargs[0]["format"]["properties"]["questions"]["maxItems"], 18)
+        self.assertLess(first["min_items"], int(14 * quiz_units.QUIZ_MIN_ITEMS_RATIO))
+        self.assertEqual(FakeModel.kwargs[0]["format"]["properties"]["questions"]["maxItems"], 17)
         self.assertEqual(result["assessment_plan"]["status"], "partial")     # still returns what is valid
 
     def test_a_large_document_keeps_the_ratio_based_minimum(self):
         result, _ = self.run_engine([{"questions": candidates(range(15))}], chunks=make_chunks(40, 2))
         first = result["assessment_plan"]["calls"][0]
         self.assertGreaterEqual(first["material_chars"], 5000)
-        self.assertEqual(first["min_items"], 10)
+        self.assertEqual(first["min_items"], 9)
 
     def test_topic_scope_uses_the_same_pipeline(self):
         result, _ = self.run_engine([{"questions": candidates(range(15))}], scope="topic")

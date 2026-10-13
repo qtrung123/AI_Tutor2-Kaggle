@@ -63,9 +63,10 @@ QUIZ_V2_ALLOWED_QUESTION_COUNTS = set(QUIZ_ALLOWED_QUESTION_COUNTS)
 QUIZ_GENERATION_KEEP_ALIVE = "5m"
 
 # Live Quiz path ("Study Units", see backend/quiz_units.py and _generate_quiz_from_units): no
-# Planner, concept extraction, Question Blueprint, slots, or repair/fill loops. At most TWO LLM
+# Planner, concept extraction, Question Blueprint, slots, or LLM repair/fill loops. At most THREE LLM
 # calls per request: one candidate-generation call and, only if the validated pool is short of
-# question_count, one bounded top-up. The V2 Planner-based engines (_generate_topic_quiz_v2,
+# question_count, up to two bounded top-ups. Bad distractors and too-short quotes are repaired
+# locally, without a call. The V2 Planner-based engines (_generate_topic_quiz_v2,
 # _run_document_single_choice_quiz in backend/quiz_legacy_v2.py, built on
 # backend/assessment_planner.py) are kept for comparison and are not on the live path.
 
@@ -149,11 +150,12 @@ def _generate_quiz_from_units(
     validate_candidate (a wrong-language candidate is rejected like any other invalid one).
 
         chunks -> excerpts -> context that fits a fixed budget
-        -> call 1 writes a surplus of candidates (12 -> 15, 15 -> 18, 18 -> 22, 20 -> 24)
-        -> parse -> validate -> the valid ones join the pool -> enough? stop
-        -> otherwise another call (at most 4 for 12/15 questions, 5 for 18/20) that writes a
-           moderate batch of only what is missing, is shown every existing question with the
-           sentence it used, and prefers excerpts no call has shown -> repeat
+        -> call 1 writes a small surplus of candidates (12 -> 14, 15 -> 18, 18 -> 21, 20 -> 24)
+        -> parse -> validate (bad distractors / too-short quotes repaired locally) -> the valid
+           ones join the pool -> enough? stop
+        -> otherwise another call (at most 3 in total, never a 4th): call 2 writes what is missing
+           + 2, call 3 what is missing + 1; each is shown every existing question with the sentence
+           it used and prefers excerpts no call has shown -> repeat
         -> best `question_count` candidates -> quiz
 
     `question_count` is a target, not a condition of success: the quiz holds
@@ -205,6 +207,8 @@ def _generate_quiz_from_units(
         #           + response_failures (a whole-call failure is not a per-candidate outcome).
         "duplicate_rejections": 0, "grounding_rejections": 0, "structural_rejections": 0,
         "response_failures": 0,
+        # accepted candidates that needed a local (no-LLM) repair of their wrong options / evidence quote
+        "options_repaired": 0, "evidence_repaired": 0,
         # which rule rejected the candidates (quote_not_found, answer_not_in_context, duplicate_evidence, ...)
         "rejection_codes": {},
     }
@@ -234,7 +238,7 @@ def _generate_quiz_from_units(
             if remaining_s < QUIZ_MIN_CALL_S:
                 stop_reason = "time budget used up"
                 break
-            requested = followup_request(missing)
+            requested = followup_request(missing, call_number)
             budget = context_budget(requested)
             # Prefer excerpts no call has shown. Once every excerpt was shown, prefer the text no
             # accepted question was built on (least-used excerpts first) and only fall back to the
@@ -330,13 +334,19 @@ def _generate_quiz_from_units(
             followup_generation_ms += elapsed
 
         validation_started = time.perf_counter()
-        accepted_before, rejected_here, codes_here = len(accepted), 0, {}
+        accepted_before, rejected_here, codes_here, repaired_here = len(accepted), 0, {}, 0
+        # Replacement distractors for a local option repair: every option this call wrote, then the
+        # options of the questions already accepted.
+        distractor_bank = [
+            option for raw in candidates if isinstance(raw, dict) and isinstance(raw.get("options"), list)
+            for option in raw["options"] if isinstance(option, str)
+        ] + [option for question in accepted for option in question["options"]]
         for raw in candidates:
             candidate_counter += 1
             try:
                 normalized, warnings = validate_candidate(
                     raw, context_units, accepted, difficulty, len(accepted) + 1, scope_topic, candidate_counter,
-                    language=language,
+                    language=language, distractor_bank=distractor_bank,
                 )
             except (ValueError, TypeError, KeyError, AttributeError) as error:
                 category = getattr(error, "category", "structure")
@@ -352,6 +362,10 @@ def _generate_quiz_from_units(
                 print(f"[quiz-units-validation] call={call_number} discarded candidate ({bucket}): {error}")
                 continue
             accepted.append(normalized)
+            for repair in ("options_repaired", "evidence_repaired"):
+                if repair in warnings:
+                    validation_results[repair] += 1
+            repaired_here += int("options_repaired" in warnings or "evidence_repaired" in warnings)
             validation_results["accepted_with_warnings" if warnings else "accepted"] += 1
             validation_results["quality_warnings"] += len(warnings)
             save_quiz_validation_event({
@@ -390,7 +404,7 @@ def _generate_quiz_from_units(
         call_record = {
             "call": call_number, "asked": requested, "min_items": output_schema["properties"]["questions"]["minItems"],
             "returned": len(candidates), "valid_added": added,
-            "rejected": rejected_here, "rejected_by": codes_here,
+            "rejected": rejected_here, "rejected_by": codes_here, "repaired": repaired_here,
             "excerpts": len(shown_units), "material_chars": material_chars, "prompt_chars": len(prompt),
             "num_predict": num_predict, "temperature": temperature, "num_ctx": QUIZ_NUM_CTX,
             "keep_alive": QUIZ_GENERATION_KEEP_ALIVE,

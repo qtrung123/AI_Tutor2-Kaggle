@@ -160,8 +160,11 @@ class UnsupportedEvidenceIsStillRejectedTests(unittest.TestCase):
         self.rejected({**FRONT, "evidence_quote": "The banker's algorithm avoids deadlock by refusing unsafe resource requests."},
                       "quote_not_found", "grounding")
 
-    def test_a_too_short_quote_proves_nothing(self):
-        self.rejected({**FRONT, "evidence_quote": "The queue."}, "quote_too_short", "grounding")
+    def test_a_too_short_quote_proves_nothing_unless_it_can_be_widened_from_the_source(self):
+        self.rejected({**FRONT, "evidence_quote": "The CPU idles."}, "quote_too_short", "grounding")   # nowhere in the material
+        question, warnings = validate({**FRONT, "evidence_quote": "The queue."}, self.units)            # real text: widened locally
+        self.assertIn("evidence_repaired", warnings)
+        self.assertIn("frontofthequeueisselected", squash(question["_meta"]["quote"]))
 
     def test_a_real_quote_with_an_answer_from_outside_knowledge_is_rejected(self):
         self.rejected(candidate(
@@ -363,7 +366,7 @@ class FollowUpsPreferUnusedEvidenceTests(unittest.TestCase):
         self.assertEqual(plan["status"], "partial")
         self.assertEqual(plan["validation_results"]["duplicate_rejections"], 1)      # only the genuine repeat
         self.assertEqual(plan["validation_results"]["grounding_rejections"], 0)
-        self.assertLessEqual(plan["llm_calls"], 4)
+        self.assertLessEqual(plan["llm_calls"], 3)
         self.assertIn(two_facts[0], FakeModel.prompts[1])                           # the used sentence was offered again
 
     def test_a_follow_up_still_writes_only_what_is_missing(self):
@@ -555,8 +558,8 @@ class CountsPartialsAndStoppingStillHoldTests(unittest.TestCase):
         self.assertEqual((len(result["questions"]), plan["status"], plan["requested_count"], plan["actual_count"]), (7, "partial", 18, 7))
         self.assertLessEqual(plan["llm_calls"], quiz_units.max_llm_calls(18))
 
-    def test_the_call_ceiling_is_unchanged(self):
-        self.assertEqual({n: quiz_units.max_llm_calls(n) for n in (12, 15, 18, 20)}, {12: 4, 15: 4, 18: 5, 20: 5})
+    def test_the_call_ceiling_is_three_for_every_count(self):
+        self.assertEqual({n: quiz_units.max_llm_calls(n) for n in (12, 15, 18, 20)}, {12: 3, 15: 3, 18: 3, 20: 3})
 
 
 if __name__ == "__main__":

@@ -157,7 +157,7 @@ class SingleChoiceContractTests(unittest.TestCase):
         self.assert_single_choice_quiz(quiz)
 
     def test_engine_version_is_bumped_so_old_mixed_quizzes_are_not_reused(self):
-        self.assertEqual(QUIZ_ENGINE_VERSION, "simple_context_v9")
+        self.assertEqual(QUIZ_ENGINE_VERSION, "simple_context_v10")
 
 
 class LanguageDetectionTests(unittest.TestCase):
@@ -272,13 +272,22 @@ class PerOptionLanguageTests(unittest.TestCase):
             self.assertFalse(language_mismatch(self.VI_STEM, terms, self.VI_EXPLANATION, "vietnamese"), terms)
             self.assertFalse(language_mismatch(self.EN_STEM, terms, self.EN_EXPLANATION, "english"), terms)
 
-    def test_the_validator_rejects_a_mixed_option_candidate(self):
+    def test_the_validator_never_accepts_a_mixed_option_candidate(self):
         units = build_study_units(vi_chunks())
         raw = vi_candidate(1)
         raw["options"][3] = "Counts the synchronisation signals of tasks"
-        with self.assertRaises(quiz_units.CandidateRejected) as caught:
-            quiz_units.validate_candidate(raw, units, [], "easy", 1, {"topic_id": "document", "name": "Doc"}, 1,
-                                          language="vietnamese")
+        scope = {"topic_id": "document", "name": "Doc"}
+        # the wrong-language distractor is replaced locally; the quiz stays in ONE language
+        question, warnings = quiz_units.validate_candidate(raw, units, [], "easy", 1, scope, 1, language="vietnamese")
+        self.assertIn("options_repaired", warnings)
+        self.assertNotIn("D. Counts the synchronisation signals of tasks", question["options"])
+        self.assertFalse(language_mismatch(question["question"], question["options"], question["explanation"], "vietnamese"))
+        # with nothing to replace it from, the candidate is still rejected as language_mismatch
+        raw["options"] = [raw["options"][0], "Counts the synchronisation signals of tasks", "Locks the shared memory pages", "Boots the device firmware"]
+        raw["answer_index"] = 0
+        with patch.object(quiz_units, "_distractor_alternatives", return_value=[]):
+            with self.assertRaises(quiz_units.CandidateRejected) as caught:
+                quiz_units.validate_candidate(raw, units, [], "easy", 1, scope, 1, language="vietnamese")
         self.assertEqual(caught.exception.code, "language_mismatch")
 
 
@@ -292,8 +301,8 @@ def saved_quiz(planner_version: str) -> dict:
 
 
 class CacheVersionTests(unittest.TestCase):
-    """A saved v8 quiz (possibly mixed types/languages) never satisfies a new Normal Quiz request;
-    a saved v9 quiz does. Old rows are not deleted or rewritten: regeneration saves a new artifact."""
+    """A saved v8 quiz (possibly mixed types/languages) or v9 quiz (before local repair and the
+    3-call budget) never satisfies a new Normal Quiz request; a saved v10 quiz does. Old rows are not deleted or rewritten: regeneration saves a new artifact."""
 
     def request(self, saved):
         document = {**DOCUMENT, "topics": []}
@@ -312,17 +321,20 @@ class CacheVersionTests(unittest.TestCase):
         delete.assert_not_called()
         return quiz, save
 
-    def test_saved_v8_quiz_is_not_current(self):
-        old = saved_quiz("simple_context_v8")
-        quiz, save = self.request(old)
-        self.assertEqual(len(FakeModel.prompts), 1)                       # regenerated, not served from cache
-        save.assert_called_once()
-        self.assertNotEqual(quiz["quiz_id"], old["quiz_id"])              # a new artifact; the v8 row is untouched
-        self.assertEqual(quiz["assessment_plan"]["planner_version"], "simple_context_v9")
-        self.assertEqual(old["assessment_plan"]["planner_version"], "simple_context_v8")
+    def test_saved_v8_and_v9_quizzes_are_not_current(self):
+        for version in ("simple_context_v8", "simple_context_v9"):
+            with self.subTest(version=version):
+                FakeModel.reset([{"questions": candidates(range(15))}])
+                old = saved_quiz(version)
+                quiz, save = self.request(old)
+                self.assertEqual(len(FakeModel.prompts), 1)                   # regenerated, not served from cache
+                save.assert_called_once()
+                self.assertNotEqual(quiz["quiz_id"], old["quiz_id"])          # a new artifact; the old row is untouched
+                self.assertEqual(quiz["assessment_plan"]["planner_version"], "simple_context_v10")
+                self.assertEqual(old["assessment_plan"]["planner_version"], version)
 
-    def test_saved_v9_quiz_is_cache_compatible(self):
-        current = saved_quiz("simple_context_v9")
+    def test_saved_v10_quiz_is_cache_compatible(self):
+        current = saved_quiz("simple_context_v10")
         quiz, save = self.request(current)
         self.assertIs(quiz, current)
         self.assertEqual(FakeModel.prompts, [])                           # no model call
