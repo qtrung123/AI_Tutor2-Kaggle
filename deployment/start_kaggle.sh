@@ -58,6 +58,39 @@ log() { printf '[ai-tutor] %s\n' "$*"; }
 tail_log() { [[ -f "$1" ]] && tail -n 80 "$1" >&2 || true; }
 fail() { log "ERROR: $1"; [[ $# -lt 2 ]] || tail_log "$2"; exit 1; }
 
+# Accounts and saved app data live in external PostgreSQL (DATABASE_URL); Kaggle's disk is wiped
+# when the session ends. DATABASE_URL comes from the environment or, on Kaggle, from the Kaggle
+# Secret of the same name. Its value is never printed.
+resolve_database_url() {
+  if [[ -n "${DATABASE_URL:-}" ]]; then
+    log "DATABASE_URL provided by the environment"
+    return
+  fi
+  local value
+  value="$(python - 2>/dev/null <<'PY' || true
+try:
+    from kaggle_secrets import UserSecretsClient
+    print(UserSecretsClient().get_secret("DATABASE_URL") or "", end="")
+except Exception:
+    pass
+PY
+)"
+  if [[ -n "$value" ]]; then
+    export DATABASE_URL="$value"
+    log "DATABASE_URL loaded from Kaggle Secrets"
+  fi
+}
+
+resolve_database_url
+if [[ -z "${DATABASE_URL:-}" ]]; then
+  [[ "${AI_TUTOR_ALLOW_SQLITE:-0}" == "1" ]] ||
+    fail "DATABASE_URL is not set. Add the Kaggle Secret DATABASE_URL and attach it to this notebook (or set AI_TUTOR_ALLOW_SQLITE=1 to run on temporary local SQLite)."
+  log "WARNING: DATABASE_URL is not set; using local SQLite at $AI_TUTOR_DATABASE_PATH."
+  log "WARNING: accounts and saved data will be lost when this Kaggle session ends."
+fi
+db_status="$(cd "$PROJECT_ROOT" && python -m backend.db 2>&1)" || fail "Database check failed: $db_status"
+log "$db_status"
+
 on_error() {
   local exit_code=$?
   log "Command failed at line $1 (exit $exit_code)."
@@ -162,9 +195,13 @@ prepare_kaggle_chroma() {
   printf '%s\n' "$OLLAMA_EMBEDDING_MODEL" >"$marker"
   log "Old ChromaDB moved to: $backup_path"
 
+  # The shared PostgreSQL registry is never cleared from here: ingestion re-indexes any registered
+  # document whose vectors are missing from the rebuilt store (backend/ingest.has_source_vectors).
+  if [[ -n "${DATABASE_URL:-}" ]]; then
+    log "Kept the PostgreSQL document registry; files are re-indexed when found or uploaded again"
   # SQLite indexed_documents is authoritative. Clear only that derived registry
   # so incremental ingestion repopulates the rebuilt vectorstore.
-  if [[ -f "$AI_TUTOR_DATABASE_PATH" ]]; then
+  elif [[ -f "$AI_TUTOR_DATABASE_PATH" ]]; then
     python - "$AI_TUTOR_DATABASE_PATH" <<'PY'
 import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as connection:

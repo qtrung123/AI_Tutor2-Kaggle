@@ -82,6 +82,23 @@ class TopicSchemaRefreshTests(unittest.TestCase):
         ingest.index_files([path], self.owner)
         return path
 
+    def test_unchanged_file_is_reindexed_when_its_vectors_are_gone(self):
+        """PostgreSQL keeps the registry across a Kaggle reset but the local Chroma store is wiped:
+        uploading the same file again must rebuild its vectors under the same document id."""
+        path = self.index_pdf()
+        before = indexed_document_store.get_indexed_document(self.owner, PDF_NAME)
+        skipped = ingest.index_files([path], self.owner)
+        self.assertEqual(skipped["skipped_files"], [PDF_NAME])
+
+        self.store.delete(ids=self.store.get(where={"owner_id": self.owner})["ids"])
+        result = ingest.index_files([path], self.owner)
+
+        self.assertEqual((result["new_files"], result["skipped_files"]), (1, []))
+        self.assertEqual(len(self.store.get(where={"owner_id": self.owner})["ids"]), before["chunks"])
+        after = indexed_document_store.get_indexed_document(self.owner, PDF_NAME)
+        self.assertEqual((after["document_id"], after["hash"], after["topics"]),
+                         (before["document_id"], before["hash"], before["topics"]))
+
     def make_stale(self, document_id, topics=STALE_FALLBACK_TOPICS, version=RESTORED_SCHEMA_VERSION):
         """Simulate a restored Kaggle row written by an older extractor schema."""
         info = indexed_document_store.get_indexed_document(self.owner, document_id)

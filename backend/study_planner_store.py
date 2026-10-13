@@ -1,197 +1,194 @@
-"""Owner-scoped SQLite persistence for the Study Planner feature (Phase 1 / MVP).
+"""Owner-scoped persistence for the Study Planner feature (PostgreSQL or SQLite).
 
-Mirrors the connection/schema-migration conventions already used by flashcard_store.py,
-quiz_store.py, and conversation_store.py -- same shared DATABASE_PATH, same
-_ClosingConnection pattern, same additive-migration style.
+Same conventions as flashcard_store.py, quiz_store.py, and conversation_store.py: the shared
+backend/db.py connection layer, the same DATABASE_PATH fallback, and additive migrations.
 """
 
-import sqlite3
 from datetime import date as date_type, datetime, timezone
 from uuid import uuid4
 
+from backend import db
 from backend.auth_store import initialize_auth_store
 from backend.study_time import merge_minute_intervals, subtract_minute_interval, to_hhmm, to_minutes
 from config import DATABASE_PATH
 
 
-class _ClosingConnection(sqlite3.Connection):
-    def __exit__(self, exc_type, exc_value, traceback):
-        try:
-            return super().__exit__(exc_type, exc_value, traceback)
-        finally:
-            self.close()
-
-
-def _connect() -> sqlite3.Connection:
-    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DATABASE_PATH, timeout=15, factory=_ClosingConnection)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA busy_timeout = 15000")
-    return connection
+def _connect() -> db.Connection:
+    return db.connect(DATABASE_PATH)
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _add_column_if_missing(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    """Additive-migration helper: ALTER TABLE ... ADD COLUMN, tolerant of two requests racing to
-    apply the same migration on a fresh database (each of loadPlannerData's parallel GETs calls
-    initialize_study_planner_store independently). The PRAGMA table_info check above already
-    avoids this in the common case, but does not make the check-then-ALTER atomic, so a
-    'duplicate column' error from a concurrent winner is swallowed here rather than surfacing as
-    a 500 to the user."""
-    try:
-        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-    except sqlite3.OperationalError as error:
-        if "duplicate column name" not in str(error):
-            raise
+def _add_column_if_missing(connection: db.Connection, table: str, column: str, definition: str) -> None:
+    """Additive-migration helper, tolerant of two requests racing to apply the same migration on a
+    fresh database (each of loadPlannerData's parallel GETs calls initialize_study_planner_store
+    independently): a column that already exists is never re-added (see db.add_column)."""
+    db.add_column(connection, table, column, definition)
 
 
 def initialize_study_planner_store() -> None:
     initialize_auth_store()
-    with _connect() as connection:
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS study_tasks (
-                task_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, title TEXT NOT NULL,
-                document_id TEXT, deadline TEXT NOT NULL,
-                estimated_minutes INTEGER NOT NULL, remaining_minutes INTEGER NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL,
-                FOREIGN KEY (owner_id) REFERENCES users(id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_study_tasks_owner ON study_tasks(owner_id, deadline);
+    db.ensure_schema("study_planner", DATABASE_PATH, _initialize_schema)
 
-            CREATE TABLE IF NOT EXISTS availability_slots (
-                availability_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
-                date TEXT, start_at TEXT NOT NULL, end_at TEXT NOT NULL,
-                is_recurring INTEGER NOT NULL DEFAULT 0, day_of_week INTEGER,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (owner_id) REFERENCES users(id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_availability_owner_date ON availability_slots(owner_id, date);
-            CREATE INDEX IF NOT EXISTS idx_availability_owner_recurring
-                ON availability_slots(owner_id, is_recurring, day_of_week);
 
-            CREATE TABLE IF NOT EXISTS study_blocks (
-                block_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, task_id TEXT NOT NULL,
-                document_id TEXT, topic_id TEXT, title TEXT NOT NULL,
-                start_at TEXT NOT NULL, end_at TEXT NOT NULL, planned_minutes INTEGER NOT NULL,
-                actual_minutes INTEGER, status TEXT NOT NULL DEFAULT 'suggested',
-                locked INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
-                FOREIGN KEY (owner_id) REFERENCES users(id),
-                FOREIGN KEY (task_id) REFERENCES study_tasks(task_id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_study_blocks_owner_start ON study_blocks(owner_id, start_at);
-            CREATE INDEX IF NOT EXISTS idx_study_blocks_task ON study_blocks(task_id);
+# SQLite databases created before Study Planner v2 have this shape; _migrate_schedule_runs_for_plans
+# rebuilds it. PostgreSQL databases are created directly in the final shape (_SCHEDULE_RUNS).
+_LEGACY_SCHEDULE_RUNS = """
+CREATE TABLE IF NOT EXISTS schedule_runs (
+    schedule_run_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, task_id TEXT NOT NULL,
+    reason TEXT NOT NULL, created_at TEXT NOT NULL,
+    FOREIGN KEY (owner_id) REFERENCES users(id),
+    FOREIGN KEY (task_id) REFERENCES study_tasks(task_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_task ON schedule_runs(task_id, created_at DESC);
+"""
 
-            CREATE TABLE IF NOT EXISTS schedule_runs (
-                schedule_run_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, task_id TEXT NOT NULL,
-                reason TEXT NOT NULL, created_at TEXT NOT NULL,
-                FOREIGN KEY (owner_id) REFERENCES users(id),
-                FOREIGN KEY (task_id) REFERENCES study_tasks(task_id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_schedule_runs_task ON schedule_runs(task_id, created_at DESC);
+_SCHEDULE_RUNS = """
+CREATE TABLE IF NOT EXISTS schedule_runs (
+    schedule_run_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, task_id TEXT,
+    plan_id TEXT, reason TEXT NOT NULL, created_at TEXT NOT NULL,
+    CHECK (task_id IS NOT NULL OR plan_id IS NOT NULL),
+    FOREIGN KEY (owner_id) REFERENCES users(id),
+    FOREIGN KEY (task_id) REFERENCES study_tasks(task_id) ON DELETE CASCADE,
+    FOREIGN KEY (plan_id) REFERENCES study_plans(plan_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_task ON schedule_runs(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_plan ON schedule_runs(plan_id, created_at DESC);
+"""
 
-            CREATE TABLE IF NOT EXISTS study_plan_items (
-                item_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, owner_id TEXT NOT NULL,
-                document_id TEXT NOT NULL, topic_id TEXT NOT NULL, title TEXT NOT NULL,
-                estimated_minutes INTEGER NOT NULL, remaining_minutes INTEGER NOT NULL,
-                priority INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active',
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (owner_id) REFERENCES users(id),
-                FOREIGN KEY (task_id) REFERENCES study_tasks(task_id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_study_plan_items_task
-                ON study_plan_items(task_id, priority, created_at);
 
-            CREATE TABLE IF NOT EXISTS topic_progress (
-                owner_id TEXT NOT NULL, document_id TEXT NOT NULL, topic_id TEXT NOT NULL,
-                planned_minutes INTEGER NOT NULL DEFAULT 0, completed_minutes INTEGER NOT NULL DEFAULT 0,
-                progress_percent REAL NOT NULL DEFAULT 0, last_studied_at TEXT,
-                PRIMARY KEY (owner_id, document_id, topic_id),
-                FOREIGN KEY (owner_id) REFERENCES users(id)
-            );
-            """
-        )
-        # Additive migration: completion tracking on study_blocks (Phase 3).
-        existing_columns = {row["name"] for row in connection.execute("PRAGMA table_info(study_blocks)")}
-        if "completion_status" not in existing_columns:
-            _add_column_if_missing(
-                connection, "study_blocks", "completion_status", "TEXT NOT NULL DEFAULT 'scheduled'"
-            )
-        if "completed_at" not in existing_columns:
-            _add_column_if_missing(connection, "study_blocks", "completed_at", "TEXT")
-        # Additive migration: learning context on study_blocks (AI Study Planning Agent).
-        if "objective" not in existing_columns:
-            _add_column_if_missing(connection, "study_blocks", "objective", "TEXT")
-        if "study_goal" not in existing_columns:
-            _add_column_if_missing(connection, "study_blocks", "study_goal", "TEXT")
-        # Additive migration: optional topic-level linking on study_tasks (in addition to
-        # document-level linking) so a task can scope its generated plan to a single topic.
-        existing_task_columns = {row["name"] for row in connection.execute("PRAGMA table_info(study_tasks)")}
-        if "topic_id" not in existing_task_columns:
-            _add_column_if_missing(connection, "study_tasks", "topic_id", "TEXT")
+def _initialize_schema(connection: db.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS study_tasks (
+            task_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, title TEXT NOT NULL,
+            document_id TEXT, deadline TEXT NOT NULL,
+            estimated_minutes INTEGER NOT NULL, remaining_minutes INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL,
+            FOREIGN KEY (owner_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_study_tasks_owner ON study_tasks(owner_id, deadline);
 
-        # Document-centric planner (Study Planner v2). The legacy task/topic tables above stay
-        # untouched but are no longer used by new code. No topic_id anywhere below: a plan is a
-        # set of documents (study packs), and sessions are scheduled per document + activity.
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS study_plans (
-                plan_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, title TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active',
-                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                FOREIGN KEY (owner_id) REFERENCES users(id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_study_plans_owner ON study_plans(owner_id, created_at);
+        CREATE TABLE IF NOT EXISTS availability_slots (
+            availability_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+            date TEXT, start_at TEXT NOT NULL, end_at TEXT NOT NULL,
+            is_recurring INTEGER NOT NULL DEFAULT 0, day_of_week INTEGER,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (owner_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_availability_owner_date ON availability_slots(owner_id, date);
+        CREATE INDEX IF NOT EXISTS idx_availability_owner_recurring
+            ON availability_slots(owner_id, is_recurring, day_of_week);
 
-            CREATE TABLE IF NOT EXISTS study_plan_materials (
-                material_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, owner_id TEXT NOT NULL,
-                document_id TEXT NOT NULL, deadline TEXT, familiarity TEXT,
-                learning_state TEXT NOT NULL DEFAULT 'new',
-                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                UNIQUE (plan_id, document_id),
-                FOREIGN KEY (owner_id) REFERENCES users(id),
-                FOREIGN KEY (plan_id) REFERENCES study_plans(plan_id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_study_plan_materials_owner_document
-                ON study_plan_materials(owner_id, document_id);
+        CREATE TABLE IF NOT EXISTS study_blocks (
+            block_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, task_id TEXT NOT NULL,
+            document_id TEXT, topic_id TEXT, title TEXT NOT NULL,
+            start_at TEXT NOT NULL, end_at TEXT NOT NULL, planned_minutes INTEGER NOT NULL,
+            actual_minutes INTEGER, status TEXT NOT NULL DEFAULT 'suggested',
+            locked INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+            FOREIGN KEY (owner_id) REFERENCES users(id),
+            FOREIGN KEY (task_id) REFERENCES study_tasks(task_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_study_blocks_owner_start ON study_blocks(owner_id, start_at);
+        CREATE INDEX IF NOT EXISTS idx_study_blocks_task ON study_blocks(task_id);
 
-            CREATE TABLE IF NOT EXISTS study_sessions (
-                session_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, plan_id TEXT NOT NULL,
-                document_id TEXT NOT NULL, activity_type TEXT NOT NULL, artifact_id TEXT,
-                scheduled_start TEXT NOT NULL, scheduled_end TEXT NOT NULL,
-                duration_minutes INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'scheduled',
-                reason TEXT, priority_snapshot REAL,
-                started_at TEXT, completed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                FOREIGN KEY (owner_id) REFERENCES users(id),
-                FOREIGN KEY (plan_id) REFERENCES study_plans(plan_id) ON DELETE CASCADE,
-                FOREIGN KEY (plan_id, document_id)
-                    REFERENCES study_plan_materials(plan_id, document_id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_study_sessions_owner_start ON study_sessions(owner_id, scheduled_start);
-            CREATE INDEX IF NOT EXISTS idx_study_sessions_plan ON study_sessions(plan_id, document_id, scheduled_start);
-            """
-        )
-        # Additive migration: a rescheduled session points at the session it replaces.
-        _add_column_if_missing(connection, "study_sessions", "rescheduled_from", "TEXT")
+        CREATE TABLE IF NOT EXISTS study_plan_items (
+            item_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+            document_id TEXT NOT NULL, topic_id TEXT NOT NULL, title TEXT NOT NULL,
+            estimated_minutes INTEGER NOT NULL, remaining_minutes INTEGER NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (owner_id) REFERENCES users(id),
+            FOREIGN KEY (task_id) REFERENCES study_tasks(task_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_study_plan_items_task
+            ON study_plan_items(task_id, priority, created_at);
+
+        CREATE TABLE IF NOT EXISTS topic_progress (
+            owner_id TEXT NOT NULL, document_id TEXT NOT NULL, topic_id TEXT NOT NULL,
+            planned_minutes INTEGER NOT NULL DEFAULT 0, completed_minutes INTEGER NOT NULL DEFAULT 0,
+            progress_percent REAL NOT NULL DEFAULT 0, last_studied_at TEXT,
+            PRIMARY KEY (owner_id, document_id, topic_id),
+            FOREIGN KEY (owner_id) REFERENCES users(id)
+        );
+        """
+    )
+    if connection.backend == db.SQLITE:
+        connection.executescript(_LEGACY_SCHEDULE_RUNS)
+    # Additive migration: completion tracking on study_blocks (Phase 3).
+    _add_column_if_missing(connection, "study_blocks", "completion_status", "TEXT NOT NULL DEFAULT 'scheduled'")
+    _add_column_if_missing(connection, "study_blocks", "completed_at", "TEXT")
+    # Additive migration: learning context on study_blocks (AI Study Planning Agent).
+    _add_column_if_missing(connection, "study_blocks", "objective", "TEXT")
+    _add_column_if_missing(connection, "study_blocks", "study_goal", "TEXT")
+    # Additive migration: optional topic-level linking on study_tasks (in addition to
+    # document-level linking) so a task can scope its generated plan to a single topic.
+    _add_column_if_missing(connection, "study_tasks", "topic_id", "TEXT")
+
+    # Document-centric planner (Study Planner v2). The legacy task/topic tables above stay
+    # untouched but are no longer used by new code. No topic_id anywhere below: a plan is a
+    # set of documents (study packs), and sessions are scheduled per document + activity.
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS study_plans (
+            plan_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, title TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            FOREIGN KEY (owner_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_study_plans_owner ON study_plans(owner_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS study_plan_materials (
+            material_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+            document_id TEXT NOT NULL, deadline TEXT, familiarity TEXT,
+            learning_state TEXT NOT NULL DEFAULT 'new',
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            UNIQUE (plan_id, document_id),
+            FOREIGN KEY (owner_id) REFERENCES users(id),
+            FOREIGN KEY (plan_id) REFERENCES study_plans(plan_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_study_plan_materials_owner_document
+            ON study_plan_materials(owner_id, document_id);
+
+        CREATE TABLE IF NOT EXISTS study_sessions (
+            session_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, plan_id TEXT NOT NULL,
+            document_id TEXT NOT NULL, activity_type TEXT NOT NULL, artifact_id TEXT,
+            scheduled_start TEXT NOT NULL, scheduled_end TEXT NOT NULL,
+            duration_minutes INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'scheduled',
+            reason TEXT, priority_snapshot REAL,
+            started_at TEXT, completed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            FOREIGN KEY (owner_id) REFERENCES users(id),
+            FOREIGN KEY (plan_id) REFERENCES study_plans(plan_id) ON DELETE CASCADE,
+            FOREIGN KEY (plan_id, document_id)
+                REFERENCES study_plan_materials(plan_id, document_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_study_sessions_owner_start ON study_sessions(owner_id, scheduled_start);
+        CREATE INDEX IF NOT EXISTS idx_study_sessions_plan ON study_sessions(plan_id, document_id, scheduled_start);
+        """
+    )
+    # Additive migration: a rescheduled session points at the session it replaces.
+    _add_column_if_missing(connection, "study_sessions", "rescheduled_from", "TEXT")
+    if connection.backend == db.SQLITE:
         _migrate_schedule_runs_for_plans(connection)
+    else:
+        connection.executescript(_SCHEDULE_RUNS)
 
 
-def _migrate_schedule_runs_for_plans(connection: sqlite3.Connection) -> None:
-    """Let schedule_runs log runs for a study plan as well as a legacy task: rebuild it once with
-    a nullable task_id plus a plan_id (SQLite cannot drop NOT NULL in place). Existing rows are
-    copied verbatim. BEGIN IMMEDIATE + a re-check inside the transaction makes two requests racing
-    on a fresh database safe -- the loser sees the already-rebuilt table and does nothing."""
+def _migrate_schedule_runs_for_plans(connection: db.Connection) -> None:
+    """SQLite only. Let schedule_runs log runs for a study plan as well as a legacy task: rebuild it
+    once with a nullable task_id plus a plan_id (SQLite cannot drop NOT NULL in place). Existing rows
+    are copied verbatim. BEGIN IMMEDIATE + a re-check inside the transaction makes two requests
+    racing on a fresh database safe -- the loser sees the already-rebuilt table and does nothing."""
     def needs_rebuild() -> bool:
+        # Read live (not db.table_columns' cache): the re-check below must see a concurrent rebuild.
         return "plan_id" not in {row["name"] for row in connection.execute("PRAGMA table_info(schedule_runs)")}
 
     if not needs_rebuild():
         return
     connection.commit()
-    connection.execute("BEGIN IMMEDIATE")
+    connection.begin_immediate()
     try:
         if needs_rebuild():
             connection.execute(
@@ -222,7 +219,7 @@ def _migrate_schedule_runs_for_plans(connection: sqlite3.Connection) -> None:
 # Study tasks
 # ---------------------------------------------------------------------------
 
-def _task(row: sqlite3.Row) -> dict:
+def _task(row) -> dict:
     return {
         "task_id": row["task_id"], "owner_id": row["owner_id"], "title": row["title"],
         "document_id": row["document_id"], "topic_id": row["topic_id"], "deadline": row["deadline"],
@@ -294,7 +291,7 @@ def delete_task(owner_id: str, task_id: str) -> None:
 # Availability
 # ---------------------------------------------------------------------------
 
-def _availability(row: sqlite3.Row) -> dict:
+def _availability(row) -> dict:
     return {
         "availability_id": row["availability_id"], "owner_id": row["owner_id"],
         "date": row["date"], "start_at": row["start_at"], "end_at": row["end_at"],
@@ -314,7 +311,7 @@ def list_availability(owner_id: str) -> list[dict]:
     return [_availability(row) for row in rows]
 
 
-def _replace_group(connection: sqlite3.Connection, owner_id: str, date: str | None,
+def _replace_group(connection: db.Connection, owner_id: str, date: str | None,
                     day_of_week: int | None, is_recurring: bool, intervals: list[tuple[str, str]]) -> None:
     """Replace every row in one (owner, date) or (owner, recurring day_of_week) group with the
     given minimal, non-overlapping set of (start_at, end_at) HH:MM intervals."""
@@ -398,7 +395,7 @@ def remove_availability(owner_id: str, start_at: str, end_at: str, date: str | N
 # Study blocks
 # ---------------------------------------------------------------------------
 
-def _block(row: sqlite3.Row) -> dict:
+def _block(row) -> dict:
     return {
         "block_id": row["block_id"], "owner_id": row["owner_id"], "task_id": row["task_id"],
         "document_id": row["document_id"], "topic_id": row["topic_id"], "title": row["title"],
@@ -537,7 +534,7 @@ def record_schedule_run(owner_id: str, task_id: str, reason: str = "initial") ->
 # Study plan items (Phase 2: document-aware planning -- one per document topic)
 # ---------------------------------------------------------------------------
 
-def _plan_item(row: sqlite3.Row) -> dict:
+def _plan_item(row) -> dict:
     return {
         "item_id": row["item_id"], "task_id": row["task_id"], "owner_id": row["owner_id"],
         "document_id": row["document_id"], "topic_id": row["topic_id"], "title": row["title"],
@@ -619,7 +616,7 @@ def sum_estimated_minutes_for_topic(owner_id: str, document_id: str, topic_id: s
 # Topic progress (Phase 3: completion tracking)
 # ---------------------------------------------------------------------------
 
-def _topic_progress(row: sqlite3.Row) -> dict:
+def _topic_progress(row) -> dict:
     return {
         "owner_id": row["owner_id"], "document_id": row["document_id"], "topic_id": row["topic_id"],
         "planned_minutes": row["planned_minutes"], "completed_minutes": row["completed_minutes"],
@@ -750,11 +747,11 @@ def validate_session(session: dict) -> None:
         raise ValueError("duration_minutes must be a positive whole number that fits the scheduled window.")
 
 
-def _plan(row: sqlite3.Row) -> dict:
+def _plan(row) -> dict:
     return {key: row[key] for key in ("plan_id", "owner_id", "title", "status", "created_at", "updated_at")}
 
 
-def _material(row: sqlite3.Row) -> dict:
+def _material(row) -> dict:
     return {
         key: row[key]
         for key in ("material_id", "plan_id", "owner_id", "document_id", "deadline", "familiarity",
@@ -762,7 +759,7 @@ def _material(row: sqlite3.Row) -> dict:
     }
 
 
-def _session(row: sqlite3.Row) -> dict:
+def _session(row) -> dict:
     return {
         key: row[key]
         for key in ("session_id", "owner_id", "plan_id", "document_id", "activity_type", "artifact_id",
@@ -864,7 +861,7 @@ def add_material(owner_id: str, plan_id: str, document_id: str, deadline: str | 
                    familiarity, learning_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (material_id, plan_id, owner_id, document_id, deadline, familiarity, learning_state, now, now),
             )
-    except sqlite3.IntegrityError as error:
+    except db.IntegrityError as error:
         raise ValueError("This document is already part of the study plan.") from error
     return get_material(owner_id, material_id)
 
@@ -1014,7 +1011,7 @@ def count_active_plan_sessions(owner_id: str, plan_id: str) -> int:
         ).fetchone()[0]
 
 
-def _insert_schedule_run(connection: sqlite3.Connection, owner_id: str, plan_id: str, reason: str) -> dict:
+def _insert_schedule_run(connection: db.Connection, owner_id: str, plan_id: str, reason: str) -> dict:
     schedule_run_id, created_at = str(uuid4()), utc_now_iso()
     connection.execute(
         "INSERT INTO schedule_runs (schedule_run_id, owner_id, plan_id, reason, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -1034,7 +1031,7 @@ def confirm_plan_sessions(owner_id: str, plan_id: str, sessions: list[dict], rea
     rows = _session_rows(owner_id, plan_id, sessions)
     connection = _connect()
     try:
-        connection.execute("BEGIN IMMEDIATE")
+        connection.begin_immediate()
         active = connection.execute(
             f"SELECT COUNT(*) FROM study_sessions WHERE owner_id=? AND plan_id=? "
             f"AND status IN ({','.join('?' * len(ACTIVE_SESSION_STATUSES))})",
@@ -1075,7 +1072,7 @@ _REFUSALS = {"start": ("session_not_startable", "started"), "complete": ("sessio
              "skip": ("session_not_skippable", "skipped")}
 
 
-def _locked_session(connection: sqlite3.Connection, owner_id: str, session_id: str) -> sqlite3.Row:
+def _locked_session(connection: db.Connection, owner_id: str, session_id: str):
     row = connection.execute(
         """SELECT s.*, p.status AS plan_status FROM study_sessions s
            JOIN study_plans p ON p.plan_id = s.plan_id
@@ -1098,7 +1095,7 @@ def transition_session(owner_id: str, session_id: str, action: str) -> tuple[dic
     initialize_study_planner_store()
     connection = _connect()
     try:
-        connection.execute("BEGIN IMMEDIATE")
+        connection.begin_immediate()
         row = _locked_session(connection, owner_id, session_id)
         status, changed = row["status"], False
         if status != target:
@@ -1143,7 +1140,7 @@ def reschedule_session(owner_id: str, session_id: str, scheduled_start: str, sch
     initialize_study_planner_store()
     connection = _connect()
     try:
-        connection.execute("BEGIN IMMEDIATE")
+        connection.begin_immediate()
         row = _locked_session(connection, owner_id, session_id)
         if row["status"] not in RESCHEDULABLE_STATUSES:
             raise SessionTransitionError("session_not_reschedulable", f"A {row['status']} session cannot be rescheduled.",
@@ -1216,7 +1213,7 @@ def apply_adaptation_changes(owner_id: str, plan_id: str, fingerprint: tuple, no
             raise ValueError("Session document is not part of this study plan.")
     connection = _connect()
     try:
-        connection.execute("BEGIN IMMEDIATE")
+        connection.begin_immediate()
         plan = connection.execute("SELECT status FROM study_plans WHERE plan_id=? AND owner_id=?",
                                   (plan_id, owner_id)).fetchone()
         if not plan:

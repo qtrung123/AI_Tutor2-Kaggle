@@ -1,70 +1,56 @@
-"""Owner-scoped SQLite persistence for grounded document flashcards."""
+"""Owner-scoped persistence for grounded document flashcards (PostgreSQL or SQLite)."""
 
 import json
-import sqlite3
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from backend import db
 from backend.auth_store import initialize_auth_store
 from config import DATABASE_PATH
 
 
-class _ClosingConnection(sqlite3.Connection):
-    def __exit__(self, exc_type, exc_value, traceback):
-        try:
-            return super().__exit__(exc_type, exc_value, traceback)
-        finally:
-            self.close()
-
-
-def _connect() -> sqlite3.Connection:
-    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DATABASE_PATH, timeout=15, factory=_ClosingConnection)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA busy_timeout = 15000")
-    return connection
+def _connect() -> db.Connection:
+    return db.connect(DATABASE_PATH)
 
 
 def initialize_flashcard_store() -> None:
     initialize_auth_store()
-    with _connect() as connection:
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS flashcard_sets (
-                set_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, document_id TEXT NOT NULL,
-                document_hash TEXT NOT NULL, topic_schema_version INTEGER NOT NULL,
-                flashcard_version TEXT NOT NULL, model_id TEXT NOT NULL, runtime_model TEXT NOT NULL,
-                topic_ids_json TEXT NOT NULL, created_at TEXT NOT NULL,
-                FOREIGN KEY (owner_id) REFERENCES users(id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_flashcard_set_identity ON flashcard_sets(
-                owner_id, document_id, document_hash, topic_schema_version,
-                flashcard_version, model_id, runtime_model, created_at DESC
-            );
-            CREATE TABLE IF NOT EXISTS flashcards (
-                flashcard_id TEXT PRIMARY KEY, set_id TEXT NOT NULL, owner_id TEXT NOT NULL,
-                document_id TEXT NOT NULL, topic_id TEXT NOT NULL, topic_name TEXT NOT NULL,
-                subtopic_id TEXT, subtopic_name TEXT, front TEXT NOT NULL, back TEXT NOT NULL,
-                source_chunk_ids_json TEXT NOT NULL DEFAULT '[]', is_favorite INTEGER NOT NULL DEFAULT 0,
-                position INTEGER NOT NULL, created_at TEXT NOT NULL,
-                FOREIGN KEY (set_id) REFERENCES flashcard_sets(set_id) ON DELETE CASCADE,
-                FOREIGN KEY (owner_id) REFERENCES users(id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_flashcards_owner_document
-                ON flashcards(owner_id, document_id, position, created_at);
-            """
-        )
-        # Additive migration: flashcard_language distinguishes cached sets by requested study
-        # language (Auto/English/Vietnamese) so one language's cache is never served for another.
-        existing_columns = {row["name"] for row in connection.execute("PRAGMA table_info(flashcard_sets)")}
-        if "flashcard_language" not in existing_columns:
-            connection.execute(
-                "ALTER TABLE flashcard_sets ADD COLUMN flashcard_language TEXT NOT NULL DEFAULT 'auto'"
-            )
+    db.ensure_schema("flashcards", DATABASE_PATH, _initialize_schema)
 
 
-def _card(row: sqlite3.Row) -> dict:
+def _initialize_schema(connection: db.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS flashcard_sets (
+            set_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, document_id TEXT NOT NULL,
+            document_hash TEXT NOT NULL, topic_schema_version INTEGER NOT NULL,
+            flashcard_version TEXT NOT NULL, model_id TEXT NOT NULL, runtime_model TEXT NOT NULL,
+            topic_ids_json TEXT NOT NULL, created_at TEXT NOT NULL,
+            FOREIGN KEY (owner_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_flashcard_set_identity ON flashcard_sets(
+            owner_id, document_id, document_hash, topic_schema_version,
+            flashcard_version, model_id, runtime_model, created_at DESC
+        );
+        CREATE TABLE IF NOT EXISTS flashcards (
+            flashcard_id TEXT PRIMARY KEY, set_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+            document_id TEXT NOT NULL, topic_id TEXT NOT NULL, topic_name TEXT NOT NULL,
+            subtopic_id TEXT, subtopic_name TEXT, front TEXT NOT NULL, back TEXT NOT NULL,
+            source_chunk_ids_json TEXT NOT NULL DEFAULT '[]', is_favorite INTEGER NOT NULL DEFAULT 0,
+            position INTEGER NOT NULL, created_at TEXT NOT NULL,
+            FOREIGN KEY (set_id) REFERENCES flashcard_sets(set_id) ON DELETE CASCADE,
+            FOREIGN KEY (owner_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_flashcards_owner_document
+            ON flashcards(owner_id, document_id, position, created_at);
+        """
+    )
+    # Additive migration: flashcard_language distinguishes cached sets by requested study
+    # language (Auto/English/Vietnamese) so one language's cache is never served for another.
+    db.add_column(connection, "flashcard_sets", "flashcard_language", "TEXT NOT NULL DEFAULT 'auto'")
+
+
+def _card(row) -> dict:
     return {
         "flashcard_id": row["flashcard_id"], "set_id": row["set_id"], "owner_id": row["owner_id"],
         "document_id": row["document_id"], "topic_id": row["topic_id"],

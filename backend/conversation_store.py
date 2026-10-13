@@ -1,99 +1,82 @@
-"""SQLite persistence for independent chat conversations and their messages."""
+"""Persistence for independent chat conversations and their messages (PostgreSQL or SQLite)."""
 
-import sqlite3
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from backend import db
 from config import DATABASE_PATH
 from backend.auth_store import LEGACY_USER_ID, initialize_auth_store
-
-
-class _ClosingConnection(sqlite3.Connection):
-    """Close SQLite file handles when a transaction context exits."""
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        try:
-            return super().__exit__(exc_type, exc_value, traceback)
-        finally:
-            self.close()
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _connect() -> sqlite3.Connection:
-    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DATABASE_PATH, timeout=15, factory=_ClosingConnection)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA busy_timeout = 15000")
-    return connection
+def _connect() -> db.Connection:
+    return db.connect(DATABASE_PATH)
 
 
 def initialize_conversation_store() -> None:
     initialize_auth_store()
-    with _connect() as connection:
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS conversations (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS conversation_sources (
-                conversation_id TEXT NOT NULL,
-                document_id TEXT NOT NULL,
-                PRIMARY KEY (conversation_id, document_id),
-                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS messages (
-                id TEXT PRIMARY KEY,
-                conversation_id TEXT NOT NULL,
-                role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
-                content TEXT NOT NULL,
-                grounding_status TEXT,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS message_citations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                message_id TEXT NOT NULL,
-                document_id TEXT NOT NULL,
-                page TEXT,
-                chunk TEXT,
-                content TEXT,
-                FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_messages_conversation
-                ON messages(conversation_id, created_at);
-            """
-        )
-        columns = {row["name"] for row in connection.execute("PRAGMA table_info(conversations)")}
-        if "owner_id" not in columns:
-            connection.execute(
-                f"ALTER TABLE conversations ADD COLUMN owner_id TEXT NOT NULL DEFAULT '{LEGACY_USER_ID}'"
-            )
-        if "document_id" not in columns:
-            connection.execute("ALTER TABLE conversations ADD COLUMN document_id TEXT")
-        connection.execute(
-            """
-            UPDATE conversations
-            SET document_id = (
-                SELECT cs.document_id FROM conversation_sources cs
-                WHERE cs.conversation_id = conversations.id
-                ORDER BY cs.document_id LIMIT 1
-            )
-            WHERE document_id IS NULL
-            """
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_conversations_owner ON conversations(owner_id, updated_at)"
-        )
+    db.ensure_schema("conversations", DATABASE_PATH, _initialize_schema)
 
 
-def _source_ids(connection: sqlite3.Connection, conversation_id: str) -> list[str]:
+def _initialize_schema(connection: db.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS conversations (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS conversation_sources (
+            conversation_id TEXT NOT NULL,
+            document_id TEXT NOT NULL,
+            PRIMARY KEY (conversation_id, document_id),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+            content TEXT NOT NULL,
+            grounding_status TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS message_citations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT NOT NULL,
+            document_id TEXT NOT NULL,
+            page TEXT,
+            chunk TEXT,
+            content TEXT,
+            FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_messages_conversation
+            ON messages(conversation_id, created_at);
+        """
+    )
+    db.add_column(connection, "conversations", "owner_id", f"TEXT NOT NULL DEFAULT '{LEGACY_USER_ID}'")
+    db.add_column(connection, "conversations", "document_id", "TEXT")
+    connection.execute(
+        """
+        UPDATE conversations
+        SET document_id = (
+            SELECT cs.document_id FROM conversation_sources cs
+            WHERE cs.conversation_id = conversations.id
+            ORDER BY cs.document_id LIMIT 1
+        )
+        WHERE document_id IS NULL
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conversations_owner ON conversations(owner_id, updated_at)"
+    )
+
+
+def _source_ids(connection: db.Connection, conversation_id: str) -> list[str]:
     rows = connection.execute(
         "SELECT document_id FROM conversation_sources WHERE conversation_id = ? ORDER BY document_id",
         (conversation_id,),
@@ -101,7 +84,7 @@ def _source_ids(connection: sqlite3.Connection, conversation_id: str) -> list[st
     return [row["document_id"] for row in rows]
 
 
-def _conversation_result(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
+def _conversation_result(connection: db.Connection, row) -> dict:
     item = dict(row)
     document_id = item.get("document_id")
     item["document_ids"] = [document_id] if document_id else _source_ids(connection, row["id"])

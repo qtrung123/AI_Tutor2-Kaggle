@@ -1,64 +1,51 @@
-"""Owner-scoped SQLite persistence for generated document summaries."""
+"""Owner-scoped persistence for generated document summaries (PostgreSQL or SQLite)."""
 
 import json
-import sqlite3
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from backend import db
 from backend.auth_store import initialize_auth_store
 from config import DATABASE_PATH
 
 
-class _ClosingConnection(sqlite3.Connection):
-    def __exit__(self, exc_type, exc_value, traceback):
-        try:
-            return super().__exit__(exc_type, exc_value, traceback)
-        finally:
-            self.close()
+def _connect() -> db.Connection:
+    return db.connect(DATABASE_PATH)
 
 
-def _connect() -> sqlite3.Connection:
-    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DATABASE_PATH, timeout=15, factory=_ClosingConnection)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA busy_timeout = 15000")
-    return connection
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS document_summaries (
+    summary_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    document_id TEXT NOT NULL,
+    version_number INTEGER NOT NULL,
+    document_hash TEXT NOT NULL,
+    topic_schema_version INTEGER NOT NULL,
+    summary_version TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    runtime_model TEXT NOT NULL,
+    topic_summaries_json TEXT NOT NULL,
+    final_summary_json TEXT NOT NULL,
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (owner_id) REFERENCES users(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_document_summary_version
+    ON document_summaries(owner_id, document_id, version_number);
+CREATE INDEX IF NOT EXISTS idx_document_summary_identity
+    ON document_summaries(
+        owner_id, document_id, document_hash, topic_schema_version,
+        summary_version, model_id, version_number DESC
+    );
+"""
 
 
 def initialize_summary_store() -> None:
     initialize_auth_store()
-    with _connect() as connection:
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS document_summaries (
-                summary_id TEXT PRIMARY KEY,
-                owner_id TEXT NOT NULL,
-                document_id TEXT NOT NULL,
-                version_number INTEGER NOT NULL,
-                document_hash TEXT NOT NULL,
-                topic_schema_version INTEGER NOT NULL,
-                summary_version TEXT NOT NULL,
-                model_id TEXT NOT NULL,
-                runtime_model TEXT NOT NULL,
-                topic_summaries_json TEXT NOT NULL,
-                final_summary_json TEXT NOT NULL,
-                metrics_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (owner_id) REFERENCES users(id)
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_document_summary_version
-                ON document_summaries(owner_id, document_id, version_number);
-            CREATE INDEX IF NOT EXISTS idx_document_summary_identity
-                ON document_summaries(
-                    owner_id, document_id, document_hash, topic_schema_version,
-                    summary_version, model_id, version_number DESC
-                );
-            """
-        )
+    db.ensure_schema("summaries", DATABASE_PATH, lambda connection: connection.executescript(_SCHEMA))
 
 
-def _decode(row: sqlite3.Row | None) -> dict | None:
+def _decode(row) -> dict | None:
     if not row:
         return None
     return {

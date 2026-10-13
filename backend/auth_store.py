@@ -1,6 +1,5 @@
 import hashlib
 import secrets
-import threading
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -15,11 +14,6 @@ from config import ADMIN_EMAILS, AUTH_SESSION_DAYS, DATABASE_PATH, LEGACY_USER_E
 LEGACY_USER_ID = "local_student"
 _password_hasher = PasswordHasher()
 _dummy_hash = _password_hasher.hash("not-a-real-user-password")
-# Never a valid argon2 hash, so a SQLite placeholder row for a PostgreSQL user can't log in.
-_LOCAL_PLACEHOLDER_PASSWORD_HASH = "!stored-in-postgres"
-_postgres_schema_ready = False
-_postgres_schema_lock = threading.Lock()
-_mirrored_users: set[tuple[str, str]] = set()
 
 _SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -46,9 +40,7 @@ CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expi
 # Timestamps stay ISO-8601 UTC TEXT, as in SQLite: every value is written by utc_now().isoformat(),
 # so string comparisons (expires_at > now) and API payloads behave identically on both backends.
 # PostgreSQL has no COLLATE NOCASE; case-insensitive email uniqueness is an index on lower(email).
-# The advisory lock serializes schema creation if two processes start at once.
 _POSTGRES_SCHEMA = """
-SELECT pg_advisory_xact_lock(7241001);
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
@@ -72,13 +64,9 @@ CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expi
 """
 
 
-def _connect():
+def _connect() -> db.Connection:
     """Auth tables live in PostgreSQL when DATABASE_URL is set, otherwise in the SQLite file."""
     return db.connect(DATABASE_PATH)
-
-
-def _connect_local_sqlite():
-    return db.connect(DATABASE_PATH, backend=db.SQLITE)
 
 
 def utc_now() -> datetime:
@@ -107,57 +95,13 @@ def _ensure_legacy_user(connection: db.Connection) -> None:
         )
 
 
-def _initialize_postgres_schema() -> None:
-    """Create the PostgreSQL auth schema once per process; never drops or rebuilds tables."""
-    global _postgres_schema_ready
-    if _postgres_schema_ready:
-        return
-    with _postgres_schema_lock:
-        if _postgres_schema_ready:
-            return
-        with _connect() as connection:
-            connection.executescript(_POSTGRES_SCHEMA)
-            _ensure_legacy_user(connection)
-        _postgres_schema_ready = True
+def _initialize_schema(connection: db.Connection) -> None:
+    connection.executescript(_POSTGRES_SCHEMA if connection.backend == db.POSTGRES else _SQLITE_SCHEMA)
+    _ensure_legacy_user(connection)
 
 
 def initialize_auth_store() -> None:
-    # The SQLite users table is always kept: stores not yet moved to PostgreSQL declare
-    # FOREIGN KEY (owner_id) REFERENCES users(id) against it in the same SQLite file.
-    if db.selected_backend() == db.POSTGRES:
-        _initialize_postgres_schema()
-        local = _connect_local_sqlite()
-    else:
-        local = _connect()
-    with local as connection:
-        connection.executescript(_SQLITE_SCHEMA)
-        _ensure_legacy_user(connection)
-
-
-def _mirror_user_locally(user: dict) -> None:
-    """Give a PostgreSQL user a credential-less SQLite users row so local foreign keys hold.
-
-    Needed only until every store has moved to PostgreSQL. The placeholder email is derived from
-    the id, so it never collides with an older SQLite account restored from a previous session.
-    """
-    if db.selected_backend() != db.POSTGRES:
-        return
-    key = (str(DATABASE_PATH), user["id"])
-    if key in _mirrored_users:
-        return
-    with _connect_local_sqlite() as connection:
-        connection.execute(
-            "INSERT INTO users (id, display_name, email, password_hash, created_at) "
-            "VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-            (
-                user["id"],
-                user["display_name"],
-                f"{user['id']}@postgres-account.invalid",
-                _LOCAL_PLACEHOLDER_PASSWORD_HASH,
-                user["created_at"],
-            ),
-        )
-    _mirrored_users.add(key)
+    db.ensure_schema("auth", DATABASE_PATH, _initialize_schema)
 
 
 def normalize_email(email: str) -> str:
@@ -180,11 +124,9 @@ def create_user(display_name: str, email: str, password: str) -> dict:
                 (user_id, display_name.strip(), normalize_email(email), _password_hasher.hash(password), now),
             )
             row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-            user = _public_user(row)
+            return _public_user(row)
     except db.IntegrityError as error:
         raise ValueError("An account with this email already exists.") from error
-    _mirror_user_locally(user)
-    return user
 
 
 def authenticate_user(email: str, password: str) -> dict | None:
@@ -200,9 +142,7 @@ def authenticate_user(email: str, password: str) -> dict | None:
         verified = False
     if not row or not verified or row["disabled_at"]:
         return None
-    user = _public_user(row)
-    _mirror_user_locally(user)
-    return user
+    return _public_user(row)
 
 
 def create_session(user_id: str) -> tuple[str, dict]:
@@ -242,11 +182,7 @@ def get_user_for_session(raw_token: str | None) -> dict | None:
             connection.execute(
                 "UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?", (now, token_hash)
             )
-    if not row:
-        return None
-    user = _public_user(row)
-    _mirror_user_locally(user)
-    return user
+    return _public_user(row) if row else None
 
 
 def revoke_session(raw_token: str | None) -> None:

@@ -34,8 +34,6 @@ class AuthStoreTestBase(unittest.TestCase):
         self.stdout = io.StringIO()
         self.stack = ExitStack()
         self.stack.enter_context(patch.object(auth_store, "DATABASE_PATH", self.local_db))
-        self.stack.enter_context(patch.object(auth_store, "_postgres_schema_ready", False))
-        self.stack.enter_context(patch.object(auth_store, "_mirrored_users", set()))
         self.stack.enter_context(patch.object(db, "_announced", set()))
         self.stack.enter_context(patch("sys.stdout", self.stdout))
 
@@ -67,7 +65,7 @@ class SQLiteAuthStoreTests(AuthStoreTestBase):
         environment = {key: value for key, value in os.environ.items() if key != "DATABASE_URL"}
         self.stack.enter_context(patch.dict(os.environ, environment, clear=True))
         # Any attempt to load the PostgreSQL driver would raise ImportError.
-        self.stack.enter_context(patch.dict(sys.modules, {"psycopg": None}))
+        self.stack.enter_context(patch.dict(sys.modules, {"psycopg": None, "psycopg_pool": None}))
 
     def test_auth_behavior_is_unchanged_without_database_url(self):
         user = self.assert_full_auth_flow()
@@ -101,24 +99,18 @@ class PostgresAuthStoreTests(AuthStoreTestBase):
         self.stack.enter_context(self.fake.installed(SECRET_URL))
 
     def simulate_kaggle_restart(self):
-        """New process on a fresh Kaggle disk: in-process state and the local SQLite file are gone."""
-        auth_store._postgres_schema_ready = False
-        auth_store._mirrored_users.clear()
-        self.local_db.unlink()
+        """New process on a fresh Kaggle disk: pools, schema cache and the local data dir are gone."""
+        db.close_pools()
+        db._schema_ready.clear()
+        if self.local_db.exists():
+            self.local_db.unlink()
 
-    def test_auth_flow_runs_on_postgres(self):
+    def test_auth_flow_runs_on_postgres_and_never_touches_local_sqlite(self):
         user = self.assert_full_auth_flow()
         stored = query(self.postgres_db, "SELECT id, email, password_hash FROM users WHERE id = ?", (user["id"],))
         self.assertEqual(stored[0][:2], (user["id"], "ada@example.com"))
         self.assertTrue(stored[0][2].startswith("$argon2"))
-        self.assertEqual(len(query(self.postgres_db, "SELECT 1 FROM auth_sessions WHERE user_id = ?", (user["id"],))), 1)
-        self.assertEqual(query(self.local_db, "SELECT 1 FROM auth_sessions"), [])
-
-    def test_local_sqlite_keeps_only_a_credential_less_placeholder_row(self):
-        user = auth_store.create_user("Ada", "ada@example.com", PASSWORD)
-        local = query(self.local_db, "SELECT email, password_hash FROM users WHERE id = ?", (user["id"],))
-        self.assertEqual(local, [(f"{user['id']}@postgres-account.invalid", "!stored-in-postgres")])
-        self.assertEqual(query(self.local_db, "SELECT 1 FROM users WHERE email = 'ada@example.com'"), [])
+        self.assertFalse(self.local_db.exists())
 
     def test_user_id_survives_a_kaggle_restart(self):
         user = auth_store.create_user("Ada", "ada@example.com", PASSWORD)
@@ -129,20 +121,6 @@ class PostgresAuthStoreTests(AuthStoreTestBase):
         with self.assertRaisesRegex(ValueError, "already exists"):
             auth_store.create_user("Ada again", "ada@example.com", PASSWORD)
         self.assertEqual(query(self.postgres_db, "SELECT COUNT(*) FROM users WHERE lower(email) = 'ada@example.com'"), [(1,)])
-
-    def test_local_foreign_keys_accept_postgres_users_after_a_restart(self):
-        user = auth_store.create_user("Ada", "ada@example.com", PASSWORD)
-        token, _session = auth_store.create_session(user["id"])
-        self.simulate_kaggle_restart()
-        auth_store.get_user_for_session(token)
-        raw = sqlite3.connect(self.local_db)
-        try:
-            raw.execute("PRAGMA foreign_keys = ON")
-            raw.execute("CREATE TABLE owned (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id))")
-            raw.execute("INSERT INTO owned (id, owner_id) VALUES ('x', ?)", (user["id"],))
-            raw.commit()
-        finally:
-            raw.close()
 
     def test_schema_initialization_is_idempotent_and_never_destructive(self):
         auth_store.initialize_auth_store()

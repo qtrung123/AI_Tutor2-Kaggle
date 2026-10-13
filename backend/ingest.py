@@ -197,6 +197,15 @@ def delete_stale_source_vectors(vectorstore, owner_id: str, document_id: str, cu
     return stale_ids
 
 
+def has_source_vectors(vectorstore, owner_id: str, document_id: str) -> bool:
+    """Whether the local vectorstore still holds chunks for this owner's document.
+
+    The document registry can outlive the vectors (PostgreSQL survives a Kaggle reset; the local
+    Chroma directory does not), so a matching hash alone does not mean the file is still indexed."""
+    result = vectorstore.get(where={"$and": [{"owner_id": owner_id}, {"document_id": document_id}]}, limit=1, include=[])
+    return bool(result.get("ids"))
+
+
 def load_document_chunks(file_path: Path, owner_id: str, file_hash: str):
     """Load pages and split them into chunks carrying the document's ownership metadata."""
     documents = clean_documents(load_single_file(file_path))
@@ -302,7 +311,8 @@ def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
         file_hash = calculate_file_hash(file_path)
         file_key = file_path.name
 
-        if file_key in indexed_files and indexed_files[file_key]["hash"] == file_hash:
+        if (file_key in indexed_files and indexed_files[file_key]["hash"] == file_hash
+                and has_source_vectors(vectorstore, owner_id, file_key)):
             if indexed_files[file_key].get("topic_schema_version") == TOPIC_SCHEMA_VERSION:
                 print(f"Skipping already indexed file: {file_path.name}")
                 skipped_files.append(file_path.name)

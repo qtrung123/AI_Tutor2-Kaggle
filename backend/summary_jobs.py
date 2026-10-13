@@ -9,7 +9,6 @@ job ids this process is actually running decides staleness - a "processing" row 
 owns (e.g. the Kaggle session restarted mid-generation) is marked failed instead of staying stuck.
 """
 
-import sqlite3
 import threading
 import time
 import traceback
@@ -17,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from backend import db
 from backend.auth_store import initialize_auth_store
 from backend.indexed_document_store import get_indexed_document
 from backend.model_registry import prepare_generation_model
@@ -31,56 +31,43 @@ _lock = threading.Lock()
 _live_jobs: set[str] = set()
 
 
-class _ClosingConnection(sqlite3.Connection):
-    def __exit__(self, exc_type, exc_value, traceback):
-        try:
-            return super().__exit__(exc_type, exc_value, traceback)
-        finally:
-            self.close()
+def _connect() -> db.Connection:
+    return db.connect(DATABASE_PATH)
 
 
-def _connect() -> sqlite3.Connection:
-    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DATABASE_PATH, timeout=15, factory=_ClosingConnection)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA busy_timeout = 15000")
-    return connection
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS summary_jobs (
+    job_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    document_id TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    regenerate INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    summary_id TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (owner_id) REFERENCES users(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_summary_jobs_one_processing
+    ON summary_jobs(owner_id, fingerprint) WHERE status = 'processing';
+CREATE INDEX IF NOT EXISTS idx_summary_jobs_document
+    ON summary_jobs(owner_id, document_id, created_at DESC);
+"""
 
 
 def initialize_summary_job_store() -> None:
     initialize_auth_store()
-    with _connect() as connection:
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS summary_jobs (
-                job_id TEXT PRIMARY KEY,
-                owner_id TEXT NOT NULL,
-                document_id TEXT NOT NULL,
-                model_id TEXT NOT NULL,
-                fingerprint TEXT NOT NULL,
-                regenerate INTEGER NOT NULL DEFAULT 0,
-                status TEXT NOT NULL,
-                summary_id TEXT,
-                error_code TEXT,
-                error_message TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (owner_id) REFERENCES users(id)
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_summary_jobs_one_processing
-                ON summary_jobs(owner_id, fingerprint) WHERE status = 'processing';
-            CREATE INDEX IF NOT EXISTS idx_summary_jobs_document
-                ON summary_jobs(owner_id, document_id, created_at DESC);
-            """
-        )
+    db.ensure_schema("summary_jobs", DATABASE_PATH, lambda connection: connection.executescript(_SCHEMA))
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _decode(row: sqlite3.Row | None) -> dict | None:
+def _decode(row) -> dict | None:
     return dict(row) if row else None
 
 
@@ -111,7 +98,7 @@ def _fail_if_orphaned(job: dict | None) -> dict | None:
     return job
 
 
-def _processing_job(connection: sqlite3.Connection, owner_id: str, fingerprint: str) -> dict | None:
+def _processing_job(connection: db.Connection, owner_id: str, fingerprint: str) -> dict | None:
     return _decode(connection.execute(
         "SELECT * FROM summary_jobs WHERE owner_id=? AND fingerprint=? AND status='processing'",
         (owner_id, fingerprint),

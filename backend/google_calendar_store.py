@@ -1,4 +1,4 @@
-"""Owner-scoped SQLite persistence for the Google Calendar integration.
+"""Owner-scoped persistence for the Google Calendar integration (PostgreSQL or SQLite).
 
 Three small tables in the planner's database (the event links point at study_sessions rows, so they
 live -- and are test-isolated -- together; see study_planner_store._connect):
@@ -14,11 +14,38 @@ Persistence only: no HTTP, no encryption, no planner decisions. Every query is s
 import hashlib
 from datetime import datetime, timedelta, timezone
 
-from backend import study_planner_store
+from backend import db, study_planner_store
 from backend.study_planner_store import utc_now_iso
 
 CONNECTION_STATUSES = ("connected", "reconnect_required")
 LINK_STATUSES = ("synced", "error")
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS google_calendar_connections (
+    owner_id TEXT PRIMARY KEY, encrypted_refresh_token TEXT NOT NULL,
+    granted_scopes TEXT NOT NULL DEFAULT '', study_calendar_id TEXT, study_calendar_name TEXT,
+    status TEXT NOT NULL DEFAULT 'connected',
+    avoid_conflicts INTEGER NOT NULL DEFAULT 1, sync_sessions INTEGER NOT NULL DEFAULT 1,
+    utc_offset_minutes INTEGER,
+    connected_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    FOREIGN KEY (owner_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS google_calendar_event_links (
+    owner_id TEXT NOT NULL, session_id TEXT NOT NULL, calendar_id TEXT NOT NULL,
+    google_event_id TEXT NOT NULL, synced_hash TEXT, last_synced_at TEXT,
+    sync_status TEXT NOT NULL DEFAULT 'synced', last_error TEXT,
+    PRIMARY KEY (owner_id, session_id),
+    FOREIGN KEY (owner_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS google_oauth_states (
+    state_hash TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL, consumed_at TEXT,
+    FOREIGN KEY (owner_id) REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_google_oauth_states_owner ON google_oauth_states(owner_id);
+"""
 
 
 def _connect():
@@ -27,35 +54,8 @@ def _connect():
 
 def initialize_google_calendar_store() -> None:
     study_planner_store.initialize_study_planner_store()
-    with _connect() as connection:
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS google_calendar_connections (
-                owner_id TEXT PRIMARY KEY, encrypted_refresh_token TEXT NOT NULL,
-                granted_scopes TEXT NOT NULL DEFAULT '', study_calendar_id TEXT, study_calendar_name TEXT,
-                status TEXT NOT NULL DEFAULT 'connected',
-                avoid_conflicts INTEGER NOT NULL DEFAULT 1, sync_sessions INTEGER NOT NULL DEFAULT 1,
-                utc_offset_minutes INTEGER,
-                connected_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                FOREIGN KEY (owner_id) REFERENCES users(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS google_calendar_event_links (
-                owner_id TEXT NOT NULL, session_id TEXT NOT NULL, calendar_id TEXT NOT NULL,
-                google_event_id TEXT NOT NULL, synced_hash TEXT, last_synced_at TEXT,
-                sync_status TEXT NOT NULL DEFAULT 'synced', last_error TEXT,
-                PRIMARY KEY (owner_id, session_id),
-                FOREIGN KEY (owner_id) REFERENCES users(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS google_oauth_states (
-                state_hash TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
-                expires_at TEXT NOT NULL, consumed_at TEXT,
-                FOREIGN KEY (owner_id) REFERENCES users(id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_google_oauth_states_owner ON google_oauth_states(owner_id);
-            """
-        )
+    db.ensure_schema("google_calendar", study_planner_store.DATABASE_PATH,
+                     lambda connection: connection.executescript(_SCHEMA))
 
 
 # -- OAuth state ----------------------------------------------------------------
@@ -234,7 +234,8 @@ def link_summary(owner_id: str) -> dict:
     initialize_google_calendar_store()
     with _connect() as connection:
         row = connection.execute(
-            """SELECT SUM(sync_status='error') AS errors, MAX(last_synced_at) AS last_synced_at
+            """SELECT SUM(CASE WHEN sync_status='error' THEN 1 ELSE 0 END) AS errors,
+                      MAX(last_synced_at) AS last_synced_at
                FROM google_calendar_event_links WHERE owner_id=?""",
             (owner_id,),
         ).fetchone()

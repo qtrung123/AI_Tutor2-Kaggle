@@ -87,9 +87,21 @@ tail -n 100 /kaggle/working/ai-tutor-logs/nginx.log
 
 Khi một service không sẵn sàng trước timeout, `start_kaggle.sh` in log liên quan và thoát khác 0. PID nằm trong `/kaggle/working/ai-tutor-runtime`.
 
+## PostgreSQL (`DATABASE_URL`)
+
+Tài khoản và toàn bộ dữ liệu quan hệ (hội thoại, metadata tài liệu, summary, flashcard, quiz và lịch sử làm bài, mastery/progress, planner, kết nối Google Calendar) được lưu trong PostgreSQL bên ngoài khi có `DATABASE_URL`, nên không mất khi Kaggle khởi động lại. Đăng nhập lại bằng cùng email sẽ dùng đúng `user_id` cũ.
+
+1. Tạo Kaggle Secret tên `DATABASE_URL` dạng `postgresql://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require` (mật khẩu có ký tự đặc biệt phải percent-encode, ví dụ `@` → `%40`) và bật secret đó cho notebook.
+2. `start_kaggle.sh` tự đọc secret này (hoặc biến môi trường `DATABASE_URL` nếu đã có), kiểm tra kết nối trước khi tải model và chỉ in `[db] backend=postgres connected`. Không bao giờ in URL hay mật khẩu.
+3. Thiếu `DATABASE_URL` thì script dừng với lỗi rõ ràng thay vì âm thầm dùng SQLite tạm thời. Đặt `AI_TUTOR_ALLOW_SQLITE=1` nếu thật sự muốn chạy SQLite (dữ liệu sẽ mất khi session kết thúc).
+
+Bảng được tạo tự động (`CREATE TABLE IF NOT EXISTS`, chỉ thêm cột còn thiếu), không bao giờ xóa hay truncate bảng. File `data/conversations.db` cũ (kể cả bản khôi phục từ dataset) **không** được tự động chuyển sang PostgreSQL.
+
 ## Dữ liệu và tính lâu bền
 
-`/kaggle/input` là read-only. Tài liệu upload, `data/conversations.db`, `vectorstore/` và `indexed_files.json` được ghi dưới `/kaggle/working/AI_Tutor2`. Chúng mất khi session kết thúc nếu không được lưu lại.
+`/kaggle/input` là read-only. Tài liệu upload, `vectorstore/` (Chroma), `indexed_files.json` và — khi không dùng PostgreSQL — `data/conversations.db` được ghi dưới `/kaggle/working/AI_Tutor2`. Chúng mất khi session kết thúc nếu không được lưu lại.
+
+PostgreSQL chưa lưu file PDF và vector Chroma. Sau khi Kaggle reset, danh sách tài liệu cùng summary/flashcard/quiz đã lưu vẫn còn, nhưng chat RAG và việc tạo nội dung mới cho tài liệu cần file và vector của nó: upload lại đúng file đó (cùng tên, cùng nội dung) sẽ index lại dưới cùng `document_id` và cùng hash nên thường nối lại với dữ liệu cũ (riêng tài liệu mà cấu trúc chủ đề phải nhờ LLM tinh chỉnh thì danh sách chủ đề có thể khác, khi đó summary/flashcard có thể phải tạo lại), hoặc khôi phục `data/` + `vectorstore/` bằng `STATE_DATASET_SLUG` bên dưới.
 
 `kaggle_run.ipynb` tự động hoá việc này bằng hai Kaggle Dataset riêng tư (không cần tạo trước, lần lưu đầu tiên sẽ tự tạo):
 

@@ -1,8 +1,7 @@
-"""SQLite persistence for generated quizzes, progress, history, and explanations."""
+"""Persistence for generated quizzes, progress, history, and explanations (PostgreSQL or SQLite)."""
 
 import json
 import hashlib
-import sqlite3
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -15,6 +14,7 @@ from config import (
     LEGACY_QUIZ_ATTEMPTS_PATH,
     LEGACY_QUIZ_EXPLANATIONS_PATH,
 )
+from backend import db
 from backend.auth_store import LEGACY_USER_ID, initialize_auth_store
 from backend.quiz_options import canonicalize_option
 
@@ -25,27 +25,12 @@ WRITTEN_QUESTION_TYPES = ("fill_blank", "short_answer")
 FLASHCARD_WRITTEN_PLANNER_VERSION = "flashcard_written_v1"
 
 
-class _ClosingConnection(sqlite3.Connection):
-    """Commit/rollback like sqlite3.Connection and also release the file handle."""
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        try:
-            return super().__exit__(exc_type, exc_value, traceback)
-        finally:
-            self.close()
-
-
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _connect() -> sqlite3.Connection:
-    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DATABASE_PATH, timeout=15, factory=_ClosingConnection)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA busy_timeout = 15000")
-    return connection
+def _connect() -> db.Connection:
+    return db.connect(DATABASE_PATH)
 
 
 def _read_legacy_json(path: Path) -> dict:
@@ -62,313 +47,320 @@ def _read_legacy_json(path: Path) -> dict:
 def initialize_quiz_store() -> None:
     """Create quiz tables and import the old JSON files once."""
     initialize_auth_store()
-    with _connect() as connection:
-        connection.executescript(
+    db.ensure_schema("quizzes", DATABASE_PATH, _initialize_schema)
+
+
+def _initialize_schema(connection: db.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS app_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS quizzes (
+            quiz_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            document_hash TEXT,
+            title TEXT NOT NULL,
+            difficulty TEXT NOT NULL CHECK (difficulty IN ('easy', 'medium', 'difficult')),
+            question_count INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_active_quiz_variant
+            ON quizzes(document_id, difficulty) WHERE is_active = 1;
+        CREATE INDEX IF NOT EXISTS idx_quizzes_document
+            ON quizzes(document_id, difficulty, created_at);
+
+        CREATE TABLE IF NOT EXISTS quiz_questions (
+            quiz_id TEXT NOT NULL,
+            question_id INTEGER NOT NULL,
+            position INTEGER NOT NULL,
+            question TEXT NOT NULL,
+            correct_answer TEXT NOT NULL,
+            PRIMARY KEY (quiz_id, question_id),
+            FOREIGN KEY (quiz_id) REFERENCES quizzes(quiz_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS quiz_options (
+            quiz_id TEXT NOT NULL,
+            question_id INTEGER NOT NULL,
+            option_letter TEXT NOT NULL,
+            option_text TEXT NOT NULL,
+            PRIMARY KEY (quiz_id, question_id, option_letter),
+            FOREIGN KEY (quiz_id, question_id)
+                REFERENCES quiz_questions(quiz_id, question_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS quiz_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            quiz_id TEXT,
+            document_id TEXT NOT NULL,
+            difficulty TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            submitted_at TEXT,
+            updated_at TEXT NOT NULL,
+            score INTEGER NOT NULL DEFAULT 0,
+            answered INTEGER NOT NULL DEFAULT 0,
+            total INTEGER NOT NULL DEFAULT 0,
+            completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
+            is_latest INTEGER NOT NULL DEFAULT 1 CHECK (is_latest IN (0, 1))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_attempt_variant
+            ON quiz_attempts(document_id, difficulty, is_latest, updated_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_latest_attempt_variant
+            ON quiz_attempts(document_id, difficulty) WHERE is_latest = 1;
+        CREATE INDEX IF NOT EXISTS idx_attempt_history
+            ON quiz_attempts(completed, completed_at, submitted_at);
+
+        CREATE TABLE IF NOT EXISTS quiz_attempt_answers (
+            attempt_id TEXT NOT NULL,
+            question_id INTEGER NOT NULL,
+            question TEXT,
+            options_json TEXT NOT NULL DEFAULT '[]',
+            selected_answer TEXT NOT NULL,
+            correct_answer TEXT NOT NULL,
+            is_correct INTEGER NOT NULL CHECK (is_correct IN (0, 1)),
+            PRIMARY KEY (attempt_id, question_id),
+            FOREIGN KEY (attempt_id) REFERENCES quiz_attempts(attempt_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS quiz_explanations (
+            cache_key TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            difficulty TEXT NOT NULL,
+            question_id INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_explanations_variant
+            ON quiz_explanations(document_id, difficulty, question_id);
+
+        CREATE TABLE IF NOT EXISTS quiz_validation_events (
+            validation_id TEXT PRIMARY KEY,
+            generation_run_id TEXT NOT NULL,
+            quiz_id TEXT,
+            document_id TEXT NOT NULL,
+            document_hash TEXT,
+            topic_id TEXT NOT NULL,
+            topic_schema_version INTEGER NOT NULL,
+            difficulty TEXT NOT NULL,
+            batch_index INTEGER NOT NULL,
+            generation_attempt INTEGER NOT NULL,
+            candidate_index INTEGER NOT NULL,
+            generator_model TEXT NOT NULL,
+            generation_prompt_version TEXT NOT NULL,
+            validator_model TEXT NOT NULL,
+            validator_prompt_version TEXT NOT NULL,
+            candidate_question_json TEXT NOT NULL,
+            cited_chunk_ids_json TEXT NOT NULL,
+            evidence_chunk_ids_json TEXT NOT NULL,
+            hard_passed INTEGER NOT NULL,
+            quality_passed INTEGER NOT NULL,
+            accepted INTEGER NOT NULL,
+            outcome TEXT NOT NULL,
+            verdict_json TEXT NOT NULL,
+            rejection_reasons_json TEXT NOT NULL,
+            latency_ms INTEGER,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_quiz_validation_run
+            ON quiz_validation_events(generation_run_id, batch_index, generation_attempt);
+
+        CREATE TABLE IF NOT EXISTS concept_plan_cache (
+            cache_key TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            document_id TEXT NOT NULL,
+            document_hash TEXT NOT NULL,
+            topic_schema_version INTEGER NOT NULL,
+            topic_id TEXT NOT NULL,
+            planner_version TEXT NOT NULL,
+            planner_input_fingerprint TEXT NOT NULL,
+            planner_prompt_version TEXT NOT NULL,
+            planner_model TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_concept_plan_cache_document
+            ON concept_plan_cache(owner_id, document_id, topic_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS topic_mastery (
+            student_id TEXT NOT NULL,
+            document_id TEXT NOT NULL,
+            topic_id TEXT NOT NULL,
+            mastery_score REAL NOT NULL,
+            mastery_level TEXT NOT NULL,
+            earned_weight REAL NOT NULL,
+            possible_weight REAL NOT NULL,
+            correct_answers INTEGER NOT NULL,
+            answered_questions INTEGER NOT NULL,
+            completed_attempts INTEGER NOT NULL,
+            has_evidence INTEGER NOT NULL,
+            has_sufficient_evidence INTEGER NOT NULL,
+            minimum_questions_required INTEGER NOT NULL,
+            formula_version TEXT NOT NULL,
+            formula_config_json TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            PRIMARY KEY (student_id, document_id, topic_id)
+        );
+        """
+    )
+    migrations = {
+        "quizzes": {
+            "owner_id": f"TEXT NOT NULL DEFAULT '{LEGACY_USER_ID}'",
+            "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
+            "topic_name": "TEXT NOT NULL DEFAULT 'Whole document'",
+            "topic_schema_version": "INTEGER NOT NULL DEFAULT 0",
+            "assessment_scope": "TEXT NOT NULL DEFAULT 'topic'",
+            "assessment_plan_json": "TEXT NOT NULL DEFAULT '{}'",
+            "planner_version": "TEXT NOT NULL DEFAULT 'legacy'",
+            # Set only for quizzes generated by the admin Quiz model benchmark; NULL otherwise.
+            "benchmark_id": "TEXT",
+        },
+        "quiz_questions": {
+            "question_type": "TEXT NOT NULL DEFAULT 'single_choice'",
+            "correct_answers_json": "TEXT NOT NULL DEFAULT '[]'",
+            "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
+            "difficulty": "TEXT NOT NULL DEFAULT 'easy'",
+            "explanation": "TEXT NOT NULL DEFAULT ''",
+            "source_chunk_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "validation_outcome": "TEXT NOT NULL DEFAULT 'accepted'",
+            "topic_name": "TEXT NOT NULL DEFAULT ''",
+            "concept_id": "TEXT NOT NULL DEFAULT ''",
+            "concept_name": "TEXT NOT NULL DEFAULT ''",
+            "assessment_capacity": "INTEGER NOT NULL DEFAULT 0",
+            "source_subtopic_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "concept_origin": "TEXT NOT NULL DEFAULT ''",
+            "concept_plan_id": "TEXT NOT NULL DEFAULT ''",
+        },
+        "quiz_attempts": {
+            "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
+            "student_id": "TEXT NOT NULL DEFAULT 'local_student'",
+            "attempt_number": "INTEGER NOT NULL DEFAULT 0",
+            "percentage": "REAL NOT NULL DEFAULT 0",
+            "current_question_index": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "quiz_attempt_answers": {
+            "question_type": "TEXT NOT NULL DEFAULT 'single_choice'",
+            "selected_answers_json": "TEXT NOT NULL DEFAULT '[]'",
+            "correct_answers_json": "TEXT NOT NULL DEFAULT '[]'",
+            "question_difficulty": "TEXT NOT NULL DEFAULT 'easy'",
+            "validation_outcome": "TEXT NOT NULL DEFAULT 'accepted'",
+            "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
+            "topic_name": "TEXT NOT NULL DEFAULT ''",
+            "concept_id": "TEXT NOT NULL DEFAULT ''",
+            "assessment_capacity": "INTEGER NOT NULL DEFAULT 0",
+            "evidence_requirement_version": "TEXT NOT NULL DEFAULT 'question_count_v1'",
+            "explanation": "TEXT NOT NULL DEFAULT ''",
+            "source_chunk_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "source_subtopic_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "concept_origin": "TEXT NOT NULL DEFAULT ''",
+            "concept_plan_id": "TEXT NOT NULL DEFAULT ''",
+        },
+        "topic_mastery": {
+            "assessment_capacity": "INTEGER NOT NULL DEFAULT 0",
+            "distinct_concepts_assessed": "INTEGER NOT NULL DEFAULT 0",
+            "concept_coverage_ratio": "REAL NOT NULL DEFAULT 0",
+            "required_concept_coverage": "REAL NOT NULL DEFAULT 0",
+            "required_concepts": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "quiz_explanations": {
+            "owner_id": f"TEXT NOT NULL DEFAULT '{LEGACY_USER_ID}'",
+        },
+        "quiz_validation_events": {
+            "owner_id": f"TEXT NOT NULL DEFAULT '{LEGACY_USER_ID}'",
+        },
+    }
+    added_columns = set()
+    for table, columns in migrations.items():
+        for column, definition in columns.items():
+            # Backfills below only repair rows written before a column existed, which only
+            # local SQLite databases can contain; PostgreSQL tables are created by this code.
+            if db.add_column(connection, table, column, definition) and connection.backend == db.SQLITE:
+                added_columns.add((table, column))
+    if ("quiz_attempt_answers", "question_difficulty") in added_columns:
+        connection.execute(
             """
-            CREATE TABLE IF NOT EXISTS app_metadata (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS quizzes (
-                quiz_id TEXT PRIMARY KEY,
-                document_id TEXT NOT NULL,
-                document_hash TEXT,
-                title TEXT NOT NULL,
-                difficulty TEXT NOT NULL CHECK (difficulty IN ('easy', 'medium', 'difficult')),
-                question_count INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))
-            );
-
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_active_quiz_variant
-                ON quizzes(document_id, difficulty) WHERE is_active = 1;
-            CREATE INDEX IF NOT EXISTS idx_quizzes_document
-                ON quizzes(document_id, difficulty, created_at);
-
-            CREATE TABLE IF NOT EXISTS quiz_questions (
-                quiz_id TEXT NOT NULL,
-                question_id INTEGER NOT NULL,
-                position INTEGER NOT NULL,
-                question TEXT NOT NULL,
-                correct_answer TEXT NOT NULL,
-                PRIMARY KEY (quiz_id, question_id),
-                FOREIGN KEY (quiz_id) REFERENCES quizzes(quiz_id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS quiz_options (
-                quiz_id TEXT NOT NULL,
-                question_id INTEGER NOT NULL,
-                option_letter TEXT NOT NULL,
-                option_text TEXT NOT NULL,
-                PRIMARY KEY (quiz_id, question_id, option_letter),
-                FOREIGN KEY (quiz_id, question_id)
-                    REFERENCES quiz_questions(quiz_id, question_id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS quiz_attempts (
-                attempt_id TEXT PRIMARY KEY,
-                quiz_id TEXT,
-                document_id TEXT NOT NULL,
-                difficulty TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                completed_at TEXT,
-                submitted_at TEXT,
-                updated_at TEXT NOT NULL,
-                score INTEGER NOT NULL DEFAULT 0,
-                answered INTEGER NOT NULL DEFAULT 0,
-                total INTEGER NOT NULL DEFAULT 0,
-                completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
-                is_latest INTEGER NOT NULL DEFAULT 1 CHECK (is_latest IN (0, 1))
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_attempt_variant
-                ON quiz_attempts(document_id, difficulty, is_latest, updated_at);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_latest_attempt_variant
-                ON quiz_attempts(document_id, difficulty) WHERE is_latest = 1;
-            CREATE INDEX IF NOT EXISTS idx_attempt_history
-                ON quiz_attempts(completed, completed_at, submitted_at);
-
-            CREATE TABLE IF NOT EXISTS quiz_attempt_answers (
-                attempt_id TEXT NOT NULL,
-                question_id INTEGER NOT NULL,
-                question TEXT,
-                options_json TEXT NOT NULL DEFAULT '[]',
-                selected_answer TEXT NOT NULL,
-                correct_answer TEXT NOT NULL,
-                is_correct INTEGER NOT NULL CHECK (is_correct IN (0, 1)),
-                PRIMARY KEY (attempt_id, question_id),
-                FOREIGN KEY (attempt_id) REFERENCES quiz_attempts(attempt_id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS quiz_explanations (
-                cache_key TEXT PRIMARY KEY,
-                document_id TEXT NOT NULL,
-                difficulty TEXT NOT NULL,
-                question_id INTEGER NOT NULL,
-                payload_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_explanations_variant
-                ON quiz_explanations(document_id, difficulty, question_id);
-
-            CREATE TABLE IF NOT EXISTS quiz_validation_events (
-                validation_id TEXT PRIMARY KEY,
-                generation_run_id TEXT NOT NULL,
-                quiz_id TEXT,
-                document_id TEXT NOT NULL,
-                document_hash TEXT,
-                topic_id TEXT NOT NULL,
-                topic_schema_version INTEGER NOT NULL,
-                difficulty TEXT NOT NULL,
-                batch_index INTEGER NOT NULL,
-                generation_attempt INTEGER NOT NULL,
-                candidate_index INTEGER NOT NULL,
-                generator_model TEXT NOT NULL,
-                generation_prompt_version TEXT NOT NULL,
-                validator_model TEXT NOT NULL,
-                validator_prompt_version TEXT NOT NULL,
-                candidate_question_json TEXT NOT NULL,
-                cited_chunk_ids_json TEXT NOT NULL,
-                evidence_chunk_ids_json TEXT NOT NULL,
-                hard_passed INTEGER NOT NULL,
-                quality_passed INTEGER NOT NULL,
-                accepted INTEGER NOT NULL,
-                outcome TEXT NOT NULL,
-                verdict_json TEXT NOT NULL,
-                rejection_reasons_json TEXT NOT NULL,
-                latency_ms INTEGER,
-                created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_quiz_validation_run
-                ON quiz_validation_events(generation_run_id, batch_index, generation_attempt);
-
-            CREATE TABLE IF NOT EXISTS concept_plan_cache (
-                cache_key TEXT PRIMARY KEY,
-                owner_id TEXT NOT NULL,
-                document_id TEXT NOT NULL,
-                document_hash TEXT NOT NULL,
-                topic_schema_version INTEGER NOT NULL,
-                topic_id TEXT NOT NULL,
-                planner_version TEXT NOT NULL,
-                planner_input_fingerprint TEXT NOT NULL,
-                planner_prompt_version TEXT NOT NULL,
-                planner_model TEXT NOT NULL,
-                plan_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                last_used_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_concept_plan_cache_document
-                ON concept_plan_cache(owner_id, document_id, topic_id, created_at);
-
-            CREATE TABLE IF NOT EXISTS topic_mastery (
-                student_id TEXT NOT NULL,
-                document_id TEXT NOT NULL,
-                topic_id TEXT NOT NULL,
-                mastery_score REAL NOT NULL,
-                mastery_level TEXT NOT NULL,
-                earned_weight REAL NOT NULL,
-                possible_weight REAL NOT NULL,
-                correct_answers INTEGER NOT NULL,
-                answered_questions INTEGER NOT NULL,
-                completed_attempts INTEGER NOT NULL,
-                has_evidence INTEGER NOT NULL,
-                has_sufficient_evidence INTEGER NOT NULL,
-                minimum_questions_required INTEGER NOT NULL,
-                formula_version TEXT NOT NULL,
-                formula_config_json TEXT NOT NULL,
-                computed_at TEXT NOT NULL,
-                PRIMARY KEY (student_id, document_id, topic_id)
-            );
+            UPDATE quiz_attempt_answers
+            SET question_difficulty = COALESCE(
+                (SELECT difficulty FROM quiz_attempts
+                 WHERE quiz_attempts.attempt_id = quiz_attempt_answers.attempt_id),
+                'easy'
+            )
             """
         )
-        migrations = {
-            "quizzes": {
-                "owner_id": f"TEXT NOT NULL DEFAULT '{LEGACY_USER_ID}'",
-                "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
-                "topic_name": "TEXT NOT NULL DEFAULT 'Whole document'",
-                "topic_schema_version": "INTEGER NOT NULL DEFAULT 0",
-                "assessment_scope": "TEXT NOT NULL DEFAULT 'topic'",
-                "assessment_plan_json": "TEXT NOT NULL DEFAULT '{}'",
-                "planner_version": "TEXT NOT NULL DEFAULT 'legacy'",
-                # Set only for quizzes generated by the admin Quiz model benchmark; NULL otherwise.
-                "benchmark_id": "TEXT",
-            },
-            "quiz_questions": {
-                "question_type": "TEXT NOT NULL DEFAULT 'single_choice'",
-                "correct_answers_json": "TEXT NOT NULL DEFAULT '[]'",
-                "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
-                "difficulty": "TEXT NOT NULL DEFAULT 'easy'",
-                "explanation": "TEXT NOT NULL DEFAULT ''",
-                "source_chunk_ids_json": "TEXT NOT NULL DEFAULT '[]'",
-                "validation_outcome": "TEXT NOT NULL DEFAULT 'accepted'",
-                "topic_name": "TEXT NOT NULL DEFAULT ''",
-                "concept_id": "TEXT NOT NULL DEFAULT ''",
-                "concept_name": "TEXT NOT NULL DEFAULT ''",
-                "assessment_capacity": "INTEGER NOT NULL DEFAULT 0",
-                "source_subtopic_ids_json": "TEXT NOT NULL DEFAULT '[]'",
-                "concept_origin": "TEXT NOT NULL DEFAULT ''",
-                "concept_plan_id": "TEXT NOT NULL DEFAULT ''",
-            },
-            "quiz_attempts": {
-                "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
-                "student_id": "TEXT NOT NULL DEFAULT 'local_student'",
-                "attempt_number": "INTEGER NOT NULL DEFAULT 0",
-                "percentage": "REAL NOT NULL DEFAULT 0",
-                "current_question_index": "INTEGER NOT NULL DEFAULT 0",
-            },
-            "quiz_attempt_answers": {
-                "question_type": "TEXT NOT NULL DEFAULT 'single_choice'",
-                "selected_answers_json": "TEXT NOT NULL DEFAULT '[]'",
-                "correct_answers_json": "TEXT NOT NULL DEFAULT '[]'",
-                "question_difficulty": "TEXT NOT NULL DEFAULT 'easy'",
-                "validation_outcome": "TEXT NOT NULL DEFAULT 'accepted'",
-                "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
-                "topic_name": "TEXT NOT NULL DEFAULT ''",
-                "concept_id": "TEXT NOT NULL DEFAULT ''",
-                "assessment_capacity": "INTEGER NOT NULL DEFAULT 0",
-                "evidence_requirement_version": "TEXT NOT NULL DEFAULT 'question_count_v1'",
-                "explanation": "TEXT NOT NULL DEFAULT ''",
-                "source_chunk_ids_json": "TEXT NOT NULL DEFAULT '[]'",
-                "source_subtopic_ids_json": "TEXT NOT NULL DEFAULT '[]'",
-                "concept_origin": "TEXT NOT NULL DEFAULT ''",
-                "concept_plan_id": "TEXT NOT NULL DEFAULT ''",
-            },
-            "topic_mastery": {
-                "assessment_capacity": "INTEGER NOT NULL DEFAULT 0",
-                "distinct_concepts_assessed": "INTEGER NOT NULL DEFAULT 0",
-                "concept_coverage_ratio": "REAL NOT NULL DEFAULT 0",
-                "required_concept_coverage": "REAL NOT NULL DEFAULT 0",
-                "required_concepts": "INTEGER NOT NULL DEFAULT 0",
-            },
-            "quiz_explanations": {
-                "owner_id": f"TEXT NOT NULL DEFAULT '{LEGACY_USER_ID}'",
-            },
-            "quiz_validation_events": {
-                "owner_id": f"TEXT NOT NULL DEFAULT '{LEGACY_USER_ID}'",
-            },
-        }
-        added_columns = set()
-        for table, columns in migrations.items():
-            existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
-            for column, definition in columns.items():
-                if column not in existing:
-                    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-                    added_columns.add((table, column))
-        if ("quiz_attempt_answers", "question_difficulty") in added_columns:
-            connection.execute(
-                """
-                UPDATE quiz_attempt_answers
-                SET question_difficulty = COALESCE(
-                    (SELECT difficulty FROM quiz_attempts
-                     WHERE quiz_attempts.attempt_id = quiz_attempt_answers.attempt_id),
-                    'easy'
-                )
-                """
+    if ("quiz_attempt_answers", "topic_id") in added_columns:
+        connection.execute(
+            """
+            UPDATE quiz_attempt_answers
+            SET topic_id = COALESCE(
+                (SELECT topic_id FROM quiz_attempts
+                 WHERE quiz_attempts.attempt_id = quiz_attempt_answers.attempt_id),
+                'document'
             )
-        if ("quiz_attempt_answers", "topic_id") in added_columns:
-            connection.execute(
-                """
-                UPDATE quiz_attempt_answers
-                SET topic_id = COALESCE(
-                    (SELECT topic_id FROM quiz_attempts
-                     WHERE quiz_attempts.attempt_id = quiz_attempt_answers.attempt_id),
-                    'document'
-                )
-                """
-            )
-        if ("quiz_attempts", "attempt_number") in added_columns:
-            connection.execute(
-                """
-                UPDATE quiz_attempts AS current
-                SET attempt_number = (
-                    SELECT COUNT(*) FROM quiz_attempts AS earlier
-                    WHERE earlier.student_id = current.student_id
-                      AND earlier.quiz_id = current.quiz_id
-                      AND earlier.completed = 1
-                      AND (COALESCE(earlier.completed_at, earlier.submitted_at, earlier.updated_at) <
+            """
+        )
+    if ("quiz_attempts", "attempt_number") in added_columns:
+        connection.execute(
+            """
+            UPDATE quiz_attempts AS current
+            SET attempt_number = (
+                SELECT COUNT(*) FROM quiz_attempts AS earlier
+                WHERE earlier.student_id = current.student_id
+                  AND earlier.quiz_id = current.quiz_id
+                  AND earlier.completed = 1
+                  AND (COALESCE(earlier.completed_at, earlier.submitted_at, earlier.updated_at) <
+                       COALESCE(current.completed_at, current.submitted_at, current.updated_at)
+                       OR (COALESCE(earlier.completed_at, earlier.submitted_at, earlier.updated_at) =
                            COALESCE(current.completed_at, current.submitted_at, current.updated_at)
-                           OR (COALESCE(earlier.completed_at, earlier.submitted_at, earlier.updated_at) =
-                               COALESCE(current.completed_at, current.submitted_at, current.updated_at)
-                               AND earlier.attempt_id <= current.attempt_id))
-                )
-                WHERE current.completed = 1
-                """
+                           AND earlier.attempt_id <= current.attempt_id))
             )
-        if ("quiz_attempts", "percentage") in added_columns:
-            connection.execute(
-                "UPDATE quiz_attempts SET percentage = CASE WHEN total > 0 THEN ROUND(100.0 * score / total, 2) ELSE 0 END"
-            )
-        connection.executescript(
-            """
-            -- Multiple quizzes (different models, counts, or plain re-runs) may legitimately share
-            -- one (owner, document, topic, difficulty) slot as separate artifacts -- this index is
-            -- for lookup performance only, never a uniqueness guarantee (see quiz_id as the real
-            -- identity of a quiz artifact, enforced by the quizzes.quiz_id primary key instead).
-            DROP INDEX IF EXISTS idx_active_quiz_variant;
-            CREATE INDEX idx_active_quiz_variant
-                ON quizzes(owner_id, document_id, topic_id, difficulty) WHERE is_active = 1;
-            -- "Latest attempt" is tracked per quiz_id, not per slot, so an in-progress attempt on
-            -- one quiz is never demoted just because a sibling quiz (same slot) is generated or
-            -- answered.
-            DROP INDEX IF EXISTS idx_latest_attempt_variant;
-            CREATE UNIQUE INDEX idx_latest_attempt_variant
-                ON quiz_attempts(student_id, document_id, topic_id, difficulty, quiz_id) WHERE is_latest = 1;
-            DROP INDEX IF EXISTS idx_attempt_variant;
-            CREATE INDEX idx_attempt_variant
-                ON quiz_attempts(student_id, document_id, topic_id, difficulty, is_latest, updated_at);
+            WHERE current.completed = 1
             """
         )
-        migrated = connection.execute(
-            "SELECT value FROM app_metadata WHERE key = 'quiz_json_migrated_v1'"
-        ).fetchone()
-        if migrated is None:
-            _migrate_legacy_json(connection)
-            connection.execute(
-                "INSERT INTO app_metadata (key, value) VALUES ('quiz_json_migrated_v1', ?)",
-                (utc_now_iso(),),
-            )
+    if ("quiz_attempts", "percentage") in added_columns:
+        connection.execute(
+            "UPDATE quiz_attempts SET percentage = CASE WHEN total > 0 THEN ROUND(100.0 * score / total, 2) ELSE 0 END"
+        )
+    connection.executescript(
+        """
+        -- Multiple quizzes (different models, counts, or plain re-runs) may legitimately share
+        -- one (owner, document, topic, difficulty) slot as separate artifacts -- this index is
+        -- for lookup performance only, never a uniqueness guarantee (see quiz_id as the real
+        -- identity of a quiz artifact, enforced by the quizzes.quiz_id primary key instead).
+        DROP INDEX IF EXISTS idx_active_quiz_variant;
+        CREATE INDEX idx_active_quiz_variant
+            ON quizzes(owner_id, document_id, topic_id, difficulty) WHERE is_active = 1;
+        -- "Latest attempt" is tracked per quiz_id, not per slot, so an in-progress attempt on
+        -- one quiz is never demoted just because a sibling quiz (same slot) is generated or
+        -- answered.
+        DROP INDEX IF EXISTS idx_latest_attempt_variant;
+        CREATE UNIQUE INDEX idx_latest_attempt_variant
+            ON quiz_attempts(student_id, document_id, topic_id, difficulty, quiz_id) WHERE is_latest = 1;
+        DROP INDEX IF EXISTS idx_attempt_variant;
+        CREATE INDEX idx_attempt_variant
+            ON quiz_attempts(student_id, document_id, topic_id, difficulty, is_latest, updated_at);
+        """
+    )
+    # Pre-database quiz JSON files are local state: import them into local SQLite only. The shared
+    # PostgreSQL database never ingests stale local files.
+    if connection.backend != db.SQLITE:
+        return
+    migrated = connection.execute(
+        "SELECT value FROM app_metadata WHERE key = 'quiz_json_migrated_v1'"
+    ).fetchone()
+    if migrated is None:
+        _migrate_legacy_json(connection)
+        connection.execute(
+            "INSERT INTO app_metadata (key, value) VALUES ('quiz_json_migrated_v1', ?)",
+            (utc_now_iso(),),
+        )
 
 
 # The admin Quiz model benchmark (backend/model_benchmark_service.py) opens this around each
@@ -401,7 +393,7 @@ def _normalize_options(options) -> list[str]:
     return [canonicalize_option(option, "ABCD"[index]) for index, option in enumerate((options or [])[:4])]
 
 
-def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: str, quiz: dict, owner_id: str = LEGACY_USER_ID) -> dict:
+def _insert_quiz(connection: db.Connection, document_id: str, difficulty: str, quiz: dict, owner_id: str = LEGACY_USER_ID) -> dict:
     quiz_id = str(quiz.get("quiz_id") or uuid4())
     questions = list(quiz.get("questions") or [])
     stored = {
@@ -494,7 +486,7 @@ def _insert_quiz(connection: sqlite3.Connection, document_id: str, difficulty: s
     return stored
 
 
-def _row_to_quiz(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
+def _row_to_quiz(connection: db.Connection, row) -> dict:
     question_rows = connection.execute(
         """
         SELECT question_id, question, correct_answer, topic_id, difficulty,
@@ -689,7 +681,7 @@ def list_document_quizzes(document_id: str, owner_id: str = LEGACY_USER_ID) -> d
         return {row["quiz_id"]: _row_to_quiz(connection, row) for row in rows}
 
 
-def _row_to_attempt(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
+def _row_to_attempt(connection: db.Connection, row) -> dict:
     answer_rows = connection.execute(
         """
         SELECT * FROM quiz_attempt_answers
@@ -796,7 +788,7 @@ def get_latest_attempt(
 
 
 def _save_attempt_row(
-    connection: sqlite3.Connection,
+    connection: db.Connection,
     document_id: str,
     difficulty: str,
     topic_id: str,
@@ -1295,7 +1287,7 @@ def get_quiz_attempt_summary(quiz_id: str, student_id: str) -> dict:
             SELECT COUNT(*) AS attempts,
                    COALESCE((SELECT percentage FROM quiz_attempts latest
                              WHERE latest.quiz_id = ? AND latest.student_id = ? AND latest.completed = 1
-                             ORDER BY COALESCE(latest.completed_at, latest.submitted_at) DESC, latest.attempt_id DESC LIMIT 1), 0) AS latest_score,
+                             ORDER BY COALESCE(latest.completed_at, latest.submitted_at) DESC NULLS LAST, latest.attempt_id DESC LIMIT 1), 0) AS latest_score,
                    COALESCE(MAX(percentage), 0) AS best_score,
                    COALESCE(ROUND(AVG(CASE WHEN total > 0 THEN 100.0 * score / total ELSE 0 END), 2), 0) AS average_score
             FROM quiz_attempts
@@ -1387,7 +1379,7 @@ def list_topic_mastery(student_id: str, document_id: str | None = None) -> list[
                          AND t.document_id = m.document_id
                          AND a.topic_id = m.topic_id
                          AND a.concept_origin != 'flashcard'
-                       ORDER BY COALESCE(t.submitted_at, t.completed_at) DESC, a.question_id
+                       ORDER BY COALESCE(t.submitted_at, t.completed_at) DESC NULLS LAST, a.question_id
                        LIMIT 1
                    ), m.topic_id) AS topic_name
             FROM topic_mastery m
@@ -1497,7 +1489,7 @@ def _iter_legacy_quizzes(data: dict):
                 yield key, difficulty, quiz
 
 
-def _migrate_legacy_json(connection: sqlite3.Connection) -> None:
+def _migrate_legacy_json(connection: db.Connection) -> None:
     """Import legacy quiz JSON files without deleting the original backups."""
     quiz_count = attempt_count = explanation_count = 0
     for document_id, difficulty, quiz in _iter_legacy_quizzes(
@@ -1554,9 +1546,13 @@ def _migrate_legacy_json(connection: sqlite3.Connection) -> None:
         question_id = int(parts[-1]) if str(parts[-1]).isdigit() else 0
         connection.execute(
             """
-            INSERT OR REPLACE INTO quiz_explanations (
+            INSERT INTO quiz_explanations (
                 cache_key, document_id, difficulty, question_id, payload_json, created_at
             ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cache_key) DO UPDATE SET
+                document_id = excluded.document_id, difficulty = excluded.difficulty,
+                question_id = excluded.question_id, payload_json = excluded.payload_json,
+                created_at = excluded.created_at
             """,
             (
                 cache_key,

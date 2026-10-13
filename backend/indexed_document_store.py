@@ -1,26 +1,13 @@
 import json
-import sqlite3
 from datetime import datetime, timezone
 
+from backend import db
 from backend.auth_store import LEGACY_USER_ID, initialize_auth_store
 from config import DATABASE_PATH, INDEXED_FILES_PATH
 
 
-class _ClosingConnection(sqlite3.Connection):
-    def __exit__(self, exc_type, exc_value, traceback):
-        try:
-            return super().__exit__(exc_type, exc_value, traceback)
-        finally:
-            self.close()
-
-
-def _connect() -> sqlite3.Connection:
-    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DATABASE_PATH, timeout=15, factory=_ClosingConnection)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA busy_timeout = 15000")
-    return connection
+def _connect() -> db.Connection:
+    return db.connect(DATABASE_PATH)
 
 
 def _now() -> str:
@@ -29,63 +16,71 @@ def _now() -> str:
 
 def initialize_indexed_document_store() -> None:
     initialize_auth_store()
-    with _connect() as connection:
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS indexed_documents (
-                owner_id TEXT NOT NULL,
-                document_id TEXT NOT NULL,
-                display_name TEXT NOT NULL,
-                file_hash TEXT NOT NULL,
-                chunk_count INTEGER NOT NULL,
-                storage_path TEXT NOT NULL,
-                topic_schema_version INTEGER NOT NULL,
-                topics_json TEXT NOT NULL DEFAULT '[]',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (owner_id, document_id),
-                FOREIGN KEY (owner_id) REFERENCES users(id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_indexed_documents_owner
-                ON indexed_documents(owner_id, updated_at);
-            CREATE TABLE IF NOT EXISTS index_registry_migrations (
-                migration_key TEXT PRIMARY KEY,
-                completed_at TEXT NOT NULL
-            );
-            """
-        )
-        migrated = connection.execute(
-            "SELECT 1 FROM index_registry_migrations WHERE migration_key = 'indexed_files_json_v1'"
-        ).fetchone()
-        if not migrated:
-            legacy = {}
-            if INDEXED_FILES_PATH.exists():
-                try:
-                    legacy = json.loads(INDEXED_FILES_PATH.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    legacy = {}
-            now = _now()
-            for document_id, info in legacy.items():
-                if not isinstance(info, dict):
-                    continue
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO indexed_documents (
-                        owner_id, document_id, display_name, file_hash, chunk_count,
-                        storage_path, topic_schema_version, topics_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        LEGACY_USER_ID, document_id, document_id, str(info.get("hash", "")),
-                        int(info.get("chunks", 0)), str(info.get("path", document_id)),
-                        int(info.get("topic_schema_version", 0)),
-                        json.dumps(info.get("topics") or [], ensure_ascii=False), now, now,
-                    ),
-                )
+    db.ensure_schema("indexed_documents", DATABASE_PATH, _initialize_schema)
+
+
+def _initialize_schema(connection: db.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS indexed_documents (
+            owner_id TEXT NOT NULL,
+            document_id TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            file_hash TEXT NOT NULL,
+            chunk_count INTEGER NOT NULL,
+            storage_path TEXT NOT NULL,
+            topic_schema_version INTEGER NOT NULL,
+            topics_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (owner_id, document_id),
+            FOREIGN KEY (owner_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_indexed_documents_owner
+            ON indexed_documents(owner_id, updated_at);
+        CREATE TABLE IF NOT EXISTS index_registry_migrations (
+            migration_key TEXT PRIMARY KEY,
+            completed_at TEXT NOT NULL
+        );
+        """
+    )
+    # The pre-authentication indexed_files.json registry is a local file: import it into the local
+    # SQLite database only. The shared PostgreSQL database never ingests stale local state.
+    if connection.backend != db.SQLITE:
+        return
+    migrated = connection.execute(
+        "SELECT 1 FROM index_registry_migrations WHERE migration_key = 'indexed_files_json_v1'"
+    ).fetchone()
+    if not migrated:
+        legacy = {}
+        if INDEXED_FILES_PATH.exists():
+            try:
+                legacy = json.loads(INDEXED_FILES_PATH.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                legacy = {}
+        now = _now()
+        for document_id, info in legacy.items():
+            if not isinstance(info, dict):
+                continue
             connection.execute(
-                "INSERT INTO index_registry_migrations (migration_key, completed_at) VALUES ('indexed_files_json_v1', ?)",
-                (now,),
+                """
+                INSERT INTO indexed_documents (
+                    owner_id, document_id, display_name, file_hash, chunk_count,
+                    storage_path, topic_schema_version, topics_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    LEGACY_USER_ID, document_id, document_id, str(info.get("hash", "")),
+                    int(info.get("chunks", 0)), str(info.get("path", document_id)),
+                    int(info.get("topic_schema_version", 0)),
+                    json.dumps(info.get("topics") or [], ensure_ascii=False), now, now,
+                ),
             )
+        connection.execute(
+            "INSERT INTO index_registry_migrations (migration_key, completed_at) VALUES ('indexed_files_json_v1', ?)",
+            (now,),
+        )
 
 
 def list_indexed_documents(owner_id: str) -> list[dict]:
@@ -98,7 +93,7 @@ def list_indexed_documents(owner_id: str) -> list[dict]:
     return [_row_to_document(row) for row in rows]
 
 
-def _row_to_document(row: sqlite3.Row) -> dict:
+def _row_to_document(row) -> dict:
     return {
         "owner_id": row["owner_id"], "document_id": row["document_id"],
         "display_name": row["display_name"], "hash": row["file_hash"],
