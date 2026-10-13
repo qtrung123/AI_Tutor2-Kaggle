@@ -11,3 +11,4 @@ pypdf>=4
 python-dotenv
 argon2-cffi
 cryptography
+psycopg[binary]>=3.2,<4
