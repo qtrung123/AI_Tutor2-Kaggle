@@ -151,16 +151,18 @@ class SchedulerUnitTests(ScheduleAssertions, unittest.TestCase):
     def test_durations_are_activity_appropriate_and_scale_with_artifact_size(self):
         unknown = make_state("d", chunks=0)
         defaults = {activity: estimate_duration(activity, unknown) for activity in DEFAULT_CONFIG.durations}
-        self.assertEqual(defaults, {"summary": 40, "flashcards": 20, "quiz": 30, "review": 15, "quiz_retry": 25,
-                                    "written_quiz": 15})
-        self.assertEqual(estimate_duration("written_quiz", make_state("d", cards=4)), 10)
-        self.assertEqual(estimate_duration("written_quiz", make_state("d", cards=40)), 15)   # at most 10 questions
+        self.assertEqual(defaults, {"summary": 40, "flashcards": 20, "quiz": 30, "review": 20, "quiz_retry": 25,
+                                    "written_quiz": 20})
+        # Small artifacts are raised to the 20-minute minimum for a new session.
+        self.assertEqual(estimate_duration("written_quiz", make_state("d", cards=4)), 20)
+        self.assertEqual(estimate_duration("written_quiz", make_state("d", cards=40)), 20)   # at most 10 questions
         self.assertEqual(estimate_duration("summary", make_state("d", chunks=4)), 30)
         self.assertEqual(estimate_duration("summary", make_state("d", chunks=40)), 50)
-        self.assertEqual(estimate_duration("flashcards", make_state("d", cards=8)), 15)
+        self.assertEqual(estimate_duration("flashcards", make_state("d", cards=8)), 20)
         self.assertEqual(estimate_duration("flashcards", make_state("d", cards=24)), 25)
         self.assertEqual(estimate_duration("flashcards", make_state("d", cards=90)), 30)
-        self.assertEqual(estimate_duration("review", make_state("d", cards=30)), 15)
+        self.assertEqual(estimate_duration("review", make_state("d", cards=30)), 20)
+        self.assertEqual(estimate_duration("review", make_state("d", cards=50)), 25)
         self.assertEqual(estimate_duration("quiz", make_state("d", in_progress=True, questions=5)), 20)
         self.assertEqual(estimate_duration("quiz", make_state("d", in_progress=True, questions=15)), 30)
         self.assertEqual(estimate_duration("quiz", make_state("d", in_progress=True, questions=40)), 40)

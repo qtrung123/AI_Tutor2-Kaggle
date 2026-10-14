@@ -14,6 +14,7 @@ from backend.flashcard_quiz_service import create_flashcard_written_quiz, is_fla
 from backend.quiz_store import get_quiz_by_id
 from backend.indexed_document_store import list_indexed_documents
 from backend.study_scheduler import DEFAULT_CONFIG, find_next_slot, plan_schedule
+from backend.study_session_duration import SessionDurationError, validate_new_session_minutes
 from backend.study_scheduler_contracts import REASON_LABELS, SchedulingContext
 
 # Real civil UTC offsets: UTC-12:00 .. UTC+14:00, always a whole number of quarter hours
@@ -341,10 +342,10 @@ def confirm_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now
             "Nothing can be scheduled with the current availability and deadlines.",
             capacity=_capacity(result.capacity, titles),
         )
+    records = [p.to_session_record() for p in result.proposals]
+    _require_new_session_lengths(records)
     try:
-        saved = study_planner_store.confirm_plan_sessions(
-            owner_id, plan_id, [p.to_session_record() for p in result.proposals], reason="confirm",
-        )
+        saved = study_planner_store.confirm_plan_sessions(owner_id, plan_id, records, reason="confirm")
     except study_planner_store.PlanAlreadyConfirmedError as error:
         raise PlanConflictError("This plan is already confirmed.") from error
     return _with_calendar_sync(owner_id, {
@@ -357,6 +358,18 @@ def confirm_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now
         "capacity": _capacity(result.capacity, titles),
         "warnings": warnings,
     }, int(offset.total_seconds() // 60))
+
+
+def _require_new_session_lengths(records) -> None:
+    """Every session about to be CREATED lasts at least the minimum (moves and existing sessions are
+    never re-checked). The scheduler already guarantees this; a violation is refused, never resized."""
+    for record in records:
+        try:
+            validate_new_session_minutes(record["duration_minutes"])
+        except SessionDurationError as error:
+            raise PlanValidationError(SessionDurationError.code, str(error),
+                                      activity_type=record.get("activity_type"),
+                                      duration_minutes=record["duration_minutes"]) from error
 
 
 class SessionConflictError(Exception):
@@ -585,6 +598,7 @@ def place_live_candidate(owner_id: str, plan_id: str, key: str, target_start: st
     record = {"document_id": candidate.document_id, "activity_type": candidate.activity_type,
               "scheduled_start": start, "scheduled_end": end, "duration_minutes": candidate.estimated_minutes,
               "reason": candidate.reason.code, "artifact_id": candidate.artifact_id}
+    _require_new_session_lengths([record])
     try:
         written = study_planner_store.apply_adaptation_changes(
             owner_id, plan_id, study_planner_store.plan_sessions_fingerprint(plan_sessions), now.isoformat(),
@@ -652,6 +666,7 @@ def apply_adaptation(owner_id: str, plan_id: str, trigger: dict, utc_offset_minu
     added = [{"document_id": a.document_id, "activity_type": a.activity_type, "scheduled_start": a.scheduled_start,
               "scheduled_end": a.scheduled_end, "duration_minutes": a.duration_minutes, "reason": a.reason_code,
               "artifact_id": a.artifact_id, "rescheduled_from": a.replaces_session_id} for a in result.added]
+    _require_new_session_lengths(added)
     replaced = sorted({a.replaces_session_id for a in result.added if a.replaces_session_id
                        and by_id[a.replaces_session_id]["status"] in ("scheduled", "missed")})
     try:

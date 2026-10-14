@@ -80,7 +80,7 @@ const plannerOpen = async (session) => {
   const card = plannerSessionItem({...session, plan_id: "plan-1"}, "div", {action: true});
   document.body.appendChild(card);
   const info = {chip: card.querySelector(".planner-activity-chip").textContent, reason: card.querySelector(".planner-session-reason").textContent,
-    className: card.className, borderLeft: getComputedStyle(card).borderLeftWidth};
+    className: card.className, borderLeft: getComputedStyle(card).borderLeftWidth, borderColor: getComputedStyle(card).borderLeftColor};
   const button = [...card.querySelectorAll("button")].find((b) => b.textContent === "Resume" || b.textContent === "Start");
   const label = button.textContent;
   button.click();
@@ -197,7 +197,8 @@ class PlannerWrittenQuizUiTests(unittest.TestCase):
         self.assertIn("planner-session--written_quiz", card["className"])
         self.assertEqual(card["borderLeft"], "4px")                                  # distinct from a normal Quiz
         self.assertEqual(self.out["normalExact"]["card"]["chip"], "Quiz")
-        self.assertNotEqual(self.out["normalExact"]["card"]["borderLeft"], "4px")
+        # Every activity has its own colored bar; Written Quiz's teal differs from a normal Quiz's.
+        self.assertNotEqual(self.out["normalExact"]["card"]["borderColor"], card["borderColor"])
         self.assertEqual(self.out["activityLabel"], "Written Quiz")
         self.assertEqual(self.out["reasonText"], "Retrieval practice: scheduled to reinforce recall before your next assessment.")
 

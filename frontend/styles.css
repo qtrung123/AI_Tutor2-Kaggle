@@ -3382,7 +3382,13 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-toolbar-row{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:nowrap}
 .pcal-nav{display:flex;gap:0}
 .pcal-range{margin:0 6px 0 2px;font-size:18px;font-weight:500;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
-.pcal-view-pill{flex:none;padding:3px 11px;border:1px solid var(--session-line);border-radius:999px;font-size:12px;font-weight:600;color:var(--pcal-ink-2)}
+.pcal-view-switch{flex:none;display:inline-flex;padding:2px;border:1px solid var(--session-line);border-radius:9px;background:var(--pcal-line-soft)}
+.pcal-view-option{border:0;border-radius:7px;background:transparent;padding:4px 12px;font-size:13px;font-weight:600;color:var(--pcal-ink-2);cursor:pointer}
+.pcal-view-option[aria-pressed="true"]{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(20,24,60,.12)}
+.pcal-view-option:focus-visible,.pcal-zoom button:focus-visible,.pcal-dayhead:focus-visible{outline:2px solid var(--session-accent);outline-offset:1px}
+.pcal-zoom{flex:none;display:inline-flex;gap:0}
+.pcal-zoom[hidden]{display:none}
+.pcal-zoom button:disabled{opacity:.4;cursor:default}
 .pcal-actions{display:flex;gap:6px;flex:none;margin-left:auto}
 .pcal-secondary{color:var(--pcal-ink-2)}
 .pcal-status-line{display:flex;align-items:center;gap:10px;min-width:0}
@@ -3409,7 +3415,10 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-head{position:sticky;top:0;z-index:6;background:#fff;display:grid;grid-template-columns:52px repeat(7,minmax(0,1fr));border-bottom:1px solid var(--pcal-line);transition:box-shadow .15s var(--pcal-ease)}
 .pcal-head.is-scrolled{box-shadow:0 3px 6px -3px rgba(30,36,70,.14)}
 .pcal-corner{border-top:1px solid var(--pcal-line)}
-.pcal-dayhead{display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 0 2px;border-top:1px solid var(--pcal-line)}
+.pcal-dayhead{display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 0 2px;border:0;border-top:1px solid var(--pcal-line);background:transparent;font:inherit;cursor:zoom-in;min-width:0}
+.pcal-dayhead:hover .pcal-daynum{background:var(--pcal-line-soft)}
+.pcal-dayhead.is-focused{cursor:zoom-out}
+.pcal-dayhead.is-focused .pcal-dow{color:var(--ink)}
 .pcal-dow{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .pcal-daynum{width:36px;height:36px;display:grid;place-items:center;border-radius:50%;font-size:21px;font-weight:450;color:var(--ink);transition:background-color .15s var(--pcal-ease)}
 .pcal-dayhead.is-past .pcal-daynum,.pcal-dayhead.is-past .pcal-dow{color:#9aa1ad}
@@ -3420,10 +3429,11 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-deadline-marker{display:block;padding:1px 6px;border-radius:4px;background:#fff3e4;color:#8f4f14;font-size:11px;font-weight:600;line-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pcal-deadline-marker::before{content:"\2691  ";font-size:10px}
 .pcal-deadline-marker.is-past{background:#f1f2f5;color:var(--muted)}
-.pcal-body{display:grid;grid-template-columns:52px repeat(7,minmax(0,1fr));height:1920px;position:relative}
+.pcal{--pcal-hour:112px}
+.pcal-body{display:grid;grid-template-columns:52px repeat(7,minmax(0,1fr));height:calc(var(--pcal-hour) * 24);position:relative}
 .pcal-gutter{position:relative}
 .pcal-hour{position:absolute;right:8px;transform:translateY(-50%);font-size:10.5px;color:#8b93a1;font-variant-numeric:tabular-nums}
-.pcal-col{position:relative;border-left:1px solid var(--pcal-line);cursor:crosshair;touch-action:none;background-image:linear-gradient(to bottom,var(--pcal-line) 1px,transparent 1px);background-size:100% 80px}
+.pcal-col{position:relative;border-left:1px solid var(--pcal-line);cursor:crosshair;touch-action:none;background-image:linear-gradient(to bottom,var(--pcal-line) 1px,transparent 1px);background-size:100% var(--pcal-hour)}
 .pcal-col.is-today{background-color:#fbfbff}
 /* the past is read-only history: muted, no create cursor */
 .pcal-col.is-past{background-color:#f8f9fb;cursor:default}
@@ -3436,44 +3446,79 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-avail.label-none .pcal-avail-label,.pcal-avail.label-none .pcal-avail-time{visibility:hidden}
 .pcal-avail:hover,.pcal-avail:focus-visible{background:var(--pcal-avail-strong)}
 .pcal-avail.is-selected{background:var(--pcal-avail-strong);border-left-color:var(--pcal-avail-ink)}
-.pcal-avail-label{font-size:9.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;opacity:.9}
-.pcal-avail-time{font-size:10px;opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pcal-avail-label{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;opacity:.7}
+.pcal-avail-time{font-size:10.5px;opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pcal-avail.is-short{flex-direction:row;align-items:center;gap:6px;padding-top:0;padding-bottom:0}
 .pcal-avail.is-short .pcal-avail-time{display:none}
 
 /* sessions: document title first, activity + time second */
-.pcal-event{position:absolute;left:5px;right:3px;z-index:3;box-sizing:border-box;padding:3px 6px;border-radius:6px;border:1px solid transparent;text-align:left;font:inherit;display:flex;flex-direction:column;gap:0;overflow:hidden;cursor:pointer;min-width:0;transition:box-shadow .15s var(--pcal-ease),border-color .15s var(--pcal-ease),background-color .15s var(--pcal-ease),opacity .15s var(--pcal-ease)}
-.pcal-event:focus-visible,.pcal-event.is-selected{outline:2px solid #1f2540;outline-offset:1px;z-index:4}
-.pcal-event-title{font-size:12px;font-weight:650;line-height:15px;overflow:hidden;overflow-wrap:break-word;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;flex:none}
-.pcal-event-meta{display:flex;min-width:0;font-size:11px;line-height:14px;white-space:nowrap;overflow:hidden;opacity:.9}
-.pcal-event-meta>span{flex:none}
-/* Calendar-style order: the time first, then the activity. */
-.pcal-event-time{order:1;font-variant-numeric:tabular-nums}
-.pcal-event-sep{order:2;white-space:pre}
-.pcal-event-activity{order:3;flex:0 1 auto!important;min-width:0;overflow:hidden;text-overflow:ellipsis}
-/* Content compacts with the block's height (= its scheduled duration). */
-.pcal-event--roomy,.pcal-event--tall{padding:4px 7px;gap:1px}
-.pcal-event--roomy .pcal-event-title{-webkit-line-clamp:2}
-.pcal-event--roomy .pcal-event-meta,.pcal-event--tall .pcal-event-meta{flex-direction:column}
-.pcal-event--roomy .pcal-event-sep,.pcal-event--tall .pcal-event-sep{display:none}
-.pcal-event--medium{padding:2px 7px}
-.pcal-event.is-compact{flex-direction:row;align-items:center;gap:6px;padding-top:0;padding-bottom:0}
-.pcal-event.is-compact .pcal-event-title{display:block;white-space:nowrap;text-overflow:ellipsis;flex:0 1 auto;min-width:0;font-size:11.5px;line-height:13px}
-.pcal-event.is-compact .pcal-event-meta{flex:0 0 auto;line-height:13px}
-.pcal-event--medium .pcal-event-activity,.pcal-event--medium .pcal-event-sep,.pcal-event--short .pcal-event-activity,.pcal-event--short .pcal-event-sep,.pcal-event--tiny .pcal-event-meta{display:none}
-.pcal-event--tiny{padding:0 6px}
-.pcal-event--tiny .pcal-event-title{font-size:10.5px;line-height:11px}
-.pcal-event--suggested{background:var(--pcal-ghost);border:1px dashed var(--pcal-ghost-edge);color:var(--pcal-ghost-ink)}
-.pcal-event--suggested:hover{background:#eef0ff;border-color:var(--session-accent)}
-.pcal-event--confirmed{background:var(--session-accent);color:#fff}
-.pcal-event--confirmed:hover{box-shadow:0 2px 6px rgba(40,48,120,.28)}
-.pcal-event--active{background:#4f5be0;color:#fff;box-shadow:0 0 0 2px #fff,0 0 0 3px rgba(104,118,245,.55)}
-.pcal-event--overdue{background:var(--pcal-warn-bg);border-color:var(--pcal-warn-edge);color:var(--pcal-warn-ink)}
-.pcal-event--overdue:hover{border-color:#dcb697}
-.pcal-event--completed{background:#f0f2f4;border-color:#e3e6ea;color:#6b737d}
-.pcal-event--completed .pcal-event-title::before{content:"\2713  "}
-.pcal-event--skipped{background:#fff;border:1px dashed #d4d8de;color:#8b939c}
+.pcal-event,.pcal-agenda-card{--ev-accent:#5b6cf0;--ev-bg:#eef0ff;--ev-edge:#d5d9fb;--ev-ink:#27306f}
+.pcal-activity--summary{--ev-accent:#5b6cf0;--ev-bg:#eef0ff;--ev-edge:#d5d9fb;--ev-ink:#27306f}
+.pcal-activity--flashcards{--ev-accent:#c7811a;--ev-bg:#fff4e2;--ev-edge:#f2dcb5;--ev-ink:#5e3b06}
+.pcal-activity--quiz{--ev-accent:#cc4a6b;--ev-bg:#fdeef2;--ev-edge:#f4cfd9;--ev-ink:#6e1b33}
+.pcal-activity--quiz_retry{--ev-accent:#a8457a;--ev-bg:#f9eef5;--ev-edge:#ecd0e1;--ev-ink:#5c1c40}
+.pcal-activity--review{--ev-accent:#2b86ad;--ev-bg:#e8f4fa;--ev-edge:#c7e2ef;--ev-ink:#123f55}
+.pcal-activity--written_quiz{--ev-accent:#1f9d8a;--ev-bg:#e3f6f2;--ev-edge:#bfe6de;--ev-ink:#0d4d44}
+/* study sessions: the subject first; the layout follows the block's real height (never stretched) */
+.pcal-event{position:absolute;left:4px;right:4px;z-index:3;box-sizing:border-box;padding:4px 8px 4px 10px;border-radius:7px;border:1px solid var(--ev-edge);background:var(--ev-bg);color:var(--ev-ink);box-shadow:inset 4px 0 0 var(--ev-accent);text-align:left;font:inherit;display:flex;flex-wrap:wrap;align-content:flex-start;align-items:baseline;column-gap:6px;row-gap:1px;overflow:hidden;cursor:pointer;min-width:0;transition:box-shadow .15s var(--pcal-ease),border-color .15s var(--pcal-ease),background-color .15s var(--pcal-ease),opacity .15s var(--pcal-ease)}
+.pcal-event:hover{border-color:var(--ev-accent)}
+.pcal-event:focus-visible,.pcal-event.is-selected{outline:2px solid #1f2540;outline-offset:1px;z-index:5}
+.pcal-event-meta,.pcal-event-extra{display:contents}
+.pcal-event-tag{order:0;margin-bottom:1px}
+.pcal-event-title{order:1;flex:1 1 100%;min-width:0;font-size:13px;font-weight:700;line-height:16px;overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical}
+.pcal-event-time{order:2;flex:none;font-size:12px;font-weight:600;line-height:15px;font-variant-numeric:tabular-nums;white-space:nowrap}
+/* zero basis: the duration and activity never wrap onto a line of their own (they shrink and ellipsize) */
+.pcal-event-duration{order:3;flex:1 1 0;min-width:0;font-size:12px;line-height:15px;opacity:.8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pcal-event-duration::before{content:"\00B7  "}
+.pcal-event-sep{display:none}
+.pcal-event-break{order:4;flex:1 0 100%;height:0}
+.pcal-event-activity{order:5;flex:1 1 0;min-width:0;font-size:11.5px;line-height:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.85}
+.pcal-event-status{order:6;flex:none;padding:0 6px;border-radius:999px;background:rgba(255,255,255,.75);font-size:10.5px;font-weight:700;line-height:15px;white-space:nowrap}
+.pcal-event--roomy .pcal-event-title{-webkit-line-clamp:var(--title-lines,1)}
+.pcal-event--medium{padding-top:2px;padding-bottom:2px;row-gap:1px}
+.pcal-event--medium .pcal-event-title{line-height:14px}
+.pcal-event--medium .pcal-event-time,.pcal-event--medium .pcal-event-duration{line-height:13px}
+.pcal-event--medium .pcal-event-break,.pcal-event--medium .pcal-event-activity,.pcal-event--medium .pcal-event-status{display:none}
+.pcal-event--compact{flex-wrap:nowrap;align-items:center;padding-top:0;padding-bottom:0}
+.pcal-event--compact .pcal-event-title{flex:0 1 auto;display:block;white-space:nowrap;text-overflow:ellipsis;font-size:12px;line-height:14px}
+.pcal-event--compact .pcal-event-time{font-size:11px;line-height:14px;font-weight:500}
+.pcal-event--compact .pcal-event-duration,.pcal-event--compact .pcal-event-break,.pcal-event--compact .pcal-event-activity,.pcal-event--compact .pcal-event-status{display:none}
+.pcal-event.is-compact .pcal-event-tag{align-self:center;margin-bottom:0}
+.pcal-event.is-lane{padding-left:7px;padding-right:4px}
+.pcal-event.is-lane .pcal-event-title{font-size:12px}
+.pcal-event.is-lane .pcal-event-duration{display:none}
+.pcal-event.is-lane .pcal-event-title{-webkit-line-clamp:var(--title-lines,1);overflow-wrap:break-word;hyphens:auto}
+/* One-row blocks show the start only (the full range is in the tooltip, aria-label and popover). */
+.pcal-event--compact .pcal-event-end{display:none}
+/* Narrow blocks (an expanded neighbour day, side-by-side lanes, smaller desktops): the subject keeps
+   the room; secondary details give way first. */
+/* Widths are the block's content box (a 1280px desktop day column gives about 107px). */
+.pcal-event{container-type:inline-size}
+@container (max-width:96px){
+  .pcal-event-duration{flex:1 0 auto}   /* its own line when the time leaves no room, never "·…" */
+  .pcal-event:not(.pcal-event--confirmed) .pcal-event-activity{display:none}
+}
+@container (max-width:72px){
+  .pcal-event-duration{display:none}
+  .pcal-event-end{display:none}
+}
+/* status: planned = tinted; in progress = solid accent + ring; completed = grey with a check;
+   not completed = warm dashed; suggested = dashed outline; skipped = struck */
+.pcal-event--confirmed .pcal-event-status{display:none}
+.pcal-event--confirmed:hover{box-shadow:inset 4px 0 0 var(--ev-accent),0 2px 6px rgba(30,36,70,.14)}
+.pcal-event--active{background:var(--ev-accent);border-color:var(--ev-accent);color:#fff;box-shadow:0 0 0 2px #fff,0 0 0 4px var(--ev-accent)}
+.pcal-event--active .pcal-event-status{background:rgba(255,255,255,.22);color:#fff}
+.pcal-event--active .pcal-event-status::before{content:"\25CF  "}
+.pcal-event--overdue{background:var(--pcal-warn-bg);border:1px dashed #d9a982;color:var(--pcal-warn-ink);box-shadow:inset 4px 0 0 #d9a982}
+.pcal-event--overdue:hover{border-color:#c58d63}
+.pcal-event--completed{background:#f2f3f5;border-color:#e2e5ea;color:#5d6570;box-shadow:inset 4px 0 0 #aab1bc}
+.pcal-event--completed .pcal-event-title::before{content:"\2713  ";color:#2f8a52}
+.pcal-event--completed .pcal-event-status{background:#e6f4ea;color:#21653a}
+.pcal-event--skipped{background:#fff;border:1px dashed #d4d8de;color:#8b939c;box-shadow:none}
 .pcal-event--skipped .pcal-event-title{text-decoration:line-through;text-decoration-color:rgba(139,147,156,.6)}
+.pcal-event--suggested{background:#fff;border:1.5px dashed var(--ev-accent);color:var(--ev-ink);box-shadow:none}
+.pcal-event--suggested:hover{background:var(--ev-bg)}
+.pcal-event--suggested .pcal-event-status{background:var(--ev-bg)}
 /* adaptation review on the calendar: proposals are ghosts; sessions they move or drop stay, muted */
 .pcal-review{display:flex;align-items:center;gap:10px;min-width:0;margin-top:4px;padding:4px 5px 4px 12px;border-radius:8px;background:var(--pcal-ghost);border:1px dashed var(--pcal-ghost-edge);color:var(--pcal-ghost-ink);font-size:12.5px}
 .pcal-review[hidden],.pcal-status-line[hidden]{display:none}
@@ -3483,14 +3528,13 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-review-actions{display:flex;gap:6px;flex:none;margin-left:auto}
 .pcal-review-actions button{white-space:nowrap}
 .pcal-review-actions .primary-button{width:auto;padding:5px 12px;font-size:12.5px;border-radius:8px}
-.pcal-event--proposed{background:var(--pcal-ghost);border:1.5px dashed var(--pcal-ghost-edge);color:var(--pcal-ghost-ink);z-index:4}
+.pcal-event--proposed{background:var(--pcal-ghost);border:1.5px dashed var(--pcal-ghost-edge);color:var(--pcal-ghost-ink);box-shadow:none;z-index:4}
 .pcal-event--proposed:hover{background:#eef0ff;border-color:var(--session-accent)}
 .pcal-event-tag{align-self:flex-start;flex:none;padding:0 5px;border-radius:4px;background:#e4e7ff;color:var(--pcal-ghost-ink);font-size:9.5px;font-weight:700;letter-spacing:.04em;line-height:14px;text-transform:uppercase;white-space:nowrap}
-.pcal-event.is-compact .pcal-event-tag{align-self:center}
 .pcal-event.pcal-change--moving,.pcal-event.pcal-change--cancelled{background:#f3f4f8;border:1px solid #dfe2ea;color:#6b737d;box-shadow:none}
 .pcal-event.pcal-change--moving:hover,.pcal-event.pcal-change--cancelled:hover{border-color:#c9cdd8}
 .pcal-change--moving .pcal-event-tag,.pcal-change--cancelled .pcal-event-tag{background:#e6e8ee;color:#5b6478}
-.pcal-change--cancelled .pcal-event-title,.pcal-change--cancelled .pcal-event-meta{text-decoration:line-through;text-decoration-color:rgba(107,115,125,.55)}
+.pcal-change--cancelled .pcal-event-title,.pcal-change--cancelled .pcal-event-meta,.pcal-change--cancelled .pcal-event-time,.pcal-change--cancelled .pcal-event-activity{text-decoration:line-through;text-decoration-color:rgba(107,115,125,.55)}
 .pcal-kind--change-moving,.pcal-kind--change-cancelled{background:var(--pcal-line-soft);color:var(--pcal-ink-2)}
 .pcal-now{position:absolute;left:-1px;right:0;height:2px;margin-top:-1px;background:#e5484d;z-index:5;pointer-events:none}
 .pcal-now::before{content:"";position:absolute;left:-5px;top:-4px;width:10px;height:10px;border-radius:50%;background:#e5484d}
@@ -3621,7 +3665,6 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 /* Written Quiz (flashcard retrieval practice) sessions: visually distinct from normal Quiz. */
 .planner-session--written_quiz{border-left:4px solid #1f9d8a}
 .planner-session--written_quiz .planner-activity-chip{background:#e3f6f2;color:#136b5e}
-.pcal-event.pcal-activity--written_quiz{box-shadow:inset 3px 0 0 #1f9d8a}
 
 /* Google Calendar: a quiet section at the foot of the materials rail, and read-only "Busy" blocks */
 .pcal-gcal{margin-top:10px;padding-top:10px;border-top:1px solid var(--pcal-line);display:grid;gap:6px}
@@ -3643,5 +3686,65 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .planner-gcal-connect{white-space:nowrap}
 .planner-gcal-connect:disabled{opacity:.55;cursor:not-allowed}
 .planner-gcal-connected{font-size:12.5px;font-weight:600;white-space:nowrap;color:var(--pcal-avail-ink)}
-.pcal-busy{position:absolute;left:0;right:0;z-index:2;box-sizing:border-box;padding:2px 6px;overflow:hidden;pointer-events:none;border-left:2px solid #b9bec9;color:#5f6675;background:repeating-linear-gradient(135deg,rgba(116,124,142,.17) 0 6px,rgba(116,124,142,.07) 6px 12px)}
-.pcal-busy-label{font-size:9.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase}
+.pcal-busy{position:absolute;left:0;right:0;z-index:2;box-sizing:border-box;padding:2px 6px;overflow:hidden;pointer-events:none;border-left:2px solid #c9cdd5;color:#6b7280;background:repeating-linear-gradient(135deg,rgba(116,124,142,.12) 0 6px,rgba(116,124,142,.05) 6px 12px)}
+.pcal-busy-label{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;opacity:.8}
+
+/* Agenda view: the week as readable cards grouped by day (same sessions, same actions) */
+.pcal-agenda{flex:1;min-height:0;overflow-y:auto;padding:4px 16px 20px;display:grid;align-content:start;gap:18px;scrollbar-width:thin}
+.pcal-agenda[hidden]{display:none}
+.pcal-agenda-day{display:grid;gap:8px;min-width:0}
+.pcal-agenda-date{margin:0;padding:6px 0 4px;display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 10px;border-bottom:1px solid var(--pcal-line);font-size:15px;font-weight:700;color:var(--ink)}
+.pcal-agenda-day.is-past .pcal-agenda-date{color:var(--muted)}
+.pcal-agenda-today{padding:1px 8px;border-radius:999px;background:var(--session-accent);color:#fff;font-size:11px;font-weight:700}
+.pcal-agenda-total{margin-left:auto;font-size:12.5px;font-weight:500;color:var(--muted)}
+.pcal-agenda-list{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.pcal-agenda-card{display:grid;grid-template-columns:84px minmax(0,1fr);gap:14px;padding:12px 14px 12px 16px;border:1px solid var(--ev-edge);border-radius:12px;background:#fff;box-shadow:inset 4px 0 0 var(--ev-accent);min-width:0}
+.pcal-agenda-time{display:grid;align-content:start;gap:1px;font-variant-numeric:tabular-nums}
+.pcal-agenda-start{font-size:16px;font-weight:700;color:var(--ink)}
+.pcal-agenda-end{font-size:12.5px;color:var(--pcal-ink-2)}
+.pcal-agenda-duration{margin-top:4px;justify-self:start;padding:1px 8px;border-radius:999px;background:var(--ev-bg);color:var(--ev-ink);font-size:12px;font-weight:700}
+.pcal-agenda-body{display:grid;gap:4px;min-width:0}
+.pcal-agenda-top{display:flex;align-items:flex-start;gap:10px;min-width:0}
+.pcal-agenda-title{margin:0;flex:1;min-width:0;font-size:15px;font-weight:700;line-height:1.3;color:var(--ink);overflow-wrap:anywhere}
+.pcal-agenda-status{flex:none;font-size:11.5px;padding:2px 9px}
+.pcal-agenda-topic{margin:0;display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px;font-size:13px;color:var(--pcal-ink-2)}
+.pcal-agenda-activity{font-weight:700;color:var(--ev-ink)}
+.pcal-agenda-reason{overflow-wrap:anywhere}
+.pcal-agenda-note{margin:0;font-size:12.5px;color:var(--muted)}
+.pcal-agenda-note--warn{color:var(--pcal-warn-ink);font-weight:600}
+.pcal-agenda-actions{margin-top:6px;display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px}
+.pcal-agenda-actions .primary-button{width:auto;padding:6px 14px;font-size:13px;border-radius:8px}
+.pcal-agenda-card--active{background:var(--ev-bg);border-color:var(--ev-accent)}
+.pcal-agenda-card--completed,.pcal-agenda-card--skipped{background:#f8f9fa;border-color:#e3e6ea;box-shadow:inset 4px 0 0 #aab1bc}
+.pcal-agenda-card--completed .pcal-agenda-title::before{content:"\2713  ";color:#2f8a52}
+.pcal-agenda-card--skipped .pcal-agenda-title{text-decoration:line-through;color:var(--muted)}
+.pcal-agenda-card--overdue{background:var(--pcal-warn-bg);border:1px dashed #d9a982;box-shadow:inset 4px 0 0 #d9a982}
+.pcal-agenda-card--suggested,.pcal-agenda-card--proposed{border:1.5px dashed var(--ev-accent);box-shadow:none}
+.pcal-agenda-card.pcal-change--cancelled .pcal-agenda-title{text-decoration:line-through;color:var(--muted)}
+.pcal-kind--active{background:var(--ev-accent,var(--session-accent));color:#fff}
+.pcal-kind--completed{background:#e6f4ea;color:#21653a}
+.pcal-kind--suggested,.pcal-kind--proposed{background:var(--pcal-ghost);color:var(--pcal-ghost-ink)}
+.pcal-agenda-empty{display:grid;gap:4px;padding:40px 16px;text-align:center;color:var(--muted);font-size:13.5px;border:1px dashed var(--pcal-line);border-radius:12px}
+.pcal-agenda-empty strong{font-size:15px;color:var(--pcal-ink-2)}
+@media (max-width:560px){
+  .pcal-agenda-card{grid-template-columns:1fr;gap:6px}
+  .pcal-agenda-time{display:flex;align-items:baseline;gap:8px}
+  .pcal-agenda-duration{margin-top:0}
+}
+
+/* narrow screens: the saved plan reads as agenda cards (subject first, then time, activity, status) */
+.planner-session{border-left:4px solid var(--line)}
+.planner-session--summary{border-left-color:#5b6cf0}
+.planner-session--flashcards{border-left-color:#c7811a}
+.planner-session--quiz{border-left-color:#cc4a6b}
+.planner-session--quiz_retry{border-left-color:#a8457a}
+.planner-session--review{border-left-color:#2b86ad}
+.planner-session-body strong{font-size:15px;line-height:1.3}
+.planner-session-time{font-size:14px}
+.planner-session-live{padding:1px 8px;border-radius:999px;background:#5b6cf0;color:#fff;font-weight:700;white-space:nowrap}
+/* Tablet widths: the action buttons go under the session text instead of squeezing over it. */
+@media(min-width:481px) and (max-width:1023px){
+  .planner-session--actionable{grid-template-columns:96px minmax(0,1fr)}
+  .planner-session--actionable .planner-session-actions{grid-column:2;flex-wrap:wrap;justify-content:flex-start}
+}
+.planner-session--status-in_progress{background:#f4f5ff}

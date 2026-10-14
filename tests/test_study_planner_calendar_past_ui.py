@@ -61,6 +61,7 @@ const popoverButtons = () => [...$("pcal-popover").querySelectorAll("button")].m
   await sleep(1500);
   const noMotion = document.createElement("style"); noMotion.textContent = "*,*::before,*::after{transition:none!important;animation:none!important}"; document.head.appendChild(noMotion);
   plannerNow = () => new Date(2026, 8, 24, 14, 0, 0);   // Thu 24 Sep 2026, 14:00
+  pcalSetHourPx(80, {save: false});   // this suite's geometry is written for the 80px/hour zoom level
   const session = (id, activity, start, end, minutes, status) => ({session_id: id, plan_id: "plan-1", document_id: "mkt.pdf",
     document_title: "Marketing", activity_type: activity, scheduled_start: start, scheduled_end: end, duration_minutes: minutes,
     status, reason: {code: "new_material", message: "New material to learn"}, artifact_id: null, rescheduled_from: null});

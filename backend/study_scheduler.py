@@ -14,6 +14,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
+from backend.study_session_duration import at_least_minimum
 from backend.study_time import free_minutes_by_date, subtract_minute_interval, to_minutes
 from backend.study_scheduler_contracts import (
     REASON_DEADLINE_APPROACHING, REASON_FINAL_REVIEW, REASON_LOW_QUIZ_SCORE, REASON_NEW_MATERIAL,
@@ -63,10 +64,11 @@ class SchedulerConfig:
     deadline_approaching_days: int = 3    # new material this close to its deadline says so
     default_horizon_days: int = 14        # horizon for plans without deadlines
     max_horizon_days: int = 42
-    # Durations: (min, max, default when the artifact size is unknown), minutes.
+    # Durations: (min, max, default when the artifact size is unknown), minutes. No new session is
+    # shorter than study_session_duration.MIN_SESSION_MINUTES (20).
     durations: dict = field(default_factory=lambda: {
-        "summary": (30, 50, 40), "flashcards": (15, 30, 20), "quiz": (20, 40, 30),
-        "review": (10, 20, 15), "quiz_retry": (20, 30, 25), "written_quiz": (10, 25, 15),
+        "summary": (30, 50, 40), "flashcards": (20, 30, 20), "quiz": (20, 40, 30),
+        "review": (20, 30, 20), "quiz_retry": (20, 30, 25), "written_quiz": (20, 25, 20),
     })
     summary_base_minutes: int = 20
     summary_minutes_per_chunk: float = 2.0
@@ -172,8 +174,8 @@ def estimate_duration(activity_type: str, state, config: SchedulerConfig = DEFAU
         total = state.quiz.latest_completed.total if state.quiz.latest_completed else questions
         value = total * config.quiz_minutes_per_question
     else:
-        return bounds[2]
-    return min(_round_clamp(value, bounds, rounding), config.max_block_minutes)
+        return at_least_minimum(bounds[2])
+    return at_least_minimum(min(_round_clamp(value, bounds, rounding), config.max_block_minutes))
 
 
 def review_interval_days(percentage: float, config: SchedulerConfig = DEFAULT_CONFIG) -> int:

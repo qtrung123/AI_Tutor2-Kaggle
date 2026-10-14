@@ -324,7 +324,8 @@ if (plannerView) {
         <button class="pcal-button" id="pcal-today" type="button">Today</button>
         <div class="pcal-nav"><button class="pcal-icon-button" id="pcal-prev" type="button" aria-label="Previous week">‹</button><button class="pcal-icon-button" id="pcal-next" type="button" aria-label="Next week">›</button></div>
         <h2 class="pcal-range" id="pcal-range"></h2>
-        <span class="pcal-view-pill">Week</span>
+        <div class="pcal-view-switch" role="group" aria-label="Calendar view"><button class="pcal-view-option" id="pcal-view-week" type="button" data-view="week" aria-pressed="true">Week</button><button class="pcal-view-option" id="pcal-view-agenda" type="button" data-view="agenda" aria-pressed="false">Agenda</button></div>
+        <div class="pcal-zoom" role="group" aria-label="Calendar zoom"><button class="pcal-icon-button" id="pcal-zoom-out" type="button" aria-label="Zoom out" title="Zoom out">−</button><button class="pcal-icon-button" id="pcal-zoom-in" type="button" aria-label="Zoom in" title="Zoom in">+</button></div>
         <div class="pcal-actions"><button class="pcal-button pcal-secondary" id="pcal-auto-plan" type="button">Auto Plan</button><button class="primary-button pcal-accept" id="pcal-accept" type="button">Accept plan</button></div>
         <div class="planner-gcal-cta" id="pcal-gcal-cta" hidden></div>
         <div class="pcal-panel-toggles" role="group" aria-label="Planner panels">
@@ -340,6 +341,7 @@ if (plannerView) {
       <div class="pcal-head" id="pcal-head"></div>
       <div class="pcal-body" id="pcal-body"></div>
     </div>
+    <div class="pcal-agenda" id="pcal-agenda" aria-label="Agenda" hidden></div>
   </section>
   <aside class="pcal-rail pcal-queue" id="pcal-queue-rail" aria-labelledby="pcal-queue-title">
     <div class="pcal-queue-head"><h3 class="pcal-rail-title" id="pcal-queue-title">Study queue</h3><span class="pcal-queue-count" id="pcal-queue-count"></span></div>
@@ -399,6 +401,11 @@ const pcal = {
   sheetList: document.getElementById("pcal-sheet-list"),
   sheetClose: document.getElementById("pcal-sheet-close"),
   popover: document.getElementById("pcal-popover"),
+  agenda: document.getElementById("pcal-agenda"),
+  viewWeek: document.getElementById("pcal-view-week"),
+  viewAgenda: document.getElementById("pcal-view-agenda"),
+  zoomIn: document.getElementById("pcal-zoom-in"),
+  zoomOut: document.getElementById("pcal-zoom-out"),
   gcal: document.getElementById("pcal-gcal"),
 };
 const todayPlanPanel = document.getElementById("today-plan");
@@ -1106,8 +1113,20 @@ const PCAL_CHANGE_KIND_LABELS = {
 // endpoint fills the week with suggested (ghost) sessions; Accept plan confirms them in place.
 // Same plan state and APIs as the step flow above, which stays the small-screen experience.
 
-const PCAL_HOUR_PX = 80;
-const PCAL_MINUTE_PX = PCAL_HOUR_PX / 60;
+// Vertical zoom of the week grid (pixels per hour). Events always keep their real start/end; a taller
+// hour gives short sessions room for their title, time and status. Default: the comfortable level.
+const PCAL_ZOOM_LEVELS = [64, 80, 112, 144];
+const PCAL_DEFAULT_HOUR_PX = 112;
+let PCAL_HOUR_PX = PCAL_DEFAULT_HOUR_PX;
+let PCAL_MINUTE_PX = PCAL_HOUR_PX / 60;
+// Below this height (px) an event shows one compact row (title + start); full details stay in its
+// tooltip, accessible name and popover.
+const PCAL_EVENT_TWO_LINE_PX = 34;
+const PCAL_EVENT_ROOMY_PX = 62;
+// New sessions: minimum length, quick presets and default (mirrors backend/study_session_duration.py).
+const PLANNER_MIN_SESSION_MINUTES = 20;
+const PLANNER_SESSION_DURATION_PRESETS = [20, 30, 40, 50];
+const PLANNER_DEFAULT_SESSION_MINUTES = 30;
 const PCAL_DAY_MINUTES = 24 * 60;
 const PCAL_PREVIEW_DELAY_MS = 450;
 // Google Calendar section of the desktop planner (js/planner.js).
@@ -1128,8 +1147,10 @@ const PLANNER_LEARNING_STATE_LABELS = {
 };
 const PCAL_KIND_LABELS = {
   suggested: "Suggested", confirmed: "Planned", active: "In progress", overdue: "Not completed",
-  completed: "Completed", skipped: "Skipped",
+  completed: "Completed", skipped: "Skipped", proposed: "Suggested change",
 };
+let pcalView = "week";            // "week" | "agenda" (desktop workspace); smaller screens list sessions by day
+let pcalFocusDay = null;          // a date key whose column is expanded in the week grid; null = all equal
 const plannerDesktopQuery = window.matchMedia ? window.matchMedia("(min-width: 1024px)") : null;
 
 let plannerCalWeekStart = null;   // Monday of the week on the calendar; null = this week
@@ -1255,6 +1276,11 @@ pcal.today?.addEventListener("click", () => {
   renderPlannerWorkspace();
 });
 pcal.prev?.addEventListener("click", () => pcalShiftWeek(-7));
+pcal.viewWeek?.addEventListener("click", () => pcalSetView("week"));
+pcal.viewAgenda?.addEventListener("click", () => pcalSetView("agenda"));
+pcal.zoomIn?.addEventListener("click", () => pcalZoom(1));
+pcal.zoomOut?.addEventListener("click", () => pcalZoom(-1));
+pcalRestorePreferences();
 pcal.next?.addEventListener("click", () => pcalShiftWeek(7));
 pcal.autoPlan?.addEventListener("click", () => plannerQueueAutoPreview(0));
 pcal.explain?.addEventListener("click", () => (pcal.popover.hidden ? pcalOpenPlanExplanation() : pcalClosePopover()));
@@ -1292,7 +1318,7 @@ document.addEventListener("pointercancel", () => {
 document.addEventListener("pointerdown", (event) => {
   // Click-away closes the popover and the add-materials sheet.
   if (!plannerWorkspace || plannerWorkspace.hidden) return;
-  if (!pcal.popover.hidden && !pcal.popover.contains(event.target) && !event.target.closest?.(".pcal-event, .pcal-avail")) pcalClosePopover();
+  if (!pcal.popover.hidden && !pcal.popover.contains(event.target) && !event.target.closest?.(".pcal-event, .pcal-avail, .pcal-agenda-details")) pcalClosePopover();
   if (!pcal.sheet.hidden && !pcal.sheet.contains(event.target) && !pcal.addMaterials.contains(event.target)) pcalCloseSheet();
 });
 document.addEventListener("keydown", (event) => {

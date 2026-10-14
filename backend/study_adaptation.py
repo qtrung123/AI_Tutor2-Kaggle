@@ -23,6 +23,7 @@ Rules
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
+from backend.study_session_duration import at_least_minimum
 from backend.study_time import free_minutes_by_date, subtract_minute_interval, to_minutes
 from backend.study_scheduler import DEFAULT_CONFIG, SchedulerConfig, _build_steps, _Step, resolve_clock
 from backend.study_scheduler_contracts import REASON_FINAL_REVIEW, REASON_RESCHEDULED, MaterialContext
@@ -302,7 +303,9 @@ def _reconcile_document(material: MaterialContext, steps: list[_Step], future: l
             continue
         if not can_add(step):
             continue
-        slot = _place(calendar, material.document_id, step.activity_type, step.duration, ready, latest, None, last_end)
+        # A new session (a replacement included) is never shorter than the minimum; moves keep their length.
+        minutes = at_least_minimum(step.duration)
+        slot = _place(calendar, material.document_id, step.activity_type, minutes, ready, latest, None, last_end)
         if slot is None:
             outcome.warnings.append({"code": "no_slot_before_deadline" if deadline else "no_available_slot",
                                      "document_id": material.document_id, "activity_type": step.activity_type})
@@ -313,11 +316,11 @@ def _reconcile_document(material: MaterialContext, steps: list[_Step], future: l
         reason_code = REASON_RESCHEDULED if replaced else step.reason_code
         message = (f'Replace the {"skipped" if replaced and replaced.get("status") == "skipped" else "missed"} '
                    f'{_label(step.activity_type)} session for "{title}".' if replaced else step.message)
-        outcome.added.append(AddedSession(material.document_id, step.activity_type, slot[0], slot[1], step.duration,
+        outcome.added.append(AddedSession(material.document_id, step.activity_type, slot[0], slot[1], minutes,
                                           reason_code, message, step.artifact_id,
                                           replaced["session_id"] if replaced else None))
         outcome.reasons.append(f"Add: {message}")
-        calendar.occupy(material.document_id, step.activity_type, *slot, step.duration)
+        calendar.occupy(material.document_id, step.activity_type, *slot, minutes)
         last_date, last_end = _day(slot[0]), slot[1]
 
     for session in unused:

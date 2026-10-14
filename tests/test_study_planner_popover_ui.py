@@ -71,17 +71,19 @@ const press = (label) => [...$("pcal-popover").querySelectorAll(".pcal-session-a
     session("s-cancelled", "mkt.pdf", "review", "2026-09-23T20:00:00", "2026-09-23T20:15:00", 15, "cancelled"),
   ]};
   setPage("planner"); await sleep(600);
-  $("pcal-scroll").scrollTop = 8 * 80;
+  $("pcal-scroll").scrollTop = 8 * PCAL_HOUR_PX;
   out.onCalendar = [...document.querySelectorAll(".pcal-event")].map((e) => e.dataset.sessionId).sort();
 
   // Event blocks: height = duration; content compacts with it (visible parts only, no overflow).
   const shownText = (el) => el && el.getClientRects().length && getComputedStyle(el).display !== "none" ? el.textContent : null;
   out.blocks = Object.fromEntries(["s-ahead", "s-start", "s-missed", "s-skipped"].map((id) => {
     const e = document.querySelector(`.pcal-event[data-session-id="${id}"]`);
-    const tier = ["roomy", "tall", "medium", "short", "tiny"].find((t) => e.classList.contains(`pcal-event--${t}`));
+    const tier = ["roomy", "medium", "compact"].find((t) => e.classList.contains(`pcal-event--${t}`));
     return [id, {tier, height: Math.round(e.getBoundingClientRect().height), top: Math.round(parseFloat(e.style.top)),
       title: shownText(e.querySelector(".pcal-event-title")), time: shownText(e.querySelector(".pcal-event-time")),
       activity: shownText(e.querySelector(".pcal-event-activity")), meta: e.querySelector(".pcal-event-meta").textContent,
+      duration: shownText(e.querySelector(".pcal-event-duration")), status: shownText(e.querySelector(".pcal-event-status")),
+      tooltip: e.title, fontSize: parseFloat(getComputedStyle(e.querySelector(".pcal-event-title")).fontSize),
       overflows: [...e.children].some((c) => c.getClientRects().length && c.getBoundingClientRect().bottom > e.getBoundingClientRect().bottom + 1)}];
   }));
   out.scheduled = open("s-ahead");
@@ -122,22 +124,29 @@ const press = (label) => [...$("pcal-popover").querySelectorAll(".pcal-session-a
 class PopoverAssertions:
     def test_event_blocks_reflect_duration_and_compact_their_content(self):
         blocks = self.out["blocks"]
-        # 18:00-18:45 (45m, 58px): title, time and activity; height and top follow the scheduled times.
-        self.assertEqual(blocks["s-ahead"]["tier"], "tall")
-        self.assertEqual((blocks["s-ahead"]["top"], blocks["s-ahead"]["height"]), (18 * 80, 45 * 80 // 60 - 2))
-        self.assertEqual((blocks["s-ahead"]["title"], blocks["s-ahead"]["time"], blocks["s-ahead"]["activity"]),
-                         ("Marketing", "18:00–18:45", "Summary"))
-        # 40m: title + time; 20m: one row, title + time.
-        for key, tier in (("s-skipped", "medium"), ("s-start", "short")):
-            self.assertEqual(blocks[key]["tier"], tier)
-            self.assertIsNotNone(blocks[key]["title"])
-            self.assertIsNotNone(blocks[key]["time"])
-            self.assertIsNone(blocks[key]["activity"])
-        # 15m: the title only.
-        self.assertEqual(blocks["s-missed"]["tier"], "tiny")
-        self.assertEqual((blocks["s-missed"]["title"], blocks["s-missed"]["time"]), ("PowerBI", None))
+        hour = 112   # the default comfortable zoom (px per hour); blocks keep their real start and length
+        # 45m: the subject, time · duration and activity; height and top follow the scheduled times.
+        self.assertEqual(blocks["s-ahead"]["tier"], "roomy")
+        self.assertEqual((blocks["s-ahead"]["top"], blocks["s-ahead"]["height"]), (18 * hour, round(45 * hour / 60 - 2)))
+        self.assertEqual((blocks["s-ahead"]["title"], blocks["s-ahead"]["time"], blocks["s-ahead"]["duration"],
+                          blocks["s-ahead"]["activity"]), ("Marketing", "18:00–18:45", "45m", "Summary"))
+        self.assertIsNone(blocks["s-ahead"]["status"])   # a planned session needs no status pill
+        # 40m: roomy as well; 20m: two lines, subject + time · duration.
+        self.assertEqual(blocks["s-skipped"]["tier"], "roomy")
+        self.assertEqual(blocks["s-skipped"]["status"], "Skipped")
+        self.assertEqual(blocks["s-start"]["tier"], "medium")
+        self.assertIsNotNone(blocks["s-start"]["title"])
+        self.assertIsNotNone(blocks["s-start"]["time"])
+        self.assertEqual(blocks["s-start"]["duration"], "20m")
+        self.assertIsNone(blocks["s-start"]["activity"])
+        # An existing 15m session: one compact row that still names the subject and its start.
+        self.assertEqual(blocks["s-missed"]["tier"], "compact")
+        self.assertEqual(blocks["s-missed"]["title"], "PowerBI")
+        self.assertIsNotNone(blocks["s-missed"]["time"])
+        self.assertIn("PowerBI", blocks["s-missed"]["tooltip"])   # full details on hover
         for block in blocks.values():
             self.assertFalse(block["overflows"])
+            self.assertGreaterEqual(block["fontSize"], 12)
         self.assertEqual(blocks["s-ahead"]["meta"], "Summary · 18:00–18:45")   # the text other code reads is unchanged
 
     def test_no_script_errors(self):

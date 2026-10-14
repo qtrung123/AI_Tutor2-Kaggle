@@ -77,6 +77,7 @@ const clickBlock = async (block) => {
   await sleep(1500);
   const noMotion = document.createElement("style"); noMotion.textContent = "*,*::before,*::after{transition:none!important;animation:none!important}"; document.head.appendChild(noMotion);
   plannerNow = () => new Date(2026, 8, 21, 8, 0, 0);   // Mon 21 Sep 2026, 08:00
+  pcalSetHourPx(80, {save: false});   // this suite's geometry is written for the 80px/hour zoom level
   out.desktop = innerWidth >= 1024;
   setPage("planner"); await sleep(500);
   if (!out.desktop) {

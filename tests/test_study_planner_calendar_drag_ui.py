@@ -173,6 +173,7 @@ const drag = async (element, date, minute, {inspect} = {}) => {
   await sleep(1500);
   const noMotion = document.createElement("style"); noMotion.textContent = "*,*::before,*::after{transition:none!important;animation:none!important}"; document.head.appendChild(noMotion);
   plannerNow = () => new Date(2026, 8, 24, 12, 0, 0);
+  pcalSetHourPx(80, {save: false});   // this suite's geometry is written for the 80px/hour zoom level
   P.plans = [{plan_id: "plan-1", title: "Exams", status: "active"}];
   P.materials = [{material_id: "m-mkt", plan_id: "plan-1", document_id: "mkt.pdf", deadline: "2026-10-01", learning_state: "new"},
                  {material_id: "m-stats", plan_id: "plan-1", document_id: "stats.pdf", deadline: null, learning_state: "new"}];
