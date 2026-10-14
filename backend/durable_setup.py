@@ -24,7 +24,7 @@ APP_TABLES = (
     "app_metadata", "quizzes", "quiz_questions", "quiz_options", "quiz_attempts", "quiz_attempt_answers",
     "quiz_explanations", "quiz_validation_events", "concept_plan_cache", "topic_mastery",
     "study_tasks", "availability_slots", "study_blocks", "schedule_runs", "study_plan_items", "topic_progress",
-    "study_plans", "study_plan_materials", "study_sessions",
+    "study_plans", "study_plan_materials", "study_sessions", "study_preferences",
     "google_calendar_connections", "google_calendar_event_links", "google_oauth_states",
 )
 _API_ROLES = ("anon", "authenticated")
