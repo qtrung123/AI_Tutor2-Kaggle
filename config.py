@@ -111,6 +111,12 @@ STRUCTURAL_EVIDENCE_ONLY_CHUNK_MIN_CHARS = int(os.getenv("STRUCTURAL_EVIDENCE_ON
 
 # Model dùng để embedding
 EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "bge-m3")
+# bge-m3 dense vectors have 1024 dimensions; pgvector rows are validated against this.
+EMBEDDING_DIMENSIONS = int(os.getenv("AI_TUTOR_EMBEDDING_DIMENSIONS", "1024"))
+
+# Durable original uploads (Supabase Storage, private bucket). SUPABASE_URL and
+# SUPABASE_SERVICE_ROLE_KEY are read from the environment at call time and stay server-side.
+SUPABASE_STORAGE_BUCKET = os.getenv("AI_TUTOR_STORAGE_BUCKET", "ai-tutor-documents")
 
 # Ollama's standard environment variable. LangChain also honors this value.
 OLLAMA_BASE_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")

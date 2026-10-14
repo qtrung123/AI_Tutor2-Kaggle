@@ -10,10 +10,11 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from backend import google_calendar_sync, study_planner_store
+from backend import document_storage, google_calendar_sync, study_planner_store
 from backend.api.deps import require_current_user
 from backend.conversation_store import remove_source_from_conversations
 from backend.flashcard_store import delete_document_flashcards
+from backend.indexed_document_store import get_indexed_document
 from backend.ingest import delete_indexed_file, index_files
 from backend.quiz_common import list_indexed_documents
 from backend.quiz_store import delete_document_quiz_data
@@ -93,7 +94,22 @@ def sources(current_user: dict = Depends(require_current_user)) -> list[SourceSu
 
 @router.get("/api/sources/{document_id}/content")
 def source_content(document_id: str, current_user: dict = Depends(require_current_user)) -> FileResponse:
-    """Serve one owned original upload for the Study Session document viewer."""
+    """Serve one owned original upload for the Study Session document viewer.
+
+    With durable storage the Kaggle disk is only a cache: a missing local copy is downloaded from
+    the private bucket (server-side; the browser never sees storage credentials)."""
+    if document_storage.durable_storage_enabled():
+        document = get_indexed_document(current_user["id"], document_id)
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found.")
+        try:
+            path = document_storage.ensure_local_copy(document)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="Original upload is unavailable.") from error
+        except document_storage.DocumentStorageError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        media_type = "application/pdf" if path.suffix.lower() == ".pdf" else "text/plain; charset=utf-8"
+        return FileResponse(path, media_type=media_type, filename=path.name, content_disposition_type="inline")
     source = next((item for item in list_uploaded_sources(current_user["id"]) if item["title"] == document_id), None)
     if not source:
         raise HTTPException(status_code=404, detail="Document not found.")
@@ -114,8 +130,9 @@ async def upload_sources(files: list[UploadFile] = File(...), current_user: dict
     1. Receive multipart files from frontend.
     2. Validate file extensions.
     3. Save files into data/.
-    4. Call backend.ingest.index_files() to chunk/embed/store them in Chroma.
-    5. Return indexing stats and refreshed source list.
+    4. Call backend.ingest.index_files() to store the original durably (Supabase Storage on
+       PostgreSQL deployments) and chunk/embed/store it in the vector store.
+    5. Return indexing stats and refreshed source list -- only after everything is stored.
     """
     if not files:
         raise HTTPException(status_code=400, detail="Upload at least one PDF or TXT file.")
@@ -157,6 +174,11 @@ async def upload_sources(files: list[UploadFile] = File(...), current_user: dict
         )
     except HTTPException:
         raise
+    except document_storage.DocumentStorageError as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"The file could not be saved to durable storage, so it was not added. {error}",
+        ) from error
     except Exception as error:
         raise HTTPException(
             status_code=500,

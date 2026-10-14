@@ -5,8 +5,6 @@ from typing import List
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_ollama import OllamaEmbeddings
-from langchain_chroma import Chroma
 
 from backend.topic_extractor import (
     MIN_MEANINGFUL_SPAN,
@@ -15,10 +13,12 @@ from backend.topic_extractor import (
     _HIGH_CONFIDENCE as HIGH_STRUCTURE_CONFIDENCE,
     ollama_heading_refiner,
 )
+from backend import document_storage, vector_store
 from backend.assessment_planner import resolve_topic_evidence
 from backend.auth_store import LEGACY_USER_ID
 from backend.indexed_document_store import (
     delete_indexed_document,
+    is_object_referenced,
     list_indexed_documents,
     list_stale_topic_documents,
     upsert_indexed_document,
@@ -27,8 +27,6 @@ from backend.indexed_document_store import (
 from config import (
     DATA_DIR,
     VECTORSTORE_DIR,
-    COLLECTION_NAME,
-    EMBEDDING_MODEL,
     CHAT_MODEL,
     CHUNK_SIZE,
     CHUNK_OVERLAP,
@@ -141,20 +139,14 @@ def split_documents(documents):
 
 
 def get_vectorstore():
-    """Open or create Chroma vectorstore."""
-    embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
-
-    vectorstore = Chroma(
-        persist_directory=str(VECTORSTORE_DIR),
-        collection_name=COLLECTION_NAME,
-        embedding_function=embeddings,
-    )
-
-    return vectorstore
+    """The chunk store: durable pgvector on PostgreSQL, local Chroma on SQLite (backend/vector_store.py)."""
+    return vector_store.get_vectorstore()
 
 
 def migrate_legacy_vector_ownership(vectorstore) -> int:
     """Add legacy ownership in place without changing vector IDs or chunk traceability."""
+    if getattr(vectorstore, "is_durable", False):
+        return 0  # pgvector rows always carry owner_id; only old local Chroma data needs this
     result = vectorstore.get(limit=100000)
     ids = result.get("ids", []) or []
     metadatas = result.get("metadatas", []) or []
@@ -169,7 +161,7 @@ def migrate_legacy_vector_ownership(vectorstore) -> int:
         update_ids.append(vector_id)
         update_metadatas.append(metadata)
     if update_ids:
-        vectorstore._collection.update(ids=update_ids, metadatas=update_metadatas)
+        vector_store.update_chunk_metadata(vectorstore, update_ids, update_metadatas)
     return len(update_ids)
 
 
@@ -251,7 +243,7 @@ def refresh_topic_metadata(vectorstore, file_path: Path, owner_id: str, info: di
     if any(stored_text.get(vector_id) != chunk.page_content for vector_id, chunk in zip(vector_ids, chunks)):
         return None
     topics = add_topic_metadata(documents, chunks, provenance_ids)
-    vectorstore._collection.update(ids=vector_ids, metadatas=[chunk.metadata for chunk in chunks])
+    vector_store.update_chunk_metadata(vectorstore, vector_ids, [chunk.metadata for chunk in chunks])
     refreshed = {**info, "topic_schema_version": TOPIC_SCHEMA_VERSION, "topics": topics}
     upsert_indexed_document(owner_id, document_id, refreshed)
     print(f"Refreshed topics without re-embedding: {file_path.name} ({len(topics)} topics)")
@@ -268,8 +260,14 @@ def refresh_stale_topic_documents() -> dict:
     stale = list_stale_topic_documents(TOPIC_SCHEMA_VERSION)
     vectorstore = get_vectorstore() if stale else None
     for info in stale:
-        file_path = Path(str(info.get("path") or ""))
         label = f"{info['owner_id']}/{info['document_id']}"
+        if document_storage.durable_storage_enabled():
+            try:  # the Kaggle disk is only a cache: fetch the durable original when needed
+                file_path = document_storage.ensure_local_copy(info)
+            except (FileNotFoundError, document_storage.DocumentStorageError):
+                file_path = Path()
+        else:
+            file_path = Path(str(info.get("path") or ""))
         if not file_path.is_file():
             print(f"Cannot refresh topics, source file is missing: {label}")
             missing.append(label)
@@ -282,11 +280,35 @@ def refresh_stale_topic_documents() -> dict:
     return {"refreshed": refreshed, "reindexed": reindexed, "missing": missing}
 
 
+def _discard_unreferenced_object(owner_id: str, object_path: str | None) -> None:
+    """Delete a stored original that no registered document points at (never masks the caller's error)."""
+    if not object_path or is_object_referenced(owner_id, object_path):
+        return
+    try:
+        document_storage.delete(owner_id, object_path)
+    except Exception as error:  # best effort; reported without credentials
+        print(f"[storage] could not delete an unreferenced object for owner {owner_id} ({type(error).__name__})")
+
+
+def _store_original_for_existing(owner_id: str, file_key: str, file_path: Path, file_hash: str, info: dict) -> dict:
+    """A document indexed before durable storage existed: upload its original now and record the
+    reference, without re-embedding."""
+    stored_path = document_storage.upload(owner_id, file_path, file_hash)
+    stored = {**info, "object_path": stored_path, "object_bucket": document_storage.bucket_name()}
+    upsert_indexed_document(owner_id, file_key, stored)
+    return stored
+
+
 def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
     """
     Incremental indexing:
     - only index new files
     - skip files that were already indexed
+
+    With durable storage (PostgreSQL deployments) the original is uploaded to the private bucket
+    before anything is recorded, and the call returns only after the original, its vectors and its
+    registry row are all stored. A failure removes the object it just uploaded unless an existing
+    document still references it, so no orphaned objects are left behind.
     """
     DATA_DIR.mkdir(exist_ok=True)
     VECTORSTORE_DIR.mkdir(exist_ok=True)
@@ -310,9 +332,14 @@ def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
 
         file_hash = calculate_file_hash(file_path)
         file_key = file_path.name
+        durable = document_storage.durable_storage_enabled()
+        previous = indexed_files.get(file_key)
 
         if (file_key in indexed_files and indexed_files[file_key]["hash"] == file_hash
                 and has_source_vectors(vectorstore, owner_id, file_key)):
+            if durable and not indexed_files[file_key].get("object_path"):
+                indexed_files[file_key] = _store_original_for_existing(
+                    owner_id, file_key, file_path, file_hash, indexed_files[file_key])
             if indexed_files[file_key].get("topic_schema_version") == TOPIC_SCHEMA_VERSION:
                 print(f"Skipping already indexed file: {file_path.name}")
                 skipped_files.append(file_path.name)
@@ -323,36 +350,49 @@ def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
                 topic_refreshed_files.append(file_path.name)
                 continue
 
-        documents, chunks = load_document_chunks(file_path, owner_id, file_hash)
+        # Durable original first: nothing is recorded for a file that is not safely stored.
+        stored_path = document_storage.upload(owner_id, file_path, file_hash) if durable else None
+        try:
+            documents, chunks = load_document_chunks(file_path, owner_id, file_hash)
 
-        if not documents:
-            print(f"No extractable text found in: {file_path.name}")
-            continue
+            if not documents:
+                print(f"No extractable text found in: {file_path.name}")
+                _discard_unreferenced_object(owner_id, stored_path)
+                continue
 
-        if not chunks:
-            print(f"No chunks created for: {file_path.name}")
-            continue
+            if not chunks:
+                print(f"No chunks created for: {file_path.name}")
+                _discard_unreferenced_object(owner_id, stored_path)
+                continue
 
-        provenance_ids = [f"{file_hash}_{i}" for i in range(len(chunks))]
-        vector_ids = owner_vector_ids(owner_id, provenance_ids)
+            provenance_ids = [f"{file_hash}_{i}" for i in range(len(chunks))]
+            vector_ids = owner_vector_ids(owner_id, provenance_ids)
 
-        topics = add_topic_metadata(documents, chunks, provenance_ids)
+            topics = add_topic_metadata(documents, chunks, provenance_ids)
 
-        vectorstore.add_documents(
-            documents=chunks,
-            ids=vector_ids,
-        )
-        delete_stale_source_vectors(vectorstore, owner_id, file_key, vector_ids)
+            vectorstore.add_documents(
+                documents=chunks,
+                ids=vector_ids,
+            )
+            delete_stale_source_vectors(vectorstore, owner_id, file_key, vector_ids)
 
-        info = {
-            "hash": file_hash,
-            "chunks": len(chunks),
-            "path": str(file_path),
-            "topic_schema_version": TOPIC_SCHEMA_VERSION,
-            "topics": topics,
-        }
-        indexed_files[file_key] = info
-        upsert_indexed_document(owner_id, file_key, info)
+            info = {
+                "hash": file_hash,
+                "chunks": len(chunks),
+                "path": str(file_path),
+                "topic_schema_version": TOPIC_SCHEMA_VERSION,
+                "topics": topics,
+            }
+            if stored_path:
+                info.update(object_path=stored_path, object_bucket=document_storage.bucket_name())
+            indexed_files[file_key] = info
+            upsert_indexed_document(owner_id, file_key, info)
+        except BaseException:
+            _discard_unreferenced_object(owner_id, stored_path)
+            raise
+        # Replaced content: this document no longer references its previous original.
+        if previous and previous.get("object_path") and previous["object_path"] != stored_path:
+            _discard_unreferenced_object(owner_id, previous["object_path"])
 
         total_new_files += 1
         total_chunks += len(chunks)
@@ -387,12 +427,15 @@ def delete_indexed_file(file_name: str, owner_id: str = LEGACY_USER_ID) -> dict:
     file_hash = info.get("hash")
     chunk_count = int(info.get("chunks", 0))
 
-    if file_hash and chunk_count:
-        vectorstore = get_vectorstore()
-        ids = [
-            f"{file_hash}_{index}" if owner_id == LEGACY_USER_ID else f"{owner_id}_{file_hash}_{index}"
-            for index in range(chunk_count)
-        ]
+    vectorstore = get_vectorstore()
+    ids = [
+        f"{file_hash}_{index}" if owner_id == LEGACY_USER_ID else f"{owner_id}_{file_hash}_{index}"
+        for index in range(chunk_count)
+    ] if file_hash and chunk_count else []
+    # Also every vector still filed under this document (e.g. left by an interrupted re-index).
+    filed = vectorstore.get(where={"$and": [{"owner_id": owner_id}, {"document_id": file_key}]}, include=[])
+    ids = sorted(set(ids) | set(filed.get("ids") or []))
+    if ids:
         vectorstore.delete(ids=ids)
 
     source_path = Path(info.get("path") or DATA_DIR / file_key)
@@ -406,6 +449,9 @@ def delete_indexed_file(file_name: str, owner_id: str = LEGACY_USER_ID) -> dict:
             resolved_source.unlink()
 
     delete_indexed_document(owner_id, file_key)
+    # The registry row goes first, so a failed object delete never leaves a dangling reference.
+    if info.get("object_path"):
+        _discard_unreferenced_object(owner_id, info["object_path"])
 
     return {
         "deleted": file_key,
@@ -431,6 +477,11 @@ def main():
     print(f"Topic schema refresh: {len(topic_refresh['refreshed'])} refreshed in place, "
           f"{len(topic_refresh['reindexed'])} re-indexed, {len(topic_refresh['missing'])} missing source files")
 
+    if document_storage.durable_storage_enabled():
+        # Durable deployments keep originals in Supabase Storage; the repository's sample files in
+        # data/ are not uploaded or embedded again on every start.
+        print("Durable storage enabled: skipping data/ folder indexing.")
+        return
     result = index_all_data_files()
 
     print("Indexing completed.")

@@ -21,6 +21,7 @@ OWNED_TABLES = {
     "auth_sessions": "user_id",
     "conversations": "owner_id",
     "indexed_documents": "owner_id",
+    "document_chunks": "owner_id",
     "document_summaries": "owner_id",
     "summary_jobs": "owner_id",
     "flashcard_sets": "owner_id",
@@ -68,6 +69,18 @@ def main() -> int:
                     mine = connection.execute(f"SELECT COUNT(*) FROM {table} WHERE {column} = ?", (user_id,)).fetchone()[0]
                     line += f" {mine:>10}"
                 print(line)
+            if user_id and "indexed_documents" in existing:
+                has_vectors = "document_chunks" in existing
+                rows = connection.execute(
+                    "SELECT d.document_id, d.chunk_count, d.object_path, "
+                    + ("(SELECT COUNT(*) FROM document_chunks c WHERE c.owner_id = d.owner_id "
+                       "AND c.document_id = d.document_id)" if has_vectors else "0")
+                    + " AS vectors FROM indexed_documents d WHERE d.owner_id = ? ORDER BY d.document_id",
+                    (user_id,),
+                ).fetchall() if "object_path" in db.table_columns(connection, "indexed_documents") else []
+                for row in rows:
+                    print(f"[db-status] document={row['document_id']} chunks={row['chunk_count']} "
+                          f"vectors={row['vectors']} original_stored={'yes' if row['object_path'] else 'no'}")
             connection.rollback()
     except db.DatabaseError as error:
         print(str(error) if str(error).startswith("[db]") else f"[db] {error}", file=sys.stderr)

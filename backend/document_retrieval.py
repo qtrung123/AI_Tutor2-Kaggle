@@ -1,23 +1,16 @@
-"""Shared Chroma document-chunk retrieval used by Quiz, Summary, Flashcards and the Study Planner."""
+"""Shared document-chunk retrieval used by Quiz, Summary, Flashcards and the Study Planner
+(durable pgvector on PostgreSQL, local Chroma on SQLite -- see backend/vector_store.py)."""
 import re
 from pathlib import Path
 
-from langchain_chroma import Chroma
-from langchain_ollama import OllamaEmbeddings
-
+from backend import vector_store
 from backend.assessment_planner import resolve_topic_evidence
 from backend.auth_store import LEGACY_USER_ID
 from backend.ingest import migrate_legacy_vector_ownership
-from config import COLLECTION_NAME, EMBEDDING_MODEL, VECTORSTORE_DIR
 
 
-def _load_vectorstore() -> Chroma:
-    embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
-    store = Chroma(
-        persist_directory=str(VECTORSTORE_DIR),
-        collection_name=COLLECTION_NAME,
-        embedding_function=embeddings,
-    )
+def _load_vectorstore():
+    store = vector_store.get_vectorstore()
     migrate_legacy_vector_ownership(store)
     return store
 

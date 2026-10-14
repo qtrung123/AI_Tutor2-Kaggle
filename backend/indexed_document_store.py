@@ -44,6 +44,9 @@ def _initialize_schema(connection: db.Connection) -> None:
         );
         """
     )
+    # Durable original upload (Supabase Storage); NULL for documents kept only on local disk.
+    db.add_column(connection, "indexed_documents", "object_path", "TEXT")
+    db.add_column(connection, "indexed_documents", "object_bucket", "TEXT")
     # The pre-authentication indexed_files.json registry is a local file: import it into the local
     # SQLite database only. The shared PostgreSQL database never ingests stale local state.
     if connection.backend != db.SQLITE:
@@ -100,6 +103,7 @@ def _row_to_document(row) -> dict:
         "chunks": row["chunk_count"], "path": row["storage_path"],
         "topic_schema_version": row["topic_schema_version"],
         "topics": json.loads(row["topics_json"] or "[]"),
+        "object_path": row["object_path"], "object_bucket": row["object_bucket"],
     }
 
 
@@ -126,22 +130,35 @@ def upsert_indexed_document(owner_id: str, document_id: str, info: dict) -> dict
             """
             INSERT INTO indexed_documents (
                 owner_id, document_id, display_name, file_hash, chunk_count, storage_path,
-                topic_schema_version, topics_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                topic_schema_version, topics_json, created_at, updated_at, object_path, object_bucket
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(owner_id, document_id) DO UPDATE SET
                 display_name=excluded.display_name, file_hash=excluded.file_hash,
                 chunk_count=excluded.chunk_count, storage_path=excluded.storage_path,
                 topic_schema_version=excluded.topic_schema_version,
-                topics_json=excluded.topics_json, updated_at=excluded.updated_at
+                topics_json=excluded.topics_json, updated_at=excluded.updated_at,
+                object_path=COALESCE(excluded.object_path, indexed_documents.object_path),
+                object_bucket=COALESCE(excluded.object_bucket, indexed_documents.object_bucket)
             """,
             (
                 owner_id, document_id, info.get("display_name") or document_id,
                 str(info.get("hash", "")), int(info.get("chunks", 0)), str(info.get("path", "")),
                 int(info.get("topic_schema_version", 0)),
                 json.dumps(info.get("topics") or [], ensure_ascii=False), now, now,
+                info.get("object_path") or None, info.get("object_bucket") or None,
             ),
         )
     return get_indexed_document(owner_id, document_id)
+
+
+def is_object_referenced(owner_id: str, object_path: str) -> bool:
+    """Whether any of the owner's registered documents still points at this stored object."""
+    initialize_indexed_document_store()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT 1 FROM indexed_documents WHERE owner_id = ? AND object_path = ? LIMIT 1", (owner_id, object_path)
+        ).fetchone()
+    return row is not None
 
 
 def delete_indexed_document(owner_id: str, document_id: str) -> dict | None:

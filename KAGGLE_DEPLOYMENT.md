@@ -87,21 +87,72 @@ tail -n 100 /kaggle/working/ai-tutor-logs/nginx.log
 
 Khi một service không sẵn sàng trước timeout, `start_kaggle.sh` in log liên quan và thoát khác 0. PID nằm trong `/kaggle/working/ai-tutor-runtime`.
 
-## PostgreSQL (`DATABASE_URL`)
+## Lưu trữ bền vững (Supabase): Kaggle chỉ để tính toán
 
-Tài khoản và toàn bộ dữ liệu quan hệ (hội thoại, metadata tài liệu, summary, flashcard, quiz và lịch sử làm bài, mastery/progress, planner, kết nối Google Calendar) được lưu trong PostgreSQL bên ngoài khi có `DATABASE_URL`, nên không mất khi Kaggle khởi động lại. Đăng nhập lại bằng cùng email sẽ dùng đúng `user_id` cũ.
+Khi có `DATABASE_URL`, mọi dữ liệu cần giữ lại đều nằm ngoài Kaggle, nên reset runtime không làm mất gì:
 
-1. Tạo Kaggle Secret tên `DATABASE_URL` dạng `postgresql://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require` (mật khẩu có ký tự đặc biệt phải percent-encode, ví dụ `@` → `%40`) và bật secret đó cho notebook.
-2. `start_kaggle.sh` tự đọc secret này (hoặc biến môi trường `DATABASE_URL` nếu đã có), kiểm tra kết nối trước khi tải model và chỉ in `[db] backend=postgres connected`. Không bao giờ in URL hay mật khẩu.
-3. Thiếu `DATABASE_URL` thì script dừng với lỗi rõ ràng thay vì âm thầm dùng SQLite tạm thời. Đặt `AI_TUTOR_ALLOW_SQLITE=1` nếu thật sự muốn chạy SQLite (dữ liệu sẽ mất khi session kết thúc).
+| Dữ liệu | Nơi lưu |
+| --- | --- |
+| Tài khoản, hội thoại, metadata tài liệu, summary, flashcard, quiz và kết quả, mastery/progress, planner, Google Calendar | Supabase PostgreSQL |
+| Chunk tài liệu, embedding `bge-m3` (1024 chiều), metadata, `document_id`, `owner_id` | Supabase PostgreSQL + pgvector (bảng `document_chunks`) |
+| File gốc PDF/TXT đã upload | Supabase Storage, bucket **private** `ai-tutor-documents` (đường dẫn `<user_id>/<sha256>.pdf`) |
 
-Bảng được tạo tự động (`CREATE TABLE IF NOT EXISTS`, chỉ thêm cột còn thiếu), không bao giờ xóa hay truncate bảng. File `data/conversations.db` cũ (kể cả bản khôi phục từ dataset) **không** được tự động chuyển sang PostgreSQL.
+Ổ đĩa Kaggle chỉ là cache: file gốc được tải lại từ Storage khi cần (ví dụ mở trình xem tài liệu); chat RAG đọc vector đã lưu, không embed lại.
+
+### Kaggle Secrets cần có (bật cho notebook)
+
+| Secret | Giá trị |
+| --- | --- |
+| `DATABASE_URL` | `postgresql://USER:PASSWORD@HOST:PORT/postgres?sslmode=require` — dùng **pooler** của Supabase (Kaggle không có IPv6); mật khẩu có ký tự đặc biệt phải percent-encode (`@` → `%40`) |
+| `SUPABASE_URL` | `https://<project-ref>.supabase.co` |
+| `SUPABASE_SERVICE_ROLE_KEY` | service role / secret key của project (chỉ dùng phía server, không bao giờ gửi xuống trình duyệt) |
+
+`start_kaggle.sh` tự đọc ba secret này (hoặc biến môi trường cùng tên), rồi chạy `python -m backend.durable_setup` **trước khi** tải model. Script dừng với lỗi rõ ràng nếu thiếu secret, không kết nối được, thiếu pgvector hoặc bucket đang public — không bao giờ âm thầm quay về SQLite/Chroma/ổ đĩa tạm. Log chỉ in trạng thái, ví dụ:
+
+```
+[db] backend=postgres connected
+[vectors] backend=pgvector schema=extensions model=bge-m3 dimensions=1024
+[storage] backend=supabase bucket=ai-tutor-documents private=true
+[security] row level security enabled on 35 app tables; revoked anon, authenticated
+```
+
+Bảng chỉ được tạo/bổ sung (`CREATE TABLE IF NOT EXISTS`, thêm cột còn thiếu), không bao giờ xóa hay truncate. Dữ liệu Kaggle cũ (`data/conversations.db`, Chroma cũ) **không** được tự động chuyển sang.
+
+### pgvector
+
+Startup tự chạy `CREATE EXTENSION IF NOT EXISTS vector` (vào schema `extensions` nếu có). Nếu role không đủ quyền, chạy một lần trong Supabase SQL Editor:
+
+```sql
+create extension if not exists vector with schema extensions;
+```
+
+### Bảo mật Supabase (Data API)
+
+Supabase mở mọi bảng trong schema `public` qua Data API cho role `anon`/`authenticated`. Khi khởi động, app tự bật Row Level Security (không có policy) và thu hồi quyền của `anon`/`authenticated` trên đúng các bảng của app; backend kết nối bằng role sở hữu bảng nên không bị ảnh hưởng. Có thể kiểm tra/chạy tay trong SQL Editor (thay `<table>` cho từng bảng của app):
+
+```sql
+select relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+where n.nspname = 'public' and c.relkind = 'r' and not c.relrowsecurity;   -- phải rỗng
+alter table public.<table> enable row level security;
+revoke all on table public.<table> from anon, authenticated;
+```
+
+Không đưa `SUPABASE_SERVICE_ROLE_KEY` vào frontend; bucket phải giữ chế độ private.
+
+### Nghiệm thu sau khi reset Kaggle
+
+1. Run All trên commit mới; log phải có bốn dòng `[db]`, `[vectors]`, `[storage]`, `[security]` ở trên.
+2. Đăng ký một tài khoản test, upload một PDF, hỏi một câu RAG về PDF đó (câu trả lời có trích dẫn trang).
+3. Tạo summary, flashcard, một quiz; làm và nộp quiz; tạo một study plan.
+4. Ghi lại: `!cd /kaggle/working/AI_Tutor2 && python -m deployment.db_status --email <email-test>` — in `user_id`, số dòng mỗi bảng và từng tài liệu (`chunks`, `vectors`, `original_stored=yes`).
+5. Factory reset session Kaggle, Run All lại.
+6. Đăng nhập lại cùng tài khoản; chạy lại lệnh ở bước 4: `user_id`, `document_id`, `vectors` và số dòng phải giống hệt.
+7. Mở tài liệu trong trình xem (file tải từ Storage, không cần upload lại); hỏi lại câu RAG (trả lời từ vector đã lưu, không embed lại); kiểm tra hội thoại, summary, flashcard, kết quả quiz, planner vẫn còn.
+8. Đăng nhập tài khoản thứ hai: không thấy tài liệu hay dữ liệu nào của tài khoản test.
 
 ## Dữ liệu và tính lâu bền
 
-`/kaggle/input` là read-only. Tài liệu upload, `vectorstore/` (Chroma), `indexed_files.json` và — khi không dùng PostgreSQL — `data/conversations.db` được ghi dưới `/kaggle/working/AI_Tutor2`. Chúng mất khi session kết thúc nếu không được lưu lại.
-
-PostgreSQL chưa lưu file PDF và vector Chroma. Sau khi Kaggle reset, danh sách tài liệu cùng summary/flashcard/quiz đã lưu vẫn còn, nhưng chat RAG và việc tạo nội dung mới cho tài liệu cần file và vector của nó: upload lại đúng file đó (cùng tên, cùng nội dung) sẽ index lại dưới cùng `document_id` và cùng hash nên thường nối lại với dữ liệu cũ (riêng tài liệu mà cấu trúc chủ đề phải nhờ LLM tinh chỉnh thì danh sách chủ đề có thể khác, khi đó summary/flashcard có thể phải tạo lại), hoặc khôi phục `data/` + `vectorstore/` bằng `STATE_DATASET_SLUG` bên dưới.
+`/kaggle/input` là read-only. Khi **không** dùng `DATABASE_URL` (chế độ SQLite tạm thời), tài liệu upload, `vectorstore/` (Chroma), `indexed_files.json` và `data/conversations.db` nằm dưới `/kaggle/working/AI_Tutor2` và mất khi session kết thúc nếu không được lưu lại. Với cấu hình Supabase ở trên, cơ chế lưu dataset dưới đây không còn cần cho dữ liệu người dùng (chỉ còn hữu ích cho cache model).
 
 `kaggle_run.ipynb` tự động hoá việc này bằng hai Kaggle Dataset riêng tư (không cần tạo trước, lần lưu đầu tiên sẽ tự tạo):
 

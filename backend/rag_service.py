@@ -1,8 +1,6 @@
 from pathlib import Path
 
-from langchain_chroma import Chroma
-from langchain_ollama import OllamaEmbeddings
-
+from backend import vector_store
 from backend.conversation_store import (
     add_message,
     get_conversation,
@@ -13,31 +11,21 @@ from backend.ingest import migrate_legacy_vector_ownership
 
 from config import (
     CHAT_MODEL,
-    COLLECTION_NAME,
-    EMBEDDING_MODEL,
     PROMPT_PATH,
     TOP_K,
-    VECTORSTORE_DIR,
 )
 from backend.llm_backend import ChatOllama
 from backend.model_registry import resolve_generation_model
 
 
-def load_vectorstore() -> Chroma:
+def load_vectorstore():
     """
-    Open the existing local Chroma vector database.
-
-    This is the "knowledge base" created by backend/ingest.py. The same
-    embedding model must be used for both indexing and searching, otherwise
-    the question vectors and document vectors would not live in the same space.
+    Open the document chunk store created by backend/ingest.py: durable pgvector on PostgreSQL,
+    local Chroma on SQLite (backend/vector_store.py). The same embedding model must be used for
+    both indexing and searching, otherwise the question vectors and document vectors would not
+    live in the same space.
     """
-    embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
-
-    store = Chroma(
-        persist_directory=str(VECTORSTORE_DIR),
-        collection_name=COLLECTION_NAME,
-        embedding_function=embeddings,
-    )
+    store = vector_store.get_vectorstore()
     migrate_legacy_vector_ownership(store)
     return store
 
