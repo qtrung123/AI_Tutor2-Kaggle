@@ -170,6 +170,26 @@ def _initialize_schema(connection: db.Connection) -> None:
     )
     # Additive migration: a rescheduled session points at the session it replaces.
     _add_column_if_missing(connection, "study_sessions", "rescheduled_from", "TEXT")
+    # Additive migration: the learner's study goal per material. goal_type NULL = not configured
+    # (every material created before this existed); target_date is a soft preference, never a
+    # constraint -- the hard deadline stays in `deadline`.
+    _add_column_if_missing(connection, "study_plan_materials", "goal_type", "TEXT")
+    _add_column_if_missing(connection, "study_plan_materials", "target_date", "TEXT")
+    # Additive migration: 1 = the learner set this session's time/length by hand. Auto Plan and
+    # adaptation never move, resize or cancel such a session on their own (study_adaptation).
+    _add_column_if_missing(connection, "study_sessions", "manual_edit", "INTEGER NOT NULL DEFAULT 0")
+    # Study Preferences: one row per learner, created on first save. No row = the defaults
+    # (study_preferences.DEFAULTS), so existing learners keep exactly today's behaviour.
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS study_preferences (
+            owner_id TEXT PRIMARY KEY, daily_target_minutes INTEGER NOT NULL,
+            break_minutes INTEGER NOT NULL, strategy TEXT NOT NULL, durations_json TEXT NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            FOREIGN KEY (owner_id) REFERENCES users(id)
+        );
+        """
+    )
     if connection.backend == db.SQLITE:
         _migrate_schedule_runs_for_plans(connection)
     else:
@@ -693,6 +713,9 @@ def upsert_topic_progress(owner_id: str, document_id: str, topic_id: str, planne
 PLAN_STATUSES = ("active", "paused", "completed", "archived")
 FAMILIARITY_LEVELS = ("new_to_me", "somewhat_familiar", "reviewing")
 LEARNING_STATES = ("new", "learning", "needs_review", "on_track", "completed")
+# A material's study goal: "deadline" = finish by a required hard deadline; "flexible" = no
+# deadline, sessions may spread over the available days. None = never configured.
+GOAL_TYPES = ("deadline", "flexible")
 # written_quiz = retrieval practice from the document's persisted flashcards (a flashcard-derived
 # written quiz); it never counts as the document's assessment.
 ACTIVITY_TYPES = ("summary", "flashcards", "quiz", "review", "quiz_retry", "written_quiz")
@@ -725,6 +748,21 @@ def _require_iso_date(value: str | None, field: str) -> None:
         raise ValueError(f"{field} must be an ISO date (YYYY-MM-DD).") from error
 
 
+def validate_study_goal(goal_type: str | None, deadline: str | None, target_date: str | None) -> None:
+    """A material's goal as a whole. A "deadline" goal needs its deadline; "flexible" has none; an
+    unconfigured goal (None) accepts whatever deadline the material already had. The target date
+    is optional but never later than the hard deadline."""
+    _require_choice(goal_type, GOAL_TYPES, "goal_type", optional=True)
+    _require_iso_date(deadline, "deadline")
+    _require_iso_date(target_date, "target_date")
+    if goal_type == "deadline" and not deadline:
+        raise ValueError("A deadline goal needs a deadline date.")
+    if goal_type == "flexible" and deadline:
+        raise ValueError("Flexible learning has no deadline. Clear the deadline or choose a deadline goal.")
+    if target_date and deadline and str(target_date) > str(deadline):
+        raise ValueError("The target completion date cannot be later than the deadline.")
+
+
 def _session_span_minutes(scheduled_start: str, scheduled_end: str) -> int:
     """Validate a session's naive-local ISO datetimes (the planner's wall-clock convention, see
     study_planner_service.compute_schedule) and return the span in minutes."""
@@ -752,11 +790,15 @@ def _plan(row) -> dict:
 
 
 def _material(row) -> dict:
-    return {
+    material = {
         key: row[key]
-        for key in ("material_id", "plan_id", "owner_id", "document_id", "deadline", "familiarity",
-                    "learning_state", "created_at", "updated_at")
+        for key in ("material_id", "plan_id", "owner_id", "document_id", "deadline", "goal_type", "target_date",
+                    "familiarity", "learning_state", "created_at", "updated_at")
     }
+    # Read-only view of the goal for display: an unconfigured material that already had a deadline
+    # reads as a deadline goal; one with neither stays None (nothing is invented or stored).
+    material["learning_goal"] = material["goal_type"] or ("deadline" if material["deadline"] else None)
+    return material
 
 
 def _session(row) -> dict:
@@ -766,7 +808,7 @@ def _session(row) -> dict:
                     "scheduled_start", "scheduled_end", "duration_minutes", "status", "reason",
                     "priority_snapshot", "started_at", "completed_at", "rescheduled_from", "created_at",
                     "updated_at")
-    }
+    } | {"manual_edit": bool(row["manual_edit"])}
 
 
 def _update_row(table: str, key_column: str, key: str, owner_id: str, fields: dict, not_found: str) -> None:
@@ -842,15 +884,17 @@ def delete_plan(owner_id: str, plan_id: str) -> None:
 # -- Plan materials (one row per document in a plan) -------------------------
 
 def add_material(owner_id: str, plan_id: str, document_id: str, deadline: str | None = None,
-                 familiarity: str | None = None, learning_state: str = "new") -> dict:
+                 familiarity: str | None = None, learning_state: str = "new",
+                 goal_type: str | None = None, target_date: str | None = None) -> dict:
     """Add one document to a plan. Does not check that the document exists -- callers go through
-    study_planner_service.add_plan_material, which validates document ownership."""
+    study_planner_service.add_plan_material, which validates document ownership. The study goal is
+    optional: without goal_type the material is simply unconfigured (see validate_study_goal)."""
     initialize_study_planner_store()
     if not get_plan(owner_id, plan_id):
         raise ValueError("Study plan not found.")
     if not document_id:
         raise ValueError("document_id is required.")
-    _require_iso_date(deadline, "deadline")
+    validate_study_goal(goal_type, deadline, target_date)
     _require_choice(familiarity, FAMILIARITY_LEVELS, "familiarity", optional=True)
     _require_choice(learning_state, LEARNING_STATES, "learning_state")
     material_id, now = str(uuid4()), utc_now_iso()
@@ -858,8 +902,10 @@ def add_material(owner_id: str, plan_id: str, document_id: str, deadline: str | 
         with _connect() as connection:
             connection.execute(
                 """INSERT INTO study_plan_materials (material_id, plan_id, owner_id, document_id, deadline,
-                   familiarity, learning_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (material_id, plan_id, owner_id, document_id, deadline, familiarity, learning_state, now, now),
+                   goal_type, target_date, familiarity, learning_state, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (material_id, plan_id, owner_id, document_id, deadline, goal_type, target_date, familiarity,
+                 learning_state, now, now),
             )
     except db.IntegrityError as error:
         raise ValueError("This document is already part of the study plan.") from error
@@ -896,13 +942,28 @@ def list_materials(owner_id: str, plan_id: str) -> list[dict]:
 
 
 def update_material(owner_id: str, material_id: str, changes: dict) -> dict:
-    """`deadline` and `familiarity` may be set to None to clear them."""
+    """`deadline`, `goal_type`, `target_date` and `familiarity` may be set to None to clear them
+    (goal_type None = goal removed, back to unconfigured).
+
+    The goal is validated as a whole against the saved row. Choosing "flexible" without sending a
+    deadline clears the deadline. A configured goal follows a deadline-only change: setting a
+    deadline makes it a deadline goal, clearing it makes it flexible. An unconfigured material keeps
+    goal_type None on deadline-only changes, exactly as before goals existed. Never touches sessions."""
     initialize_study_planner_store()
-    fields = {key: changes[key] for key in ("deadline", "familiarity", "learning_state") if key in changes}
+    fields = {key: changes[key] for key in ("deadline", "goal_type", "target_date", "familiarity", "learning_state")
+              if key in changes}
     if not fields:
         raise ValueError("No material changes supplied.")
-    if "deadline" in fields:
-        _require_iso_date(fields["deadline"], "deadline")
+    if {"deadline", "goal_type", "target_date"} & set(fields):
+        current = get_material(owner_id, material_id)
+        if not current:
+            raise ValueError("Plan material not found.")
+        if fields.get("goal_type") == "flexible" and "deadline" not in fields:
+            fields["deadline"] = None
+        elif "goal_type" not in fields and "deadline" in fields and current["goal_type"]:
+            fields["goal_type"] = "deadline" if fields["deadline"] else "flexible"
+        merged = {**current, **fields}
+        validate_study_goal(merged["goal_type"], merged["deadline"], merged["target_date"])
     if "familiarity" in fields:
         _require_choice(fields["familiarity"], FAMILIARITY_LEVELS, "familiarity", optional=True)
     if "learning_state" in fields:
@@ -1132,11 +1193,15 @@ def start_session(owner_id: str, session_id: str) -> tuple[dict, bool]:
 RESCHEDULABLE_STATUSES = ("scheduled", "missed")
 
 
-def reschedule_session(owner_id: str, session_id: str, scheduled_start: str, scheduled_end: str) -> tuple[dict, dict]:
+def reschedule_session(owner_id: str, session_id: str, scheduled_start: str, scheduled_end: str,
+                       duration_minutes: int | None = None, manual: bool = False) -> tuple[dict, dict]:
     """Move one session to a new window. The original row is kept as history (status
     'rescheduled', which never blocks time) and a new 'scheduled' session carries the same
     plan/document/activity/artifact/reason/priority plus rescheduled_from=<original id>. Refuses a
-    window that overlaps time already occupied (see list_busy_sessions). One transaction."""
+    window that overlaps time already occupied (see list_busy_sessions). One transaction.
+
+    `duration_minutes` (a learner's explicit edit) replaces the length; otherwise it is kept.
+    `manual` marks the new row as set by hand; a manually edited session stays manual when moved."""
     initialize_study_planner_store()
     connection = _connect()
     try:
@@ -1148,7 +1213,8 @@ def reschedule_session(owner_id: str, session_id: str, scheduled_start: str, sch
         if row["plan_status"] != "active":
             raise SessionTransitionError("plan_not_active", "This session belongs to a plan that is no longer active.",
                                          row["status"])
-        duration = row["duration_minutes"]
+        duration = row["duration_minutes"] if duration_minutes is None else duration_minutes
+        manual_edit = int(bool(manual or row["manual_edit"]))
         validate_session({"activity_type": row["activity_type"], "status": "scheduled", "reason": row["reason"],
                           "scheduled_start": scheduled_start, "scheduled_end": scheduled_end,
                           "duration_minutes": duration})
@@ -1169,10 +1235,11 @@ def reschedule_session(owner_id: str, session_id: str, scheduled_start: str, sch
         connection.execute(
             """INSERT INTO study_sessions (session_id, owner_id, plan_id, document_id, activity_type, artifact_id,
                    scheduled_start, scheduled_end, duration_minutes, status, reason, priority_snapshot,
-                   rescheduled_from, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?)""",
+                   rescheduled_from, manual_edit, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?)""",
             (new_id, owner_id, row["plan_id"], row["document_id"], row["activity_type"], row["artifact_id"],
-             scheduled_start, scheduled_end, duration, row["reason"], row["priority_snapshot"], session_id, now, now),
+             scheduled_start, scheduled_end, duration, row["reason"], row["priority_snapshot"], session_id,
+             manual_edit, now, now),
         )
         connection.commit()
     except BaseException:
@@ -1423,3 +1490,38 @@ def reset_planner_data(owner_id: str) -> None:
         connection.execute("DELETE FROM study_tasks WHERE owner_id=?", (owner_id,))
         connection.execute("DELETE FROM availability_slots WHERE owner_id=?", (owner_id,))
         connection.execute("DELETE FROM topic_progress WHERE owner_id=?", (owner_id,))
+
+
+# -- Study preferences (one row per learner) ---------------------------------
+
+def get_study_preferences(owner_id: str) -> dict | None:
+    """The learner's saved preferences row (durations still JSON), or None when never saved."""
+    initialize_study_planner_store()
+    with _connect() as connection:
+        row = connection.execute("SELECT * FROM study_preferences WHERE owner_id=?", (owner_id,)).fetchone()
+    return {key: row[key] for key in ("owner_id", "daily_target_minutes", "break_minutes", "strategy",
+                                      "durations_json", "created_at", "updated_at")} if row else None
+
+
+def save_study_preferences(owner_id: str, daily_target_minutes: int, break_minutes: int, strategy: str,
+                           durations_json: str) -> dict:
+    """Insert or replace the learner's preferences (validated by study_preferences)."""
+    initialize_study_planner_store()
+    now = utc_now_iso()
+    with _connect() as connection:
+        connection.execute(
+            """INSERT INTO study_preferences (owner_id, daily_target_minutes, break_minutes, strategy, durations_json,
+                   created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(owner_id) DO UPDATE SET daily_target_minutes=excluded.daily_target_minutes,
+                   break_minutes=excluded.break_minutes, strategy=excluded.strategy,
+                   durations_json=excluded.durations_json, updated_at=excluded.updated_at""",
+            (owner_id, daily_target_minutes, break_minutes, strategy, durations_json, now, now),
+        )
+    return get_study_preferences(owner_id)
+
+
+def delete_study_preferences(owner_id: str) -> None:
+    """Back to the defaults."""
+    initialize_study_planner_store()
+    with _connect() as connection:
+        connection.execute("DELETE FROM study_preferences WHERE owner_id=?", (owner_id,))

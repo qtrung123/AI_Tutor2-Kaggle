@@ -112,7 +112,9 @@ class DocumentStudyStateTests(unittest.TestCase):
         self.assertEqual((state.quiz.quiz_count, state.quiz.latest_quiz_status, state.quiz.latest_completed),
                          (0, None, None))
         self.assertIsNone(state.last_activity_at)
-        self.assertNotIn("topic", str(state.to_dict().keys()))
+        # The only topic-level signal is persisted topic mastery (weak_topics), empty without quiz evidence.
+        self.assertEqual([key for key in state.to_dict() if "topic" in key], ["weak_topics"])
+        self.assertEqual(state.weak_topics, ())
 
     def test_summary_only(self):
         self.add_summary(self.alice, "doc-a")

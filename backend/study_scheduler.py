@@ -3,9 +3,15 @@
 Pure and LLM-free. Same input, same output. Flow:
   1. per document, turn its DocumentStudyState into an ordered queue of steps (candidate
      activities with earliest/latest dates and minimum spacing between them);
-  2. walk the horizon day by day; on each day repeatedly pick the highest-priority ready step
-     and place it in the learner's free availability, within a comfortable daily budget;
-  3. report whatever did not fit as a capacity shortfall instead of packing time harder.
+  2. pace each document's new-material steps evenly over its usable days (up to the final review
+     window, the soft target date, or a week for flexible learning), staggered across documents;
+  3. walk the horizon day by day; on each day repeatedly pick the highest-priority ready step --
+     ready = due, at or past its pace day, and not a second session of that document that day
+     while later days remain -- and place it in the learner's free availability (Google busy time
+     and accepted sessions already removed), within a comfortable daily budget. A document that
+     would run short of time before its deadline ignores pacing and is placed as early as possible;
+  4. report whatever did not fit as a capacity shortfall instead of packing time harder. Should
+     pacing ever leave more unscheduled than earliest-first placement, the latter is returned.
 
 Every tunable number lives in SchedulerConfig.
 """
@@ -14,7 +20,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
-from backend.study_session_duration import at_least_minimum
+from backend.study_session_duration import MIN_SESSION_MINUTES, at_least_minimum
 from backend.study_time import free_minutes_by_date, subtract_minute_interval, to_minutes
 from backend.study_scheduler_contracts import (
     REASON_DEADLINE_APPROACHING, REASON_FINAL_REVIEW, REASON_LOW_QUIZ_SCORE, REASON_NEW_MATERIAL,
@@ -58,36 +64,49 @@ class SchedulerConfig:
     moderate_retry_gap_days: int = 2      # moderate score: review, then quiz_retry this many days later
     quiz_gap_after_learning_days: int = 1  # the first quiz never lands the same day as new material
     final_review_window_days: int = 2     # final review within this many days before the deadline
+    # A strong score (>= 80%) gets a second, lighter spaced review this many intervals after the first.
+    second_review_interval_factor: int = 2
+    weak_topics_in_message: int = 3       # weak topic names quoted in a session message
     # A quiz/quiz_retry inside the final-review window already is final retrieval: a separate final
     # review is only added on a LATER day, and is dropped (satisfied) when no later slot exists.
     retrieval_activities: tuple = ("quiz", "quiz_retry")
     deadline_approaching_days: int = 3    # new material this close to its deadline says so
     default_horizon_days: int = 14        # horizon for plans without deadlines
     max_horizon_days: int = 42
-    # Durations: (min, max, default when the artifact size is unknown), minutes. No new session is
-    # shorter than study_session_duration.MIN_SESSION_MINUTES (20).
+    # Length of a NEW session per activity, in minutes -- the single source for these numbers
+    # (Study Preferences will override this dict). "review" is a weak-topic / spaced review;
+    # "final_review" the review right before a deadline; "light_review" the lighter spaced
+    # repetition after a strong score. Never below MIN_SESSION_MINUTES (20).
+    # Existing sessions keep their own saved length: they are never resized from here.
     durations: dict = field(default_factory=lambda: {
-        "summary": (30, 50, 40), "flashcards": (20, 30, 20), "quiz": (20, 40, 30),
-        "review": (20, 30, 20), "quiz_retry": (20, 30, 25), "written_quiz": (20, 25, 20),
+        "summary": 45, "flashcards": 20, "quiz": 35, "quiz_retry": 35, "review": 30,
+        "written_quiz": 20, "final_review": 45, "light_review": 20,
     })
-    summary_base_minutes: int = 20
-    summary_minutes_per_chunk: float = 2.0
-    flashcard_minutes_per_card: float = 1.0
-    review_minutes_per_card: float = 0.5
-    quiz_minutes_per_question: float = 2.0
     # A written_quiz session practices at most this many of the document's flashcards.
     written_quiz_questions: int = 10
-    written_quiz_minutes_per_question: float = 1.5
-    duration_rounding_minutes: int = 5
     # Daily shape: availability is permission, not obligation.
-    max_block_minutes: int = 50
     daily_target_minutes: int = 90
-    session_gap_minutes: int = 10
-    heavy_gap_minutes: int = 30           # between two heavy sessions on the same day
+    # Break between two consecutive study sessions (also kept around accepted sessions).
+    session_gap_minutes: int = 20
+    heavy_gap_minutes: int = 30           # longer break between two heavy sessions on the same day
     heavy_activities: tuple = ("summary", "quiz", "quiz_retry")
     max_heavy_sessions_per_day: int = 2
     max_sessions_per_document_per_day: int = 2
     slot_alignment_minutes: int = 5
+    # Distribution (see _pace_days): new material is paced evenly over the usable days before its
+    # pacing end instead of filling the earliest free slots. The end is the day before the final
+    # review window (hard deadline), the target completion date when sooner (soft), or this many
+    # days for flexible learning. Materials are staggered so they do not all land on the same days.
+    spread_sessions: bool = True
+    # False ("Deadline Priority" in Study Preferences): documents with a hard deadline are not paced
+    # -- they go as early as possible -- while flexible ones stay balanced.
+    pace_deadline_materials: bool = True
+    flexible_spread_days: int = 7
+    # A target completion date (soft) adds this share of deadline-style urgency as it approaches.
+    target_urgency_weight: float = 0.5
+    # When the final review window has no usable day at all, it moves to the last usable day
+    # before it, if that day is at most this many days before the deadline (never on/after it).
+    final_review_fallback_days: int = 4
 
 
 DEFAULT_CONFIG = SchedulerConfig()
@@ -110,6 +129,7 @@ class _Step:
     latest: date
     gap_days: int = 0         # minimum days after the previous placed step of the same document
     artifact_id: str | None = None
+    metadata: dict = field(default_factory=dict)   # facts behind the step (score, weak topics, preparation)
 
 
 @dataclass
@@ -121,6 +141,9 @@ class _DocumentPlan:
     last_date: date | None = None
     last_activity: str | None = None
     sessions_by_day: dict = field(default_factory=dict)
+    target: date | None = None          # soft target completion date (study goal), never a constraint
+    pace: dict = field(default_factory=dict)   # step index -> earliest preferred day (learn steps)
+    spread_end: date | None = None      # last day the material's steps are meant to spread over
 
     @property
     def current(self) -> _Step | None:
@@ -150,32 +173,12 @@ class _DocumentPlan:
 # Durations and spacing
 # ---------------------------------------------------------------------------
 
-def _round_clamp(minutes: float, bounds: tuple, rounding: int) -> int:
-    low, high, _ = bounds
-    rounded = int(rounding * math.floor(minutes / rounding + 0.5))
-    return max(low, min(high, rounded))
-
-
-def estimate_duration(activity_type: str, state, config: SchedulerConfig = DEFAULT_CONFIG) -> int:
-    """Activity-appropriate minutes, scaled by the artifact size when known (chunks, cards, questions)."""
-    bounds, rounding = config.durations[activity_type], config.duration_rounding_minutes
-    cards, questions = state.flashcards.card_count, state.quiz.latest_quiz_question_count
-    if activity_type == "summary" and state.chunk_count:
-        value = config.summary_base_minutes + config.summary_minutes_per_chunk * state.chunk_count
-    elif activity_type == "flashcards" and cards:
-        value = cards * config.flashcard_minutes_per_card
-    elif activity_type == "review" and cards:
-        value = cards * config.review_minutes_per_card
-    elif activity_type == "quiz" and questions:
-        value = questions * config.quiz_minutes_per_question
-    elif activity_type == "written_quiz" and cards:
-        value = min(cards, config.written_quiz_questions) * config.written_quiz_minutes_per_question
-    elif activity_type == "quiz_retry" and (state.quiz.latest_completed or questions):
-        total = state.quiz.latest_completed.total if state.quiz.latest_completed else questions
-        value = total * config.quiz_minutes_per_question
-    else:
-        return at_least_minimum(bounds[2])
-    return at_least_minimum(min(_round_clamp(value, bounds, rounding), config.max_block_minutes))
+def estimate_duration(activity_type: str, state=None, config: SchedulerConfig = DEFAULT_CONFIG,
+                      final: bool = False, variant: str | None = None) -> int:
+    """Minutes for a NEW session of this activity (config.durations; `final` = the final review
+    before a deadline, `variant` another named length such as "light_review"), never below the
+    minimum session length. The same for every document: `state` is accepted for callers' convenience."""
+    return at_least_minimum(config.durations["final_review" if final else variant or activity_type])
 
 
 def review_interval_days(percentage: float, config: SchedulerConfig = DEFAULT_CONFIG) -> int:
@@ -218,6 +221,23 @@ def local_date(timestamp: str | None, utc_offset: timedelta | None, fallback: da
 
 def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_offset: timedelta | None,
                  config: SchedulerConfig) -> list[_Step]:
+    """The ordered steps one document still needs, from its persisted study state only (never an
+    invented score or topic). Learning states, first match wins:
+
+    - marked completed           -> only the final review before a deadline;
+    - quiz in progress           -> finish that quiz;
+    - quiz attempted, < 60%      -> weak-topic review, written recall practice (with flashcards),
+                                    then a quiz retry on a later day;
+    - quiz attempted, 60-79%     -> review of the incorrect topics, practice, then reassessment;
+    - quiz attempted, >= 80%     -> lighter spaced repetition (a weak-topic review instead when
+                                    topic mastery still shows a clearly weak topic);
+    - quiz created, not attempted -> the initial quiz (after the summary when there is none yet);
+    - no quiz yet                -> learn the material first (summary, flashcards, recall practice),
+                                    then create and take a first quiz.
+
+    A step never assumes a resource that does not exist: a missing summary / flashcard set / quiz is
+    an explicit preparation step ("generate", "create") whose session opens that tool's create
+    state; weak-topic reviews open whatever the document has (see study_plan_api_service._session_tool)."""
     state = material.state
     title = state.title
     deadline = date.fromisoformat(material.deadline) if material.deadline else None
@@ -228,18 +248,19 @@ def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_
     code = state.state_reason.code
     quiz = state.quiz
 
-    def step(activity, reason, message, kind, earliest=today, gap=0, artifact=None) -> _Step:
-        return _Step(activity, reason, message, estimate_duration(activity, state, config), kind,
-                     min(max(earliest, today), latest), latest, gap, artifact)
+    def step(activity, reason, message, kind, earliest=today, gap=0, artifact=None, metadata=None,
+             variant=None) -> _Step:
+        return _Step(activity, reason, message, estimate_duration(activity, state, config, variant=variant), kind,
+                     min(max(earliest, today), latest), latest, gap, artifact, dict(metadata or {}))
 
     def learn_reason() -> str:
         close = deadline is not None and (deadline - today).days <= config.deadline_approaching_days
         return REASON_DEADLINE_APPROACHING if close else REASON_NEW_MATERIAL
 
-    def learn_message(activity) -> str:
+    def learn_message(text) -> str:
         if learn_reason() == REASON_DEADLINE_APPROACHING:
-            return f'"{title}" is due {deadline.isoformat()}: {_ACTIVITY_LABELS[activity]}.'
-        return f'Start "{title}": {_ACTIVITY_LABELS[activity]}.'
+            return f'"{title}" is due {deadline.isoformat()}: {text}.'
+        return f'Start "{title}": {text}.'
 
     def review_due(percentage: float) -> date:
         base = local_date(quiz.latest_completed.completed_at, utc_offset, today)
@@ -247,56 +268,95 @@ def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_
 
     # Written Quiz (retrieval practice) is only possible from a persisted, usable flashcard set.
     has_cards = bool(state.flashcards.available and state.flashcards.card_count)
+    weak = tuple(state.weak_topics)
+    weak_names = [topic.name for topic in weak[:config.weak_topics_in_message]]
+    topics_text = ", ".join(weak_names)
 
-    def written_quiz(earliest=today, gap=0) -> _Step:
+    def written_quiz(earliest=today, gap=0, metadata=None) -> _Step:
         return step("written_quiz", REASON_RETRIEVAL_PRACTICE,
                     f'Written Quiz on "{title}": reinforce recall before your next assessment.', "review",
-                    earliest=earliest, gap=gap)
+                    earliest=earliest, gap=gap, metadata=metadata)
 
     steps: list[_Step] = []
     if code == "marked_completed":
         pass  # only the final review below, when a deadline is coming up
     elif code == "quiz_in_progress":
         steps.append(step("quiz", REASON_QUIZ_IN_PROGRESS, f'Finish the quiz in progress for "{title}".',
-                          "finish", artifact=quiz.latest_quiz_id if quiz.latest_quiz_status == "in_progress" else None))
-    elif code in ("no_study_activity", "study_started"):
+                          "finish", artifact=quiz.latest_quiz_id if quiz.latest_quiz_status == "in_progress" else None,
+                          metadata={"learning_stage": "quiz_in_progress"}))
+    elif code in ("no_study_activity", "study_started") and quiz.quiz_count and quiz.latest_quiz_status == "not_started":
+        # Quiz created but not attempted: the initial assessment is the priority.
         if not state.summary.available:
-            steps.append(step("summary", learn_reason(), learn_message("summary"), "learn",
-                              artifact=state.summary.summary_id))
+            steps.append(step("summary", learn_reason(), learn_message("generate the summary and read it"), "learn",
+                              metadata={"learning_stage": "quiz_not_attempted", "preparation": "generate_summary"}))
+        steps.append(step("quiz", learn_reason(), learn_message("take the quiz you created"), "learn",
+                          gap=config.quiz_gap_after_learning_days if steps else 0, artifact=quiz.latest_quiz_id,
+                          metadata={"learning_stage": "quiz_not_attempted"}))
+    elif code in ("no_study_activity", "study_started"):
+        # No quiz to take yet: learn the material first, then create a first quiz.
+        stage = {"learning_stage": "no_quiz"}
+        if not state.summary.available:
+            steps.append(step("summary", learn_reason(), learn_message("generate the summary and read it"), "learn",
+                              metadata={**stage, "preparation": "generate_summary"}))
         if not state.flashcards.available:
-            steps.append(step("flashcards", learn_reason(), learn_message("flashcards"), "learn"))
+            steps.append(step("flashcards", learn_reason(), learn_message("create flashcards and practice them"), "learn",
+                              metadata={**stage, "preparation": "create_flashcards"}))
         if has_cards:   # summary -> flashcards -> written quiz -> quiz
-            steps.append(written_quiz())
-        steps.append(step("quiz", learn_reason(), learn_message("quiz"), "learn",
+            steps.append(written_quiz(metadata=stage))
+        steps.append(step("quiz", learn_reason(), learn_message("create a first quiz and take it"), "learn",
                           gap=config.quiz_gap_after_learning_days if steps else 0,
-                          artifact=quiz.latest_quiz_id if quiz.latest_quiz_status == "not_started" else None))
-    elif code == "low_quiz_score":
-        result = quiz.latest_completed
-        low_message = f'Latest quiz on "{title}" scored {result.percentage:g}%'
-        steps.append(step("flashcards", REASON_LOW_QUIZ_SCORE, f"{low_message}: practice the flashcards.", "review",
-                          earliest=review_due(result.percentage), artifact=state.flashcards.set_id))
-        if has_cards:   # flashcard review -> written quiz -> quiz retry
-            steps.append(written_quiz())
-        steps.append(step("quiz_retry", REASON_LOW_QUIZ_SCORE, f"{low_message}: retake a quiz.", "review",
-                          gap=config.low_score_retry_gap_days, artifact=result.quiz_id))
-    elif code in ("moderate_quiz_score", "strong_quiz_score"):
+                          metadata={**stage, "preparation": "create_quiz"}))
+    elif code in ("low_quiz_score", "moderate_quiz_score", "strong_quiz_score"):
         result = quiz.latest_completed
         due = review_due(result.percentage)
-        # The final review subsumes a spaced review that would land inside its window anyway.
-        if final_start is None or due < final_start:
-            steps.append(step("review", REASON_REVIEW_DUE, f'Spaced review of "{title}".', "review", earliest=due))
-        if code == "moderate_quiz_score":
-            # Reinforcement between the review and the next assessment; the retry keeps its spacing.
+        facts = {"percentage": result.percentage, "quiz_id": result.quiz_id,
+                 "weak_topics": [{"topic_id": t.topic_id, "name": t.name, "severity": t.severity} for t in weak]}
+        scored = f'Latest quiz on "{title}" scored {result.percentage:g}%'
+        if code == "low_quiz_score":
+            # Below 60%: weak-topic review first, recall practice, then a retry on a later day.
+            focus = f"review your weak topics ({topics_text})" if weak_names else "review the questions you missed"
+            stage = {**facts, "learning_stage": "low_score"}
+            steps.append(step("review", REASON_LOW_QUIZ_SCORE, f"{scored}: {focus}.", "review", earliest=due,
+                              metadata=stage))
+            if has_cards:
+                steps.append(written_quiz(metadata=stage))
+            steps.append(step("quiz_retry", REASON_LOW_QUIZ_SCORE, f"{scored}: retake a quiz.", "review",
+                              gap=config.low_score_retry_gap_days, artifact=result.quiz_id, metadata=stage))
+        elif code == "moderate_quiz_score":
+            # 60-79%: review the incorrect topics, practice, then reassess. The final review
+            # subsumes a review that would land inside its window anyway.
+            stage = {**facts, "learning_stage": "moderate_score"}
+            if final_start is None or due < final_start:
+                focus = f"review the topics you got wrong ({topics_text})" if weak_names else "review the questions you got wrong"
+                steps.append(step("review", REASON_REVIEW_DUE, f"{scored}: {focus}.", "review", earliest=due,
+                                  metadata=stage))
             practice_gap = 1 if has_cards and config.moderate_retry_gap_days > 1 else 0
             if has_cards:
-                steps.append(written_quiz(earliest=due, gap=practice_gap))
-            steps.append(step("quiz_retry", REASON_REVIEW_DUE, f'Check "{title}" again with a quiz.', "review",
-                              earliest=due, gap=config.moderate_retry_gap_days - practice_gap, artifact=result.quiz_id))
-        # A strong score gets plain spaced review: no immediate written quiz.
+                steps.append(written_quiz(earliest=due, gap=practice_gap, metadata=stage))
+            steps.append(step("quiz_retry", REASON_REVIEW_DUE, f'{scored}: check "{title}" again with a quiz.', "review",
+                              earliest=due, gap=config.moderate_retry_gap_days - practice_gap, artifact=result.quiz_id,
+                              metadata=stage))
+        else:
+            # >= 80%: lighter spaced repetition -- unless topic mastery still shows a clearly weak topic.
+            high = [t.name for t in weak if t.severity == "high"][:config.weak_topics_in_message]
+            stage = {**facts, "learning_stage": "strong_score"}
+            if final_start is not None and due >= final_start:
+                pass   # the final review covers it
+            elif high:
+                steps.append(step("review", REASON_REVIEW_DUE, f'{scored}, but {", ".join(high)} is still weak: review it.',
+                                  "review", earliest=due, metadata=stage))
+            else:
+                steps.append(step("review", REASON_REVIEW_DUE, f'Spaced review of "{title}" ({scored.split(" scored ")[1]} last time).',
+                                  "review", earliest=due, metadata=stage, variant="light_review"))
+                second = due + timedelta(days=review_interval_days(result.percentage, config)
+                                         * config.second_review_interval_factor)
+                if second <= latest and (final_start is None or second < final_start):
+                    steps.append(step("review", REASON_REVIEW_DUE, f'Spaced review of "{title}" again.', "review",
+                                      earliest=second, metadata=stage, variant="light_review"))
 
     if deadline is not None:
         steps.append(_Step("review", REASON_FINAL_REVIEW, f'Final review of "{title}" before {deadline.isoformat()}.',
-                           estimate_duration("review", state, config), "final", final_start, latest))
+                           estimate_duration("review", state, config, final=True), "final", final_start, latest))
     return steps
 
 
@@ -311,7 +371,7 @@ def _horizon_end(context: SchedulingContext, today: date, config: SchedulerConfi
 
 
 def _reason(step: _Step) -> SchedulingReason:
-    return SchedulingReason(step.reason_code, step.message)
+    return SchedulingReason(step.reason_code, step.message, dict(step.metadata))
 
 
 def select_candidates(material: MaterialContext, now: datetime, config: SchedulerConfig = DEFAULT_CONFIG,
@@ -360,6 +420,9 @@ def _priority(plan: _DocumentPlan, day: date, max_remaining: int, capacity: dict
     deadline_urgency = 0.0
     if plan.deadline is not None:
         deadline_urgency = max(0.0, min(1.0, 1 - (plan.deadline - day).days / config.urgency_horizon_days))
+    if plan.target is not None:   # soft: a share of the urgency a deadline on that date would give
+        target_urgency = max(0.0, min(1.0, 1 - (plan.target - day).days / config.urgency_horizon_days))
+        deadline_urgency = max(deadline_urgency, config.target_urgency_weight * target_urgency)
     review_urgency = config.review_urgency[step.kind]
     if step.kind == "review":
         overdue = max(0, (day - step.earliest).days)
@@ -427,13 +490,121 @@ def find_next_slot(context: SchedulingContext, duration: int, latest: date, earl
     return None
 
 
+def target_date(material: MaterialContext, today: date) -> date | None:
+    """The study goal's soft target completion date, when it is still ahead (a passed or malformed
+    one is simply ignored -- it is a preference, never a constraint)."""
+    value = material.material.get("target_date")
+    try:
+        target = date.fromisoformat(str(value)) if value else None
+    except ValueError:
+        return None
+    return target if target is not None and target >= today else None
+
+
+def _widen_empty_final_windows(plans: list, usable: list, today: date, config: SchedulerConfig) -> None:
+    """A final review window (the last days before a deadline) with no usable day at all -- e.g. a
+    weekend without availability -- starts on the last usable day before it instead, when that day
+    is at most final_review_fallback_days before the deadline (so a free Friday still counts).
+    Never on or after the deadline."""
+    for plan in plans:
+        final = plan.steps[-1] if plan.steps and plan.steps[-1].kind == "final" else None
+        if final is None or any(final.earliest <= d <= final.latest for d in usable):
+            continue
+        floor = max(today, plan.deadline - timedelta(days=config.final_review_fallback_days))
+        earlier = [d for d in usable if floor <= d < final.earliest]
+        if earlier:
+            final.earliest = earlier[-1]
+
+
+def spread_end(deadline: date | None, target: date | None, steps: list, today: date, horizon_end: date,
+               config: SchedulerConfig) -> date | None:
+    """The last day a document's steps should spread over (shared by the initial plan and the
+    adaptation proposals): the day before its final review window for a hard deadline, the soft
+    target completion date when sooner, or flexible_spread_days for flexible learning. None when
+    that day is already behind us (nothing left to spread)."""
+    final = steps[-1] if steps and steps[-1].kind == "final" else None
+    if deadline is not None:
+        end = (final.earliest - timedelta(days=1)) if final else steps[-1].latest if steps else today
+    else:
+        end = min(horizon_end, today + timedelta(days=config.flexible_spread_days - 1))
+    if target is not None:
+        end = min(end, target)
+    return end if end >= today else None
+
+
+def _pace_days(plans: list, usable: list, today: date, horizon_end: date, config: SchedulerConfig) -> None:
+    """Spread each material's new-material steps evenly over its usable days.
+
+    The pacing end is the day before the final review window for a hard deadline, the soft target
+    completion date when it comes sooner, or flexible_spread_days for flexible learning. Step i of k
+    gets the usable day at position round((i + stagger) * N / k) of the N usable days, where the stagger
+    (the material's rank / number of materials) keeps several materials from all landing on the
+    same days. Only "learn" steps are paced: reviews keep the dates spaced repetition chose for them.
+    A pace is a preference: _allocate lifts it when the material runs short of time."""
+    ranked = sorted(plans, key=lambda p: (p.deadline or date.max, p.target or date.max, p.context.document_id))
+    for rank, plan in enumerate(ranked):
+        plan.spread_end = spread_end(plan.deadline, plan.target, plan.steps, today, horizon_end, config)
+        if plan.spread_end is None or not _balanced(plan, config):
+            continue
+        learn = [index for index, step in enumerate(plan.steps) if step.kind == "learn"]
+        days = [d for d in usable if today <= d <= plan.spread_end]
+        if not learn or len(days) < 2:
+            continue
+        stagger = rank / len(ranked)
+        for position, index in enumerate(learn):
+            plan.pace[index] = days[min(len(days) - 1, int((position + stagger) * len(days) / len(learn) + 0.5))]
+
+
+def _balanced(plan: _DocumentPlan, config: SchedulerConfig) -> bool:
+    """Whether this document is paced and spread (all of them, except deadlined ones under the
+    Deadline Priority strategy)."""
+    return plan.deadline is None or config.pace_deadline_materials
+
+
+def _short_of_time(plan: _DocumentPlan, day: date, capacity: dict, config: SchedulerConfig) -> bool:
+    """True when waiting for a later day could cost the material its deadline (or target): the
+    pacing preferences then give way and the material is scheduled as early as before."""
+    end = plan.deadline - timedelta(days=1) if plan.deadline else plan.target
+    if end is None:
+        return False
+    minutes_left, days_left = _capacity_until(day, end, capacity)
+    if not minutes_left or plan.remaining_minutes / minutes_left >= config.pressure_threshold:
+        return True
+    days_needed = 1 + sum(step.gap_days for step in plan.steps[plan.index + 1:]) + len(plan.steps) - plan.index - 1
+    return days_left <= days_needed
+
+
+def _spread_allows(plan: _DocumentPlan, day: date, usable: list) -> bool:
+    """Prefer one session per material per day: a second one the same day only when the material
+    has fewer usable days left in its spread window than steps still to place."""
+    if not plan.sessions_by_day.get(day):
+        return True
+    end = plan.spread_end or plan.steps[-1].latest
+    days_after = sum(1 for d in usable if day < d <= end)
+    return days_after < len(plan.steps) - plan.index
+
+
 def plan_schedule(context: SchedulingContext, config: SchedulerConfig = DEFAULT_CONFIG) -> ScheduleResult:
+    """Paced allocation (sessions spread over the usable days) when config.spread_sessions; if that
+    would leave more work unscheduled than the plain earliest-first allocation, the latter is used,
+    so spreading never costs the learner a session."""
+    if not config.spread_sessions:
+        return _allocate(context, config, spread=False)
+    paced = _allocate(context, config, spread=True)
+    if paced.capacity.shortfall_minutes:
+        packed = _allocate(context, config, spread=False)
+        if packed.capacity.shortfall_minutes < paced.capacity.shortfall_minutes:
+            return packed
+    return paced
+
+
+def _allocate(context: SchedulingContext, config: SchedulerConfig, spread: bool) -> ScheduleResult:
     now, utc_offset = resolve_clock(context.now, context.utc_offset)
     today = now.date()
     end = _horizon_end(context, today, config)
     plans = [
         _DocumentPlan(material, date.fromisoformat(material.deadline) if material.deadline else None,
-                      _build_steps(material, today, end, utc_offset, config))
+                      _build_steps(material, today, end, utc_offset, config), target=target_date(material, today))
         for material in context.materials
     ]
     free = _free_by_date(context, now, end, config)
@@ -441,6 +612,11 @@ def plan_schedule(context: SchedulingContext, config: SchedulerConfig = DEFAULT_
         day: min(config.daily_target_minutes, sum(finish - start for start, finish in intervals))
         for day, intervals in free.items()
     }
+    # Usable = a day with at least one session's worth of comfortable free time.
+    usable = sorted(day for day, minutes in daily_capacity.items() if minutes >= MIN_SESSION_MINUTES)
+    _widen_empty_final_windows(plans, usable, today, config)
+    if spread:
+        _pace_days(plans, usable, today, end, config)
     proposals: list[ProposedSession] = []
     unscheduled: list[tuple[_DocumentPlan, _Step]] = []
 
@@ -453,12 +629,16 @@ def plan_schedule(context: SchedulingContext, config: SchedulerConfig = DEFAULT_
                 plan.index += 1
         cursor, used, heavy_count, last_heavy = None, 0, 0, False
         while True:
+            remaining_capacity = {**daily_capacity, day: daily_capacity.get(day, 0) - used}
             ready = [plan for plan in plans if plan.current and plan.ready_date(config) <= day
                      and plan.sessions_by_day.get(day, 0) < config.max_sessions_per_document_per_day]
+            if spread:   # paced and spread out, unless the material would run short of time
+                ready = [plan for plan in ready
+                         if not _balanced(plan, config) or _short_of_time(plan, day, remaining_capacity, config)
+                         or (day >= plan.pace.get(plan.index, day) and _spread_allows(plan, day, usable))]
             max_remaining = max((plan.remaining_minutes for plan in plans), default=0)
             scored = sorted(
-                ((_priority(plan, day, max_remaining, {**daily_capacity, day: daily_capacity.get(day, 0) - used},
-                            config), plan)
+                ((_priority(plan, day, max_remaining, remaining_capacity, config), plan)
                  for plan in ready),
                 key=lambda item: (-item[0], item[1].deadline or date.max, item[1].context.document_id),
             )

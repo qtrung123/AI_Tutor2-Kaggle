@@ -104,7 +104,9 @@ const clickBlock = async (block) => {
   document.querySelector(".pcal-notice-action").click(); await sleep(100);
   out.sheet = {open: visible($("pcal-sheet")), rows: [...document.querySelectorAll(".pcal-sheet-row strong")].map((s) => s.textContent)};
   const row = (id) => document.querySelector(`.pcal-sheet-row[data-document-id="${id}"]`);
-  row("mkt.pdf").querySelector('input[type="date"]').value = "2026-10-01";
+  const mktGoal = row("mkt.pdf").querySelector('.planner-goal-choice input[value="deadline"]');
+  mktGoal.checked = true; mktGoal.dispatchEvent(new Event("change", {bubbles: true}));
+  row("mkt.pdf").querySelector(".planner-goal-deadline input").value = "2026-10-01";
   row("mkt.pdf").querySelector(".pcal-sheet-add").click(); await sleep(300);
   row("stats.pdf").querySelector(".pcal-sheet-add").click(); await sleep(300);
   out.sheet.rowsAfter = [...document.querySelectorAll(".pcal-sheet-row strong")].map((s) => s.textContent);
@@ -112,7 +114,7 @@ const clickBlock = async (block) => {
   out.sheet.closed = $("pcal-sheet").hidden;
   out.materials = {saved: P.materials.map((m) => [m.document_id, m.deadline]), plans: P.plans.length,
     rail: [...document.querySelectorAll(".pcal-material")].map((m) => ({title: m.querySelector(".pcal-material-title").textContent,
-      pill: m.querySelector(".pcal-pill").textContent, deadline: m.querySelector('input[type="date"]').value})),
+      pill: m.querySelector(".pcal-pill").textContent, goal: [...m.querySelector(".pcal-goal").classList].find((c) => c.startsWith("pcal-goal--"))})),
     ...toolbar(), previews: P.previewBodies.length, queueEmpty: document.querySelector(".pcal-queue-empty")?.textContent};
 
   // 3. One click on Monday 18:00 = 30 minutes of weekly availability -> preview runs by itself (at risk).
@@ -134,12 +136,19 @@ const clickBlock = async (block) => {
   out.nextWeek = {range: $("pcal-range").textContent, events: events().map(describeEvent), markers: markers(),
     availability: availability().filter((a) => a.date === "2026-09-28")};
 
-  // 6. Inline deadline edit + two quick edits -> exactly one more preview (debounced).
+  // 6. Inline goal edit (Flexible -> Has deadline) + two quick edits -> exactly one more preview (debounced).
   const before = P.previewBodies.length;
-  const statsDeadline = document.querySelector('.pcal-material[data-document-id="stats.pdf"] input[type="date"]');
-  statsDeadline.value = "2026-10-03"; statsDeadline.dispatchEvent(new Event("change", {bubbles: true})); await sleep(60);
-  const statsDeadline2 = document.querySelector('.pcal-material[data-document-id="stats.pdf"] input[type="date"]');
-  statsDeadline2.value = "2026-10-02"; statsDeadline2.dispatchEvent(new Event("change", {bubbles: true})); await sleep(900);
+  const editGoal = async (id, deadline) => {
+    const item = () => document.querySelector(`.pcal-material[data-document-id="${id}"]`);
+    item().querySelector(".pcal-goal-edit").click(); await sleep(30);
+    const radio = item().querySelector('.planner-goal-choice input[value="deadline"]');
+    radio.checked = true; radio.dispatchEvent(new Event("change", {bubbles: true}));
+    const input = item().querySelector(".planner-goal-deadline input");
+    input.value = deadline; input.dispatchEvent(new Event("change", {bubbles: true}));
+    item().querySelector(".pcal-goal-save").click();
+  };
+  await editGoal("stats.pdf", "2026-10-03"); await sleep(60);
+  await editGoal("stats.pdf", "2026-10-02"); await sleep(900);
   out.deadlineEdit = {previews: P.previewBodies.length - before, saved: P.materials.map((m) => [m.document_id, m.deadline]), markers: markers()};
 
   // 7. Availability popover: click the block -> time, Repeat weekly, Delete (for a separate Wednesday slot).
@@ -267,8 +276,8 @@ class CalendarPlannerAssertions:
         materials = self.out["materials"]
         self.assertEqual(materials["saved"], [["mkt.pdf", "2026-10-01"], ["stats.pdf", None]])
         self.assertEqual(materials["plans"], 1)
-        self.assertEqual(materials["rail"], [{"title": "Marketing", "pill": "New", "deadline": "2026-10-01"},
-                                             {"title": "Statistics", "pill": "New", "deadline": ""}])
+        self.assertEqual(materials["rail"], [{"title": "Marketing", "pill": "New", "goal": "pcal-goal--deadline"},
+                                             {"title": "Statistics", "pill": "New", "goal": "pcal-goal--flexible"}])
         # Materials but no availability: prompt to drag, no preview yet.
         self.assertEqual(materials["notice"], "Drag on the calendar to mark when you could study.")
         self.assertEqual(materials["previews"], 0)
@@ -373,7 +382,7 @@ class CalendarPlannerAssertions:
         self.assertFalse(accepted["acceptShown"])
         self.assertFalse(accepted["autoPlanShown"])
         self.assertEqual((accepted["queue"]["items"], accepted["queue"]["sessionCards"]), ([], 0))   # confirmed sessions live on the calendar
-        self.assertEqual(self.out["confirmedPopover"], ["×", "Start Session", "Reschedule", "Skip"])   # Start Session primary; no Complete before starting
+        self.assertEqual(self.out["confirmedPopover"], ["×", "Start Session", "Edit", "Reschedule", "Skip"])   # Start Session primary; no Complete before starting
 
     def test_reload_opens_the_confirmed_calendar(self):
         reloaded = self.out["reloaded"]

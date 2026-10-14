@@ -331,6 +331,7 @@ if (plannerView) {
         <div class="pcal-panel-toggles" role="group" aria-label="Planner panels">
           <button class="pcal-panel-toggle" id="pcal-materials-toggle" type="button" aria-label="Materials" title="Materials" aria-haspopup="dialog" aria-expanded="false" aria-controls="pcal-materials-rail"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 3.5h3v13h-3zM8.5 3.5h3v13h-3zM13.2 4.3l2.8-.8 3 12.6-2.9.8z"/></svg></button>
           <button class="pcal-panel-toggle" id="pcal-queue-toggle" type="button" aria-label="Study queue" title="Study queue" aria-haspopup="dialog" aria-expanded="false" aria-controls="pcal-queue-rail"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4.5l1.5 1.5L7 3.5M3 10l1.5 1.5L7 9M3 15.5L4.5 17 7 14.5M9.5 5h8M9.5 10.5h8M9.5 16h8"/></svg></button>
+          <button class="pcal-panel-toggle" id="pcal-prefs-toggle" type="button" aria-label="Study preferences" title="Study preferences" aria-haspopup="dialog" aria-expanded="false" aria-controls="pcal-prefs-rail"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h9M15 5h2M3 10h3M9 10h8M3 15h7M13 15h4M12 3.5v3M6 8.5v3M10 13.5v3"/></svg></button>
         </div>
       </div>
       <div class="pcal-status-line"><span class="pcal-status" id="pcal-status" aria-live="polite"></span><button class="pcal-explain" id="pcal-explain" type="button" aria-haspopup="dialog" hidden>How this plan was built</button></div>
@@ -346,6 +347,10 @@ if (plannerView) {
   <aside class="pcal-rail pcal-queue" id="pcal-queue-rail" aria-labelledby="pcal-queue-title">
     <div class="pcal-queue-head"><h3 class="pcal-rail-title" id="pcal-queue-title">Study queue</h3><span class="pcal-queue-count" id="pcal-queue-count"></span></div>
     <ol class="pcal-queue-list" id="pcal-queue"></ol>
+  </aside>
+  <aside class="pcal-rail pcal-prefs" id="pcal-prefs-rail" aria-labelledby="pcal-prefs-title">
+    <div class="pcal-rail-head"><h3 class="pcal-rail-title" id="pcal-prefs-title">Study preferences</h3></div>
+    <form class="pcal-prefs-form" id="pcal-prefs-form" novalidate></form>
   </aside>
   <section class="pcal-sheet" id="pcal-sheet" role="dialog" aria-labelledby="pcal-sheet-title" hidden>
     <div class="pcal-sheet-head"><h3 id="pcal-sheet-title">Add materials</h3><button class="pcal-icon-button" id="pcal-sheet-close" type="button" aria-label="Close">×</button></div>
@@ -407,6 +412,7 @@ const pcal = {
   zoomIn: document.getElementById("pcal-zoom-in"),
   zoomOut: document.getElementById("pcal-zoom-out"),
   gcal: document.getElementById("pcal-gcal"),
+  prefsForm: document.getElementById("pcal-prefs-form"),
 };
 const todayPlanPanel = document.getElementById("today-plan");
 
@@ -1385,9 +1391,9 @@ let plannerDocStatesLoad = 0;
 // The calendar popover's actions by state -- the primary action first; terminal or history-changing
 // ones stay secondary. Only what the lifecycle API allows for that state (Home keeps its own set).
 const PCAL_SESSION_ACTIONS = {
-  confirmed: [["start", "Start Session", true], ["reschedule", "Reschedule", false], ["skip", "Skip", false]],
+  confirmed: [["start", "Start Session", true], ["edit", "Edit", false], ["reschedule", "Reschedule", false], ["skip", "Skip", false]],
   active: [["start", "Resume", true], ["complete", "Complete session", false], ["skip", "Skip", false]],
-  overdue: [["reschedule", "Reschedule", true], ["skip", "Skip", false]],
+  overdue: [["reschedule", "Reschedule", true], ["edit", "Edit", false], ["skip", "Skip", false]],
 };
 
 // The scheduler's own reason code, in plain words (its message when the code is unknown).
@@ -1495,7 +1501,7 @@ pcal.addMaterials?.addEventListener("click", () => (pcal.sheet.hidden ? pcalOpen
 pcal.sheetClose?.addEventListener("click", pcalCloseSheet);
 pcal.newPlan?.addEventListener("click", pcalStartNewPlan);
 // Materials / Study queue: toolbar buttons open them as popovers over the full-width calendar.
-["materials", "queue"].forEach((panel) => {
+["materials", "queue", "prefs"].forEach((panel) => {
   document.getElementById(`pcal-${panel}-toggle`)?.addEventListener("click", () => pcalTogglePanel(panel));
 });
 window.addEventListener("resize", () => {

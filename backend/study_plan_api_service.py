@@ -13,6 +13,7 @@ from backend.document_study_state import get_document_study_state
 from backend.flashcard_quiz_service import create_flashcard_written_quiz, is_flashcard_quiz
 from backend.quiz_store import get_quiz_by_id
 from backend.indexed_document_store import list_indexed_documents
+from backend import study_preferences
 from backend.study_scheduler import DEFAULT_CONFIG, find_next_slot, plan_schedule
 from backend.study_session_duration import SessionDurationError, validate_new_session_minutes
 from backend.study_scheduler_contracts import REASON_LABELS, SchedulingContext
@@ -132,11 +133,13 @@ def list_plan_materials(owner_id: str, plan_id: str) -> list[dict]:
 
 
 def add_plan_material(owner_id: str, plan_id: str, document_id: str, deadline: str | None = None,
-                      familiarity: str | None = None) -> dict:
+                      familiarity: str | None = None, goal_type: str | None = None,
+                      target_date: str | None = None) -> dict:
     _require_plan(owner_id, plan_id)
     _validate_deadline(deadline)
     try:
-        material = study_planner_service.add_plan_material(owner_id, plan_id, document_id, deadline, familiarity)
+        material = study_planner_service.add_plan_material(owner_id, plan_id, document_id, deadline, familiarity,
+                                                           goal_type=goal_type, target_date=target_date)
     except ValueError as error:
         if str(error) == "Document not found.":
             raise PlanNotFoundError(str(error)) from error
@@ -147,7 +150,9 @@ def add_plan_material(owner_id: str, plan_id: str, document_id: str, deadline: s
 
 
 def update_plan_material(owner_id: str, plan_id: str, material_id: str, changes: dict) -> dict:
-    """`changes` holds only the fields the caller sent; an explicit None clears that field."""
+    """`changes` holds only the fields the caller sent; an explicit None clears that field. Editing
+    a goal or its dates never moves, cancels or re-plans existing sessions: the client may ask for
+    an adaptation proposal afterwards, which the learner reviews before anything changes."""
     _require_material(owner_id, plan_id, material_id)
     if "deadline" in changes:
         _validate_deadline(changes["deadline"])
@@ -228,8 +233,10 @@ def _schedule_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_n
     availability, calendar_warnings = _effective_availability(owner_id, local_now, offset)
     context = study_planner_service.build_scheduling_context(owner_id, plan_id, now=local_now, utc_offset=offset,
                                                              availability=availability)
+    # The learner's Study Preferences (daily target, break, strategy, durations) shape the plan.
     result, entries, applied, rejected = study_placement.apply_placements(
-        plan_schedule(context), list(placements), now=local_now, availability=context.availability,
+        plan_schedule(context, study_preferences.scheduler_config(owner_id)), list(placements), now=local_now,
+        availability=context.availability,
         busy=context.busy_sessions, deadlines={m.document_id: m.deadline for m in context.materials},
     )
 
@@ -282,6 +289,7 @@ def _saved_session(session: dict, titles: dict) -> dict:
         "reason": {"code": code, "message": REASON_LABELS.get(code, "")} if code else None,
         "artifact_id": session["artifact_id"], "started_at": session["started_at"],
         "completed_at": session["completed_at"], "rescheduled_from": session["rescheduled_from"],
+        "manual_edit": bool(session.get("manual_edit")),
     }
 
 
@@ -477,15 +485,17 @@ def skip_session(owner_id: str, session_id: str) -> dict:
 
 
 def reschedule_session(owner_id: str, session_id: str, utc_offset_minutes: int, local_now: str | None = None,
-                       target_start: str | None = None) -> dict:
+                       target_start: str | None = None, duration_minutes: int | None = None) -> dict:
     """Move one session to the first usable slot: inside the learner's availability, clear of busy
     sessions, from now (or, for a session still ahead, after its current end) up to the material's
     deadline. Only when nothing fits by the deadline -- or the deadline has already passed -- is a
     slot after it used (after_deadline=true), within the default planning horizon. Nothing else in
     the plan moves.
 
-    With `target_start` (a calendar drag) the session moves to exactly that start instead, when the
-    window is valid (study_placement.validate_window); otherwise 409 with the reason and no write."""
+    With `target_start` (a calendar drag or the Edit form) the session moves to exactly that start
+    instead, when the window is valid (study_placement.validate_window); otherwise 409 with the reason
+    and no write. `duration_minutes` (Edit form) also sets a new length. Both are the learner's own
+    choice: the new session is marked manual_edit, so Auto Plan / adaptation never change it."""
     session = study_planner_store.get_session(owner_id, session_id)
     if not session:
         raise PlanNotFoundError("Study session not found.")
@@ -493,10 +503,21 @@ def reschedule_session(owner_id: str, session_id: str, utc_offset_minutes: int, 
     now = _parse_local_now(local_now, offset)
     material = study_planner_store.get_plan_material(owner_id, session["plan_id"], session["document_id"])
     availability, _ = _effective_availability(owner_id, now, offset)
+    if duration_minutes is not None:
+        try:
+            validate_new_session_minutes(duration_minutes)
+        except SessionDurationError as error:
+            raise SessionConflictError(SessionDurationError.code, str(error), status=session["status"]) from error
+        if duration_minutes > study_preferences.MAX_SESSION_MINUTES:
+            raise SessionConflictError("session_too_long", f"A study session can last at most "
+                                       f"{study_preferences.MAX_SESSION_MINUTES} minutes.", status=session["status"])
+        target_start = target_start or session["scheduled_start"]
     if target_start is not None:
         return _with_calendar_sync(owner_id, _reschedule_to(owner_id, session, target_start, now,
-                                                            material["deadline"] if material else None, availability),
+                                                            material["deadline"] if material else None, availability,
+                                                            duration_minutes),
                                    utc_offset_minutes)
+    config = study_preferences.scheduler_config(owner_id)
     deadline = date.fromisoformat(material["deadline"]) if material and material["deadline"] else None
     context = SchedulingContext(
         owner_id=owner_id, plan_id=session["plan_id"], now=now, utc_offset=offset, materials=(),
@@ -509,9 +530,9 @@ def reschedule_session(owner_id: str, session_id: str, utc_offset_minutes: int, 
     horizon = now.date() + timedelta(days=DEFAULT_CONFIG.default_horizon_days)
     slot, after_deadline = None, False
     if deadline is None or deadline >= now.date():
-        slot = find_next_slot(context, session["duration_minutes"], deadline or horizon, earliest)
+        slot = find_next_slot(context, session["duration_minutes"], deadline or horizon, earliest, config)
     if slot is None and deadline is not None:
-        slot = find_next_slot(context, session["duration_minutes"], max(horizon, deadline), earliest)
+        slot = find_next_slot(context, session["duration_minutes"], max(horizon, deadline), earliest, config)
         after_deadline = slot is not None
     if slot is None:
         raise SessionConflictError(
@@ -529,7 +550,7 @@ def reschedule_session(owner_id: str, session_id: str, utc_offset_minutes: int, 
 
 
 def _reschedule_to(owner_id: str, session: dict, target_start: str, now: datetime, deadline: str | None,
-                   availability: list[dict]) -> dict:
+                   availability: list[dict], duration_minutes: int | None = None) -> dict:
     if session["status"] not in study_planner_store.RESCHEDULABLE_STATUSES:
         raise SessionConflictError("session_not_reschedulable", f"A {session['status']} session cannot be rescheduled.",
                                    status=session["status"])
@@ -537,13 +558,14 @@ def _reschedule_to(owner_id: str, session: dict, target_start: str, now: datetim
             if s["session_id"] != session["session_id"]]
     try:
         start, end = study_placement.validate_window(
-            target_start, session["duration_minutes"], now=now,
+            target_start, duration_minutes or session["duration_minutes"], now=now,
             availability=availability, deadline=deadline, busy=busy)
     except study_placement.PlacementError as error:
         raise SessionConflictError(error.code, str(error), status=session["status"]) from error
     try:
         # One transaction; the store re-checks status and overlap and keeps the rescheduled_from lineage.
-        previous, moved = study_planner_store.reschedule_session(owner_id, session["session_id"], start, end)
+        previous, moved = study_planner_store.reschedule_session(owner_id, session["session_id"], start, end,
+                                                                 duration_minutes=duration_minutes, manual=True)
     except study_planner_store.SessionTransitionError as error:
         raise SessionConflictError(error.code, str(error), status=error.status) from error
     titles = _document_titles(owner_id)
@@ -568,7 +590,7 @@ def list_live_candidates(owner_id: str, plan_id: str, utc_offset_minutes: int, l
     session covers -- the only things a learner may drag onto the calendar. Read-only."""
     _, context, plan_sessions = _live_context(owner_id, plan_id, utc_offset_minutes, local_now)
     found = []
-    for item in study_placement.live_candidates(context, plan_sessions):
+    for item in study_placement.live_candidates(context, plan_sessions, study_preferences.scheduler_config(owner_id)):
         candidate = item["candidate"]
         found.append({"candidate_key": item["candidate_key"], "document_id": candidate.document_id,
                       "document_title": item["title"], "activity_type": candidate.activity_type,
@@ -583,7 +605,8 @@ def place_live_candidate(owner_id: str, plan_id: str, key: str, target_start: st
     start. Validated like any placement, then written atomically: if the plan's sessions changed
     since they were read, nothing is saved (409 stale_plan)."""
     now, context, plan_sessions = _live_context(owner_id, plan_id, utc_offset_minutes, local_now)
-    match = next((item for item in study_placement.live_candidates(context, plan_sessions)
+    match = next((item for item in study_placement.live_candidates(context, plan_sessions,
+                                                                   study_preferences.scheduler_config(owner_id))
                   if item["candidate_key"] == key), None)
     if match is None:
         raise SessionConflictError("candidate_stale", study_placement.PLACEMENT_MESSAGES["candidate_stale"], status="")
@@ -636,7 +659,7 @@ def _compute_adaptation(owner_id: str, plan_id: str, trigger: dict, utc_offset_m
             trigger=parsed, now=now, utc_offset=offset, materials=context.materials,
             plan_sessions=tuple(plan_sessions), availability=context.availability,
             busy_sessions=context.busy_sessions,
-        ))
+        ), study_adaptation.AdaptationConfig(scheduler=study_preferences.scheduler_config(owner_id)))
     except ValueError as error:
         raise PlanValidationError("invalid_trigger", str(error)) from error
     return result, now, plan_sessions

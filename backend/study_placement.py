@@ -177,7 +177,7 @@ def apply_placements(result, placements: list[dict], *, now: datetime, availabil
 # After confirmation: what the planner still wants done
 # ---------------------------------------------------------------------------
 
-def live_candidates(context, plan_sessions: list[dict]) -> list[dict]:
+def live_candidates(context, plan_sessions: list[dict], config=None) -> list[dict]:
     """The scheduler's current candidate activities for each material of a confirmed plan that no
     scheduled / in-progress session of that document and activity already covers."""
     covered: dict = {}
@@ -188,7 +188,8 @@ def live_candidates(context, plan_sessions: list[dict]) -> list[dict]:
     found = []
     for material in context.materials:
         seen: dict = {}
-        for candidate in select_candidates(material, context.now, utc_offset=context.utc_offset):
+        for candidate in select_candidates(material, context.now, utc_offset=context.utc_offset,
+                                           **({"config": config} if config is not None else {})):
             pair = (candidate.document_id, candidate.activity_type)
             ordinal = seen.get(pair, 0)
             seen[pair] = ordinal + 1

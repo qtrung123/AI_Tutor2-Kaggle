@@ -134,6 +134,7 @@ async function loadPlannerData({ keepWeek = false } = {}) {
       plannerQueueAutoPreview(0);
       plannerLoadLiveCandidates();
       plannerLoadDocStates();
+      plannerLoadPreferences();
     }
     plannerLoadGoogleCalendar();   // every layout: the toolbar Connect control must not need the desktop calendar
   } catch (error) {
@@ -201,18 +202,27 @@ function renderPlannerMaterials() {
     pick.append(checkbox, name);
     row.appendChild(pick);
     if (material) {
-      const deadline = document.createElement("label");
-      deadline.className = "planner-material-deadline";
-      const caption = document.createElement("span");
-      caption.textContent = "Deadline (optional)";
-      const input = document.createElement("input");
-      input.type = "date";
-      input.min = today;
-      input.value = material.deadline || "";
-      input.setAttribute("aria-label", `Deadline for ${doc.title}`);
-      input.addEventListener("change", () => plannerSetDeadline(material, input));
-      deadline.append(caption, input);
-      row.appendChild(deadline);
+      const goal = document.createElement("div");
+      goal.className = "planner-material-goal";
+      const summary = document.createElement("span");
+      summary.className = `planner-goal-summary planner-goal-summary--${plannerMaterialGoal(material) || "none"}`;
+      summary.textContent = plannerGoalSummary(material);
+      const { form, read } = plannerGoalForm(plannerGoalValues(material), { today, title: doc.title });
+      const save = document.createElement("button");
+      save.type = "button";
+      save.className = "secondary-button planner-goal-save";
+      save.textContent = "Save goal";
+      save.addEventListener("click", () => plannerSaveStepGoal(material, read(), save));
+      goal.append(summary, form, save);
+      if (plannerMaterialHasGoal(material)) {
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "text-button planner-goal-remove";
+        remove.textContent = "Remove goal";
+        remove.addEventListener("click", () => plannerSaveStepGoal(material, PLANNER_NO_GOAL, remove));
+        goal.appendChild(remove);
+      }
+      row.appendChild(goal);
     }
     plannerMaterialList.appendChild(row);
   });
@@ -247,17 +257,156 @@ async function plannerToggleMaterial(documentId, checkbox) {
   renderPlannerMaterials();
 }
 
-async function plannerSetDeadline(material, input) {
+async function plannerSaveStepGoal(material, values, button) {
+  if (!values) return;
+  button.disabled = true;
   try {
-    const updated = await plannerRequest(plannerPlanUrl(`/materials/${encodeURIComponent(material.material_id)}`), {
-      method: "PATCH", body: { deadline: input.value || null },
-    });
-    plannerMaterials = plannerMaterials.map((item) => (item.material_id === updated.material_id ? updated : item));
+    await plannerPatchGoal(material, values);
     plannerPreview = null;
   } catch (error) {
-    input.value = material.deadline || "";
-    showToast(error.message || "Could not save the deadline");
+    button.disabled = false;
+    showToast(error.message || "Could not save the learning goal");
+    return;
   }
+  renderPlannerMaterials();
+}
+
+// ---- Study goals (one per material) -------------------------------------------
+// "deadline" = finish by a required date; "flexible" = no deadline, sessions may spread over the
+// available days. The target completion date is optional and only a preference (never after the
+// deadline). A material saved before goals existed has goal_type null: it reads as a deadline goal
+// when it already had a deadline, otherwise as "No goal set" -- nothing is invented for it.
+// Saving a goal never changes accepted sessions; see plannerSuggestAdaptation.
+
+const PLANNER_GOAL_LABELS = { deadline: "Has deadline", flexible: "Flexible learning" };
+const PLANNER_NO_GOAL = { goal_type: null, deadline: null, target_date: null };
+let plannerGoalFormCount = 0;
+
+function plannerMaterialGoal(material) {
+  return material?.goal_type || (material?.deadline ? "deadline" : null);
+}
+
+function plannerMaterialHasGoal(material) {
+  return Boolean(material.goal_type || material.deadline || material.target_date);
+}
+
+function plannerGoalValues(material) {
+  return { goal_type: plannerMaterialGoal(material), deadline: material.deadline || null, target_date: material.target_date || null };
+}
+
+function plannerShortDate(key) {
+  return new Date(`${key}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function plannerGoalSummary(material) {
+  const goal = plannerMaterialGoal(material);
+  const parts = [goal === "deadline" ? `Due ${plannerShortDate(material.deadline)}` : goal === "flexible" ? "Flexible" : "No goal set"];
+  if (material.target_date) parts.push(`Target ${plannerShortDate(material.target_date)}`);
+  return parts.join(" · ");
+}
+
+function plannerGoalForm(values, { today, title, onChange = null }) {
+  // The goal choice plus its two dates. `read()` validates and returns the POST/PATCH fields (or
+  // null, with the problem shown inline); `values()` returns the raw, unvalidated state.
+  const name = `planner-goal-${++plannerGoalFormCount}`;
+  const form = document.createElement("fieldset");
+  form.className = "planner-goal-form";
+  const legend = document.createElement("legend");
+  legend.textContent = "Learning goal";
+  const choices = document.createElement("div");
+  choices.className = "planner-goal-choices";
+  const radios = {};
+  Object.entries(PLANNER_GOAL_LABELS).forEach(([value, label]) => {
+    const option = document.createElement("label");
+    option.className = "planner-goal-choice";
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = name;
+    radio.value = value;
+    radio.checked = values.goal_type === value;
+    radio.setAttribute("aria-label", `${label} for ${title}`);
+    const text = document.createElement("span");
+    text.textContent = label;
+    option.append(radio, text);
+    choices.appendChild(option);
+    radios[value] = radio;
+  });
+  const dateField = (caption, value, className) => {
+    const field = document.createElement("label");
+    field.className = `planner-goal-date ${className}`;
+    const text = document.createElement("span");
+    text.textContent = caption;
+    const input = document.createElement("input");
+    input.type = "date";
+    input.value = value || "";
+    input.setAttribute("aria-label", `${caption} for ${title}`);
+    field.append(text, input);
+    return { field, input };
+  };
+  const deadline = dateField("Deadline", values.deadline, "planner-goal-deadline");
+  const target = dateField("Target completion (optional)", values.target_date, "planner-goal-target");
+  const error = document.createElement("p");
+  error.className = "planner-goal-error";
+  error.setAttribute("role", "alert");
+  error.hidden = true;
+  const goal = () => Object.keys(radios).find((key) => radios[key].checked) || null;
+  const raw = () => ({ goal_type: goal(), deadline: deadline.input.value || null, target_date: target.input.value || null });
+  const sync = () => {
+    const hasDeadline = goal() === "deadline";
+    deadline.field.hidden = !hasDeadline;
+    deadline.input.required = hasDeadline;
+    // The picker suggests today on; a past deadline is reported by the preview (deadline_passed).
+    if (!deadline.input.value || deadline.input.value >= today) deadline.input.min = today;
+    else deadline.input.removeAttribute("min");
+    if (hasDeadline && deadline.input.value) target.input.max = deadline.input.value;
+    else target.input.removeAttribute("max");
+  };
+  [...Object.values(radios), deadline.input, target.input].forEach((control) => control.addEventListener("change", () => {
+    sync();
+    error.hidden = true;
+    onChange?.(raw());
+  }));
+  sync();
+  form.append(legend, choices, deadline.field, target.field, error);
+  const read = () => {
+    const { goal_type: goalType, deadline: due, target_date: targetDate } = raw();
+    const result = { goal_type: goalType, deadline: goalType === "deadline" ? due : null, target_date: targetDate };
+    let message = "";
+    if (!goalType) message = "Choose a learning goal.";
+    else if (goalType === "deadline" && !due) message = "Pick the deadline date.";
+    else if (result.deadline && targetDate && targetDate > result.deadline) message = "The target completion date can’t be after the deadline.";
+    error.textContent = message;
+    error.hidden = !message;
+    return message ? null : result;
+  };
+  return { form, read, values: raw };
+}
+
+async function plannerPatchGoal(material, values) {
+  // One PATCH carries the whole goal, so the server validates it as a unit.
+  const updated = await plannerRequest(plannerPlanUrl(`/materials/${encodeURIComponent(material.material_id)}`), {
+    method: "PATCH", body: { goal_type: values.goal_type, deadline: values.deadline, target_date: values.target_date },
+  });
+  plannerMaterials = plannerMaterials.map((item) => (item.material_id === updated.material_id ? { ...item, ...updated } : item));
+  return updated;
+}
+
+async function plannerSuggestAdaptation(planId, trigger) {
+  // A goal or deadline change never moves, adds or cancels accepted sessions by itself: the
+  // planner only proposes (read-only preview) and the learner reviews it before anything changes.
+  if (!planId) return null;
+  let proposal = null;
+  try {
+    proposal = await plannerRequest(`${PLANNER_PLANS_API_URL}/${encodeURIComponent(planId)}/adaptation/preview`, {
+      method: "POST", body: { trigger, utc_offset_minutes: plannerUtcOffsetMinutes() },
+    });
+  } catch (error) {
+    return null;   // the goal itself is saved; a suggestion is only a bonus
+  }
+  if (!proposal?.change_count) return proposal;
+  if (plannerIsDesktop()) plannerStartCalendarReview(planId, trigger, proposal);
+  else plannerShowAdaptationReview(planId, trigger, proposal);
+  return proposal;
 }
 
 // ---- Step 2: availability (the existing weekly calendar) --------------------
@@ -489,6 +638,10 @@ async function plannerQuizTarget(session) {
 async function plannerSessionAction(session, kind, button, group) {
   // One request per session at a time: a double click (or the same session in two lists) acts once.
   if (plannerBusySessions.has(session.session_id)) return;
+  if (kind === "edit") {   // the learner's own date / time / length: a form, not a lifecycle call
+    pcalOpenSessionEditor(session, button);
+    return;
+  }
   plannerBusySessions.add(session.session_id);
   const buttons = [...group.querySelectorAll("button")];
   const label = button.textContent;
@@ -1307,16 +1460,17 @@ function plannerAfterAvailabilityChange() {
   plannerAvailabilityTimer = setTimeout(() => plannerAdapt(planId, { kind: "availability_changed" }), 800);
 }
 
-async function pcalAddMaterial(documentId, deadline, button) {
+async function pcalAddMaterial(documentId, goal, button) {
   if (button) button.disabled = true;
   try {
     await plannerEnsurePlan();
     const body = { document_id: documentId };
-    if (deadline) body.deadline = deadline;
+    Object.entries(goal || {}).forEach(([key, value]) => { if (value) body[key] = value; });
     const material = await plannerRequest(plannerPlanUrl("/materials"), { method: "POST", body });
     plannerMaterials = [...plannerMaterials, material];
+    pcalSheetGoals.delete(documentId);
     if (plannerHasLivePlan() && material.deadline) {
-      await plannerAdapt(plannerPlan.plan_id, { kind: "deadline_changed", document_id: documentId });
+      await plannerSuggestAdaptation(plannerPlan.plan_id, { kind: "deadline_changed", document_id: documentId });
     }
   } catch (error) {
     showToast(error.message || "Could not add this material");
@@ -1338,20 +1492,22 @@ async function pcalRemoveMaterial(material, button) {
   else plannerQueueAutoPreview();
 }
 
-async function pcalSetDeadline(material, input) {
+async function pcalSaveGoal(material, values, button) {
+  if (!values) return;
+  button.disabled = true;
+  const deadlineChanged = (values.deadline || null) !== (material.deadline || null);
   try {
-    const updated = await plannerRequest(plannerPlanUrl(`/materials/${encodeURIComponent(material.material_id)}`), {
-      method: "PATCH", body: { deadline: input.value || null },
-    });
-    plannerMaterials = plannerMaterials.map((item) => (item.material_id === updated.material_id ? { ...item, ...updated } : item));
+    await plannerPatchGoal(material, values);
   } catch (error) {
-    input.value = material.deadline || "";
-    showToast(error.message || "Could not save the deadline");
+    button.disabled = false;
+    showToast(error.message || "Could not save the learning goal");
     return;
   }
+  pcalGoalEditor = null;
   if (plannerHasLivePlan()) {
     renderPlannerWorkspace();
-    await plannerAdapt(plannerPlan.plan_id, { kind: "deadline_changed", document_id: material.document_id });
+    // Accepted sessions stay as they are: a changed deadline only brings a proposal to review.
+    if (deadlineChanged) await plannerSuggestAdaptation(plannerPlan.plan_id, { kind: "deadline_changed", document_id: material.document_id });
   } else plannerQueueAutoPreview();
 }
 
@@ -1448,17 +1604,18 @@ function renderPlannerWorkspace() {
 // Two icon buttons at the top right of the calendar header open these panels as popovers anchored
 // under the buttons; the calendar always keeps its full width. One panel at a time; the same
 // button, a click outside or Escape closes it. Panels start closed on every page load.
-let pcalOpenPanel = null;   // "materials" | "queue" | null
+let pcalOpenPanel = null;   // "materials" | "queue" | "prefs" | null
 
 function pcalSetPanel(panel, { focusToggle = false } = {}) {
   if (!plannerWorkspace) return;
   const previous = pcalOpenPanel;
   pcalOpenPanel = panel;
   if (previous === "materials" && panel !== "materials") pcalCloseSheet();
-  ["materials", "queue"].forEach((name) => {
+  ["materials", "queue", "prefs"].forEach((name) => {
     plannerWorkspace.classList.toggle(`is-${name}-open`, name === panel);
     document.getElementById(`pcal-${name}-toggle`)?.setAttribute("aria-expanded", String(name === panel));
   });
+  if (panel === "prefs" && previous !== "prefs") pcalRenderPreferences();
   if (panel) pcalPositionPanel(panel);
   if (focusToggle && previous) document.getElementById(`pcal-${previous}-toggle`)?.focus();
 }
@@ -1498,10 +1655,22 @@ function pcalRenderMaterials() {
     const meta = pcalEl("div", "pcal-material-meta");
     const stateKey = pcalLearningKey(material.document_id, material.learning_state || "new");
     meta.appendChild(pcalEl("span", `pcal-pill pcal-pill--${stateKey}`, PLANNER_LEARNING_STATE_LABELS[stateKey] || stateKey));
-    const { control: deadline, input } = pcalDeadlineControl(material.deadline || "", `Deadline for ${title}`, today);
-    input.addEventListener("change", () => pcalSetDeadline(material, input));
-    meta.appendChild(deadline);
+    const goal = plannerMaterialGoal(material);
+    const summary = pcalEl("span", `pcal-goal pcal-goal--${goal || "none"}`, plannerGoalSummary(material));
+    summary.classList.toggle("is-past", Boolean(material.deadline && material.deadline < today));
+    const editing = pcalGoalEditor?.materialId === material.material_id;
+    const edit = pcalEl("button", "pcal-goal-edit", goal ? "Edit goal" : "Set goal");
+    edit.type = "button";
+    edit.setAttribute("aria-label", `${goal ? "Edit" : "Set"} learning goal for ${title}`);
+    edit.setAttribute("aria-expanded", String(editing));
+    edit.addEventListener("click", () => {
+      pcalGoalEditor = editing ? null : { materialId: material.material_id, values: plannerGoalValues(material) };
+      pcalRenderMaterials();
+      pcal.materials.querySelector(".pcal-goal-editor input")?.focus();
+    });
+    meta.append(summary, edit);
     item.append(top, meta);
+    if (editing) item.appendChild(pcalGoalEditorFor(material, title, today));
     const pack = pcalStudyPackText(material.document_id, { compact: true });
     if (pack) item.appendChild(pcalEl("span", "pcal-material-pack", pack));
     pcal.materials.appendChild(item);
@@ -1549,35 +1718,34 @@ function pcalQuizText(documentId) {
   return quiz.latest ? `Latest quiz ${Math.round(quiz.latest.percentage)}%` : "No quiz attempt yet";
 }
 
-function pcalDeadlineControl(value, label, today) {
-  // A quiet text button ("Add deadline" / "Due Oct 2") over the native date picker.
-  const control = pcalEl("span", "pcal-deadline");
-  const button = pcalEl("button", "pcal-deadline-button");
-  button.type = "button";
-  const input = document.createElement("input");
-  input.type = "date";
-  input.value = value;
-  input.className = "pcal-deadline-input";
-  input.setAttribute("aria-label", label);
-  const refresh = () => {
-    const set = Boolean(input.value);
-    button.textContent = set
-      ? `Due ${new Date(`${input.value}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`
-      : "Add deadline";
-    control.classList.toggle("is-set", set);
-    control.classList.toggle("is-past", set && input.value < today);
-  };
-  button.setAttribute("aria-label", label);
-  button.addEventListener("click", () => {
-    try {
-      input.showPicker();
-    } catch (error) {
-      input.focus();
-    }
+// The Materials panel edits one goal at a time, inline under its material. The draft lives here so
+// a re-render (document states loading, a preview finishing) never drops what is being typed.
+let pcalGoalEditor = null;   // { materialId, values } | null
+
+function pcalGoalEditorFor(material, title, today) {
+  const box = pcalEl("div", "pcal-goal-editor");
+  const { form, read } = plannerGoalForm(pcalGoalEditor.values, {
+    today, title, onChange: (values) => { pcalGoalEditor.values = values; },
   });
-  refresh();
-  control.append(button, input);
-  return { control, input, refresh };
+  const actions = pcalEl("div", "pcal-goal-actions");
+  const save = pcalEl("button", "pcal-button pcal-goal-save", "Save");
+  save.type = "button";
+  save.addEventListener("click", () => pcalSaveGoal(material, read(), save));
+  const cancel = pcalEl("button", "pcal-text-action pcal-goal-cancel", "Cancel");
+  cancel.type = "button";
+  cancel.addEventListener("click", () => {
+    pcalGoalEditor = null;
+    pcalRenderMaterials();
+  });
+  actions.append(save, cancel);
+  if (plannerMaterialHasGoal(material)) {
+    const remove = pcalEl("button", "pcal-text-action pcal-danger pcal-goal-remove", "Remove goal");
+    remove.type = "button";
+    remove.addEventListener("click", () => pcalSaveGoal(material, PLANNER_NO_GOAL, remove));
+    actions.appendChild(remove);
+  }
+  box.append(form, actions);
+  return box;
 }
 
 function pcalWeekItems(fromKey, untilKey) {
@@ -2165,6 +2333,9 @@ function pcalOpenSessionPopover(kind, session, block) {
     }
     const original = session.rescheduled_from && plannerSessionsById.get(session.rescheduled_from);
     if (original) content.appendChild(pcalEl("p", "pcal-popover-note", `Moved from ${pcalWhen(original.scheduled_start)}`));
+    if (session.manual_edit && !PLANNER_HISTORY_SESSION_STATUSES.includes(session.status)) {
+      content.appendChild(pcalEl("p", "pcal-popover-note pcal-popover-manual", "Set by you. Auto Plan and suggestions keep this time and length."));
+    }
     if (kind === "completed" && session.completed_at) {
       content.appendChild(pcalEl("p", "pcal-popover-note", `Completed ${new Date(session.completed_at).toLocaleString(undefined,
         { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`));
@@ -2191,6 +2362,263 @@ function pcalOpenSessionPopover(kind, session, block) {
   pcal.popover.querySelector(".pcal-session-actions .primary-button")?.focus();
 }
 
+// -- Study preferences panel ----------------------------------------------------------
+// The learner's own scheduling choices, saved per user (server: study_preferences). Auto Plan and
+// new suggestions use them; accepted and hand-edited sessions never change because of them.
+
+const PLANNER_STRATEGY_LABELS = {
+  balanced: ["Balanced", "Spread sessions evenly over your available days."],
+  finish_early: ["Finish Early", "Use the earliest free time first."],
+  deadline_priority: ["Deadline Priority", "Materials with a deadline go first; the others stay balanced."],
+};
+const PLANNER_DURATION_LABELS = {
+  summary: "Summary (new material)", flashcards: "Flashcards", quiz: "Quiz", quiz_retry: "Quiz retry",
+  review: "Weak-topic review", written_quiz: "Written quiz", final_review: "Final review", light_review: "Light spaced review",
+};
+let plannerPreferences = null;
+
+async function plannerLoadPreferences() {
+  try {
+    plannerPreferences = await plannerRequest(PLANNER_PREFERENCES_API_URL);
+  } catch (error) {
+    plannerPreferences = null;   // the panel says it could not load; planning keeps the server's defaults
+  }
+  if (pcalOpenPanel === "prefs") pcalRenderPreferences();
+}
+
+function pcalPrefsSelect(id, label, values, current, format) {
+  const field = pcalEl("label", "pcal-prefs-field");
+  field.htmlFor = id;
+  const select = document.createElement("select");
+  select.id = id;
+  values.forEach((value) => select.add(new Option(format(value), String(value), false, value === current)));
+  field.append(pcalEl("span", "pcal-prefs-label", label), select);
+  return { field, select };
+}
+
+function pcalRenderPreferences() {
+  const form = pcal.prefsForm;
+  if (!form) return;
+  form.innerHTML = "";
+  const prefs = plannerPreferences;
+  if (!prefs) {
+    form.appendChild(pcalEl("p", "pcal-prefs-note", "Could not load your preferences. Try again in a moment."));
+    return;
+  }
+  const options = prefs.options;
+  const daily = pcalPrefsSelect("pcal-pref-daily", "Daily study target", options.daily_target_minutes,
+    prefs.daily_target_minutes, (value) => plannerFormatDuration(value));
+  const pause = pcalPrefsSelect("pcal-pref-break", "Break between sessions", options.break_minutes,
+    prefs.break_minutes, (value) => `${value} min`);
+  const strategy = pcalEl("fieldset", "pcal-prefs-group");
+  strategy.appendChild(pcalEl("legend", "pcal-prefs-label", "Scheduling strategy"));
+  options.strategy.forEach((value) => {
+    const [label, hint] = PLANNER_STRATEGY_LABELS[value] || [value, ""];
+    const option = pcalEl("label", "pcal-prefs-choice");
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = "pcal-pref-strategy";
+    radio.value = value;
+    radio.checked = prefs.strategy === value;
+    const text = pcalEl("span", "pcal-prefs-choice-text");
+    text.append(pcalEl("strong", "", label), pcalEl("small", "", hint));
+    option.append(radio, text);
+    strategy.appendChild(option);
+  });
+  const lengths = pcalEl("fieldset", "pcal-prefs-group pcal-prefs-lengths");
+  lengths.appendChild(pcalEl("legend", "pcal-prefs-label", "Session length for new sessions"));
+  options.durations.forEach((activity) => {
+    const field = pcalEl("label", "pcal-prefs-length");
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = String(options.min_session_minutes);
+    input.max = String(options.max_session_minutes);
+    input.step = String(options.duration_step_minutes);
+    input.value = String(prefs.durations[activity]);
+    input.dataset.activity = activity;
+    input.setAttribute("aria-label", `${PLANNER_DURATION_LABELS[activity] || activity} length in minutes`);
+    field.append(pcalEl("span", "", PLANNER_DURATION_LABELS[activity] || activity), input, pcalEl("span", "pcal-prefs-unit", "min"));
+    lengths.appendChild(field);
+  });
+  const note = pcalEl("p", "pcal-prefs-note",
+    "Used by Auto Plan and new suggestions. Accepted sessions and the ones you edited stay exactly as they are.");
+  const error = pcalEl("p", "pcal-prefs-error");
+  error.setAttribute("role", "alert");
+  error.hidden = true;
+  const status = pcalEl("p", "pcal-prefs-status");
+  status.setAttribute("aria-live", "polite");
+  status.textContent = prefs.saved ? "" : "Using the defaults.";
+  const actions = pcalEl("div", "pcal-prefs-actions");
+  const save = pcalEl("button", "primary-button pcal-prefs-save", "Save");
+  save.type = "submit";
+  const reset = pcalEl("button", "pcal-text-action pcal-prefs-reset", "Reset to defaults");
+  reset.type = "button";
+  reset.disabled = !prefs.saved;
+  reset.addEventListener("click", () => pcalSavePreferences(null, reset, error, status));
+  actions.append(save, reset);
+  form.append(daily.field, pause.field, strategy, lengths, note, error, status, actions);
+  form.onsubmit = (event) => {
+    event.preventDefault();
+    pcalSavePreferences(form, save, error, status);
+  };
+}
+
+function pcalReadPreferences(form, error) {
+  // Client-side checks mirror the server's; the server stays the authority.
+  const options = plannerPreferences.options;
+  const body = {
+    daily_target_minutes: Number(form.querySelector("#pcal-pref-daily").value),
+    break_minutes: Number(form.querySelector("#pcal-pref-break").value),
+    strategy: form.querySelector('input[name="pcal-pref-strategy"]:checked')?.value || "balanced",
+    durations: {},
+  };
+  for (const input of form.querySelectorAll(".pcal-prefs-length input")) {
+    input.removeAttribute("aria-invalid");
+    const minutes = Number(input.value);
+    const label = PLANNER_DURATION_LABELS[input.dataset.activity] || input.dataset.activity;
+    let problem = "";
+    if (!Number.isInteger(minutes)) problem = `${label}: enter a whole number of minutes.`;
+    else if (minutes < options.min_session_minutes) problem = `${label}: a study session must be at least ${options.min_session_minutes} minutes long.`;
+    else if (minutes > options.max_session_minutes || minutes % options.duration_step_minutes) {
+      problem = `${label}: choose up to ${options.max_session_minutes} minutes, in steps of ${options.duration_step_minutes}.`;
+    } else if (minutes > body.daily_target_minutes) problem = `${label}: longer than your daily study target, so it could never be scheduled.`;
+    if (problem) {
+      input.setAttribute("aria-invalid", "true");
+      error.textContent = problem;
+      error.hidden = false;
+      input.focus();
+      return null;
+    }
+    body.durations[input.dataset.activity] = minutes;
+  }
+  return body;
+}
+
+async function pcalSavePreferences(form, button, error, status) {
+  error.hidden = true;
+  const body = form ? pcalReadPreferences(form, error) : null;
+  if (form && !body) return;
+  button.disabled = true;
+  try {
+    plannerPreferences = await plannerRequest(PLANNER_PREFERENCES_API_URL, form ? { method: "PUT", body } : { method: "DELETE" });
+  } catch (failure) {
+    button.disabled = false;
+    error.textContent = failure.message || "Could not save your preferences.";
+    error.hidden = false;
+    const field = failure.detail?.field?.startsWith("durations.") ? failure.detail.field.slice(10) : null;
+    if (field) pcal.prefsForm.querySelector(`input[data-activity="${field}"]`)?.setAttribute("aria-invalid", "true");
+    return;
+  }
+  pcalRenderPreferences();
+  const live = plannerHasLivePlan();
+  pcal.prefsForm.querySelector(".pcal-prefs-status").textContent = form
+    ? (live ? "Saved. Your accepted sessions stay as they are; new suggestions use these settings." : "Saved. The suggested plan is updated.")
+    : "Back to the defaults.";
+  // Not accepted yet: the suggestions are recomputed with the new settings. An accepted plan is never touched.
+  if (!live) plannerQueueAutoPreview(0);
+}
+
+// -- Editing one session by hand ------------------------------------------------------
+// Date, start time and length of an accepted session. The server validates the new window
+// (availability, Google Calendar busy time, other sessions, the deadline, 20-minute minimum) and
+// refuses with a reason -- shown here -- instead of saving a conflict. A saved edit is marked as the
+// learner's own (manual_edit): Auto Plan and adaptation keep it as it is.
+
+function pcalOpenSessionEditor(session, anchor) {
+  const title = session.document_title || plannerDocumentTitle(session.document_id);
+  const options = plannerPreferences?.options;
+  // Opened from the session's own popover (which is replaced): anchor to its calendar block.
+  const block = plannerWorkspace?.querySelector(`.pcal-event[data-session-id="${CSS.escape(session.session_id)}"]`);
+  pcalShowPopover(block || anchor, `Edit ${pcalActivity(session.activity_type)} · ${title}`, (popover) => {
+    const form = pcalEl("form", "pcal-edit-form");
+    form.noValidate = true;
+    const field = (label, input) => {
+      const wrap = pcalEl("label", "pcal-edit-field");
+      wrap.append(pcalEl("span", "pcal-prefs-label", label), input);
+      return wrap;
+    };
+    const date = document.createElement("input");
+    date.type = "date";
+    date.id = "pcal-edit-date";
+    date.value = session.scheduled_start.slice(0, 10);
+    date.min = plannerDateKey(plannerNow());
+    const time = document.createElement("input");
+    time.type = "time";
+    time.id = "pcal-edit-time";
+    time.step = "900";
+    time.value = session.scheduled_start.slice(11, 16);
+    const length = document.createElement("input");
+    length.type = "number";
+    length.id = "pcal-edit-duration";
+    length.min = String(options?.min_session_minutes || 20);
+    length.max = String(options?.max_session_minutes || 180);
+    length.step = "5";
+    length.value = String(session.duration_minutes);
+    const error = pcalEl("p", "pcal-edit-error");
+    error.setAttribute("role", "alert");
+    error.hidden = true;
+    const save = pcalEl("button", "primary-button pcal-edit-save", "Save");
+    save.type = "submit";
+    const cancel = pcalEl("button", "pcal-text-action pcal-edit-cancel", "Cancel");
+    cancel.type = "button";
+    cancel.addEventListener("click", pcalClosePopover);
+    const actions = pcalEl("div", "pcal-popover-actions");
+    actions.append(save, cancel);
+    form.append(pcalEl("h4", "pcal-popover-title", "Edit session"),
+      pcalEl("p", "pcal-popover-activity", `${pcalActivity(session.activity_type)} · ${title}`),
+      field("Date", date), field("Start time", time), field("Length (minutes)", length),
+      pcalEl("p", "pcal-popover-note", "Your change is kept: Auto Plan and suggestions won't move or resize this session."),
+      error, actions);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      pcalSaveSessionEdit(session, { date: date.value, time: time.value, minutes: Number(length.value) }, error, save);
+    });
+    popover.appendChild(form);
+  });
+  pcal.popover.querySelector("#pcal-edit-time")?.focus();
+}
+
+async function pcalSaveSessionEdit(session, values, error, button) {
+  const show = (message) => {
+    error.textContent = message;
+    error.hidden = false;
+  };
+  error.hidden = true;
+  const minimum = plannerPreferences?.options?.min_session_minutes || 20;
+  if (!values.date || !values.time) return show("Choose a date and a start time.");
+  if (!Number.isInteger(values.minutes) || values.minutes < minimum) return show(`A study session must be at least ${minimum} minutes long.`);
+  const target = `${values.date}T${values.time}:00`;
+  const body = { utc_offset_minutes: plannerUtcOffsetMinutes(), target_start: target };
+  if (values.minutes !== session.duration_minutes) body.duration_minutes = values.minutes;
+  if (target === session.scheduled_start && body.duration_minutes === undefined) {
+    pcalClosePopover();
+    return null;
+  }
+  if (plannerBusySessions.has(session.session_id)) return null;
+  plannerBusySessions.add(session.session_id);
+  button.disabled = true;
+  try {
+    const result = await plannerRequest(`${PLANNER_SESSIONS_API_URL}/${encodeURIComponent(session.session_id)}/reschedule`,
+      { method: "POST", body });
+    const moved = { ...result.session, plan_id: session.plan_id };
+    plannerSessionsById.set(session.session_id, { ...session, ...(result.previous || {}) });
+    plannerSessionsById.set(moved.session_id, moved);
+    plannerSessions = [...plannerSessions.filter((item) => item.session_id !== session.session_id), moved];
+    pcalClosePopover();
+    renderPlannerWorkspace();
+    loadTodayPlan();
+    showToast("Session updated");
+  } catch (failure) {
+    // Nothing was saved: say why, keep the form so the learner can adjust it.
+    button.disabled = false;
+    show(failure.message || "Could not save this change.");
+    if (failure.status === 404 || failure.detail?.code === "session_not_reschedulable") await loadPlannerData({ keepWeek: true });
+  } finally {
+    plannerBusySessions.delete(session.session_id);
+  }
+  return null;
+}
+
 // -- add materials sheet ------------------------------------------------------------
 
 function pcalOpenSheet() {
@@ -2201,9 +2629,13 @@ function pcalOpenSheet() {
   pcal.sheet.querySelector(".pcal-sheet-add, #pcal-sheet-close")?.focus();
 }
 
+// Goal drafts in the Add materials sheet, per document, kept while the sheet stays open.
+const pcalSheetGoals = new Map();
+
 function pcalCloseSheet() {
   if (!pcal.sheet || pcal.sheet.hidden) return;
   pcal.sheet.hidden = true;
+  pcalSheetGoals.clear();
   pcal.addMaterials.setAttribute("aria-expanded", "false");
 }
 
@@ -2234,14 +2666,18 @@ function pcalRenderSheet() {
         pcalEl("span", "pcal-sheet-quiz", pcalQuizText(doc.id)));
       facts.append(line, pcalEl("span", "pcal-sheet-pack", pcalStudyPackText(doc.id)));
     }
-    const { control: deadline, input, refresh } = pcalDeadlineControl("", `Deadline for ${doc.title} (optional)`, today);
-    input.min = today;
-    input.addEventListener("change", refresh);
+    // Every new material starts with a goal choice; "Flexible learning" is preselected because it is
+    // what a material without a deadline already means.
+    const draft = pcalSheetGoals.get(doc.id) || { goal_type: "flexible", deadline: null, target_date: null };
+    const { form, read } = plannerGoalForm(draft, { today, title: doc.title, onChange: (values) => pcalSheetGoals.set(doc.id, values) });
     const add = pcalEl("button", "pcal-button pcal-sheet-add", "Add");
     add.type = "button";
     add.setAttribute("aria-label", `Add ${doc.title}`);
-    add.addEventListener("click", () => pcalAddMaterial(doc.id, input.value || null, add));
-    row.append(name, facts, deadline, add);
+    add.addEventListener("click", () => {
+      const goal = read();
+      if (goal) pcalAddMaterial(doc.id, goal, add);
+    });
+    row.append(name, facts, form, add);
     pcal.sheetList.appendChild(row);
   });
 }

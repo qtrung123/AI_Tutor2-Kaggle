@@ -207,7 +207,7 @@ class WeekAndAgendaAssertions(SharedRuleAssertions):
         self.assertEqual((cards["s-long"]["title"], cards["s-long"]["full"]), ("Lecture 03 Embedded Systems", "Lecture_03-Embedded_Systems.pdf"))
         self.assertEqual((cards["s-ahead"]["start"], cards["s-ahead"]["end"], cards["s-ahead"]["duration"], cards["s-ahead"]["activity"]),
                          ("18:00", "to 18:45", "45m", "Summary"))
-        self.assertEqual(cards["s-ahead"]["actions"], ["Start Session", "Reschedule", "Skip", "Details"])
+        self.assertEqual(cards["s-ahead"]["actions"], ["Start Session", "Edit", "Reschedule", "Skip", "Details"])
         self.assertEqual(cards["s-running"]["actions"], ["Resume", "Complete session", "Skip", "Details"])
         self.assertEqual(cards["s-done"]["actions"], ["Details"])
         self.assertTrue(all(card["fits"] for card in agenda["cards"]))

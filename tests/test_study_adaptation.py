@@ -5,6 +5,7 @@ otherwise the learner is available every day 18:00-21:00."""
 
 import random
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import test_study_scheduler as fx   # make_state / material / weekly fixtures (module import: no test re-collection)
@@ -79,10 +80,12 @@ class QuizTriggerTests(AdaptationAssertions, unittest.TestCase):
                     session("cards", "mkt", "flashcards", "2026-09-28T18:00:00", 10, reason="review_due")]
         result = propose(quiz_done("mkt"), [mkt], sessions)
         self.assertEqual([(m.session_id, m.to_start) for m in result.moved], [("cards", "2026-09-25T18:00:00")])
-        # Flashcard review -> Written Quiz (retrieval practice, same day) -> Quiz retry the next day.
+        # The planned flashcard practice (kept, with its own 10 minutes) is the weak-topic review; the
+        # Written Quiz (retrieval practice) goes to the next day rather than the same one, and the
+        # quiz retry a day after that.
         self.assertEqual([(a.activity_type, a.scheduled_start, a.reason_code) for a in result.added],
-                         [("written_quiz", "2026-09-25T18:20:00", "retrieval_practice"),
-                          ("quiz_retry", "2026-09-26T18:00:00", "low_quiz_score")])
+                         [("written_quiz", "2026-09-26T18:00:00", "retrieval_practice"),
+                          ("quiz_retry", "2026-09-27T18:00:00", "low_quiz_score")])
         self.assertEqual(result.added[1].artifact_id, "q-mkt")
         self.assertEqual((result.cancelled, result.significance, result.unchanged_count), ((), "large", 0))
         self.assert_rules(result, sessions, [mkt])
@@ -278,13 +281,20 @@ class RulesTests(AdaptationAssertions, unittest.TestCase):
                     session("running", "stats", "flashcards", "2026-09-24T11:30:00", 5, status="in_progress"),
                     session("done", "pbi", "flashcards", "2026-09-24T18:00:00", 5, status="completed")]
         other = (session("x", "pbi", "quiz", "2026-09-24T18:30:00", 30),)   # another active plan
-        result = propose(AdaptationTrigger("session_missed", session_id="missed"), [stats], sessions, other_busy=other)
-        # 40 of today's 90 comfortable minutes are used (+45 for the summary); after 18:30-19:00 + the 30-minute heavy gap.
+        trigger = AdaptationTrigger("session_missed", session_id="missed")
+        # Balanced (default): Statistics is already being studied today, so the replacement goes to tomorrow.
+        balanced = propose(trigger, [stats], sessions, other_busy=other)
+        self.assertEqual(balanced.added[0].scheduled_start, "2026-09-25T18:00:00")
+        self.assert_rules(balanced, sessions, [stats], other)
+        # The daily budget on its own (earliest-first): 40 of today's 90 comfortable minutes are used
+        # (+45 for the summary); after 18:30-19:00 + the 30-minute heavy gap.
+        packed = AdaptationConfig(scheduler=replace(fx.DEFAULT_CONFIG, spread_sessions=False))
+        result = propose(trigger, [stats], sessions, other_busy=other, config=packed)
         self.assertEqual(result.added[0].scheduled_start, "2026-09-24T19:30:00")
         # One more minute of load and the summary no longer fits today's budget.
         heavier = [dict(s, duration_minutes=11, scheduled_end="2026-09-24T18:11:00") if s["session_id"] == "done" else s
                    for s in sessions]
-        later = propose(AdaptationTrigger("session_missed", session_id="missed"), [stats], heavier, other_busy=other)
+        later = propose(trigger, [stats], heavier, other_busy=other, config=packed)
         self.assertEqual(later.added[0].scheduled_start[:10], "2026-09-25")
         self.assert_rules(result, sessions, [stats], other)
 

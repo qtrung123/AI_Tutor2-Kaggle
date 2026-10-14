@@ -2810,8 +2810,10 @@ body[data-page="session"] [data-session-pane="quiz"].quiz-landing .quiz-history-
 .planner-material-pick{display:flex;align-items:center;gap:10px;min-width:0;flex:1 1 200px;cursor:pointer;font-weight:600;font-size:14px}
 .planner-material-pick span{overflow-wrap:anywhere}
 .planner-material-pick input{width:18px;height:18px;accent-color:var(--session-accent);flex:none;margin:0}
-.planner-material-deadline{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);flex-wrap:wrap;min-width:0}
-.planner-material-deadline input{padding:6px 8px;border:1px solid var(--line);border-radius:8px;font:inherit;background:var(--card);color:var(--ink);min-width:0}
+.planner-material-goal{display:grid;gap:8px;justify-items:start;font-size:12px;min-width:0}
+.planner-goal-summary{font-size:12px;font-weight:600;color:var(--muted)}
+.planner-goal-summary--deadline{color:#8f4f14}
+.planner-goal-summary--flexible{color:#246a45}
 .planner-calendar-toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;user-select:none}
 .planner-week-nav{display:flex;align-items:center;gap:8px;font-size:14px}
 .planner-calendar-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
@@ -3330,7 +3332,30 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 /* Materials / Study queue: popovers anchored under their toolbar buttons (top/right/max-height set by
    pcalPositionPanel), over the full-width calendar -- they never take a grid column. */
 .pcal-rail{position:absolute;z-index:20;width:300px;max-width:calc(100% - 20px);box-sizing:border-box;padding:14px 12px;overflow-y:auto;display:none;flex-direction:column;gap:6px;scrollbar-width:thin;box-shadow:0 16px 40px rgba(20,24,60,.16),0 0 0 1px rgba(20,24,60,.06)}
-.pcal.is-materials-open .pcal-materials,.pcal.is-queue-open .pcal-queue{display:flex;animation:pcal-pop .16s var(--pcal-ease)}
+.pcal.is-materials-open .pcal-materials,.pcal.is-queue-open .pcal-queue,.pcal.is-prefs-open .pcal-prefs{display:flex;animation:pcal-pop .16s var(--pcal-ease)}
+/* Study preferences panel + the session Edit form */
+.pcal-prefs{width:320px}
+.pcal-prefs-form{display:grid;gap:12px;font-size:12.5px}
+.pcal-prefs-field,.pcal-edit-field{display:grid;gap:4px}
+.pcal-prefs-label{font-size:11px;font-weight:600;color:var(--muted)}
+.pcal-prefs-form select,.pcal-prefs-length input,.pcal-edit-field input{padding:6px 8px;border:1px solid var(--line);border-radius:8px;font:inherit;background:var(--card);color:var(--ink);min-width:0;box-sizing:border-box}
+.pcal-prefs-group{border:0;margin:0;padding:0;display:grid;gap:6px;min-width:0}
+.pcal-prefs-group legend{padding:0;margin-bottom:2px}
+.pcal-prefs-choice{display:flex;align-items:flex-start;gap:8px;cursor:pointer}
+.pcal-prefs-choice input{margin:3px 0 0}
+.pcal-prefs-choice-text{display:grid;gap:1px}
+.pcal-prefs-choice-text small{color:var(--muted);font-size:11.5px}
+.pcal-prefs-length{display:grid;grid-template-columns:minmax(0,1fr) 64px auto;align-items:center;gap:6px}
+.pcal-prefs-length input{width:64px}
+.pcal-prefs-length input[aria-invalid="true"],.pcal-edit-field input[aria-invalid="true"]{border-color:#b4432a}
+.pcal-prefs-unit{color:var(--muted);font-size:11.5px}
+.pcal-prefs-note{margin:0;color:var(--muted);font-size:11.5px}
+.pcal-prefs-error,.pcal-edit-error{margin:0;color:#b4432a;font-size:12px}
+.pcal-prefs-error[hidden],.pcal-edit-error[hidden]{display:none}
+.pcal-prefs-status{margin:0;color:#246a45;font-size:12px;min-height:1em}
+.pcal-prefs-actions{display:flex;align-items:center;gap:12px}
+.pcal-edit-form{display:grid;gap:8px;min-width:220px}
+.pcal-popover-manual{color:var(--session-accent)}
 .pcal.is-moving .pcal-rail{opacity:.3;pointer-events:none}
 .pcal-panel-toggles{display:flex;gap:2px;flex:none;margin-left:4px;padding-left:8px;border-left:1px solid var(--pcal-line)}
 .pcal-panel-toggle{width:34px;height:34px;display:inline-grid;place-items:center;padding:0;border:0;border-radius:8px;background:transparent;color:var(--pcal-ink-2);cursor:pointer;transition:background-color .15s var(--pcal-ease),color .15s var(--pcal-ease)}
@@ -3366,13 +3391,27 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-pill--learning{background:#e9f1ff;color:#2d5fb3}
 .pcal-pill--needs_review{background:#fff2e3;color:#94510f}
 .pcal-pill--on_track,.pcal-pill--completed{background:#e6f5ec;color:#246a45}
-.pcal-deadline{position:relative;display:inline-flex;align-items:center;min-width:0}
-.pcal-deadline-button{border:0;background:transparent;padding:1px 4px;margin:0 -4px;border-radius:5px;font-size:11.5px;font-weight:500;color:var(--muted);cursor:pointer;white-space:nowrap;transition:background-color .15s var(--pcal-ease),color .15s var(--pcal-ease)}
-.pcal-deadline-button:hover{background:#e9ebf2;color:var(--ink)}
-.pcal-deadline.is-set .pcal-deadline-button{color:#8f4f14;font-weight:600}
-.pcal-deadline.is-past .pcal-deadline-button{color:var(--pcal-warn-ink)}
-/* the native picker stays in the DOM (value + change events) but is only opened from the button */
-.pcal-deadline-input{position:absolute;left:0;bottom:0;width:1px;height:1px;opacity:0;pointer-events:none;border:0;padding:0}
+/* the material's learning goal: one quiet line ("Due Oct 2 · Target Sep 30" / "Flexible" / "No goal set") */
+.pcal-goal{font-size:11.5px;font-weight:500;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.pcal-goal--deadline{color:#8f4f14;font-weight:600}
+.pcal-goal--flexible{color:#246a45;font-weight:600}
+.pcal-goal.is-past{color:var(--pcal-warn-ink)}
+.pcal-goal-edit{border:0;background:transparent;padding:1px 4px;margin:0 -4px;border-radius:5px;font-size:11.5px;font-weight:500;color:var(--pcal-ink-2);cursor:pointer;white-space:nowrap;text-decoration:underline;text-underline-offset:2px}
+.pcal-goal-edit:hover{background:#e9ebf2;color:var(--ink)}
+.pcal-goal-edit:focus-visible{outline:2px solid var(--session-accent);outline-offset:1px}
+.pcal-goal-editor{display:grid;gap:8px;padding:8px 0 2px}
+.pcal-goal-actions{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px}
+/* shared goal form (desktop Materials panel, Add materials sheet, smaller-screen stepper) */
+.planner-goal-form{border:0;margin:0;padding:0;min-width:0;display:grid;gap:6px}
+.planner-goal-form legend{padding:0;margin:0 0 2px;font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.planner-goal-choices{display:flex;flex-wrap:wrap;gap:4px 12px}
+.planner-goal-choice{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer}
+.planner-goal-choice input{margin:0}
+.planner-goal-date{display:grid;gap:2px;font-size:11.5px;color:var(--muted);min-width:0}
+.planner-goal-date[hidden]{display:none}
+.planner-goal-date input{padding:5px 7px;border:1px solid var(--line);border-radius:7px;font:inherit;font-size:12.5px;background:var(--card);color:var(--ink);min-width:0;max-width:100%;box-sizing:border-box}
+.planner-goal-error{margin:0;font-size:11.5px;color:#b4432a}
+.planner-goal-error[hidden]{display:none}
 .pcal-add-button{margin-top:6px;border:1px dashed #d6d9e6;background:transparent;color:var(--pcal-ink-2);border-radius:8px;padding:7px 10px;font-size:12.5px;font-weight:600;cursor:pointer;text-align:left;transition:background-color .15s var(--pcal-ease),border-color .15s var(--pcal-ease),color .15s var(--pcal-ease)}
 .pcal-add-button:hover,.pcal-add-button[aria-expanded="true"]{background:var(--session-wash);border-color:var(--session-accent);color:var(--session-accent)}
 .pcal-new-plan{margin-top:auto}
@@ -3604,9 +3643,9 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-sheet-head{display:flex;align-items:center;justify-content:space-between}
 .pcal-sheet-head h3{margin:0;font-size:15px}
 .pcal-sheet-list{list-style:none;margin:0;padding:0;overflow-y:auto;display:grid;gap:0}
-.pcal-sheet-row{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"title add" "facts add" "deadline add";gap:3px 10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--pcal-line-soft)}
+.pcal-sheet-row{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"title add" "facts add" "goal goal";gap:3px 10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--pcal-line-soft)}
 .pcal-sheet-title{grid-area:title;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pcal-sheet-row .pcal-deadline{grid-area:deadline;justify-self:start}
+.pcal-sheet-row .planner-goal-form{grid-area:goal;margin-top:4px}
 .pcal-sheet-add{grid-area:add}
 .pcal-sheet-empty{font-size:12.5px;color:var(--muted);padding:8px 0}
 

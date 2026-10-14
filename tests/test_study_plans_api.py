@@ -304,7 +304,8 @@ class StudyPlanApiTests(PlannerDatabaseMixin, unittest.TestCase):
         first = body["sessions"][0]
         self.assertEqual(set(first), {"session_id", "document_id", "document_title", "activity_type", "scheduled_start",
                                       "scheduled_end", "duration_minutes", "status", "reason", "artifact_id", "started_at",
-                                      "completed_at", "rescheduled_from"})
+                                      "completed_at", "rescheduled_from", "manual_edit"})
+        self.assertFalse(first["manual_edit"])   # Auto Plan sessions are not hand-edited
         self.assertEqual((first["status"], first["document_title"]), ("scheduled", "Marketing"))
         self.assertEqual(first["reason"], {"code": "deadline_approaching", "message": "Deadline is coming up"})
         sessions, runs = self.saved(plan["plan_id"])

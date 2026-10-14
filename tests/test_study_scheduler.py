@@ -11,7 +11,7 @@ from backend import study_planner_service, study_planner_store
 from backend.document_study_state import (
     DocumentStudyState, FlashcardState, QuizAttemptResult, QuizState, SummaryState, derive_learning_state,
 )
-from backend.study_planner_store import SESSION_REASONS
+from backend.study_planner_store import ACTIVITY_TYPES, SESSION_REASONS
 from backend.study_scheduler import (
     DEFAULT_CONFIG, base_priority, estimate_duration, local_date, plan_schedule,
     review_interval_days, select_candidates,
@@ -80,9 +80,11 @@ class ScheduleAssertions:
             self.assertIn(proposal.reason.code, SESSION_REASONS)
             self.assertTrue(proposal.reason.message)
             self.assertGreaterEqual(datetime.fromisoformat(proposal.scheduled_start), ctx.now)
-            self.assertLessEqual(proposal.duration_minutes, DEFAULT_CONFIG.max_block_minutes)
-            low, high, _ = DEFAULT_CONFIG.durations[proposal.activity_type]
-            self.assertTrue(low <= proposal.duration_minutes <= high, proposal)
+            final = proposal.reason.code == "final_review"
+            lengths = {DEFAULT_CONFIG.durations["final_review" if final else proposal.activity_type]}
+            if proposal.activity_type == "review" and not final:   # lighter spaced review after a strong score
+                lengths.add(DEFAULT_CONFIG.durations["light_review"])
+            self.assertIn(proposal.duration_minutes, lengths, proposal)
             by_day[proposal.scheduled_start[:10]].append(proposal)
         for sessions in by_day.values():
             sessions.sort(key=lambda p: p.scheduled_start)
@@ -124,10 +126,12 @@ class SchedulerUnitTests(ScheduleAssertions, unittest.TestCase):
         self.assertEqual(self.kinds(make_state("d", summary=True, cards=10)),
                          [("written_quiz", "retrieval_practice"), ("quiz", "new_material")])
         self.assertEqual(self.kinds(make_state("d", in_progress=True)), [("quiz", "quiz_in_progress")])
+        # Below 60%: a weak-topic review (never practice on flashcards that do not exist), then a retry.
         self.assertEqual(self.kinds(make_state("d", percentage=40.0)), [
-            ("flashcards", "low_quiz_score"), ("quiz_retry", "low_quiz_score")])
+            ("review", "low_quiz_score"), ("quiz_retry", "low_quiz_score")])
         self.assertEqual(self.kinds(make_state("d", percentage=70.0)), [("review", "review_due"), ("quiz_retry", "review_due")])
-        self.assertEqual(self.kinds(make_state("d", percentage=95.0)), [("review", "review_due")])
+        # >= 80%: lighter spaced repetition -- a review when due, and a second one further out.
+        self.assertEqual(self.kinds(make_state("d", percentage=95.0)), [("review", "review_due"), ("review", "review_due")])
         self.assertEqual(self.kinds(make_state("d", percentage=95.0, planner_state="completed")), [])
         self.assertEqual(self.kinds(make_state("d", planner_state="completed"), "2026-10-10"), [("review", "final_review")])
         self.assertEqual(self.kinds(make_state("d"), "2026-09-20"), [])  # deadline already passed
@@ -139,7 +143,7 @@ class SchedulerUnitTests(ScheduleAssertions, unittest.TestCase):
         self.assertEqual(in_progress[0].artifact_id, "q-d")
         low = select_candidates(material(make_state("d", cards=12, percentage=40.0)), MONDAY)
         # The written quiz's practice quiz is created (and linked) when its session starts.
-        self.assertEqual([c.artifact_id for c in low], ["set-d", None, "q-d"])
+        self.assertEqual([c.artifact_id for c in low], [None, None, "q-d"])
 
     # -- 3/4. spaced review and durations -------------------------------------
 
@@ -148,25 +152,14 @@ class SchedulerUnitTests(ScheduleAssertions, unittest.TestCase):
         for percentage, days in cases.items():
             self.assertEqual(review_interval_days(percentage), days, percentage)
 
-    def test_durations_are_activity_appropriate_and_scale_with_artifact_size(self):
-        unknown = make_state("d", chunks=0)
-        defaults = {activity: estimate_duration(activity, unknown) for activity in DEFAULT_CONFIG.durations}
-        self.assertEqual(defaults, {"summary": 40, "flashcards": 20, "quiz": 30, "review": 20, "quiz_retry": 25,
+    def test_durations_are_activity_specific_and_independent_of_artifact_size(self):
+        defaults = {activity: estimate_duration(activity) for activity in ACTIVITY_TYPES}
+        self.assertEqual(defaults, {"summary": 45, "flashcards": 20, "quiz": 35, "review": 30, "quiz_retry": 35,
                                     "written_quiz": 20})
-        # Small artifacts are raised to the 20-minute minimum for a new session.
-        self.assertEqual(estimate_duration("written_quiz", make_state("d", cards=4)), 20)
-        self.assertEqual(estimate_duration("written_quiz", make_state("d", cards=40)), 20)   # at most 10 questions
-        self.assertEqual(estimate_duration("summary", make_state("d", chunks=4)), 30)
-        self.assertEqual(estimate_duration("summary", make_state("d", chunks=40)), 50)
-        self.assertEqual(estimate_duration("flashcards", make_state("d", cards=8)), 20)
-        self.assertEqual(estimate_duration("flashcards", make_state("d", cards=24)), 25)
-        self.assertEqual(estimate_duration("flashcards", make_state("d", cards=90)), 30)
-        self.assertEqual(estimate_duration("review", make_state("d", cards=30)), 20)
-        self.assertEqual(estimate_duration("review", make_state("d", cards=50)), 25)
-        self.assertEqual(estimate_duration("quiz", make_state("d", in_progress=True, questions=5)), 20)
-        self.assertEqual(estimate_duration("quiz", make_state("d", in_progress=True, questions=15)), 30)
-        self.assertEqual(estimate_duration("quiz", make_state("d", in_progress=True, questions=40)), 40)
-        self.assertEqual(estimate_duration("quiz_retry", make_state("d", percentage=40.0)), 20)
+        self.assertEqual(estimate_duration("review", final=True), 45)
+        for state in (make_state("d", chunks=4), make_state("d", chunks=40, cards=90), make_state("d", in_progress=True, questions=5)):
+            self.assertEqual(estimate_duration("summary", state), 45)
+            self.assertEqual(estimate_duration("quiz", state), 35)
 
     def test_review_never_lands_after_deadline_and_final_review_precedes_it(self):  # noqa: D102
         state = make_state("d", percentage=95.0)  # next spaced review would be 5 days out
@@ -267,7 +260,7 @@ class FinalRetrievalTests(ScheduleAssertions, unittest.TestCase):
                       weekly((0, "18:00", "22:00"), (1, "18:00", "22:00")))
         result = plan_schedule(ctx)
         self.assert_well_formed(result, ctx)
-        self.assertEqual([p.activity_type for p in result.proposals], ["flashcards", "written_quiz", "quiz_retry"])
+        self.assertEqual([p.activity_type for p in result.proposals], ["review", "written_quiz", "quiz_retry"])
         self.assertEqual(result.capacity.status, "on_track")
 
     def test_separate_final_review_only_on_a_later_day(self):
@@ -410,7 +403,7 @@ class PriorityAndCapacityTests(ScheduleAssertions, unittest.TestCase):
         ctx = context([material(make_state("d"), "2026-09-29")], weekly((0, "18:00", "22:00")), busy=busy)
         result = plan_schedule(ctx)
         self.assert_well_formed(result, ctx)
-        self.assertEqual(result.capacity.schedulable_minutes, 20)  # 21:40-22:00 after the padded busy block
+        self.assertEqual(result.capacity.schedulable_minutes, 10)  # 21:50-22:00 after the busy block + 20-min break
         self.assertEqual(result.capacity.status, "at_risk")
 
 
@@ -487,14 +480,15 @@ class GoldenScenarioTests(ScheduleAssertions, PlannerDatabaseMixin, unittest.Tes
         # the final retrieval -- no extra same-day final review.
         self.assertEqual([p.activity_type for p in self.sessions["mkt"]], ["summary", "flashcards", "quiz"])
         self.assertEqual(day_of(self.sessions["mkt"][-1].scheduled_start), date(2026, 9, 29))
-        # Multiple documents interleaved on the same day.
+        # Marketing (due Thursday) fills Monday's comfortable 90 minutes (45 + 20) and Tuesday's hour,
+        # so Statistics' 30-minute weak-topic review waits for the first day with room (Thursday).
         monday_docs = {p.document_id for docs in self.sessions.values() for p in docs if day_of(p.scheduled_start) == MONDAY.date()}
-        self.assertEqual(monday_docs, {"mkt", "stats"})
-        # Low score pulls review closer: Statistics starts today with flashcards, then written
-        # retrieval practice, then a retry on a later day.
+        self.assertEqual(monday_docs, {"mkt"})
+        # Low score: Statistics starts with a weak-topic review, then written retrieval practice,
+        # then a retry on a later day.
         stats = self.sessions["stats"]
         self.assertEqual((stats[0].activity_type, stats[0].reason.code, day_of(stats[0].scheduled_start)),
-                         ("flashcards", "low_quiz_score", MONDAY.date()))
+                         ("review", "low_quiz_score", date(2026, 10, 1)))
         self.assertEqual((stats[1].activity_type, stats[1].reason.code), ("written_quiz", "retrieval_practice"))
         self.assertEqual(stats[2].activity_type, "quiz_retry")
         self.assertGreater(day_of(stats[2].scheduled_start), day_of(stats[1].scheduled_start))
@@ -504,7 +498,8 @@ class GoldenScenarioTests(ScheduleAssertions, PlannerDatabaseMixin, unittest.Tes
         self.assertEqual(pbi[0].reason.code, "review_due")
         self.assert_final_retrieval_before_deadlines(
             {"mkt": self.MARKETING, "stats": self.STATISTICS, "pbi": self.POWERBI},
-            {"mkt": "quiz", "stats": "final_review", "pbi": "final_review"},
+            # Statistics' retry lands in its final window (Sat): it is the final retrieval itself.
+            {"mkt": "quiz", "stats": "quiz_retry", "pbi": "final_review"},
         )
 
     def test_golden_scenario_all_new_material(self):

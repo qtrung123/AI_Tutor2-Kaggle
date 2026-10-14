@@ -49,12 +49,13 @@ class WrittenQuizSchedulingTests(unittest.TestCase):
         result = plan_schedule(context([material(make_state("d"), "2026-10-10")]))
         self.assertNotIn("written_quiz", [p.activity_type for p in result.proposals])
 
-    def test_low_score_flashcard_review_then_written_quiz_then_retry(self):
+    def test_low_score_weak_topic_review_then_written_quiz_then_retry(self):
+        # The weak-topic review opens the flashcards when the document has them (see _session_tool).
         self.assertEqual(kinds(make_state("d", cards=12, percentage=40.0)), [
-            ("flashcards", "low_quiz_score"), ("written_quiz", "retrieval_practice"), ("quiz_retry", "low_quiz_score")])
+            ("review", "low_quiz_score"), ("written_quiz", "retrieval_practice"), ("quiz_retry", "low_quiz_score")])
         result = plan_schedule(context([material(make_state("d", cards=12, percentage=40.0))]))
         proposals = result.proposals
-        self.assertEqual([p.activity_type for p in proposals], ["flashcards", "written_quiz", "quiz_retry"])
+        self.assertEqual([p.activity_type for p in proposals], ["review", "written_quiz", "quiz_retry"])
         self.assertLess(proposals[0].scheduled_start, proposals[1].scheduled_start)
         self.assertLess(date.fromisoformat(proposals[1].scheduled_start[:10]), date.fromisoformat(proposals[2].scheduled_start[:10]))
 
@@ -63,7 +64,8 @@ class WrittenQuizSchedulingTests(unittest.TestCase):
             ("review", "review_due"), ("written_quiz", "retrieval_practice"), ("quiz_retry", "review_due")])
 
     def test_strong_score_has_no_immediate_written_quiz(self):
-        self.assertEqual(kinds(make_state("d", cards=12, percentage=90.0)), [("review", "review_due")])
+        # Lighter spaced repetition only: two spaced reviews, no written quiz and no retry.
+        self.assertEqual(kinds(make_state("d", cards=12, percentage=90.0)), [("review", "review_due"), ("review", "review_due")])
         result = plan_schedule(context([material(make_state("d", cards=12, percentage=90.0))], GOLDEN_AVAILABILITY))
         self.assertNotIn("written_quiz", [p.activity_type for p in result.proposals])
 
@@ -168,9 +170,9 @@ class WrittenQuizSessionApiTests(PlannerDatabaseMixin, unittest.TestCase):
         # current_quiz_performance (the dashboard metric) is built from the same latest percentage.
         performance = study_progress.current_quiz_performance({"mkt": study_progress.latest_quiz_percentage(self.alice, "mkt")})
         self.assertEqual(performance["average_percentage"], 40.0)
-        # The next plan still treats the document as low-scoring: flashcards -> written quiz -> retry.
+        # The next plan still treats the document as low-scoring: weak-topic review -> written quiz -> retry.
         self.assertEqual([c.activity_type for c in select_candidates(material(after), MONDAY)],
-                         ["flashcards", "written_quiz", "quiz_retry"])
+                         ["review", "written_quiz", "quiz_retry"])
 
 
 if __name__ == "__main__":

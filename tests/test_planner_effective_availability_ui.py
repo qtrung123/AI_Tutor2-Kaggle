@@ -220,7 +220,7 @@ class EffectiveAvailabilityUiTests(unittest.TestCase):
         toggles = closed["toggles"]
         self.assertLessEqual(closed["main"]["right"] - toggles["right"], 24)
         self.assertLess(toggles["bottom"], closed["scrollTop"])
-        self.assertLessEqual(toggles["width"], 90)
+        self.assertLessEqual(toggles["width"], 125)   # three compact icon buttons: Materials, Queue, Preferences
 
     def test_materials_opens_as_an_anchored_popover_without_shrinking_the_calendar(self):
         panels = self.out["panels"]

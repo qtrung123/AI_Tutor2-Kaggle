@@ -23,6 +23,12 @@ NOW = "2026-09-28T08:00:00"
 BODY = {"utc_offset_minutes": 0, "local_now": NOW}
 
 
+def on_grid(sessions):
+    """The first session starting on the drag grid -- a drop exactly onto it can only be refused as slot_taken
+    (the scheduler itself may also start sessions off the grid, e.g. 18:55 after a 10-minute gap)."""
+    return next(s for s in sessions if int(s["scheduled_start"][14:16]) % 15 == 0)
+
+
 class PlacementApiTests(PlannerDatabaseMixin, unittest.TestCase):
     def setUp(self):
         self.start_planner_database()
@@ -86,7 +92,7 @@ class PlacementApiTests(PlannerDatabaseMixin, unittest.TestCase):
 
     def test_invalid_placements_are_rejected_and_leave_the_schedule_alone(self):
         before = self.preview()
-        first, second = before["sessions"][0], before["sessions"][1]
+        first, second = before["sessions"][0], on_grid(before["sessions"][1:])
         cases = {
             "invalid_time": "2026-09-30T18:05:00",
             "slot_in_past": "2026-09-28T07:00:00",
@@ -185,7 +191,7 @@ class PlacementApiTests(PlannerDatabaseMixin, unittest.TestCase):
 
     def test_an_invalid_drag_writes_nothing(self):
         saved = self.confirmed()
-        first, second = saved[0], saved[1]
+        first, second = saved[0], on_grid(saved[1:])
         cases = {
             "outside_availability": "2026-09-30T10:00:00",
             "slot_taken": second["scheduled_start"],

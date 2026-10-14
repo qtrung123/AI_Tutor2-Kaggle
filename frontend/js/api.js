@@ -57,6 +57,8 @@ const PLANNER_PLANS_API_URL = apiUrl("/api/planner/plans");
 
 const PLANNER_SESSIONS_API_URL = apiUrl("/api/planner/sessions");
 
+const PLANNER_PREFERENCES_API_URL = apiUrl("/api/planner/preferences");
+
 const PROGRESS_API_BASE_URL = apiUrl("/api/progress/documents");
 
 const GOOGLE_CALENDAR_API_URL = apiUrl("/api/integrations/google-calendar");

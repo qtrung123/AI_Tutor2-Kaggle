@@ -159,7 +159,7 @@ class PopoverAssertions:
 
     def test_scheduled_session_start_is_primary_and_complete_is_absent(self):
         scheduled = self.out["scheduled"]
-        self.assertEqual((scheduled["pill"], scheduled["primary"], scheduled["secondary"]), ("Planned", ["Start Session"], ["Reschedule", "Skip"]))
+        self.assertEqual((scheduled["pill"], scheduled["primary"], scheduled["secondary"]), ("Planned", ["Start Session"], ["Edit", "Reschedule", "Skip"]))
         self.assertEqual((scheduled["title"], scheduled["activity"]), ("Marketing", "Summary"))
         self.assertRegex(scheduled["when"], r"25.* · 18:00–18:45 · 45m$")
         self.assertEqual(scheduled["focused"], "Start Session")   # keyboard lands on the primary action
@@ -174,7 +174,7 @@ class PopoverAssertions:
 
     def test_missed_session_reschedule_is_primary(self):
         missed = self.out["missed"]
-        self.assertEqual((missed["pill"], missed["primary"], missed["secondary"]), ("Not completed", ["Reschedule"], ["Skip"]))
+        self.assertEqual((missed["pill"], missed["primary"], missed["secondary"]), ("Not completed", ["Reschedule"], ["Edit", "Skip"]))   # Edit = change date / time / length by hand
         self.assertNotRegex(missed["text"], r"Start|Resume|Complete")
 
     def test_history_is_read_only(self):

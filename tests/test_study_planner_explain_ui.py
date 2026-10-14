@@ -54,11 +54,11 @@ const noOverflow = () => document.documentElement.scrollWidth <= window.innerWid
   && $("planner-workspace").getBoundingClientRect().bottom <= window.innerHeight + 1
   && (!$("pcal-popover").hidden ? $("pcal-popover").getBoundingClientRect().right <= window.innerWidth + 1 : true);
 const rail = () => [...document.querySelectorAll(".pcal-material")].map((m) => ({title: m.querySelector(".pcal-material-title").textContent,
-  pill: m.querySelector(".pcal-pill").textContent, due: m.querySelector(".pcal-deadline-button").textContent,
+  pill: m.querySelector(".pcal-pill").textContent, due: m.querySelector(".pcal-goal").textContent,
   pack: m.querySelector(".pcal-material-pack")?.textContent || null}));
 const sheet = () => [...document.querySelectorAll(".pcal-sheet-row")].map((r) => ({title: r.querySelector(".pcal-sheet-title").textContent,
   pill: r.querySelector(".pcal-pill")?.textContent || null, quiz: r.querySelector(".pcal-sheet-quiz")?.textContent || null,
-  pack: r.querySelector(".pcal-sheet-pack")?.textContent || null, deadline: r.querySelector(".pcal-deadline-button").textContent}));
+  pack: r.querySelector(".pcal-sheet-pack")?.textContent || null, goal: r.querySelector(".planner-goal-choice input:checked")?.value || null}));
 const factors = () => Object.fromEntries([...$("pcal-popover").querySelectorAll(".pcal-factor")].map((f) => [f.querySelector("dt").textContent, f.querySelector("dd").textContent]));
 const ghost = (title, activity) => [...document.querySelectorAll(".pcal-event--suggested")].find((e) => e.querySelector(".pcal-event-title").textContent === title
   && e.querySelector(".pcal-event-meta").textContent.startsWith(activity));
@@ -131,14 +131,14 @@ class ExplainAssertions:
         self.assertEqual(len(first), 1)
         self.assertEqual({k: first[0][k] for k in ("title", "pill", "pack")}, {"title": "Marketing", "pill": "New", "pack": "Summary · 18 cards · Quiz"})
         self.assertRegex(first[0]["due"], r"^Due \D*1\D")   # Oct 1 in the browser's locale
-        self.assertEqual(self.out["railAfter"][1], {"title": "Statistics", "pill": "Needs review", "due": "Add deadline", "pack": "Summary · Quiz"})
+        self.assertEqual(self.out["railAfter"][1], {"title": "Statistics", "pill": "Needs review", "due": "Flexible", "pack": "Summary · Quiz"})
 
     def test_add_materials_shows_learning_state_study_pack_and_quiz_honestly(self):
         sheet = {row["title"]: row for row in self.out["sheet"]}
         self.assertEqual(sheet["Statistics"], {"title": "Statistics", "pill": "Needs review", "quiz": "Latest quiz 42%",
-                                               "pack": "Summary ready · No flashcards yet · Quiz ready", "deadline": "Add deadline"})
+                                               "pack": "Summary ready · No flashcards yet · Quiz ready", "goal": "flexible"})
         self.assertEqual(sheet["PowerBI"], {"title": "PowerBI", "pill": "On track", "quiz": "Latest quiz 88%",
-                                            "pack": "No summary yet · 12 flashcards · Quiz ready", "deadline": "Add deadline"})
+                                            "pack": "No summary yet · 12 flashcards · Quiz ready", "goal": "flexible"})
         self.assertNotIn("Marketing", sheet)   # already in the plan
 
     def test_first_explanation_says_there_are_no_quiz_results(self):

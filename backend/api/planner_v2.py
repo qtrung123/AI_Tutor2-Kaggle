@@ -9,7 +9,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend import study_plan_api_service, study_planner_store
+from backend import study_plan_api_service, study_planner_store, study_preferences
 from backend.api.deps import require_current_user
 from backend.study_plan_api_service import (PlanConflictError, PlanNotFoundError, PlanValidationError,
                                             SessionConflictError)
@@ -34,13 +34,18 @@ class PlanMaterialCreateRequest(BaseModel):
     document_id: str = Field(min_length=1)
     deadline: Optional[str] = None      # ISO date; omitted/null = no deadline
     familiarity: Optional[str] = None   # new_to_me | somewhat_familiar | reviewing
+    goal_type: Optional[str] = None     # deadline | flexible; omitted/null = goal not configured
+    target_date: Optional[str] = None   # ISO date; preferred finish, never later than the deadline
 
 
 class PlanMaterialUpdateRequest(BaseModel):
-    """Only fields present in the body change; an explicit null clears deadline/familiarity."""
+    """Only fields present in the body change; an explicit null clears deadline/familiarity/
+    goal_type/target_date."""
     model_config = ConfigDict(extra="forbid")
     deadline: Optional[str] = None
     familiarity: Optional[str] = None
+    goal_type: Optional[str] = None
+    target_date: Optional[str] = None
 
 
 class AdaptationTriggerRequest(BaseModel):
@@ -85,8 +90,20 @@ class PlanScheduleRequest(PlanPreviewRequest):
 
 
 class SessionRescheduleRequest(PlanPreviewRequest):
-    # A calendar drag: move to exactly this naive-local start (validated server-side). Omitted = first free slot.
+    # A calendar drag / the Edit form: move to exactly this naive-local start (validated server-side).
+    # Omitted = first free slot (or, with duration_minutes alone, the same start).
     target_start: Optional[str] = Field(default=None, max_length=40)
+    # The Edit form's new length (>= 20 minutes); omitted = the session keeps its own length.
+    duration_minutes: Optional[int] = None
+
+
+class StudyPreferencesRequest(BaseModel):
+    """Only the fields sent change; durations merge per activity."""
+    model_config = ConfigDict(extra="forbid")
+    daily_target_minutes: Optional[int] = None
+    break_minutes: Optional[int] = None
+    strategy: Optional[str] = None
+    durations: Optional[dict[str, int]] = None
 
 
 class CandidatePlaceRequest(PlanPreviewRequest):
@@ -160,7 +177,7 @@ def planner_v2_add_material(plan_id: str, request: PlanMaterialCreateRequest,
     try:
         return study_plan_api_service.add_plan_material(
             current_user["id"], plan_id, request.document_id, deadline=request.deadline,
-            familiarity=request.familiarity,
+            familiarity=request.familiarity, goal_type=request.goal_type, target_date=request.target_date,
         )
     except _PLAN_V2_ERRORS as error:
         raise _plan_v2_error(error) from error
@@ -260,7 +277,32 @@ def planner_v2_skip_session(session_id: str, current_user: dict = Depends(requir
 def planner_v2_reschedule_session(session_id: str, request: SessionRescheduleRequest,
                                   current_user: dict = Depends(require_current_user)) -> dict:
     return _session_action(study_plan_api_service.reschedule_session, current_user["id"], session_id,
-                           request.utc_offset_minutes, request.local_now, request.target_start)
+                           request.utc_offset_minutes, request.local_now, request.target_start,
+                           request.duration_minutes)
+
+
+@router.get("/api/planner/preferences")
+def planner_get_preferences(current_user: dict = Depends(require_current_user)) -> dict:
+    """The learner's Study Preferences (defaults when never saved) and the choices on offer."""
+    return {**study_preferences.get_preferences(current_user["id"]), "options": study_preferences.options()}
+
+
+@router.put("/api/planner/preferences")
+def planner_save_preferences(request: StudyPreferencesRequest, current_user: dict = Depends(require_current_user)) -> dict:
+    """Save the learner's choices. Existing sessions never change: the next Auto Plan and adaptation
+    proposals use them."""
+    try:
+        saved = study_preferences.save_preferences(current_user["id"], request.model_dump(exclude_unset=True))
+    except study_preferences.PreferencesError as error:
+        raise HTTPException(status_code=400, detail={"code": "invalid_preference", "field": error.field,
+                                                     "message": str(error)}) from error
+    return {**saved, "options": study_preferences.options()}
+
+
+@router.delete("/api/planner/preferences")
+def planner_reset_preferences(current_user: dict = Depends(require_current_user)) -> dict:
+    """Back to the defaults (90 minutes a day, 20-minute breaks, Balanced, default lengths)."""
+    return {**study_preferences.reset_preferences(current_user["id"]), "options": study_preferences.options()}
 
 
 @router.get("/api/planner/plans/{plan_id}/candidates")

@@ -17,7 +17,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 from backend import (auth_store, conversation_store, db, flashcard_store, google_calendar_store,
-                     indexed_document_store, quiz_store, study_planner_store, summary_jobs, summary_store)
+                     indexed_document_store, quiz_store, study_planner_store, study_preferences, summary_jobs,
+                     summary_store)
 from backend.mastery_service import recompute_topic_mastery
 
 
@@ -123,7 +124,8 @@ class PersistenceScenarios:
         }, TOPIC, owner)
         mastery = recompute_topic_mastery(owner, DOC, TOPIC)
         plan = study_planner_store.create_plan(owner, "Finals")
-        study_planner_store.add_material(owner, plan["plan_id"], DOC, deadline="2026-12-01")
+        study_planner_store.add_material(owner, plan["plan_id"], DOC, deadline="2026-12-01", goal_type="deadline",
+                                         target_date="2026-11-25")
         study_planner_store.add_availability(owner, "18:00", "20:00", date="2026-11-02")
         confirmed = study_planner_store.confirm_plan_sessions(owner, plan["plan_id"], [
             {"document_id": DOC, "activity_type": "summary", "scheduled_start": "2026-11-02T18:00:00",
@@ -133,6 +135,10 @@ class PersistenceScenarios:
         ])
         started, changed = study_planner_store.transition_session(owner, confirmed["sessions"][0]["session_id"], "start")
         self.assertTrue(changed)
+        study_preferences.save_preferences(owner, {"daily_target_minutes": 120, "break_minutes": 10,
+                                                   "strategy": "deadline_priority", "durations": {"summary": 60}})
+        study_planner_store.reschedule_session(owner, confirmed["sessions"][1]["session_id"], "2026-11-04T18:00:00",
+                                               "2026-11-04T18:40:00", duration_minutes=40, manual=True)
         google_calendar_store.save_connection(owner, "encrypted-refresh-token", "calendar.events")
         google_calendar_store.update_connection(owner, {"avoid_conflicts": False, "study_calendar_id": "cal-1"})
         google_calendar_store.save_event_link(owner, started["session_id"], "cal-1", "event-1",
@@ -174,8 +180,15 @@ class PersistenceScenarios:
         self.assertAlmostEqual(mastery["mastery_score"], saved["mastery"]["mastery_score"], places=6)
         self.assertEqual(mastery["answered_questions"], 3)
         self.assertEqual([plan["plan_id"] for plan in study_planner_store.list_plans(owner)], [saved["plan_id"]])
+        materials = study_planner_store.list_materials(owner, saved["plan_id"])
+        self.assertEqual([(m["goal_type"], m["deadline"], m["target_date"]) for m in materials],
+                         [("deadline", "2026-12-01", "2026-11-25")])
+        preferences = study_preferences.get_preferences(owner)
+        self.assertEqual((preferences["saved"], preferences["daily_target_minutes"], preferences["break_minutes"],
+                          preferences["strategy"], preferences["durations"]["summary"]), (True, 120, 10, "deadline_priority", 60))
         sessions = study_planner_store.list_sessions(owner, plan_id=saved["plan_id"])
-        self.assertEqual([session["status"] for session in sessions], ["in_progress", "scheduled"])
+        self.assertEqual([session["status"] for session in sessions], ["in_progress", "rescheduled", "scheduled"])
+        self.assertEqual((sessions[2]["duration_minutes"], sessions[2]["manual_edit"]), (40, True))
         self.assertEqual(sessions[0]["priority_snapshot"], 1.5)
         self.assertEqual(len(study_planner_store.list_availability(owner)), 1)
         connection = google_calendar_store.get_connection(owner)

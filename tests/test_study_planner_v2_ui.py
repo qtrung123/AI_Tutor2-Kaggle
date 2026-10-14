@@ -65,7 +65,8 @@ window.fetch = async (input, init = {}) => {
   if (m && method === "GET") return json({...P.plans.find((x) => x.plan_id === m[1]), materials: P.materials});
   if (m && method === "PATCH") { const plan = P.plans.find((x) => x.plan_id === m[1]); Object.assign(plan, body); return json(plan); }
   m = p.match(/^\/api\/planner\/plans\/([^/]+)\/materials$/);
-  if (m && method === "POST") { const mat = {material_id: "m-" + body.document_id, plan_id: m[1], document_id: body.document_id, deadline: body.deadline || null, familiarity: null, learning_state: "new"}; P.materials.push(mat); return json(mat, 201); }
+  if (m && method === "POST") { const mat = {material_id: "m-" + body.document_id, plan_id: m[1], document_id: body.document_id, deadline: body.deadline || null,
+    goal_type: body.goal_type || null, target_date: body.target_date || null, familiarity: null, learning_state: "new"}; P.materials.push(mat); return json(mat, 201); }
   m = p.match(/^\/api\/planner\/plans\/([^/]+)\/materials\/([^/]+)$/);
   if (m && method === "PATCH") { const mat = P.materials.find((x) => x.material_id === m[2]); Object.assign(mat, body); return json(mat); }
   if (m && method === "DELETE") { P.materials = P.materials.filter((x) => x.material_id !== m[2]); return json({deleted: m[2]}); }
@@ -107,8 +108,15 @@ const noOverflow = () => document.documentElement.scrollWidth <= window.innerWid
 const recordOverflow = (label) => { out.overflow[label] = noOverflow(); };
 const materialRow = (title) => [...view().querySelectorAll(".planner-material-row")].find((row) => row.textContent.includes(title));
 const setDeadline = async (title, value) => {
-  const input = materialRow(title).querySelector('input[type="date"]');
-  input.value = value; input.dispatchEvent(new Event("change", {bubbles: true})); await sleep(200);
+  // The learning goal form: a date means "Has deadline", no date means "Flexible learning"; then Save goal.
+  const row = materialRow(title);
+  const radio = row.querySelector(`.planner-goal-choice input[value="${value ? "deadline" : "flexible"}"]`);
+  radio.checked = true; radio.dispatchEvent(new Event("change", {bubbles: true}));
+  if (value) {
+    const input = row.querySelector(".planner-goal-deadline input");
+    input.value = value; input.dispatchEvent(new Event("change", {bubbles: true}));
+  }
+  row.querySelector(".planner-goal-save").click(); await sleep(200);
 };
 const cell = (weekday, hhmm) => [...view().querySelectorAll(`.planner-cell[data-weekday="${weekday}"]`)]
   .find((c) => c.getAttribute("aria-label").endsWith(hhmm));
@@ -154,7 +162,7 @@ const previewState = () => ({
   await setDeadline("Marketing", "2026-10-01");
   await setDeadline("Statistics", "2026-01-01");
   out.materials = {selected: view().querySelectorAll(".planner-material-row.selected").length, plans: P.plans.length,
-    materials: P.materials.map((m) => [m.document_id, m.deadline]), deadlineInputs: view().querySelectorAll('.planner-material-row input[type="date"]').length,
+    materials: P.materials.map((m) => [m.document_id, m.deadline]), deadlineInputs: view().querySelectorAll(".planner-material-row .planner-goal-deadline input").length,
     nextDisabled: q("#planner-to-availability").disabled};
   recordOverflow("materialsSelected");
 

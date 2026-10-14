@@ -9,14 +9,22 @@ Rules
   change. Completed / in-progress / skipped / missed / rescheduled rows and anything already
   under way are history: they are never touched and they keep occupying their time.
 - The steps a document still needs come from the scheduler itself (study_scheduler._build_steps,
-  i.e. the same state-based rules: low score -> flashcards + quiz_retry, moderate -> review +
-  later retry, strong -> review pushed out, final review before the deadline). Existing sessions
+  i.e. the same state-based rules: low score -> weak-topic review + quiz_retry, moderate -> review
+  + later retry, strong -> lighter review pushed out, final review before the deadline). Existing sessions
   are matched to those steps first; only what no longer fits is moved, only what is missing is
   added, and only what is truly obsolete is cancelled.
 - New/moved sessions stay inside the learner's availability, never overlap busy time (padded by
   the session gap), respect the daily comfortable capacity, heavy-session limits, per-document
   daily limits and day spacing between a document's steps, and never land after a deadline: a
   step that no longer fits before it becomes a warning instead.
+- Balanced like the initial plan (study_scheduler, Task 2): a session added or moved after a quiz,
+  a missed/skipped session or a deadline change prefers a day the document has no session on yet,
+  and after a quiz or a deadline change the document's remaining new-material steps are paced over
+  its spread window (until the final review window, the target date, or a week for flexible learning).
+  These are preferences only: when nothing fits that way, the earliest valid slot is used as before.
+- A session the learner set by hand (manual_edit) is never moved, resized or cancelled here: it
+  satisfies its step as it is, and when it no longer fits (availability, deadline) the proposal
+  only warns about it ("manual_session_conflict").
 - Deterministic: same input, same output (sorted iteration, no clock reads, no randomness).
 """
 
@@ -25,7 +33,9 @@ from datetime import date, datetime, timedelta
 
 from backend.study_session_duration import at_least_minimum
 from backend.study_time import free_minutes_by_date, subtract_minute_interval, to_minutes
-from backend.study_scheduler import DEFAULT_CONFIG, SchedulerConfig, _build_steps, _Step, resolve_clock
+from backend.study_scheduler import (
+    DEFAULT_CONFIG, SchedulerConfig, _build_steps, _Step, resolve_clock, spread_end, target_date,
+)
 from backend.study_scheduler_contracts import REASON_FINAL_REVIEW, REASON_RESCHEDULED, MaterialContext
 
 TRIGGER_KINDS = ("quiz_completed", "session_missed", "session_skipped", "availability_changed", "deadline_changed")
@@ -179,6 +189,9 @@ class _Calendar:
     def _on(self, day: date) -> list[dict]:
         return [s for s in self.sessions.values() if _day(s["scheduled_start"]) == day]
 
+    def has_document_on(self, day: date, document_id: str) -> bool:
+        return any(s["document_id"] == document_id for s in self._on(day))
+
     def within_availability(self, start: str, end: str) -> bool:
         day = _day(start)
         windows = free_minutes_by_date(day, day, self.availability, [])[day]
@@ -232,6 +245,9 @@ def _label(activity: str) -> str:
 
 
 def _matches(step: _Step, session: dict) -> bool:
+    if step.activity_type == "review" and step.kind == "review" and session["activity_type"] == "flashcards":
+        # Flashcard practice already planned is a valid weak-topic / spaced review: keep it.
+        return session.get("reason") != REASON_FINAL_REVIEW
     if step.activity_type != session["activity_type"]:
         return False
     if step.activity_type == "review":   # a final review and a spaced review are different steps
@@ -253,14 +269,34 @@ def _search_days(ready: date, latest: date, preferred: date | None) -> list[date
 def _reconcile_document(material: MaterialContext, steps: list[_Step], future: list[dict], calendar: _Calendar,
                         outcome: _Outcome, *, can_add, cancel_unmatched: bool, strict_review_window: bool,
                         prefer_same_day: bool, replaces: dict | None, why: str,
-                        config: AdaptationConfig) -> tuple[set, set]:
+                        config: AdaptationConfig, spread_until: date | None = None,
+                        avoid_same_day: bool = False) -> tuple[set, set]:
     """Walk the document's needed steps in order, reusing its existing future sessions. Returns
-    (kept session ids, touched session ids)."""
+    (kept session ids, touched session ids).
+
+    `spread_until` paces new-material ("learn") steps that are added or moved: each prefers a day at
+    least `interval` days after the previous one, spreading them over the days up to `spread_until`
+    (as the initial plan does). `avoid_same_day` prefers days the document has no session on yet."""
     title = material.state.title
     deadline = date.fromisoformat(material.deadline) if material.deadline else None
     unused = sorted(future, key=lambda s: (s["scheduled_start"], s["session_id"]))
     kept, touched = set(), set()
     last_date, last_end = None, None
+    paced = [step for step in steps if step.kind == "learn"]   # reviews keep their spaced-repetition dates
+    interval = 0
+    if spread_until is not None and paced:
+        start = max(calendar.now.date(), paced[0].earliest)
+        if spread_until > start:
+            interval = max(1, ((spread_until - start).days + 1) // len(paced))
+
+    def soft_from(step: _Step, ready: date, latest: date) -> date | None:
+        if not interval or step.kind != "learn" or last_date is None:
+            return None
+        day = max(ready, last_date + timedelta(days=interval))
+        return day if day <= min(latest, spread_until) else None
+
+    def next_existing() -> date | None:
+        return _day(unused[0]["scheduled_start"]) if unused else None
 
     for step in steps:
         ready = step.earliest if last_date is None else max(step.earliest, last_date + timedelta(days=step.gap_days))
@@ -268,6 +304,17 @@ def _reconcile_document(material: MaterialContext, steps: list[_Step], future: l
             ready = _day(last_end)
         latest = step.latest
         match = next((s for s in unused if _matches(step, s)), None)
+        if match is not None and match.get("manual_edit"):
+            # The learner's own choice: kept exactly as set, whatever the rules would prefer.
+            unused.remove(match)
+            kept.add(match["session_id"])
+            day = _day(match["scheduled_start"])
+            # Same boundary as a manual edit (study_placement.validate_window): the deadline day itself is allowed.
+            if (deadline is not None and day > deadline) or not calendar.within_availability(
+                    match["scheduled_start"], match["scheduled_end"]):
+                _warn_manual(outcome, material, match, deadline)
+            last_date, last_end = day, match["scheduled_end"]
+            continue
         if match is not None:
             unused.remove(match)
             day = _day(match["scheduled_start"])
@@ -283,7 +330,8 @@ def _reconcile_document(material: MaterialContext, steps: list[_Step], future: l
                 continue
             calendar.release(match["session_id"])
             slot = _place(calendar, material.document_id, step.activity_type, match["duration_minutes"], ready, latest,
-                          day if prefer_same_day else None, last_end)
+                          day if prefer_same_day else None, last_end, soft_from(step, ready, latest), avoid_same_day,
+                          next_existing())
             touched.add(match["session_id"])
             if slot is None:
                 message = (f'The {_label(step.activity_type)} session for "{title}" on {match["scheduled_start"][:16].replace("T", " ")} '
@@ -305,7 +353,8 @@ def _reconcile_document(material: MaterialContext, steps: list[_Step], future: l
             continue
         # A new session (a replacement included) is never shorter than the minimum; moves keep their length.
         minutes = at_least_minimum(step.duration)
-        slot = _place(calendar, material.document_id, step.activity_type, minutes, ready, latest, None, last_end)
+        slot = _place(calendar, material.document_id, step.activity_type, minutes, ready, latest, None, last_end,
+                      soft_from(step, ready, latest), avoid_same_day, next_existing())
         if slot is None:
             outcome.warnings.append({"code": "no_slot_before_deadline" if deadline else "no_available_slot",
                                      "document_id": material.document_id, "activity_type": step.activity_type})
@@ -324,7 +373,7 @@ def _reconcile_document(material: MaterialContext, steps: list[_Step], future: l
         last_date, last_end = _day(slot[0]), slot[1]
 
     for session in unused:
-        if cancel_unmatched:
+        if cancel_unmatched and not session.get("manual_edit"):
             calendar.release(session["session_id"])
             touched.add(session["session_id"])
             message = f'Cancel the {_label(session["activity_type"])} session for "{title}": {why}, it is no longer needed.'
@@ -336,11 +385,34 @@ def _reconcile_document(material: MaterialContext, steps: list[_Step], future: l
     return kept, touched
 
 
+def _warn_manual(outcome: _Outcome, material: MaterialContext, session: dict, deadline: date | None) -> None:
+    outcome.warnings.append({"code": "manual_session_conflict", "document_id": material.document_id,
+                             "session_id": session["session_id"], "activity_type": session["activity_type"]})
+    outcome.reasons.append(
+        f'You set the {_label(session["activity_type"])} session for "{material.state.title}" on '
+        f'{session["scheduled_start"][:16].replace("T", " ")} yourself, so it stays as it is, but it is '
+        + ("after the deadline." if deadline is not None and _day(session["scheduled_start"]) > deadline
+           else "no longer inside your available time.") + " Move it if you want.")
+
+
 def _place(calendar: _Calendar, document_id: str, activity: str, duration: int, ready: date, latest: date,
-           preferred: date | None, after: str | None) -> tuple[str, str] | None:
+           preferred: date | None, after: str | None, soft_from: date | None = None,
+           avoid_same_day: bool = False, soft_before: date | None = None) -> tuple[str, str] | None:
     """The first usable slot for a step between `ready` and `latest` (never before today, never
-    before the document's previous step ends)."""
-    for day in _search_days(max(ready, calendar.now.date()), latest, preferred):
+    before the document's previous step ends). Balanced first -- from `soft_from` on and/or on a
+    day without another session of this document, but before `soft_before` (the document's next
+    existing session, so balancing never pushes it around) -- then, failing that, the first valid slot."""
+    days = _search_days(max(ready, calendar.now.date()), latest, preferred)
+    if soft_from is not None or avoid_same_day:
+        for day in days:
+            if (soft_from is not None and day < soft_from) or (avoid_same_day and calendar.has_document_on(day, document_id)):
+                continue
+            if soft_before is not None and day >= soft_before:
+                continue
+            slot = calendar.find_on(day, document_id, activity, duration, not_before=after)
+            if slot:
+                return slot
+    for day in days:
         slot = calendar.find_on(day, document_id, activity, duration, not_before=after)
         if slot:
             return slot
@@ -380,6 +452,17 @@ def propose_adaptation(context: AdaptationContext, config: AdaptationConfig = DE
         return _build_steps(material, today, min(horizon_end, today + timedelta(days=scheduler.max_horizon_days)),
                             utc_offset, scheduler)
 
+    def balanced(material: MaterialContext) -> bool:
+        """Study Preferences strategy: Finish Early never balances; Deadline Priority balances only
+        documents without a deadline."""
+        return scheduler.spread_sessions and (not material.deadline or scheduler.pace_deadline_materials)
+
+    def spread_until(material: MaterialContext, steps: list[_Step]) -> date | None:
+        if not balanced(material):
+            return None
+        deadline = date.fromisoformat(material.deadline) if material.deadline else None
+        return spread_end(deadline, target_date(material, today), steps, today, horizon_end, scheduler)
+
     def document_of(document_id: str) -> MaterialContext:
         if document_id not in materials:
             raise ValueError("That document is not part of this study plan.")
@@ -392,10 +475,12 @@ def propose_adaptation(context: AdaptationContext, config: AdaptationConfig = DE
             outcome.warnings.append({"code": "no_completed_quiz", "document_id": material.document_id})
         else:
             why = f"latest quiz scored {result.percentage:g}%"
-            _, changed = _reconcile_document(material, steps_for(material), by_document.get(material.document_id, []),
+            steps = steps_for(material)
+            _, changed = _reconcile_document(material, steps, by_document.get(material.document_id, []),
                                              calendar, outcome, can_add=lambda step: True, cancel_unmatched=True,
                                              strict_review_window=True, prefer_same_day=False, replaces=None, why=why,
-                                             config=config)
+                                             config=config, spread_until=spread_until(material, steps),
+                                             avoid_same_day=balanced(material))
             touched |= changed
 
     elif trigger.kind in ("session_missed", "session_skipped"):
@@ -429,7 +514,8 @@ def propose_adaptation(context: AdaptationContext, config: AdaptationConfig = DE
             _, changed = _reconcile_document(material, steps, by_document.get(material.document_id, []), calendar,
                                              outcome, can_add=can_add, cancel_unmatched=False,
                                              strict_review_window=False, prefer_same_day=False, replaces=session,
-                                             why=f"to make room after the {label} session", config=config)
+                                             why=f"to make room after the {label} session", config=config,
+                                             avoid_same_day=balanced(material))
             touched |= changed
             if not added_once:
                 outcome.reasons.append(f'The {label} {_label(session["activity_type"])} session of "{material.state.title}" '
@@ -442,10 +528,12 @@ def propose_adaptation(context: AdaptationContext, config: AdaptationConfig = DE
             outcome.warnings.append({"code": "deadline_passed", "document_id": material.document_id, "deadline": deadline})
         else:
             why = f"the deadline is now {deadline}" if deadline else "the deadline was removed"
-            _, changed = _reconcile_document(material, steps_for(material), by_document.get(material.document_id, []),
+            steps = steps_for(material)
+            _, changed = _reconcile_document(material, steps, by_document.get(material.document_id, []),
                                              calendar, outcome, can_add=lambda step: True, cancel_unmatched=True,
                                              strict_review_window=False, prefer_same_day=True, replaces=None, why=why,
-                                             config=config)
+                                             config=config, spread_until=spread_until(material, steps),
+                                             avoid_same_day=balanced(material))
             touched |= changed
 
     else:  # availability_changed: move only the sessions that no longer fit; nothing is added or cancelled lightly
@@ -457,6 +545,10 @@ def propose_adaptation(context: AdaptationContext, config: AdaptationConfig = DE
             items = by_document[document_id]
             invalid = [s for s in items if not calendar.within_availability(s["scheduled_start"], s["scheduled_end"])
                        or calendar.overlaps(s["scheduled_start"], s["scheduled_end"], ignore=s["session_id"])]
+            for session in [s for s in invalid if s.get("manual_edit")]:   # set by hand: warn, never move
+                _warn_manual(outcome, material, session, deadline)
+            invalid = [s for s in invalid if not s.get("manual_edit")]
+            items = [s for s in items if not s.get("manual_edit")]
             if not invalid:
                 continue
             steps = [_session_as_step(s, deadline, horizon_end, today) for s in items]

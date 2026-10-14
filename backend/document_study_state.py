@@ -4,7 +4,8 @@ product-level learning state derived from it. Consumed by the future Study Plann
 
 Deliberately conservative: a signal the app does not persist (e.g. flashcard review/mastery) is
 reported as unavailable, never guessed, and "completed" is only ever reported when the learner
-explicitly marked the plan material completed. No topic-level signals, no LLM.
+explicitly marked the plan material completed. Topic-level signals are only the persisted topic
+mastery the quiz pipeline already maintains (weak_topics, via knowledge_gap_service). No LLM.
 """
 
 from dataclasses import asdict, dataclass, field
@@ -14,6 +15,7 @@ from backend import quiz_store, study_planner_store
 from backend.flashcard_service import FLASHCARD_VERSION
 from backend.flashcard_store import get_latest_flashcard_set_info
 from backend.indexed_document_store import get_indexed_document
+from backend.knowledge_gap_service import detect_knowledge_gaps
 from backend.summary_service import SUMMARY_VERSION
 from backend.summary_store import get_latest_summary_info
 
@@ -94,6 +96,16 @@ class QuizState:
 
 
 @dataclass(frozen=True)
+class WeakTopic:
+    """A topic the learner's persisted quiz answers show as weak (topic_mastery with sufficient
+    evidence, see knowledge_gap_service). Never inferred from a score alone."""
+    topic_id: str
+    name: str
+    severity: str        # high (Weak) | moderate (Developing)
+    mastery_score: float
+
+
+@dataclass(frozen=True)
 class DocumentStudyState:
     owner_id: str
     document_id: str
@@ -109,6 +121,7 @@ class DocumentStudyState:
     planner_learning_state: str | None  # stored StudyPlanMaterial.learning_state, when plan_id given
     learning_state: str  # derived: new | learning | needs_review | on_track | completed
     state_reason: StateReason
+    weak_topics: tuple[WeakTopic, ...] = ()   # weakest first; empty when mastery has no evidence
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -239,6 +252,10 @@ def get_document_study_state(owner_id: str, document_id: str, plan_id: str | Non
     learning_state, state_reason = derive_learning_state(
         summary, flashcards, quiz, len(completed_sessions), planner_learning_state,
     )
+    weak_topics = tuple(
+        WeakTopic(gap["topic_id"], gap["topic_name"], gap["severity"], gap["mastery_score"])
+        for gap in detect_knowledge_gaps(owner_id, document_id)
+    ) if quiz.latest_completed else ()
     return DocumentStudyState(
         owner_id=owner_id, document_id=document_id,
         title=str(document.get("display_name") or document_id), chunk_count=int(document.get("chunks") or 0),
@@ -246,5 +263,5 @@ def get_document_study_state(owner_id: str, document_id: str, plan_id: str | Non
         completed_session_count=len(completed_sessions), last_session_at=last_session_at,
         last_activity_at=_latest_timestamp(last_session_at, quiz.last_activity_at),
         plan_id=plan_id if material else None, planner_learning_state=planner_learning_state,
-        learning_state=learning_state, state_reason=state_reason,
+        learning_state=learning_state, state_reason=state_reason, weak_topics=weak_topics,
     )

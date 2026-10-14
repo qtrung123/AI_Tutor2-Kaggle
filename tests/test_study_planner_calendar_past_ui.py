@@ -175,7 +175,7 @@ class PastReadOnlyAssertions:
 
     def test_missed_session_offers_reschedule_and_moves_only_to_the_future(self):
         self.assertIn("Not completed", self.out["missedPopover"]["text"])
-        self.assertEqual(self.out["missedPopover"]["buttons"], ["×", "Reschedule", "Skip"])
+        self.assertEqual(self.out["missedPopover"]["buttons"], ["×", "Reschedule", "Edit", "Skip"])   # Edit = change date / time / length by hand
         self.assertEqual(self.out["dropPastDay"], {"invalid": True, "calls": 0, "toast": "That time has already passed."})
         self.assertEqual(self.out["dropTodayPast"], {"invalid": True, "calls": 0})
         self.assertEqual(self.out["dropFuture"], {"invalid": False, "calls": ["2026-09-25T18:30:00"]})

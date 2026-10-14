@@ -67,7 +67,7 @@ class StudyAdaptationApiTests(PlannerDatabaseMixin, unittest.TestCase):
                          completed_at="2026-09-24T10:00:00+00:00")
         body = self.preview({"kind": "quiz_completed", "document_id": "mkt"}).json()
         self.assertEqual([(a["activity_type"], a["reason_code"]) for a in body["added"]],
-                         [("flashcards", "low_quiz_score"), ("written_quiz", "retrieval_practice"),
+                         [("review", "low_quiz_score"), ("written_quiz", "retrieval_practice"),
                           ("quiz_retry", "low_quiz_score")])
         self.assertEqual(body["added"][2]["artifact_id"], "q1")
         self.assertLess(body["added"][0]["scheduled_start"], body["added"][1]["scheduled_start"])

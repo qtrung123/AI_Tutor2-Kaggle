@@ -410,10 +410,10 @@ class TodayAndWeekAssertions:
                          (not_completed, running, ahead, not_completed))
         week = self.out["lifecycleWeek"]
         if self.out["width"] >= 1024:   # the calendar popover: one primary action, the rest secondary
-            self.assertEqual(week["overdue"], {"pill": "Not completed", "primary": ["Reschedule"], "secondary": ["Skip"], "note": None})
+            self.assertEqual(week["overdue"], {"pill": "Not completed", "primary": ["Reschedule"], "secondary": ["Edit", "Skip"], "note": None})
             self.assertEqual(week["running"], {"pill": "In progress", "primary": ["Resume"],
                                                "secondary": ["Complete session", "Skip"], "note": None})
-            self.assertEqual(week["later"], {"pill": "Planned", "primary": ["Start Session"], "secondary": ["Reschedule", "Skip"], "note": None})
+            self.assertEqual(week["later"], {"pill": "Planned", "primary": ["Start Session"], "secondary": ["Edit", "Reschedule", "Skip"], "note": None})
         else:
             self.assertEqual((week["overdue"], week["running"], week["later"]), (not_completed, running, ahead))
         for state in list(home.values()) + list(week.values()):

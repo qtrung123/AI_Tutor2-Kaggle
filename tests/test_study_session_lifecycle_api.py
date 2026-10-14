@@ -133,9 +133,9 @@ class StudySessionLifecycleApiTests(PlannerDatabaseMixin, unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
         moved = body["session"]
-        # 18:00-18:45 is busy (+10 min gap) -> 18:55.
+        # 18:00-18:45 is busy (+20 min break) -> 19:05; the session keeps its own 30 minutes.
         self.assertEqual((moved["scheduled_start"], moved["scheduled_end"], moved["duration_minutes"]),
-                         ("2026-09-24T18:55:00", "2026-09-24T19:25:00", 30))
+                         ("2026-09-24T19:05:00", "2026-09-24T19:35:00", 30))
         self.assertEqual((moved["status"], moved["rescheduled_from"], body["after_deadline"]),
                          ("scheduled", overdue["session_id"], False))
         # Lineage: same document / activity / artifact / reason.
