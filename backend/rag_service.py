@@ -152,6 +152,15 @@ def _history_for_prompt(messages: list[dict], limit: int = 8) -> str:
     )
 
 
+def default_conversation_title(message: str, limit: int = 60) -> str:
+    """Readable chat title from the first question: whitespace collapsed, cut at a word boundary."""
+    text = " ".join(message.split())
+    if len(text) <= limit:
+        return text or "New conversation"
+    cut = text[:limit].rsplit(" ", 1)[0] if " " in text[:limit] else text[:limit]
+    return cut.rstrip(" ,.;:-") + "…"
+
+
 def answer_conversation_message(owner_id: str, conversation_id: str, message: str, model_id: str | None = None) -> dict:
     """Answer and persist one message in a source-isolated conversation."""
     model = resolve_generation_model(model_id)
@@ -160,7 +169,7 @@ def answer_conversation_message(owner_id: str, conversation_id: str, message: st
 
     existing_messages = conversation.get("messages", [])
     if conversation["title"] == "New conversation" and not existing_messages:
-        update_conversation_title(owner_id, conversation_id, message.strip()[:64])
+        update_conversation_title(owner_id, conversation_id, default_conversation_title(message))
 
     document_id = conversation.get("document_id")
     if not document_id:

@@ -9,6 +9,7 @@ function setTutorOverlayOpen(open, { focus = true } = {}) {
   const wasFocusedInside = tutorLayout.contains(document.activeElement);
   document.body.classList.toggle("tutor-overlay-open", open);
   tutorLaunchButton?.setAttribute("aria-expanded", String(open));
+  if (open) syncTutorResizerValue();   // the docked width is only measurable once the tutor is shown
   if (open && focus) chatInput.focus({ preventScroll: true });
   if (!open && wasFocusedInside) tutorLaunchButton?.focus({ preventScroll: true });
 }
@@ -48,7 +49,10 @@ function addMessage(text, type, isLoading = false) {
 
   const body = document.createElement("div");
   body.className = "message-body";
-  appendFormattedText(body, text);
+  // Tutor answers are model output: render the safe Markdown subset. User and status text keep the
+  // simpler formatter (both build DOM nodes with textContent only).
+  if (type === "tutor" && !isLoading) appendMarkdown(body, text);
+  else appendFormattedText(body, text);
   message.appendChild(body);
 
   if (type === "tutor") {
@@ -71,6 +75,23 @@ function addMessage(text, type, isLoading = false) {
   return message;
 }
 
+// "lecture.pdf · p. 3, 5" per cited document, pages de-duplicated and in numeric order.
+function citationSummaries(citations) {
+  const pagesByTitle = new Map();
+  citations.forEach((citation) => {
+    const title = citation.title || citation.document_id || "Unknown source";
+    if (!pagesByTitle.has(title)) pagesByTitle.set(title, new Set());
+    const page = String(citation.page ?? "").trim();
+    if (page && page !== "Unknown page") pagesByTitle.get(title).add(page);
+  });
+  return [...pagesByTitle].map(([title, pages]) => {
+    const sorted = [...pages].sort((a, b) => (Number(a) - Number(b)) || a.localeCompare(b));
+    return { title, pages: sorted, label: sorted.length ? `${title} · p. ${sorted.join(", ")}` : title };
+  });
+}
+
+// Grounding status and citations sit in a footer under the answer, separate from its text. The
+// citation summary opens the conversation's Sources drawer, which lists the cited pages per material.
 function appendMessageMeta(messageElement, status, citations = []) {
   const bubble = messageElement.classList?.contains("agent-row")
     ? messageElement.querySelector(".message")
@@ -86,9 +107,20 @@ function appendMessageMeta(messageElement, status, citations = []) {
     meta.appendChild(badge);
   }
   if (citations.length) {
-    const cite = document.createElement("span");
+    const summaries = citationSummaries(citations);
+    const cite = document.createElement("button");
+    cite.type = "button";
     cite.className = "citation-count";
-    cite.textContent = `${citations.length} citation${citations.length === 1 ? "" : "s"}`;
+    cite.setAttribute("aria-controls", "conversation-sources-panel");
+    const count = document.createElement("span");
+    count.className = "citation-count-label";
+    count.textContent = `${citations.length} citation${citations.length === 1 ? "" : "s"}`;
+    const pages = document.createElement("span");
+    pages.className = "citation-pages";
+    pages.textContent = summaries.map((summary) => summary.label).join(" · ");
+    cite.title = `Show sources: ${pages.textContent}`;
+    cite.append(count, pages);
+    cite.addEventListener("click", () => setSourcesDrawerOpen(true));
     meta.appendChild(cite);
   }
   bubble.appendChild(meta);
@@ -295,40 +327,185 @@ function renderConversationSources() {
   });
 }
 
+// ---- Chats (conversations) of the open Study Session ----------------------------------------------
+// The Tutor panel lists the chats of the current document only (every conversation is scoped to one
+// document), newest first. A row opens its chat; rename edits the title inline and delete asks for
+// an inline confirmation. While an answer is being generated the list is locked so a reply can never
+// land in a different chat.
+let conversationEditingId = null;          // row showing the rename field
+let conversationConfirmDeleteId = null;    // row asking to confirm deletion
+let conversationFocusAfterRender = null;   // [conversation id, selector] to focus after re-rendering
+
+function conversationDocumentId(conversation) {
+  if (!conversation) return null;
+  return conversation.document_id || (conversation.document_ids?.length === 1 ? conversation.document_ids[0] : null);
+}
+
+function sessionConversations() {
+  return activeDocumentId ? conversations.filter((item) => conversationDocumentId(item) === activeDocumentId) : conversations;
+}
+
+function conversationsLocked() {
+  return chatForm.classList.contains("is-sending");
+}
+
+function formatConversationTime(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return "";
+  const today = new Date();
+  return date.toDateString() === today.toDateString()
+    ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : date.toLocaleDateString([], { day: "numeric", month: "short" });
+}
+
+function conversationActionButton(className, label, text, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = text;
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  button.disabled = conversationsLocked();
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function renderConversationRename(row, conversation) {
+  const form = document.createElement("form");
+  form.className = "conversation-rename-form";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "conversation-rename-input";
+  input.maxLength = 120;
+  input.value = conversation.title || "";
+  input.setAttribute("aria-label", "Chat name");
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();   // Escape cancels the rename only, not the whole Tutor panel
+    cancelConversationEdit(conversation.id);
+  });
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.className = "conversation-rename-save";
+  save.textContent = "Save";
+  const cancel = conversationActionButton("conversation-rename-cancel", "Cancel renaming", "Cancel", () => cancelConversationEdit(conversation.id));
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    renameChatConversation(conversation.id, input.value);
+  });
+  form.append(input, save, cancel);
+  row.appendChild(form);
+}
+
+function renderConversationDeleteConfirm(row, conversation) {
+  const prompt = document.createElement("p");
+  prompt.className = "conversation-confirm-text";
+  prompt.textContent = `Delete “${conversation.title}”? Its messages will be removed.`;
+  const actions = document.createElement("div");
+  actions.className = "conversation-confirm-actions";
+  const confirm = conversationActionButton("conversation-confirm-delete", `Delete chat ${conversation.title}`, "Delete", () => deleteChatConversation(conversation.id));
+  const cancel = conversationActionButton("conversation-confirm-cancel", "Keep this chat", "Cancel", () => {
+    conversationConfirmDeleteId = null;
+    conversationFocusAfterRender = [conversation.id, ".conversation-delete-button"];
+    renderConversationList();
+  });
+  actions.append(confirm, cancel);
+  row.classList.add("is-confirming");
+  row.append(prompt, actions);
+}
+
 function renderConversationList() {
   conversationList.innerHTML = "";
-  if (!conversations.length) {
-    conversationList.innerHTML = '<p class="muted">No conversations yet.</p>';
+  const items = sessionConversations();
+  const count = document.getElementById("tutor-conversations-count");
+  if (count) count.textContent = String(items.length);
+  if (newConversationButton) newConversationButton.disabled = conversationsLocked();
+  if (!items.length) {
+    const empty = document.createElement("p");
+    empty.className = "conversation-empty muted";
+    empty.textContent = "No chats yet. Ask a question to start one.";
+    conversationList.appendChild(empty);
     return;
   }
-  conversations.forEach((conversation) => {
+  items.forEach((conversation) => {
+    const isActive = conversation.id === activeConversation?.id;
     const row = document.createElement("div");
-    row.className = `conversation-item ${conversation.id === activeConversation?.id ? "active" : ""}`;
-    const openButton = document.createElement("button");
-    openButton.type = "button";
-    openButton.className = "conversation-open-button";
-    const title = document.createElement("strong");
-    title.textContent = conversation.title;
-    const meta = document.createElement("span");
-    meta.textContent = `${conversation.document_ids?.length || 0} source(s)`;
-    openButton.append(title, meta);
-    openButton.addEventListener("click", () => openConversation(conversation.id));
-    const deleteButton = document.createElement("button");
-    deleteButton.type = "button";
-    deleteButton.className = "conversation-delete-button";
-    deleteButton.textContent = "×";
-    deleteButton.title = "Delete conversation";
-    deleteButton.addEventListener("click", () => deleteChatConversation(conversation.id));
-    row.append(openButton, deleteButton);
+    row.className = `conversation-item${isActive ? " active" : ""}`;
+    row.setAttribute("role", "listitem");
+    row.dataset.conversationId = conversation.id;
+    if (conversation.id === conversationEditingId) {
+      renderConversationRename(row, conversation);
+    } else if (conversation.id === conversationConfirmDeleteId) {
+      renderConversationDeleteConfirm(row, conversation);
+    } else {
+      const openButton = document.createElement("button");
+      openButton.type = "button";
+      openButton.className = "conversation-open-button";
+      openButton.disabled = conversationsLocked() && !isActive;
+      if (isActive) openButton.setAttribute("aria-current", "true");
+      const title = document.createElement("strong");
+      title.textContent = conversation.title;
+      const meta = document.createElement("span");
+      meta.textContent = formatConversationTime(conversation.updated_at);
+      openButton.append(title, meta);
+      openButton.addEventListener("click", () => {
+        if (!isActive) openConversation(conversation.id);
+      });
+      const rename = conversationActionButton("conversation-rename-button", `Rename chat ${conversation.title}`, "✎", () => {
+        conversationEditingId = conversation.id;
+        conversationConfirmDeleteId = null;
+        conversationFocusAfterRender = [conversation.id, ".conversation-rename-input"];
+        renderConversationList();
+      });
+      const remove = conversationActionButton("conversation-delete-button", `Delete chat ${conversation.title}`, "×", () => {
+        conversationConfirmDeleteId = conversation.id;
+        conversationEditingId = null;
+        conversationFocusAfterRender = [conversation.id, ".conversation-confirm-cancel"];
+        renderConversationList();
+      });
+      row.append(openButton, rename, remove);
+    }
     conversationList.appendChild(row);
   });
+  if (conversationFocusAfterRender) {
+    const [id, selector] = conversationFocusAfterRender;
+    conversationFocusAfterRender = null;
+    const target = conversationList.querySelector(`[data-conversation-id="${CSS.escape(id)}"] ${selector}`);
+    target?.focus({ preventScroll: true });
+    if (target?.select) target.select();
+  }
+  // Keep the active chat visible by scrolling the list only (scrollIntoView would also scroll the
+  // page on tablet/phone, where the Tutor sits inline below the content).
+  const activeRow = conversationList.querySelector(".conversation-item.active");
+  if (activeRow) {
+    const listBox = conversationList.getBoundingClientRect();
+    const rowBox = activeRow.getBoundingClientRect();
+    if (rowBox.top < listBox.top) conversationList.scrollTop -= listBox.top - rowBox.top;
+    else if (rowBox.bottom > listBox.bottom) conversationList.scrollTop += rowBox.bottom - listBox.bottom;
+  }
+}
+
+function cancelConversationEdit(conversationId) {
+  conversationEditingId = null;
+  conversationFocusAfterRender = [conversationId, ".conversation-rename-button"];
+  renderConversationList();
+}
+
+function setConversationListCollapsed(collapsed, persist = true) {
+  const section = document.getElementById("tutor-conversations");
+  const toggle = document.getElementById("tutor-conversations-toggle");
+  section?.classList.toggle("is-collapsed", collapsed);
+  toggle?.setAttribute("aria-expanded", String(!collapsed));
+  if (persist) writeLocalPref("aiTutorChatListCollapsed", collapsed ? "1" : "0");
 }
 
 function renderConversationMessages() {
   messageList.innerHTML = "";
   const messages = activeConversation?.messages || [];
   if (!messages.length) {
-    addMessage("Ask a question about the selected materials. This conversation and its answers will be saved automatically.", "tutor");
+    const hint = addMessage("Ask a question about the selected materials. This conversation and its answers will be saved automatically.", "tutor");
+    hint.classList.add("conversation-empty-hint");   // removed once the first question is sent
     return;
   }
   messages.forEach((message) => {
@@ -346,46 +523,105 @@ function updateConversationHeader() {
   toggleConversationSourcesButton.textContent = `Sources (${count})`;
 }
 
+function rememberConversation(conversation) {
+  if (!currentUser || !conversation) return;
+  writeLocalPref(`activeConversationId:${currentUser.id}`, conversation.id);
+  const documentId = conversationDocumentId(conversation);
+  if (documentId) writeLocalPref(`activeConversationId:${currentUser.id}:${documentId}`, conversation.id);
+}
+
+// Only the most recent open wins: a slower earlier response (quick chat or document switches) must
+// not replace the chat the learner picked last.
+let openConversationSeq = 0;
+
 async function openConversation(conversationId) {
+  const seq = ++openConversationSeq;
   try {
-    activeConversation = await fetchJson(`${CONVERSATIONS_API_URL}/${conversationId}`);
-    if (currentUser) localStorage.setItem(`activeConversationId:${currentUser.id}`, conversationId);
+    const conversation = await fetchJson(`${CONVERSATIONS_API_URL}/${conversationId}`);
+    if (seq !== openConversationSeq) return;
+    activeConversation = conversation;
+    rememberConversation(activeConversation);
+    conversationEditingId = null;
+    conversationConfirmDeleteId = null;
     renderConversationList();
     renderConversationSources();
     renderConversationMessages();
     updateConversationHeader();
   } catch (error) {
-    showToast(error.message || "Could not open conversation");
+    if (seq === openConversationSeq) showToast(error.message || "Could not open conversation");
   }
 }
 
+// "New chat": another conversation for the open document. An untouched empty chat is reused instead
+// of piling up blank ones.
 async function createChatConversation() {
+  if (conversationsLocked()) return;
   try {
     const documentItem = getActiveStudySessionDocument();
-    const documentIds = [documentItem.id];
+    if (activeConversation && conversationDocumentId(activeConversation) === documentItem.id && !(activeConversation.messages || []).length) {
+      chatInput.focus({ preventScroll: true });
+      showToast("This chat is still empty. Ask your first question.");
+      return;
+    }
     const created = await fetchJson(CONVERSATIONS_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "New conversation", document_ids: documentIds })
+      body: JSON.stringify({ title: "New conversation", document_ids: [documentItem.id], new_conversation: true })
     });
-    conversations.unshift(created);
+    conversations = [created, ...conversations.filter((item) => item.id !== created.id)];
     await openConversation(created.id);
-    showToast("New conversation created");
+    chatInput.focus({ preventScroll: true });
+    showToast("New chat started");
   } catch (error) {
     showToast(error.message || "Could not create conversation");
   }
 }
 
+async function renameChatConversation(conversationId, rawTitle) {
+  const title = String(rawTitle || "").trim();
+  const current = conversations.find((item) => item.id === conversationId);
+  if (!title) {
+    showToast("Enter a name for this chat");
+    return;
+  }
+  if (current && title === current.title) {
+    cancelConversationEdit(conversationId);
+    return;
+  }
+  try {
+    const updated = await fetchJson(`${CONVERSATIONS_API_URL}/${conversationId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: title.slice(0, 120) })
+    });
+    conversations = conversations.map((item) => (item.id === conversationId ? { ...item, ...updated, messages: item.messages } : item));
+    if (activeConversation?.id === conversationId) activeConversation.title = updated.title;
+    conversationEditingId = null;
+    conversationFocusAfterRender = [conversationId, ".conversation-open-button"];
+    renderConversationList();
+    updateConversationHeader();
+    showToast("Chat renamed");
+  } catch (error) {
+    showToast(error.message || "Could not rename this chat");
+  }
+}
+
 async function deleteChatConversation(conversationId) {
+  if (conversationsLocked()) return;
   try {
     await fetchJson(`${CONVERSATIONS_API_URL}/${conversationId}`, { method: "DELETE" });
     conversations = conversations.filter((item) => item.id !== conversationId);
+    conversationConfirmDeleteId = null;
     if (activeConversation?.id === conversationId) {
       activeConversation = null;
-      if (conversations.length) await openConversation(conversations[0].id);
-      else await createChatConversation();
+      const next = sessionConversations()[0];
+      if (next) await openConversation(next.id);
+      else if (activeDocumentId) await ensureStudySessionConversation();
+      else { renderConversationMessages(); updateConversationHeader(); }
     }
     renderConversationList();
+    newConversationButton?.focus({ preventScroll: true });
+    showToast("Chat deleted");
   } catch (error) {
     showToast(error.message || "Could not delete conversation");
   }
@@ -426,6 +662,7 @@ async function applyConversationSources() {
 }
 
 async function sendTutorMessage(userText) {
+  messageList.querySelector(".conversation-empty-hint")?.remove();
   addMessage(userText, "user");
   chatInput.value = "";
   chatInput.disabled = true;
@@ -433,13 +670,22 @@ async function sendTutorMessage(userText) {
   submitButton.disabled = true;
   chatForm.classList.add("is-sending");
   submitButton.textContent = "Sending";
+  renderConversationList();
   const loadingRow = addMessage("Tutoring is retrieving your course materials and asking the local model...", "tutor", true);
 
   try {
     const data = await requestTutorAnswer(userText);
     loadingRow.remove();
+    const repliedIn = data.assistant_message?.conversation_id;
+    if (repliedIn && activeConversation?.id !== repliedIn) {
+      conversations = await fetchJson(CONVERSATIONS_API_URL);
+      return;
+    }
     const answerElement = addMessage(formatBackendAnswer(data), "tutor");
     appendMessageMeta(answerElement, data.grounding_status, data.citations || []);
+    if (answerElement.offsetHeight > messageList.clientHeight) {
+      messageList.scrollTop += answerElement.getBoundingClientRect().top - messageList.getBoundingClientRect().top - 8;
+    }
     activeConversation.messages = [...(activeConversation.messages || []), data.user_message, data.assistant_message];
     conversations = await fetchJson(CONVERSATIONS_API_URL);
     activeConversation.title = conversations.find((item) => item.id === activeConversation.id)?.title || activeConversation.title;
@@ -456,6 +702,7 @@ async function sendTutorMessage(userText) {
     submitButton.disabled = false;
     chatForm.classList.remove("is-sending");
     submitButton.textContent = "Send";
+    renderConversationList();
     chatInput.focus();
   }
 }

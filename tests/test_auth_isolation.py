@@ -117,6 +117,24 @@ class AuthenticationIsolationTests(unittest.TestCase):
             conversation_store.delete_conversation(second["id"], conversation["id"])
         self.assertEqual(conversation_store.get_conversation(first["id"], conversation["id"])["title"], "Private")
 
+    def test_conversation_api_new_chat_rename_and_delete(self):
+        with TestClient(app) as client, patch("backend.api.conversations.list_uploaded_sources", return_value=[{"title": "a.pdf"}]):
+            client.post("/api/auth/signup", json={"display_name": "Chat", "email": "chat@example.com", "password": "long-password-123"})
+            first = client.post("/api/conversations", json={"document_ids": ["a.pdf"]}).json()
+            reused = client.post("/api/conversations", json={"document_ids": ["a.pdf"]}).json()
+            second = client.post("/api/conversations", json={"document_ids": ["a.pdf"], "new_conversation": True}).json()
+            self.assertEqual(reused["id"], first["id"])          # default: one chat per document, as before
+            self.assertNotEqual(second["id"], first["id"])       # New chat: another conversation, same document
+            self.assertEqual(second["document_ids"], ["a.pdf"])
+            renamed = client.patch(f"/api/conversations/{second['id']}", json={"title": "Exam revision"})
+            self.assertEqual(renamed.json()["title"], "Exam revision")
+            self.assertEqual(client.patch(f"/api/conversations/{second['id']}", json={"title": ""}).status_code, 422)
+            listed = client.get("/api/conversations").json()
+            self.assertEqual({item["id"]: item["title"] for item in listed}, {first["id"]: "New conversation", second["id"]: "Exam revision"})
+            self.assertEqual(client.delete(f"/api/conversations/{second['id']}").json(), {"deleted": second["id"]})
+            self.assertEqual([item["id"] for item in client.get("/api/conversations").json()], [first["id"]])
+            self.assertEqual(client.delete(f"/api/conversations/{second['id']}").status_code, 404)
+
     def test_documents_quizzes_attempts_and_mastery_are_isolated(self):
         first, second = self.user("owner1"), self.user("owner2")
         for user in (first, second):

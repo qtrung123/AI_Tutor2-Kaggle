@@ -1,7 +1,7 @@
 """Real-browser tests for the collapsible Study Session AI Tutor (headless Chrome against the Quiz
-Player mock). Desktop (>=1024px): no permanent chat column, "Ask AI Tutor" opens a ~360px slide-over
-that does not shrink the learning content, close/reopen keeps the conversation and draft, Escape
-closes. Tablet (<1024px): unchanged inline tutor, no launch button.
+Player mock). Desktop (>=1024px): no permanent chat column, "Ask AI Tutor" docks a 380px chat beside
+the learning content (resizing is covered by tests/test_tutor_resize_ui.py), close/reopen keeps the
+conversation and draft, Escape closes. Tablet (<1024px): unchanged inline tutor, no launch button.
 
 Skipped when Chrome is not installed (set CHROME_PATH to point at it). No backend, no network.
 """
@@ -114,13 +114,13 @@ class TutorOverlayDesktopTests(unittest.TestCase):
         self.assertEqual(initial["contentWidth"], initial["workspaceWidth"])   # content uses the full workspace
         self.assertEqual(self.out["placeholder"], "Ask a question...")
 
-    def test_launch_opens_a_slide_over_without_shrinking_content(self):
+    def test_launch_docks_the_tutor_beside_the_content(self):
         opened = self.out["opened"]
         self.assertTrue(opened["visible"])
-        self.assertEqual(opened["position"], "fixed")
-        self.assertEqual(opened["width"], 360)
+        self.assertNotEqual(opened["position"], "fixed")   # a column, not a slide-over covering the content
+        self.assertEqual(opened["width"], 380)
         self.assertEqual(opened["expanded"], "true")
-        self.assertEqual(opened["contentWidth"], self.out["initial"]["contentWidth"])
+        self.assertEqual(opened["contentWidth"], opened["workspaceWidth"] - 12 - 380)   # content | divider | chat
         self.assertEqual(opened["active"], "chat-input")
 
     def test_close_and_reopen_preserve_the_conversation(self):

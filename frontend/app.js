@@ -450,6 +450,7 @@ function showAuthenticatedShell(user) {
   currentUser = user;
   authScreen.hidden = true;
   appShell.hidden = false;
+  applySidebarWidth(sidebarWidth);   // the default width is only measurable once the shell is shown
   profileDisplayName.textContent = user.display_name;
   profileEmail.textContent = user.email;
   profileAvatar.textContent = (user.display_name || user.email || "U").trim().charAt(0).toUpperCase();
@@ -718,13 +719,18 @@ function getActiveStudySessionDocument() {
   return documentItem;
 }
 
+// Keeps the open chat when it belongs to this document; otherwise reopens the chat last used for the
+// document (then its most recent one), and only creates a conversation when the document has none.
 async function ensureStudySessionConversation() {
   const documentItem = getActiveStudySessionDocument();
   const documentIds = [documentItem.id];
-  const existing = conversations.find((conversation) =>
-    conversation.document_id === documentItem.id ||
-    (conversation.document_ids?.length === 1 && conversation.document_ids[0] === documentItem.id)
-  );
+  if (activeConversation?.id && conversationDocumentId(activeConversation) === documentItem.id) {
+    renderConversationList();
+    return activeConversation;
+  }
+  const forDocument = conversations.filter((conversation) => conversationDocumentId(conversation) === documentItem.id);
+  const rememberedId = currentUser ? readLocalPref(`activeConversationId:${currentUser.id}:${documentItem.id}`) : null;
+  const existing = forDocument.find((conversation) => conversation.id === rememberedId) || forDocument[0];
 
   if (existing) {
     if (activeConversation?.id !== existing.id) await openConversation(existing.id);
@@ -867,6 +873,194 @@ function setSidebarOpen(open) {
   else if (wasOpen && document.getElementById("app-sidebar")?.contains(document.activeElement)) sidebarMenuButton.focus();
 }
 
+// ---- Desktop sidebar: collapse + drag-to-resize --------------------------------------------------
+// Above phone width the sidebar can collapse to an icon rail (body.sidebar-collapsed) and be resized
+// by dragging its right edge; both are remembered per browser. The width is exposed to CSS as
+// --sidebar-width on the app shell; without a saved width the stylesheet's default applies.
+const SIDEBAR_WIDTH_KEY = "aiTutorSidebarWidth";
+const SIDEBAR_COLLAPSED_KEY = "aiTutorSidebarCollapsed";
+const SIDEBAR_MIN_WIDTH = 200;
+const SIDEBAR_MAX_WIDTH = 420;
+const SIDEBAR_MIN_MAIN_WIDTH = 480;   // never squeeze the main content below this
+const appSidebar = document.getElementById("app-sidebar");
+const sidebarCollapseButton = document.getElementById("sidebar-collapse-button");
+const sidebarResizer = document.getElementById("sidebar-resizer");
+let sidebarWidth = null;   // px chosen by the user, or null for the stylesheet default
+
+function readLocalPref(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function writeLocalPref(key, value) {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch { /* storage unavailable: the preference just isn't remembered */ }
+}
+
+function clampSidebarWidth(width) {
+  const max = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, window.innerWidth - SIDEBAR_MIN_MAIN_WIDTH));
+  return Math.round(Math.min(max, Math.max(SIDEBAR_MIN_WIDTH, width)));
+}
+
+// sidebarWidth keeps the preferred width; the applied width is additionally limited by the window,
+// so a temporarily narrow window does not overwrite the preference.
+function applySidebarWidth(width, persist = false) {
+  sidebarWidth = width === null ? null : Math.round(Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width)));
+  if (sidebarWidth === null) appShell?.style.removeProperty("--sidebar-width");
+  else appShell?.style.setProperty("--sidebar-width", `${clampSidebarWidth(sidebarWidth)}px`);
+  const current = sidebarWidth === null ? Math.round(appSidebar?.getBoundingClientRect().width || 0) : clampSidebarWidth(sidebarWidth);
+  sidebarResizer?.setAttribute("aria-valuemin", String(SIDEBAR_MIN_WIDTH));
+  sidebarResizer?.setAttribute("aria-valuemax", String(SIDEBAR_MAX_WIDTH));
+  if (current && !document.body.classList.contains("sidebar-collapsed")) sidebarResizer?.setAttribute("aria-valuenow", String(current));
+  if (persist) writeLocalPref(SIDEBAR_WIDTH_KEY, sidebarWidth === null ? null : String(sidebarWidth));
+}
+
+function setSidebarCollapsed(collapsed, persist = true) {
+  document.body.classList.toggle("sidebar-collapsed", collapsed);
+  if (sidebarCollapseButton) {
+    const label = collapsed ? "Expand sidebar" : "Collapse sidebar";
+    sidebarCollapseButton.setAttribute("aria-expanded", String(!collapsed));
+    sidebarCollapseButton.setAttribute("aria-label", label);
+    sidebarCollapseButton.title = label;
+    sidebarCollapseButton.firstElementChild.textContent = collapsed ? "»" : "«";
+  }
+  if (!collapsed) applySidebarWidth(sidebarWidth);
+  if (persist) writeLocalPref(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+}
+
+function startSidebarResize(event) {
+  if (event.button !== 0 || document.body.classList.contains("sidebar-collapsed") || !appSidebar) return;
+  event.preventDefault();
+  const left = appSidebar.getBoundingClientRect().left;
+  try { sidebarResizer.setPointerCapture(event.pointerId); } catch { /* window listeners below still track the drag */ }
+  document.body.classList.add("sidebar-resizing");
+  const move = (moveEvent) => applySidebarWidth(clampSidebarWidth(moveEvent.clientX - left));
+  const stop = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", stop);
+    window.removeEventListener("pointercancel", stop);
+    document.body.classList.remove("sidebar-resizing");
+    applySidebarWidth(sidebarWidth, true);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", stop);
+  window.addEventListener("pointercancel", stop);
+}
+
+function resizeSidebarWithKeyboard(event) {
+  if (document.body.classList.contains("sidebar-collapsed")) return;
+  const step = event.shiftKey ? 48 : 16;
+  const current = Math.round(appSidebar?.getBoundingClientRect().width || SIDEBAR_MIN_WIDTH);
+  const next = { ArrowLeft: current - step, ArrowRight: current + step, Home: SIDEBAR_MIN_WIDTH, End: SIDEBAR_MAX_WIDTH }[event.key];
+  if (next === undefined) return;
+  event.preventDefault();
+  applySidebarWidth(clampSidebarWidth(next), true);
+}
+
+const savedSidebarWidth = Number.parseInt(readLocalPref(SIDEBAR_WIDTH_KEY), 10);
+applySidebarWidth(Number.isFinite(savedSidebarWidth) ? savedSidebarWidth : null);
+setSidebarCollapsed(readLocalPref(SIDEBAR_COLLAPSED_KEY) === "1", false);
+
+// ---- Study Session AI Tutor: resizable, expandable chat column -----------------------------------
+// At >=1024px the open tutor is docked as the right column of .session-workspace, separated from the
+// study content by a draggable divider. tutorWidth is the remembered preference; CSS clamps the applied
+// width (min chat width, min content width), so window or sidebar changes never overflow. "Expand"
+// temporarily widens the chat to the largest size that still leaves the content readable, and
+// restoring returns to the preference. Below 1024px the tutor stays full-width under the content.
+const TUTOR_WIDTH_KEY = "aiTutorChatWidth";
+const TUTOR_MIN_WIDTH = 320;
+const TUTOR_MIN_CONTENT_WIDTH = 420;   // keep in sync with the clamp() in styles.css
+const TUTOR_DIVIDER_WIDTH = 12;
+const TUTOR_WIDE_LAYOUT_MIN = 620;     // panel width from which the chat list becomes a left rail
+const sessionWorkspace = document.querySelector(".session-workspace");
+const tutorResizer = document.getElementById("tutor-resizer");
+const tutorExpandButton = document.getElementById("tutor-expand-button");
+let tutorWidth = null;   // px preferred by the user, or null for the stylesheet default
+
+function tutorMaxWidth() {
+  const workspace = sessionWorkspace?.getBoundingClientRect().width || 0;
+  return Math.max(TUTOR_MIN_WIDTH, Math.round(workspace - TUTOR_MIN_CONTENT_WIDTH - TUTOR_DIVIDER_WIDTH));
+}
+
+// A wide Tutor panel (expanded, dragged wide, or a tablet-width inline panel) shows the chat list as
+// a left rail beside the messages; narrower panels stack a collapsible list above them.
+function syncTutorWideLayout() {
+  const width = tutorLayout.getBoundingClientRect().width;
+  if (width) tutorLayout.classList.toggle("tutor-wide", width >= TUTOR_WIDE_LAYOUT_MIN);
+}
+
+function syncTutorResizerValue() {
+  const width = Math.round(tutorLayout.getBoundingClientRect().width);
+  if (!width) return;
+  syncTutorWideLayout();
+  tutorResizer?.setAttribute("aria-valuemin", String(TUTOR_MIN_WIDTH));
+  tutorResizer?.setAttribute("aria-valuemax", String(tutorMaxWidth()));
+  tutorResizer?.setAttribute("aria-valuenow", String(width));
+}
+
+function applyTutorWidth(width, persist = false) {
+  tutorWidth = width === null ? null : Math.round(Math.max(TUTOR_MIN_WIDTH, width));
+  if (tutorWidth === null) sessionWorkspace?.style.removeProperty("--tutor-width");
+  else sessionWorkspace?.style.setProperty("--tutor-width", `${tutorWidth}px`);
+  if (persist) writeLocalPref(TUTOR_WIDTH_KEY, tutorWidth === null ? null : String(tutorWidth));
+  syncTutorResizerValue();
+}
+
+function setTutorExpanded(expanded) {
+  document.body.classList.toggle("tutor-expanded", expanded);
+  if (tutorExpandButton) {
+    const label = expanded ? "Restore AI Tutor size" : "Expand AI Tutor";
+    tutorExpandButton.setAttribute("aria-pressed", String(expanded));
+    tutorExpandButton.setAttribute("aria-label", label);
+    tutorExpandButton.title = label;
+    tutorExpandButton.firstElementChild.textContent = expanded ? "⤡" : "⤢";
+  }
+  syncTutorResizerValue();
+}
+
+// The divider sits left of the chat, so the chat width is measured from the workspace's right edge.
+function tutorWidthAt(clientX) {
+  const right = sessionWorkspace.getBoundingClientRect().right;
+  return Math.min(tutorMaxWidth(), Math.max(TUTOR_MIN_WIDTH, right - clientX - TUTOR_DIVIDER_WIDTH / 2));
+}
+
+function startTutorResize(event) {
+  if (event.button !== 0 || !sessionWorkspace || !tutorOverlayQuery.matches) return;
+  event.preventDefault();
+  if (document.body.classList.contains("tutor-expanded")) setTutorExpanded(false);
+  try { tutorResizer.setPointerCapture(event.pointerId); } catch { /* window listeners below still track the drag */ }
+  document.body.classList.add("tutor-resizing");
+  const move = (moveEvent) => applyTutorWidth(tutorWidthAt(moveEvent.clientX));
+  const stop = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", stop);
+    window.removeEventListener("pointercancel", stop);
+    document.body.classList.remove("tutor-resizing");
+    applyTutorWidth(tutorWidth, true);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", stop);
+  window.addEventListener("pointercancel", stop);
+}
+
+function resizeTutorWithKeyboard(event) {
+  const step = event.shiftKey ? 48 : 16;
+  const current = Math.round(tutorLayout.getBoundingClientRect().width);
+  const next = { ArrowLeft: current + step, ArrowRight: current - step, Home: tutorMaxWidth(), End: TUTOR_MIN_WIDTH }[event.key];
+  if (next === undefined) return;
+  event.preventDefault();
+  if (document.body.classList.contains("tutor-expanded")) setTutorExpanded(false);
+  applyTutorWidth(Math.min(tutorMaxWidth(), Math.max(TUTOR_MIN_WIDTH, next)), true);
+}
+
+const savedTutorWidth = Number.parseInt(readLocalPref(TUTOR_WIDTH_KEY), 10);
+applyTutorWidth(Number.isFinite(savedTutorWidth) ? savedTutorWidth : null);
+
+setConversationListCollapsed(readLocalPref("aiTutorChatListCollapsed") === "1", false);
+// Also follows window, sidebar and tablet/phone layout changes; the calls above cover explicit resizes.
+if ("ResizeObserver" in window) new ResizeObserver(syncTutorWideLayout).observe(tutorLayout);
+
 // ---- Home: Continue studying ------------------------------------------------------------------
 // One card per document, built only from /api/progress/documents (DocumentStudyState + the active
 // plan): learning state, the latest completed quiz (only when there is one -- never a fake 0%),
@@ -919,6 +1113,11 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && document.body.classList.contains("sidebar-open")) setSidebarOpen(false);
 });
 window.matchMedia?.("(min-width: 721px)").addEventListener?.("change", (event) => { if (event.matches) setSidebarOpen(false); });
+sidebarCollapseButton?.addEventListener("click", () => setSidebarCollapsed(!document.body.classList.contains("sidebar-collapsed")));
+sidebarResizer?.addEventListener("pointerdown", startSidebarResize);
+sidebarResizer?.addEventListener("keydown", resizeSidebarWithKeyboard);
+sidebarResizer?.addEventListener("dblclick", () => { if (!document.body.classList.contains("sidebar-collapsed")) applySidebarWidth(null, true); });
+window.addEventListener("resize", () => { if (sidebarWidth !== null) applySidebarWidth(sidebarWidth); });
 
 document.getElementById("session-home-button")?.addEventListener("click", () => setPage("overview"));
 regenerateSummaryButton?.addEventListener("click", () => loadDocumentSummary(true));
@@ -960,6 +1159,9 @@ uploadSourceButton.addEventListener("click", () => sourceFileInput.click());
 sourceFileInput.addEventListener("change", () => uploadSourceFiles(sourceFileInput.files));
 sessionSearchInput?.addEventListener("input", applySessionLibraryFilters);
 newConversationButton.addEventListener("click", createChatConversation);
+document.getElementById("tutor-conversations-toggle")?.addEventListener("click", () => {
+  setConversationListCollapsed(!document.getElementById("tutor-conversations").classList.contains("is-collapsed"));
+});
 applyConversationSourcesButton.addEventListener("click", applyConversationSources);
 toggleConversationSourcesButton.addEventListener("click", () => {
   setSourcesDrawerOpen(!tutorLayout.classList.contains("sources-open"));
@@ -977,6 +1179,10 @@ document.addEventListener("keydown", (event) => {
 });
 tutorLaunchButton?.addEventListener("click", () => setTutorOverlayOpen(!tutorOverlayOpen()));
 document.getElementById("tutor-close-button")?.addEventListener("click", () => setTutorOverlayOpen(false));
+tutorExpandButton?.addEventListener("click", () => setTutorExpanded(!document.body.classList.contains("tutor-expanded")));
+tutorResizer?.addEventListener("pointerdown", startTutorResize);
+tutorResizer?.addEventListener("keydown", resizeTutorWithKeyboard);
+tutorResizer?.addEventListener("dblclick", () => { setTutorExpanded(false); applyTutorWidth(null, true); });
 generateQuizButton.addEventListener("click", generateAssessmentQuiz);
 document.getElementById("quiz-sheet-retry-button")?.addEventListener("click", () => generateAssessmentQuiz());
 document.addEventListener("keydown", (event) => {

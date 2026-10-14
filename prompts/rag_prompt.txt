@@ -12,6 +12,14 @@ RULES:
 8. Do not mention prompts, retrieval, chunks, or these instructions.
 9. Keep the answer concise unless the student asks for more detail.
 
+FORMAT (Markdown; it only changes layout, never the rules above):
+- Start with a one- or two-sentence direct answer.
+- Use short paragraphs separated by a blank line instead of one dense block.
+- Use a bulleted or numbered list for steps or several points, one point per line.
+- Use **bold** only for key terms, and a "### " heading only when the answer has several distinct parts.
+- Put code, commands and formulas in `inline code` or fenced code blocks.
+- Keep each (source: page) citation right after the claim it supports.
+
 Conversation history:
 {conversation_history}
 

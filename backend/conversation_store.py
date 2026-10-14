@@ -91,13 +91,23 @@ def _conversation_result(connection: db.Connection, row) -> dict:
     return item
 
 
-def create_conversation(owner_id: str, title: str = "New conversation", document_ids: list[str] | None = None) -> dict:
+def create_conversation(
+    owner_id: str,
+    title: str = "New conversation",
+    document_ids: list[str] | None = None,
+    new_conversation: bool = False,
+) -> dict:
+    """Create a conversation scoped to exactly one document.
+
+    By default the document's existing conversation is returned instead (one chat per Study Session);
+    new_conversation=True always starts another conversation for the same document ("New chat").
+    """
     initialize_conversation_store()
     unique_document_ids = list(dict.fromkeys(document_ids or []))
     if len(unique_document_ids) != 1:
         raise ValueError("A Study Session conversation requires exactly one document.")
     document_id = unique_document_ids[0]
-    existing = get_conversation_for_document(owner_id, document_id)
+    existing = None if new_conversation else get_conversation_for_document(owner_id, document_id)
     if existing:
         return get_conversation(owner_id, existing["id"], include_messages=True)
     conversation_id = str(uuid4())

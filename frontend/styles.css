@@ -3748,3 +3748,274 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
   .planner-session--actionable .planner-session-actions{grid-column:2;flex-wrap:wrap;justify-content:flex-start}
 }
 .planner-session--status-in_progress{background:#f4f5ff}
+
+/* Desktop sidebar: drag-to-resize and a collapsible icon rail. app.js sets --sidebar-width on the
+   app shell (absent = default width) and toggles body.sidebar-collapsed; both are remembered in
+   localStorage. Phone width keeps the off-canvas drawer above, so everything here is desktop-only. */
+.sidebar-collapse-button, .sidebar-resizer { display: none; }
+@media (min-width: 721px) {
+  .session-shell.app-shell { grid-template-columns: var(--sidebar-width, 250px) minmax(0, 1fr); }
+  .session-shell .nav-menu { grid-template-columns: minmax(0, 1fr); }   /* undo the legacy 2-column tablet menu */
+  .session-shell .sidebar .brand > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sidebar-collapse-button {
+    display: inline-flex; align-items: center; justify-content: center; flex: none; margin-left: auto; width: 30px; height: 30px;
+    border: 0; border-radius: 8px; background: transparent; color: #69738c; font-size: 16px; line-height: 1; cursor: pointer;
+  }
+  .sidebar-collapse-button:hover { background: #f4f5fb; color: #1f2940; }
+  .sidebar-collapse-button:focus-visible, .sidebar-resizer:focus-visible { outline: 2px solid var(--session-accent); outline-offset: 2px; }
+  .sidebar-resizer { display: block; position: absolute; top: 0; right: -4px; bottom: 0; z-index: 5; width: 8px; cursor: col-resize; touch-action: none; }
+  .sidebar-resizer::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background .15s ease; }
+  .sidebar-resizer:hover::after, .sidebar-resizer:focus-visible::after, body.sidebar-resizing .sidebar-resizer::after { background: var(--session-accent); }
+  body.sidebar-resizing { cursor: col-resize; user-select: none; }
+  body.sidebar-resizing iframe { pointer-events: none; }
+
+  body.sidebar-collapsed .session-shell.app-shell { grid-template-columns: 68px minmax(0, 1fr); }
+  body.sidebar-collapsed .session-shell .sidebar { padding: 16px 10px; align-items: center; }
+  body.sidebar-collapsed .session-shell .sidebar .brand { flex-direction: column; margin: 2px 0 16px; gap: 10px; }
+  body.sidebar-collapsed .session-shell .sidebar .brand > span,
+  body.sidebar-collapsed .session-shell .sidebar-upload-status,
+  body.sidebar-collapsed .session-shell .sidebar-section-label,
+  body.sidebar-collapsed .session-shell .recent-documents,
+  body.sidebar-collapsed .session-shell .profile > div:nth-child(2),
+  body.sidebar-collapsed .sidebar-resizer { display: none; }
+  body.sidebar-collapsed .sidebar-collapse-button { margin: 0; }
+  body.sidebar-collapsed .session-shell .new-session-button { width: 44px; min-height: 44px; margin: 0 0 18px; padding: 0; font-size: 0; }
+  body.sidebar-collapsed .session-shell .new-session-button::before { content: "+"; font-size: 22px; line-height: 1; }
+  body.sidebar-collapsed .session-shell .nav-menu { width: 100%; }
+  body.sidebar-collapsed .session-shell .nav-item { justify-content: center; padding: 10px 0; font-size: 0; }
+  body.sidebar-collapsed .session-shell .nav-item span { width: auto; font-size: 16px; }
+  body.sidebar-collapsed .session-shell .profile { width: 100%; margin-top: auto; padding: 12px 0 0; grid-template-columns: 1fr; justify-items: center; }
+  body.sidebar-collapsed .session-shell .sidebar-logout { width: 34px; padding: 6px 0; font-size: 0; }
+  body.sidebar-collapsed .session-shell .sidebar-logout::before { content: "\21E5"; font-size: 16px; }
+}
+@media (min-width: 721px) and (max-width: 1050px) {
+  .session-shell.app-shell { grid-template-columns: var(--sidebar-width, 210px) minmax(0, 1fr); }
+  body.sidebar-collapsed .session-shell.app-shell { grid-template-columns: 68px minmax(0, 1fr); }
+}
+
+/* Study Session AI Tutor as a resizable docked column (>=1024px). Replaces the slide-over above: when
+   open, the chat is the right column of .session-workspace with a draggable divider, so it never
+   covers the study content. app.js sets --tutor-width (the remembered preference); clamp() keeps the
+   chat >=320px and the content >=420px whatever the window or sidebar width. body.tutor-expanded
+   widens the chat to that limit until restored. Below 1024px the tutor stays full-width under the
+   content, so phones never get two narrow columns. */
+.tutor-resizer, .tutor-expand-button { display: none; }
+@media (min-width: 1024px) {
+  body[data-page="session"] .session-workspace { gap: 0; }
+  body.tutor-overlay-open[data-page="session"] .session-workspace {
+    grid-template-columns: minmax(0, 1fr) 12px clamp(320px, var(--tutor-width, 380px), calc(100% - 432px));
+  }
+  body.tutor-overlay-open.tutor-expanded[data-page="session"] .session-workspace {
+    grid-template-columns: minmax(0, 1fr) 12px max(320px, calc(100% - 432px));
+  }
+  body[data-page="session"] .persistent-tutor,
+  body.tutor-overlay-open[data-page="session"] .persistent-tutor {
+    position: relative; inset: auto; z-index: auto; display: none; width: auto; max-width: none; height: auto; min-height: 0;
+    transform: none; visibility: visible; transition: none; box-shadow: 0 10px 30px rgba(38, 46, 82, .07);
+  }
+  body.tutor-overlay-open[data-page="session"] .persistent-tutor { display: flex; }
+  body.tutor-overlay-open[data-page="session"] .tutor-resizer { display: block; position: relative; cursor: col-resize; touch-action: none; }
+  .tutor-resizer::after {
+    content: ""; position: absolute; top: 8px; bottom: 8px; left: 5px; width: 2px; border-radius: 2px;
+    background: transparent; transition: background .15s ease;
+  }
+  .tutor-resizer:hover::after, .tutor-resizer:focus-visible::after, body.tutor-resizing .tutor-resizer::after { background: var(--session-accent); }
+  .tutor-resizer:focus-visible { outline: none; }
+  body.tutor-resizing { cursor: col-resize; user-select: none; }
+  body.tutor-resizing iframe { pointer-events: none; }   /* the Original Content PDF would swallow the drag */
+  body[data-page="session"] .persistent-tutor .tutor-expand-button {
+    display: inline-grid; place-items: center; flex: 0 0 auto; width: 30px; height: 30px; margin-left: auto;
+    border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 17px; line-height: 1; cursor: pointer;
+  }
+  body[data-page="session"] .persistent-tutor .tutor-expand-button + .tutor-close-button { margin-left: 2px; }
+  body[data-page="session"] .persistent-tutor .tutor-expand-button:hover { background: var(--session-wash, #f2f3ff); color: var(--ink, #202b48); }
+  body[data-page="session"] .persistent-tutor .tutor-expand-button:focus-visible { outline: 2px solid var(--session-accent, #6876f5); outline-offset: 2px; }
+  /* A wide chat keeps a readable line length: messages stay in a centred column of at most 760px. */
+  body[data-page="session"] .persistent-tutor .message-list { padding-inline: max(16px, calc((100% - 760px) / 2)); }
+}
+/* 1024-1050px inherits the tablet "page scrolls" model; the docked chat needs the desktop height model. */
+@media (min-width: 1024px) and (max-width: 1050px) {
+  body[data-page="session"] .main-content { height: 100vh; overflow: hidden; }
+  body[data-page="session"] #session-view { height: calc(100vh - 62px); }
+  body[data-page="session"] .session-content { overflow: auto; }
+  body[data-page="session"] .persistent-tutor { height: auto; }
+}
+
+/* AI Tutor answer readability. Answers are rendered from a safe Markdown subset (appendMarkdown in
+   js/utils.js). Block spacing comes from the "> * + *" rule; grounding status and citations sit in a
+   footer band under the answer. Code blocks and tables scroll inside themselves, so nothing widens
+   the chat; everything else wraps. --msg-px/--msg-py keep the footer band flush with the bubble. */
+body[data-page="session"] .persistent-tutor .tutor-message {
+  --msg-px: 16px; --msg-py: 14px;
+  padding: var(--msg-py) var(--msg-px); color: #253049; font-size: 14.5px; line-height: 1.65;
+}
+body[data-page="session"] .persistent-tutor .user-message { line-height: 1.55; }
+body[data-page="session"] .persistent-tutor .tutor-message .message-body > * { margin: 0; }
+body[data-page="session"] .persistent-tutor .tutor-message .message-body > * + * { margin-top: 10px; }
+body[data-page="session"] .persistent-tutor .tutor-message .message-body strong { font-weight: 700; color: #1b2440; }
+body[data-page="session"] .persistent-tutor .tutor-message .md-heading { color: #1b2440; font-weight: 750; line-height: 1.35; letter-spacing: -.005em; }
+body[data-page="session"] .persistent-tutor .tutor-message .message-body > * + .md-heading { margin-top: 16px; }
+body[data-page="session"] .persistent-tutor .tutor-message h3.md-heading { font-size: 16px; }
+body[data-page="session"] .persistent-tutor .tutor-message h4.md-heading { font-size: 15px; }
+body[data-page="session"] .persistent-tutor .tutor-message h5.md-heading { font-size: 12.5px; text-transform: uppercase; letter-spacing: .05em; color: #4a5470; }
+body[data-page="session"] .persistent-tutor .tutor-message :is(ul, ol) { padding-left: 22px; }
+body[data-page="session"] .persistent-tutor .tutor-message li { margin: 0; }
+body[data-page="session"] .persistent-tutor .tutor-message li + li { margin-top: 5px; }
+body[data-page="session"] .persistent-tutor .tutor-message li > :is(ul, ol) { margin-top: 5px; }
+body[data-page="session"] .persistent-tutor .tutor-message li::marker { color: #7c86e8; }
+body[data-page="session"] .persistent-tutor .tutor-message ol > li::marker { font-weight: 700; }
+body[data-page="session"] .persistent-tutor .tutor-message blockquote {
+  padding: 8px 12px; border-left: 3px solid #c6cbf3; border-radius: 0 8px 8px 0; background: #f6f7fe; color: #46506b;
+}
+body[data-page="session"] .persistent-tutor .tutor-message blockquote > * { margin: 0; }
+body[data-page="session"] .persistent-tutor .tutor-message blockquote > * + * { margin-top: 8px; }
+body[data-page="session"] .persistent-tutor .tutor-message hr { height: 0; border: 0; border-top: 1px solid #e8eaf1; }
+body[data-page="session"] .persistent-tutor .tutor-message a { color: var(--session-accent, #6876f5); text-decoration: underline; text-underline-offset: 2px; }
+body[data-page="session"] .persistent-tutor .tutor-message code {
+  padding: 1px 5px; border: 1px solid #e6e8f2; border-radius: 5px; background: #f3f4f9; color: #2c3552;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; font-size: .87em;
+}
+body[data-page="session"] .persistent-tutor .tutor-message .message-body pre {
+  max-width: 100%; overflow-x: auto; padding: 12px 14px; border-radius: 10px; background: #1f2433; color: #e7eaf4;
+  font-size: 12.5px; line-height: 1.55; white-space: pre; word-break: normal; overflow-wrap: normal; scrollbar-width: thin;
+}
+body[data-page="session"] .persistent-tutor .tutor-message .message-body pre[data-language]::before {
+  content: attr(data-language); display: block; margin-bottom: 6px; color: #9aa3c2;
+  font-family: inherit; font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+}
+body[data-page="session"] .persistent-tutor .tutor-message .message-body pre code {
+  padding: 0; border: 0; background: none; color: inherit; font-size: inherit; white-space: inherit; word-break: normal; overflow-wrap: normal;
+}
+body[data-page="session"] .persistent-tutor .tutor-message .md-table-wrap { max-width: 100%; overflow-x: auto; border: 1px solid #e6e8f2; border-radius: 9px; scrollbar-width: thin; }
+body[data-page="session"] .persistent-tutor .tutor-message table { width: 100%; border-collapse: collapse; font-size: 13px; line-height: 1.45; }
+body[data-page="session"] .persistent-tutor .tutor-message :is(th, td) {
+  min-width: 90px; padding: 7px 10px; border-bottom: 1px solid #eceef5; text-align: left; vertical-align: top;
+  word-break: normal; overflow-wrap: break-word;
+}
+body[data-page="session"] .persistent-tutor .tutor-message th { background: #f5f6fc; color: #2b3450; font-weight: 700; }
+body[data-page="session"] .persistent-tutor .tutor-message tr:last-child td { border-bottom: 0; }
+body[data-page="session"] .persistent-tutor .tutor-message .inline-citation {
+  display: inline; padding: 1px 7px; border-radius: 999px; background: #eef0fd; color: #4c57c6;
+  font-size: 11.5px; font-weight: 600; white-space: normal; -webkit-box-decoration-break: clone; box-decoration-break: clone;
+}
+body[data-page="session"] .persistent-tutor .message .message-grounding {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;
+  margin: 14px calc(-1 * var(--msg-px, 12px)) calc(-1 * var(--msg-py, 10px)); padding: 9px var(--msg-px, 12px) 10px;
+  border-top: 1px solid #eceef5; border-radius: 0 0 14px 14px; background: #f8f9fc; font-size: 11.5px; line-height: 1.4;
+}
+body[data-page="session"] .persistent-tutor .message-grounding .grounding-badge { padding: 2px 8px; font-size: 11px; }
+body[data-page="session"] .persistent-tutor .message-grounding .citation-count {
+  display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; min-width: 0; max-width: 100%;
+  padding: 3px 10px; border: 1px solid #dfe2f3; border-radius: 999px; background: #fff; color: #4a5470;
+  font: inherit; text-align: left; cursor: pointer;
+}
+body[data-page="session"] .persistent-tutor .message-grounding .citation-count:hover { border-color: var(--session-accent, #6876f5); color: #2b3450; }
+body[data-page="session"] .persistent-tutor .message-grounding .citation-count:focus-visible { outline: 2px solid var(--session-accent, #6876f5); outline-offset: 2px; }
+body[data-page="session"] .persistent-tutor .citation-count-label { font-weight: 700; }
+body[data-page="session"] .persistent-tutor .citation-pages { min-width: 0; color: #6b7390; overflow-wrap: anywhere; }
+@media (max-width: 720px) {
+  body[data-page="session"] .persistent-tutor .tutor-message { --msg-px: 13px; --msg-py: 12px; font-size: 14px; line-height: 1.6; }
+  body[data-page="session"] .persistent-tutor .tutor-message .message-body pre { font-size: 12px; padding: 10px 12px; }
+}
+
+/* AI Tutor chats: "New chat" plus the open document's conversations, newest first. Narrow panels
+   stack a collapsible, scrollable list under the header; a wide panel (.tutor-wide, set from the
+   panel's measured width in app.js) turns it into a left rail beside the messages. */
+body[data-page="session"] .persistent-tutor .tutor-conversations {
+  order: 1; flex: 0 0 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  padding: 8px 12px; border-bottom: 1px solid #edf0f6; background: #fbfbfd;
+}
+.tutor-conversations-bar { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tutor-conversations-toggle {
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px; border: 0; border-radius: 8px;
+  background: transparent; color: #4a5470; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer;
+}
+.tutor-conversations-toggle::before { content: "▾"; font-size: 11px; transition: transform .15s ease; }
+.tutor-conversations.is-collapsed .tutor-conversations-toggle::before { transform: rotate(-90deg); }
+.tutor-conversations-toggle:hover { background: #f0f1f8; }
+.tutor-conversations-count {
+  min-width: 18px; padding: 0 6px; border-radius: 999px; background: #eceefa; color: #5a64c8;
+  font-size: 11px; line-height: 18px; text-align: center;
+}
+.tutor-new-chat-button {
+  display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; margin-left: auto; padding: 6px 12px;
+  border: 1px solid var(--session-accent, #6876f5); border-radius: 999px; background: #fff;
+  color: var(--session-accent, #6876f5); font: inherit; font-size: 12px; font-weight: 700; white-space: nowrap; cursor: pointer;
+}
+.tutor-new-chat-button::before { content: "+"; font-size: 15px; line-height: 1; }
+.tutor-new-chat-button:hover:not(:disabled) { background: var(--session-accent, #6876f5); color: #fff; }
+.tutor-new-chat-button:disabled, .tutor-conversations button:disabled { opacity: .5; cursor: default; }
+body[data-page="session"] .persistent-tutor .conversation-list {
+  display: grid; align-content: start; gap: 2px; min-height: 0; max-height: 156px; margin: 6px 0 0; padding: 0;
+  overflow-y: auto; overscroll-behavior: contain; border: 0; background: none; scrollbar-width: thin;
+}
+body[data-page="session"] .persistent-tutor .tutor-conversations.is-collapsed .conversation-list { display: none; }
+body[data-page="session"] .persistent-tutor .conversation-item {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 2px; min-width: 0;
+  margin: 0; padding: 2px; border: 1px solid transparent; border-radius: 9px; background: transparent;
+}
+body[data-page="session"] .persistent-tutor .conversation-item:hover { background: #f2f3fa; }
+body[data-page="session"] .persistent-tutor .conversation-item.active {
+  border-color: #d9dcf7; background: var(--session-wash, #f2f3ff); box-shadow: inset 3px 0 0 var(--session-accent, #6876f5);
+}
+body[data-page="session"] .persistent-tutor .conversation-open-button {
+  display: grid; gap: 1px; min-width: 0; padding: 6px 8px; border: 0; border-radius: 7px; background: transparent;
+  color: #2b3450; font: inherit; text-align: left; cursor: pointer;
+}
+body[data-page="session"] .persistent-tutor .conversation-open-button strong {
+  overflow: hidden; font-size: 12.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap;
+}
+body[data-page="session"] .persistent-tutor .conversation-open-button span { overflow: hidden; color: #8a91a6; font-size: 10.5px; white-space: nowrap; }
+body[data-page="session"] .persistent-tutor .conversation-item.active .conversation-open-button strong { color: var(--session-accent, #6876f5); font-weight: 700; }
+body[data-page="session"] .persistent-tutor :is(.conversation-rename-button, .conversation-delete-button) {
+  width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px; background: transparent;
+  color: #7a8298; font-size: 14px; line-height: 1; cursor: pointer; opacity: 0;
+}
+body[data-page="session"] .persistent-tutor .conversation-item:is(:hover, :focus-within, .active) :is(.conversation-rename-button, .conversation-delete-button) { opacity: 1; }
+body[data-page="session"] .persistent-tutor :is(.conversation-rename-button, .conversation-delete-button):hover:not(:disabled) { background: #e8eaf6; color: #2b3450; }
+body[data-page="session"] .persistent-tutor .conversation-delete-button:hover:not(:disabled) { color: var(--danger, #c0472a); }
+@media (hover: none) {
+  body[data-page="session"] .persistent-tutor :is(.conversation-rename-button, .conversation-delete-button) { opacity: 1; width: 34px; height: 34px; }
+}
+body[data-page="session"] .persistent-tutor .conversation-rename-form { grid-column: 1 / -1; display: flex; gap: 6px; min-width: 0; padding: 3px; }
+body[data-page="session"] .persistent-tutor .conversation-rename-input {
+  flex: 1 1 auto; min-width: 0; padding: 6px 9px; border: 1px solid var(--session-accent, #6876f5); border-radius: 7px;
+  color: #252c43; font: inherit; font-size: 12.5px;
+}
+body[data-page="session"] .persistent-tutor :is(.conversation-rename-save, .conversation-rename-cancel, .conversation-confirm-delete, .conversation-confirm-cancel) {
+  flex: 0 0 auto; padding: 5px 10px; border: 1px solid #dfe2f3; border-radius: 7px; background: #fff;
+  color: #4a5470; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer;
+}
+body[data-page="session"] .persistent-tutor .conversation-rename-save { border-color: var(--session-accent, #6876f5); background: var(--session-accent, #6876f5); color: #fff; }
+body[data-page="session"] .persistent-tutor .conversation-item.is-confirming { grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 8px; border-color: #f3d2c8; background: #fff6f3; box-shadow: none; }
+body[data-page="session"] .persistent-tutor .conversation-confirm-text { margin: 0; color: #6b2f20; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+body[data-page="session"] .persistent-tutor .conversation-confirm-actions { display: flex; gap: 6px; }
+body[data-page="session"] .persistent-tutor .conversation-confirm-delete { border-color: var(--danger, #c0472a); background: var(--danger, #c0472a); color: #fff; }
+body[data-page="session"] .persistent-tutor .tutor-conversations :is(button, input):focus-visible { outline: 2px solid var(--session-accent, #6876f5); outline-offset: 1px; }
+body[data-page="session"] .persistent-tutor .conversation-empty { margin: 0; padding: 6px 8px; font-size: 12px; }
+
+/* Wide panel: chats become a left rail. On desktop only while the docked panel is open, so the
+   closed panel's display:none always wins. */
+@media (min-width: 1024px) {
+  body.tutor-overlay-open[data-page="session"] .persistent-tutor.tutor-wide { display: grid; }
+}
+@media (max-width: 1023px) {
+  body[data-page="session"] .persistent-tutor.tutor-wide { display: grid; }
+}
+body[data-page="session"] .persistent-tutor.tutor-wide {
+  grid-template-columns: minmax(180px, 30%) minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+}
+body[data-page="session"] .persistent-tutor.tutor-wide .tutor-chat-header { grid-column: 1 / -1; grid-row: 1; }
+body[data-page="session"] .persistent-tutor.tutor-wide .tutor-conversations { grid-column: 1; grid-row: 2 / 6; border-right: 1px solid #edf0f6; border-bottom: 0; }
+body[data-page="session"] .persistent-tutor.tutor-wide .conversation-list,
+body[data-page="session"] .persistent-tutor.tutor-wide .tutor-conversations.is-collapsed .conversation-list { display: grid; flex: 1 1 auto; max-height: none; }
+body[data-page="session"] .persistent-tutor.tutor-wide .tutor-conversations-toggle { pointer-events: none; }
+body[data-page="session"] .persistent-tutor.tutor-wide .tutor-conversations-toggle::before { display: none; }
+body[data-page="session"] .persistent-tutor.tutor-wide .message-list { grid-column: 2; grid-row: 2; }
+body[data-page="session"] .persistent-tutor.tutor-wide .sources-toggle-button { grid-column: 2; grid-row: 3; }
+body[data-page="session"] .persistent-tutor.tutor-wide .conversation-sources-card { grid-column: 2; grid-row: 4; }
+body[data-page="session"] .persistent-tutor.tutor-wide .chat-form { grid-column: 2; grid-row: 5; }
+@media (max-width: 720px) {
+  body[data-page="session"] .persistent-tutor .conversation-list { max-height: 132px; }
+  .tutor-new-chat-button { padding: 8px 12px; }
+}

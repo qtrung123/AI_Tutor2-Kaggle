@@ -60,7 +60,9 @@ class PersistentTutorSubmitTests(unittest.TestCase):
 
     def test_session_conversation_is_loaded_by_document_without_reassignment(self):
         body = function_body("ensureStudySessionConversation")
-        self.assertIn("conversations.find", body)
+        # Keeps the open chat of this document, else reopens one of the document's chats.
+        self.assertIn("conversationDocumentId(activeConversation) === documentItem.id", body)
+        self.assertIn("conversations.filter", body)
         self.assertIn("await openConversation(existing.id)", body)
         self.assertIn("document_ids: documentIds", body)
         self.assertNotIn("/sources", body)

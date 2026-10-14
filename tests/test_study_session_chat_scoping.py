@@ -88,6 +88,46 @@ class StudySessionChatScopingTests(unittest.TestCase):
             conversation_b["id"],
         )
 
+    def test_new_conversation_flag_starts_a_separate_chat_for_the_same_document(self):
+        first = conversation_store.create_conversation(self.user["id"], "A", ["a.pdf"])
+        conversation_store.add_message(self.user["id"], first["id"], "user", "First chat")
+        second = conversation_store.create_conversation(self.user["id"], "New conversation", ["a.pdf"], new_conversation=True)
+        self.assertNotEqual(second["id"], first["id"])
+        self.assertEqual((second["document_id"], second["messages"]), ("a.pdf", []))
+        conversation_store.add_message(self.user["id"], second["id"], "user", "Second chat")
+
+        listed = {item["id"]: item["document_ids"] for item in conversation_store.list_conversations(self.user["id"])}
+        self.assertEqual(listed, {first["id"]: ["a.pdf"], second["id"]: ["a.pdf"]})
+        self.assertEqual([m["content"] for m in conversation_store.get_conversation(self.user["id"], first["id"])["messages"]], ["First chat"])
+        self.assertEqual([m["content"] for m in conversation_store.get_conversation(self.user["id"], second["id"])["messages"]], ["Second chat"])
+        # Without the flag the document's original conversation is still reused.
+        self.assertEqual(conversation_store.create_conversation(self.user["id"], "A", ["a.pdf"])["id"], first["id"])
+        self._answer(second["id"], "a.pdf")
+
+        conversation_store.delete_conversation(self.user["id"], second["id"])
+        self.assertEqual([item["id"] for item in conversation_store.list_conversations(self.user["id"])], [first["id"]])
+
+    def test_first_question_sets_a_readable_default_title(self):
+        conversation = conversation_store.create_conversation(self.user["id"], "New conversation", ["a.pdf"])
+        document = Document(page_content="A", metadata={"owner_id": self.user["id"], "document_id": "a.pdf", "source": "a.pdf", "page": 1})
+        question = "  How do   nested interrupts work when two peripherals request service at exactly the same time?  "
+        with (
+            patch.object(rag_service, "resolve_generation_model", return_value="qwen3:3b"),
+            patch.object(rag_service, "_retrieve_conversation_docs", return_value=[document]),
+            patch.object(rag_service, "load_prompt_template", return_value="{context}\n{conversation_history}\n{question}"),
+            patch.object(rag_service, "ChatOllama", _ChatModel),
+        ):
+            rag_service.answer_conversation_message(self.user["id"], conversation["id"], question, "qwen-3b")
+            rag_service.answer_conversation_message(self.user["id"], conversation["id"], "A later question", "qwen-3b")
+        title = conversation_store.get_conversation(self.user["id"], conversation["id"])["title"]
+        self.assertEqual(title, "How do nested interrupts work when two peripherals request…")
+
+    def test_default_title_helper(self):
+        self.assertEqual(rag_service.default_conversation_title("  What is   DMA?\n"), "What is DMA?")
+        self.assertEqual(rag_service.default_conversation_title("   "), "New conversation")
+        self.assertEqual(rag_service.default_conversation_title("x" * 80), "x" * 60 + "…")
+        self.assertLessEqual(len(rag_service.default_conversation_title("word " * 40)), 61)
+
     def test_conversation_document_cannot_be_reassigned(self):
         conversation = conversation_store.create_conversation(self.user["id"], "A", ["a.pdf"])
         with self.assertRaisesRegex(ValueError, "cannot be reassigned"):

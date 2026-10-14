@@ -22,6 +22,8 @@ router = APIRouter()
 class ConversationCreateRequest(BaseModel):
     title: str = "New conversation"
     document_ids: list[str] = Field(default_factory=list)
+    # False reuses the document's existing conversation; True starts another one ("New chat").
+    new_conversation: bool = False
 
 
 class ConversationUpdateRequest(BaseModel):
@@ -52,7 +54,7 @@ def _validate_conversation_document_ids(owner_id: str, document_ids: list[str]) 
 @router.post("/api/conversations")
 def conversation_create(request: ConversationCreateRequest, current_user: dict = Depends(require_current_user)) -> dict:
     _validate_conversation_document_ids(current_user["id"], request.document_ids)
-    return create_conversation(current_user["id"], request.title, request.document_ids)
+    return create_conversation(current_user["id"], request.title, request.document_ids, request.new_conversation)
 
 
 @router.get("/api/conversations")
