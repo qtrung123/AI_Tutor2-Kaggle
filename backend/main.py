@@ -21,6 +21,7 @@ from backend.api.quiz_generation import router as quiz_generation_router
 from backend.api.quiz_library import router as quiz_library_router
 from backend.api.summary import router as summary_router
 from backend.api.deps import require_admin_user, require_current_user
+from backend import perf_timing
 from backend.llm_backend import backend_description, vllm_model_ready
 from backend.model_registry import list_generation_models, prepare_generation_model
 from backend.model_comparison_service import get_quiz_model_comparison
@@ -65,6 +66,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+if perf_timing.enabled():
+    # Opt-in diagnostics (AI_TUTOR_PERF_TIMING=1): Server-Timing header + one [perf] line per request.
+    app.add_middleware(perf_timing.PerfTimingMiddleware, allowed_origins=cors_origins)
 
 
 app.include_router(auth_router)

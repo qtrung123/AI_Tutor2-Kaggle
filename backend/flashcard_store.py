@@ -9,8 +9,8 @@ from backend.auth_store import initialize_auth_store
 from config import DATABASE_PATH
 
 
-def _connect() -> db.Connection:
-    return db.connect(DATABASE_PATH)
+def _connect(autocommit: bool = False) -> db.Connection:
+    return db.connect(DATABASE_PATH, autocommit=autocommit)
 
 
 def initialize_flashcard_store() -> None:
@@ -195,7 +195,7 @@ def get_latest_flashcard_set_info(owner_id: str, document_id: str, document_hash
     from the document's CURRENT content/topic schema/card format, with its current card count
     (user-added and deleted cards included). Never loads card bodies."""
     initialize_flashcard_store()
-    with _connect() as connection:
+    with _connect(autocommit=True) as connection:  # one read: no BEGIN/COMMIT round trips
         row = connection.execute(
             """
             SELECT s.set_id, s.model_id, s.created_at,

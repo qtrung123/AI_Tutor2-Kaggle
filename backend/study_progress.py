@@ -62,6 +62,18 @@ def latest_quiz_percentage(owner_id: str, document_id: str) -> float | None:
     return round(result.percentage, 2) if result else None
 
 
+def latest_quiz_percentages(owner_id: str, document_ids: list[str]) -> dict[str, float | None]:
+    """latest_quiz_percentage for many of the owner's documents in one read. `document_ids` must
+    be documents the owner has indexed (as the dashboard's materials are): the same latest
+    completed, gradable attempt DocumentStudyState reports, or None when there is none."""
+    attempts = quiz_store.list_completed_attempts_by_document(owner_id, document_ids)
+    latest = {}
+    for document_id in document_ids:
+        gradable = [row for row in attempts.get(document_id, []) if int(row["total"] or 0) > 0]
+        latest[document_id] = round(float(gradable[0]["percentage"] or 0), 2) if gradable else None
+    return latest
+
+
 def _session_row(session: dict) -> dict:
     return {key: session[key] for key in ("session_id", "document_id", "activity_type", "scheduled_start",
                                           "scheduled_end", "duration_minutes", "status")}

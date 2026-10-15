@@ -29,8 +29,8 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _connect() -> db.Connection:
-    return db.connect(DATABASE_PATH)
+def _connect(autocommit: bool = False) -> db.Connection:
+    return db.connect(DATABASE_PATH, autocommit=autocommit)
 
 
 def _read_legacy_json(path: Path) -> dict:
@@ -689,6 +689,28 @@ def _row_to_attempt(connection: db.Connection, row) -> dict:
         """,
         (row["attempt_id"],),
     ).fetchall()
+    return _attempt_from_rows(row, answer_rows)
+
+
+_ANSWER_BATCH_SIZE = 500  # bound the IN (...) list; well under SQLite's and PostgreSQL's limits
+
+
+def _rows_to_attempts(connection: db.Connection, rows) -> list[dict]:
+    """_row_to_attempt for many attempts with one answers query per batch, not one per attempt."""
+    answers_by_attempt: dict[str, list] = {}
+    attempt_ids = [row["attempt_id"] for row in rows]
+    for start in range(0, len(attempt_ids), _ANSWER_BATCH_SIZE):
+        batch = attempt_ids[start:start + _ANSWER_BATCH_SIZE]
+        for answer in connection.execute(
+            f"SELECT * FROM quiz_attempt_answers WHERE attempt_id IN ({','.join('?' * len(batch))}) "
+            "ORDER BY attempt_id, question_id",
+            batch,
+        ).fetchall():
+            answers_by_attempt.setdefault(answer["attempt_id"], []).append(answer)
+    return [_attempt_from_rows(row, answers_by_attempt.get(row["attempt_id"], [])) for row in rows]
+
+
+def _attempt_from_rows(row, answer_rows) -> dict:
     answers = {
         str(answer["question_id"]): (
             json.loads(answer["selected_answers_json"] or "[]")
@@ -1105,6 +1127,41 @@ def invalidate_document_quizzes_for_topic_schema(
         return len(quiz_ids)
 
 
+def documents_needing_topic_schema_invalidation(owner_id: str, current_versions: dict[str, int]) -> set[str]:
+    """Which of the owner's documents still hold rows that
+    invalidate_document_quizzes_for_topic_schema would change, found in ONE read.
+
+    A document needs invalidation while any of these remain: an active quiz built for another
+    topic schema version, an unfinished attempt with no quiz or on such a quiz, or a latest
+    completed attempt on such a quiz. Once invalidation has run, none remain, so listing documents
+    no longer writes anything until a document's topic schema actually changes."""
+    if not current_versions:
+        return set()
+    initialize_quiz_store()
+    with _connect(autocommit=True) as connection:  # one read: no BEGIN/COMMIT round trips
+        rows = connection.execute(
+            """
+            SELECT document_id, topic_schema_version FROM quizzes
+            WHERE owner_id = ? AND is_active = 1
+            UNION
+            SELECT t.document_id, q.topic_schema_version FROM quiz_attempts t
+            LEFT JOIN quizzes q ON q.quiz_id = t.quiz_id AND q.owner_id = t.student_id AND q.document_id = t.document_id
+            WHERE t.student_id = ? AND t.completed = 0 AND (t.quiz_id IS NULL OR q.quiz_id IS NOT NULL)
+            UNION
+            SELECT t.document_id, q.topic_schema_version FROM quiz_attempts t
+            JOIN quizzes q ON q.quiz_id = t.quiz_id AND q.owner_id = t.student_id AND q.document_id = t.document_id
+            WHERE t.student_id = ? AND t.completed = 1 AND t.is_latest = 1
+            """,
+            (owner_id, owner_id, owner_id),
+        ).fetchall()
+    stale = set()
+    for row in rows:
+        document_id, version = row["document_id"], row["topic_schema_version"]
+        if document_id in current_versions and (version is None or int(version) != int(current_versions[document_id])):
+            stale.add(document_id)
+    return stale
+
+
 def concept_plan_cache_key(identity: dict) -> str:
     canonical = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return f"concept-plan:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
@@ -1214,41 +1271,76 @@ def list_quiz_validation_events(generation_run_id: str | None = None, owner_id: 
         return [dict(row) for row in rows]
 
 
+def _answer_snapshot_sql(extra_columns: str, partition: str, where: str, order: str) -> str:
+    """Latest response per (quiz, question) among a student's submitted assessment answers.
+    The single-topic and the batched reads share this text so they rank identically."""
+    return f"""
+        WITH ranked AS (
+            SELECT a.attempt_id, t.quiz_id, a.question_id, a.is_correct,
+                   a.question_difficulty, a.validation_outcome, a.topic_id,
+                   a.topic_name, a.concept_id, a.assessment_capacity,
+                   a.evidence_requirement_version, a.concept_plan_id,
+                   COALESCE(t.submitted_at, t.completed_at) AS evidence_at,{extra_columns}
+                   ROW_NUMBER() OVER (
+                       PARTITION BY {partition}
+                       ORDER BY COALESCE(t.submitted_at, t.completed_at) DESC, t.attempt_id DESC
+                   ) AS response_rank
+            FROM quiz_attempt_answers a
+            JOIN quiz_attempts t ON t.attempt_id = a.attempt_id
+            WHERE {where}
+              AND t.completed = 1 AND t.submitted_at IS NOT NULL
+              -- Flashcard practice answers (partly self-marked) are not mastery evidence.
+              AND a.concept_origin != 'flashcard'
+        )
+        SELECT * FROM ranked WHERE response_rank = 1
+        ORDER BY {order}
+        """
+
+
+def _latest_concept_plan_snapshots(snapshots: list[dict]) -> list[dict]:
+    planned = [row for row in snapshots if str(row.get("concept_plan_id") or "").strip()]
+    if not planned:
+        return snapshots
+    latest_plan_id = max(planned, key=lambda row: (str(row.get("evidence_at") or ""), str(row.get("attempt_id") or "")))["concept_plan_id"]
+    return [row for row in snapshots if row.get("concept_plan_id") == latest_plan_id]
+
+
 def list_completed_answer_snapshots(
     student_id: str, document_id: str, topic_id: str
 ) -> list[dict]:
     initialize_quiz_store()
-    with _connect() as connection:
+    with _connect(autocommit=True) as connection:  # one read: no BEGIN/COMMIT round trips
         rows = connection.execute(
-            """
-            WITH ranked AS (
-                SELECT a.attempt_id, t.quiz_id, a.question_id, a.is_correct,
-                       a.question_difficulty, a.validation_outcome, a.topic_id,
-                       a.topic_name, a.concept_id, a.assessment_capacity,
-                       a.evidence_requirement_version, a.concept_plan_id,
-                       COALESCE(t.submitted_at, t.completed_at) AS evidence_at,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY t.quiz_id, a.question_id
-                           ORDER BY COALESCE(t.submitted_at, t.completed_at) DESC, t.attempt_id DESC
-                       ) AS response_rank
-                FROM quiz_attempt_answers a
-                JOIN quiz_attempts t ON t.attempt_id = a.attempt_id
-                WHERE t.student_id = ? AND t.document_id = ? AND a.topic_id = ?
-                  AND t.completed = 1 AND t.submitted_at IS NOT NULL
-                  -- Flashcard practice answers (partly self-marked) are not mastery evidence.
-                  AND a.concept_origin != 'flashcard'
-            )
-            SELECT * FROM ranked WHERE response_rank = 1
-            ORDER BY quiz_id, question_id
-            """,
+            _answer_snapshot_sql("", "t.quiz_id, a.question_id",
+                                 "t.student_id = ? AND t.document_id = ? AND a.topic_id = ?", "quiz_id, question_id"),
             (student_id, document_id, topic_id),
         ).fetchall()
-        snapshots = [dict(row) for row in rows]
-        planned = [row for row in snapshots if str(row.get("concept_plan_id") or "").strip()]
-        if not planned:
-            return snapshots
-        latest_plan_id = max(planned, key=lambda row: (str(row.get("evidence_at") or ""), str(row.get("attempt_id") or "")))["concept_plan_id"]
-        return [row for row in snapshots if row.get("concept_plan_id") == latest_plan_id]
+    return _latest_concept_plan_snapshots([dict(row) for row in rows])
+
+
+def list_completed_answer_snapshots_by_topic(student_id: str, document_ids: list[str]) -> dict[tuple[str, str], list[dict]]:
+    """list_completed_answer_snapshots for every topic of the given documents in ONE read, keyed
+    by (document_id, topic_id). Ranking is partitioned per document and topic first, so each list
+    equals what the single-topic call returns; topics with no evidence are absent."""
+    document_ids = list(dict.fromkeys(document_ids))
+    if not document_ids:
+        return {}
+    initialize_quiz_store()
+    with _connect(autocommit=True) as connection:  # one read: no BEGIN/COMMIT round trips
+        rows = connection.execute(
+            _answer_snapshot_sql(
+                "\n                   t.document_id AS snapshot_document_id,",
+                "t.document_id, a.topic_id, t.quiz_id, a.question_id",
+                f"t.student_id = ? AND t.document_id IN ({','.join('?' * len(document_ids))})",
+                "snapshot_document_id, topic_id, quiz_id, question_id",
+            ),
+            (student_id, *document_ids),
+        ).fetchall()
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for row in rows:
+        snapshot = dict(row)
+        grouped.setdefault((snapshot.pop("snapshot_document_id"), snapshot["topic_id"]), []).append(snapshot)
+    return {key: _latest_concept_plan_snapshots(snapshots) for key, snapshots in grouped.items()}
 
 
 def set_attempt_answer_correctness(attempt_id: str, student_id: str, question_id: int, is_correct: bool) -> None:
@@ -1435,7 +1527,7 @@ def list_quiz_history(
     if student_id:
         clauses.append("student_id = ?")
         parameters.append(student_id)
-    with _connect() as connection:
+    with _connect(autocommit=True) as connection:  # reads only: no BEGIN/COMMIT round trips
         rows = connection.execute(
             f"""
             SELECT * FROM quiz_attempts WHERE {' AND '.join(clauses)}
@@ -1443,7 +1535,7 @@ def list_quiz_history(
             """,
             parameters,
         ).fetchall()
-        return [_row_to_attempt(connection, row) for row in rows]
+        return _rows_to_attempts(connection, rows)
 
 
 def get_quiz_history_attempt(attempt_id: str, student_id: str = LEGACY_USER_ID) -> dict | None:
@@ -1580,7 +1672,7 @@ def get_document_quiz_activity(document_id: str, owner_id: str) -> dict:
     an active quiz of this same owner and document. Flashcard written practice quizzes are
     retrieval practice, not the document's assessment: they are left out of both lists."""
     initialize_quiz_store()
-    with _connect() as connection:
+    with _connect(autocommit=True) as connection:  # reads only: no BEGIN/COMMIT round trips
         quiz_rows = connection.execute(
             """SELECT quiz_id, title, question_count, created_at FROM quizzes
                WHERE owner_id = ? AND document_id = ? AND is_active = 1 AND benchmark_id IS NULL
@@ -1588,25 +1680,58 @@ def get_document_quiz_activity(document_id: str, owner_id: str) -> dict:
                ORDER BY created_at DESC, quiz_id DESC""",
             (owner_id, document_id, FLASHCARD_WRITTEN_PLANNER_VERSION),
         ).fetchall()
-        quizzes = []
-        for quiz_row in quiz_rows:
-            attempt = connection.execute(
-                """SELECT completed, answered, total, score, percentage, updated_at,
-                          COALESCE(completed_at, submitted_at) AS completed_at
-                   FROM quiz_attempts WHERE student_id = ? AND quiz_id = ?
-                   ORDER BY updated_at DESC LIMIT 1""",
-                (owner_id, quiz_row["quiz_id"]),
-            ).fetchone()
-            quizzes.append({**dict(quiz_row), "latest_attempt": dict(attempt) if attempt else None})
+        latest_attempts = {}
+        if quiz_rows:
+            # Each quiz's own latest attempt (newest updated_at), all quizzes in one read.
+            quiz_ids = [row["quiz_id"] for row in quiz_rows]
+            for attempt in connection.execute(
+                f"""SELECT * FROM (
+                       SELECT quiz_id, completed, answered, total, score, percentage, updated_at,
+                              COALESCE(completed_at, submitted_at) AS completed_at,
+                              ROW_NUMBER() OVER (PARTITION BY quiz_id ORDER BY updated_at DESC) AS attempt_rank
+                       FROM quiz_attempts WHERE student_id = ? AND quiz_id IN ({','.join('?' * len(quiz_ids))})
+                   ) ranked WHERE attempt_rank = 1""",
+                (owner_id, *quiz_ids),
+            ).fetchall():
+                attempt = dict(attempt)
+                attempt.pop("attempt_rank")
+                latest_attempts[attempt.pop("quiz_id")] = attempt
+        quizzes = [{**dict(row), "latest_attempt": latest_attempts.get(row["quiz_id"])} for row in quiz_rows]
         completed_attempts = connection.execute(
-            """SELECT a.attempt_id, a.quiz_id, a.score, a.total, a.percentage,
-                      COALESCE(a.completed_at, a.submitted_at, a.updated_at) AS completed_at
+            _COMPLETED_ATTEMPTS_SQL.format(extra_columns="", document_filter="a.document_id = ?"),
+            (FLASHCARD_WRITTEN_PLANNER_VERSION, owner_id, document_id),
+        ).fetchall()
+    return {"quizzes": quizzes, "completed_attempts": [dict(row) for row in completed_attempts]}
+
+
+# Completed attempts on the owner's active assessment quizzes of a document, newest first.
+_COMPLETED_ATTEMPTS_SQL = """SELECT a.attempt_id, a.quiz_id, a.score, a.total, a.percentage,
+                      COALESCE(a.completed_at, a.submitted_at, a.updated_at) AS completed_at{extra_columns}
                FROM quiz_attempts a
                JOIN quizzes q ON q.quiz_id = a.quiz_id AND q.owner_id = a.student_id
                              AND q.document_id = a.document_id AND q.is_active = 1
                              AND q.benchmark_id IS NULL AND q.planner_version != ?
-               WHERE a.student_id = ? AND a.document_id = ? AND a.completed = 1
-               ORDER BY COALESCE(a.completed_at, a.submitted_at, a.updated_at) DESC, a.attempt_id DESC""",
-            (FLASHCARD_WRITTEN_PLANNER_VERSION, owner_id, document_id),
+               WHERE a.student_id = ? AND {document_filter} AND a.completed = 1
+               ORDER BY COALESCE(a.completed_at, a.submitted_at, a.updated_at) DESC, a.attempt_id DESC"""
+
+
+def list_completed_attempts_by_document(owner_id: str, document_ids: list[str]) -> dict[str, list[dict]]:
+    """get_document_quiz_activity(...)["completed_attempts"] for several documents in ONE read,
+    keyed by document_id (same rows, same newest-first order; documents without any are absent)."""
+    document_ids = list(dict.fromkeys(document_ids))
+    if not document_ids:
+        return {}
+    initialize_quiz_store()
+    with _connect(autocommit=True) as connection:  # one read: no BEGIN/COMMIT round trips
+        rows = connection.execute(
+            _COMPLETED_ATTEMPTS_SQL.format(
+                extra_columns=", a.document_id AS attempt_document_id",
+                document_filter=f"a.document_id IN ({','.join('?' * len(document_ids))})",
+            ),
+            (FLASHCARD_WRITTEN_PLANNER_VERSION, owner_id, *document_ids),
         ).fetchall()
-    return {"quizzes": quizzes, "completed_attempts": [dict(row) for row in completed_attempts]}
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        attempt = dict(row)
+        grouped.setdefault(attempt.pop("attempt_document_id"), []).append(attempt)
+    return grouped

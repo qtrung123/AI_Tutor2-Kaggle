@@ -14,6 +14,8 @@ from config import ADMIN_EMAILS, AUTH_SESSION_DAYS, DATABASE_PATH, LEGACY_USER_E
 LEGACY_USER_ID = "local_student"
 _password_hasher = PasswordHasher()
 _dummy_hash = _password_hasher.hash("not-a-real-user-password")
+# last_seen_at is refreshed at most this often, so most authenticated requests write nothing.
+_SESSION_TOUCH_INTERVAL = timedelta(seconds=60)
 
 _SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -64,9 +66,9 @@ CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expi
 """
 
 
-def _connect() -> db.Connection:
+def _connect(autocommit: bool = False) -> db.Connection:
     """Auth tables live in PostgreSQL when DATABASE_URL is set, otherwise in the SQLite file."""
-    return db.connect(DATABASE_PATH)
+    return db.connect(DATABASE_PATH, autocommit=autocommit)
 
 
 def utc_now() -> datetime:
@@ -164,23 +166,38 @@ def create_session(user_id: str) -> tuple[str, dict]:
     return raw_token, session
 
 
+def _session_touch_due(last_seen_at: str | None, now: datetime) -> bool:
+    if not last_seen_at:
+        return True
+    try:
+        seen = datetime.fromisoformat(str(last_seen_at))
+    except ValueError:
+        return True
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    return now - seen >= _SESSION_TOUCH_INTERVAL
+
+
 def get_user_for_session(raw_token: str | None) -> dict | None:
+    """Runs on every authenticated request. Autocommit: the lookup is one statement and the
+    optional last_seen_at refresh another, so neither needs BEGIN/COMMIT round trips."""
     if not raw_token:
         return None
     initialize_auth_store()
     token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-    now = utc_now().isoformat()
-    with _connect() as connection:
+    now = utc_now()
+    now_iso = now.isoformat()
+    with _connect(autocommit=True) as connection:
         row = connection.execute(
             """
-            SELECT u.* FROM auth_sessions s JOIN users u ON u.id = s.user_id
+            SELECT u.*, s.last_seen_at AS session_last_seen_at FROM auth_sessions s JOIN users u ON u.id = s.user_id
             WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND u.disabled_at IS NULL
             """,
-            (token_hash, now),
+            (token_hash, now_iso),
         ).fetchone()
-        if row:
+        if row and _session_touch_due(row["session_last_seen_at"], now):
             connection.execute(
-                "UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?", (now, token_hash)
+                "UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?", (now_iso, token_hash)
             )
     return _public_user(row) if row else None
 

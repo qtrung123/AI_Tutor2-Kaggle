@@ -6,8 +6,8 @@ from backend.auth_store import LEGACY_USER_ID, initialize_auth_store
 from config import DATABASE_PATH, INDEXED_FILES_PATH
 
 
-def _connect() -> db.Connection:
-    return db.connect(DATABASE_PATH)
+def _connect(autocommit: bool = False) -> db.Connection:
+    return db.connect(DATABASE_PATH, autocommit=autocommit)
 
 
 def _now() -> str:
@@ -88,7 +88,7 @@ def _initialize_schema(connection: db.Connection) -> None:
 
 def list_indexed_documents(owner_id: str) -> list[dict]:
     initialize_indexed_document_store()
-    with _connect() as connection:
+    with _connect(autocommit=True) as connection:  # one read: no BEGIN/COMMIT round trips
         rows = connection.execute(
             "SELECT * FROM indexed_documents WHERE owner_id = ? ORDER BY updated_at DESC, document_id",
             (owner_id,),
@@ -119,7 +119,12 @@ def list_stale_topic_documents(current_topic_schema_version: int) -> list[dict]:
 
 
 def get_indexed_document(owner_id: str, document_id: str) -> dict | None:
-    return next((item for item in list_indexed_documents(owner_id) if item["document_id"] == document_id), None)
+    initialize_indexed_document_store()
+    with _connect(autocommit=True) as connection:  # one keyed read instead of the owner's whole list
+        row = connection.execute(
+            "SELECT * FROM indexed_documents WHERE owner_id = ? AND document_id = ?", (owner_id, document_id),
+        ).fetchone()
+    return _row_to_document(row) if row else None
 
 
 def upsert_indexed_document(owner_id: str, document_id: str, info: dict) -> dict:

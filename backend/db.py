@@ -13,7 +13,9 @@ Stores keep writing SQLite-flavoured SQL; on PostgreSQL this module adapts it:
 
 ``connect()`` returns a connection that is also a context manager with sqlite3's contract: commit
 on success, roll back on error, then close. PostgreSQL connections come from a small pool that
-health-checks a connection before handing it out, so nothing stale is reused. Schema DDL runs once
+health-checks a connection before handing it out unless it was returned healthy moments ago, so
+nothing stale is reused without paying a server round trip on every request. ``connect(...,
+autocommit=True)`` serves read-only units without BEGIN/COMMIT round trips. Schema DDL runs once
 per process (ensure_schema) under an advisory lock. DATABASE_URL and driver connection errors
 (which can name the host and user) are never printed.
 """
@@ -25,7 +27,9 @@ import re
 import sqlite3
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterable, Mapping
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +39,10 @@ SQLITE = "sqlite"
 _POSTGRES_SCHEMES = {"postgres", "postgresql"}
 _POSTGRES_CONNECT_TIMEOUT_SECONDS = 10
 _POOL_MAX_SIZE = max(1, int(os.getenv("AI_TUTOR_DB_POOL_MAX_SIZE", "5")))
+# A pooled connection returned healthy within this many seconds is handed out again without the
+# pool's server round trip health check; an older (or suspect) one is still checked. 0 = always check.
+_RECHECK_IDLE_SECONDS = max(0.0, float(os.getenv("AI_TUTOR_DB_RECHECK_IDLE_SECONDS", "30")))
+_RELEASED_AT = "_ai_tutor_released_at"  # attribute stamped on a raw psycopg connection when returned
 # Transaction-scoped advisory lock keys (arbitrary constants, unique to this app).
 _SCHEMA_LOCK_KEY = 7241001
 _WRITE_LOCK_KEY = 7241002
@@ -215,6 +223,48 @@ def _adapt_params(params):
     return tuple(_adapt_value(value) for value in params)
 
 
+# -- opt-in per-request statistics -------------------------------------------------------------
+
+class RequestStats:
+    """Counters for one HTTP request (backend/perf_timing.py). Only counts and durations are kept:
+    never SQL text, parameters or results."""
+
+    __slots__ = ("units", "statements", "wait_seconds", "db_seconds")
+
+    def __init__(self):
+        self.units = 0             # connect() calls (units of work)
+        self.statements = 0        # execute / executemany / executescript / begin_immediate calls
+        self.wait_seconds = 0.0    # opening a unit: pool acquisition (+ health check) or SQLite open
+        self.db_seconds = 0.0      # statements plus commit/rollback
+
+
+_request_stats: ContextVar[RequestStats | None] = ContextVar("ai_tutor_db_request_stats", default=None)
+
+
+def start_request_stats() -> tuple[RequestStats, Any]:
+    """Collect statistics for the current context (and the threadpool calls it spawns, which copy
+    the context). Returns the stats object and the token for stop_request_stats()."""
+    stats = RequestStats()
+    return stats, _request_stats.set(stats)
+
+
+def stop_request_stats(token) -> None:
+    _request_stats.reset(token)
+
+
+def _measured(statement: bool, call: Callable[[], Any]) -> Any:
+    stats = _request_stats.get()
+    if stats is None:
+        return call()
+    started = time.perf_counter()
+    try:
+        return call()
+    finally:
+        stats.db_seconds += time.perf_counter() - started
+        if statement:
+            stats.statements += 1
+
+
 # -- connections ------------------------------------------------------------------------------
 
 class Connection:
@@ -222,9 +272,10 @@ class Connection:
     roll back on error, close), or call commit()/rollback()/close() explicitly."""
 
     def __init__(self, raw: Any, backend: str, integrity_errors: tuple[type[BaseException], ...],
-                 release: Callable[[Any], None]):
+                 release: Callable[[Any], None], autocommit: bool = False):
         self._raw = raw
         self.backend = backend
+        self.autocommit = autocommit
         self._integrity_errors = integrity_errors
         self._integrity_error = _SQLiteIntegrityError if backend == SQLITE else IntegrityError
         self._release = release
@@ -237,6 +288,9 @@ class Connection:
         return to_pyformat(sql, named=isinstance(params, Mapping))
 
     def execute(self, sql: str, params: Any = ()) -> Any:
+        return _measured(True, lambda: self._execute(sql, params))
+
+    def _execute(self, sql: str, params: Any) -> Any:
         try:
             if self.backend == POSTGRES:
                 return self._raw.execute(self._sql(sql, params), _adapt_params(params))
@@ -246,6 +300,9 @@ class Connection:
 
     def executemany(self, sql: str, seq_of_params: Iterable[Any]) -> None:
         rows = list(seq_of_params)
+        _measured(True, lambda: self._executemany(sql, rows))
+
+    def _executemany(self, sql: str, rows: list) -> None:
         try:
             if self.backend == POSTGRES:
                 if rows:
@@ -259,6 +316,9 @@ class Connection:
     def executescript(self, sql: str) -> None:
         """Run several parameterless DDL statements. On SQLite this commits first (sqlite3's own
         behaviour); on PostgreSQL it runs inside the current transaction."""
+        _measured(True, lambda: self._executescript(sql))
+
+    def _executescript(self, sql: str) -> None:
         try:
             if self.backend == POSTGRES:
                 # Without parameters psycopg sends the text as-is and allows several statements.
@@ -273,16 +333,18 @@ class Connection:
 
         SQLite: BEGIN IMMEDIATE takes the database-wide write lock. PostgreSQL: a transaction-scoped
         advisory lock gives the same serialization; it is released at commit or rollback."""
+        if self.autocommit:
+            raise DatabaseError("begin_immediate() needs a transaction; open the connection without autocommit.")
         if self.backend == POSTGRES:
-            self._raw.execute("SELECT pg_advisory_xact_lock(%s)", (_WRITE_LOCK_KEY,))
+            _measured(True, lambda: self._raw.execute("SELECT pg_advisory_xact_lock(%s)", (_WRITE_LOCK_KEY,)))
         else:
-            self._raw.execute("BEGIN IMMEDIATE")
+            _measured(True, lambda: self._raw.execute("BEGIN IMMEDIATE"))
 
     def commit(self) -> None:
-        self._raw.commit()
+        _measured(False, self._raw.commit)
 
     def rollback(self) -> None:
-        self._raw.rollback()
+        _measured(False, self._raw.rollback)
 
     def close(self) -> None:
         if self._closed:
@@ -368,6 +430,27 @@ def _diagnose_connect_failure(url: str) -> str:
     return ""
 
 
+def _released_recently(raw) -> bool:
+    """True when ``raw`` was returned to the pool moments ago and still looks healthy locally.
+
+    Only client-side state is read (no server round trip): an idle, open, unbroken connection that
+    was in use within _RECHECK_IDLE_SECONDS. A connection the server dropped in that window fails
+    on its first statement, exactly as it could right after a successful check."""
+    released_at = getattr(raw, _RELEASED_AT, None)
+    if released_at is None or _RECHECK_IDLE_SECONDS <= 0 or time.monotonic() - released_at > _RECHECK_IDLE_SECONDS:
+        return False
+    from psycopg.pq import TransactionStatus
+
+    return not raw.closed and not raw.broken and raw.info.transaction_status == TransactionStatus.IDLE
+
+
+def _check_pooled_connection(full_check: Callable[[Any], None]) -> Callable[[Any], None]:
+    def check(raw) -> None:
+        if not _released_recently(raw):
+            full_check(raw)
+    return check
+
+
 def _configure_postgres_connection(raw) -> None:
     from psycopg.types.numeric import FloatLoader
 
@@ -397,7 +480,7 @@ def _create_pool(url: str):
             "prepare_threshold": None,
         },
         configure=_configure_postgres_connection,
-        check=ConnectionPool.check_connection,
+        check=_check_pooled_connection(ConnectionPool.check_connection),
         min_size=1,
         max_size=_POOL_MAX_SIZE,
         timeout=15,
@@ -421,7 +504,7 @@ def _create_pool(url: str):
     return pool
 
 
-def _postgres_connection(url: str) -> Connection:
+def _postgres_connection(url: str, autocommit: bool = False) -> Connection:
     with _pools_lock:
         pool = _pools.get(url)
         if pool is None:
@@ -433,17 +516,51 @@ def _postgres_connection(url: str) -> Connection:
 
     import psycopg
 
-    return Connection(raw, POSTGRES, (psycopg.IntegrityError,), pool.putconn)
+    if autocommit:
+        try:
+            raw.autocommit = True  # client-side switch on an idle connection: no round trip
+        except Exception:
+            pool.putconn(raw)
+            raise
+
+    def release(connection) -> None:
+        try:
+            if connection.autocommit:
+                connection.autocommit = False
+        except Exception:
+            # Never hand an autocommit connection back: the next unit of work would lose atomicity.
+            try:
+                connection.close()
+            except Exception:
+                pass
+        else:
+            setattr(connection, _RELEASED_AT, time.monotonic())
+        pool.putconn(connection)
+
+    return Connection(raw, POSTGRES, (psycopg.IntegrityError,), release, autocommit)
 
 
-def connect(sqlite_path: Path | str, backend: str | None = None) -> Connection:
+def connect(sqlite_path: Path | str, backend: str | None = None, autocommit: bool = False) -> Connection:
     """Open the selected database. ``sqlite_path`` is used when SQLite is selected; ``backend``
-    forces one backend."""
+    forces one backend.
+
+    ``autocommit=True`` is for units that only read, or that run independent single-statement
+    writes: on PostgreSQL each statement commits on its own, saving the BEGIN and COMMIT round
+    trips. At the default READ COMMITTED isolation every statement already sees its own snapshot,
+    so reads behave exactly as inside a transaction. Units whose statements must succeed or fail
+    together keep the default. SQLite keeps its usual transactions (local, no round trips to save)
+    but records the flag, so begin_immediate() is refused on both backends alike."""
     selected = backend or selected_backend()
+    stats = _request_stats.get()
+    started = time.perf_counter() if stats is not None else 0.0
     if selected == POSTGRES:
-        connection = _postgres_connection(database_url())
+        connection = _postgres_connection(database_url(), autocommit)
     else:
         connection = _sqlite_connection(Path(sqlite_path))
+        connection.autocommit = autocommit
+    if stats is not None:
+        stats.units += 1
+        stats.wait_seconds += time.perf_counter() - started
     if backend is None:
         _announce(selected, "[db] backend=postgres connected" if selected == POSTGRES else "[db] backend=sqlite")
     return connection

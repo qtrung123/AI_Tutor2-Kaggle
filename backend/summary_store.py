@@ -9,8 +9,8 @@ from backend.auth_store import initialize_auth_store
 from config import DATABASE_PATH
 
 
-def _connect() -> db.Connection:
-    return db.connect(DATABASE_PATH)
+def _connect(autocommit: bool = False) -> db.Connection:
+    return db.connect(DATABASE_PATH, autocommit=autocommit)
 
 
 _SCHEMA = """
@@ -124,7 +124,7 @@ def get_latest_summary_info(owner_id: str, document_id: str, document_hash: str,
     generated from the document's CURRENT content/topic schema/summary format, by any model.
     Never loads the summary body."""
     initialize_summary_store()
-    with _connect() as connection:
+    with _connect(autocommit=True) as connection:  # one read: no BEGIN/COMMIT round trips
         row = connection.execute(
             """
             SELECT summary_id, model_id, created_at FROM document_summaries

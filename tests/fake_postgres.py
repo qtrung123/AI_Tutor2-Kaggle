@@ -5,8 +5,14 @@ enforces psycopg's calling conventions -- %s / %(name)s placeholders and %% esca
 ? or :name rejected, no Python bools as parameters (the schema stores INTEGER 0/1 flags) -- applies
 the row factory db.py passes in, and raises its own IntegrityError. It checks wiring and SQL shape,
 not PostgreSQL semantics: tests/test_postgres_persistence.py runs against a real server for that.
+
+It also models psycopg's network round trips the way the real driver issues them, in
+``FakePsycopg.round_trips``: the pool's health check (an empty query), the implicit BEGIN before
+the first statement of a non-autocommit transaction, each statement, and COMMIT/ROLLBACK only
+when a transaction is open.
 """
 
+import enum
 import re
 import sqlite3
 import sys
@@ -106,6 +112,23 @@ class FakeCursor:
         return False
 
 
+class TransactionStatus(enum.IntEnum):
+    IDLE = 0
+    ACTIVE = 1
+    INTRANS = 2
+    INERROR = 3
+    UNKNOWN = 4
+
+
+class _Info:
+    def __init__(self, connection: "FakePostgresConnection"):
+        self._connection = connection
+
+    @property
+    def transaction_status(self) -> TransactionStatus:
+        return TransactionStatus.INTRANS if self._connection._in_transaction else TransactionStatus.IDLE
+
+
 class _Adapters:
     def __init__(self):
         self.loaders: dict[str, object] = {}
@@ -115,16 +138,36 @@ class _Adapters:
 
 
 class FakePostgresConnection:
-    def __init__(self, backing_path: Path, statements: list[str], row_factory):
+    def __init__(self, backing_path: Path, statements: list[str], row_factory, round_trips: list[str] | None = None):
         self._db = sqlite3.connect(backing_path, check_same_thread=False)
         self._db.execute("PRAGMA foreign_keys = ON")
         self._db.create_function("pg_advisory_xact_lock", 1, lambda key: None)
         self._statements = statements
+        self._round_trips = [] if round_trips is None else round_trips
         self._row_factory = row_factory
+        self._autocommit = False
+        self._in_transaction = False
         self.adapters = _Adapters()
+        self.info = _Info(self)
         self.closed = False
+        self.broken = False
+
+    @property
+    def autocommit(self) -> bool:
+        return self._autocommit
+
+    @autocommit.setter
+    def autocommit(self, value: bool) -> None:
+        if self._in_transaction:
+            raise Error("can't change 'autocommit' now: connection in transaction status INTRANS")
+        self._autocommit = bool(value)
+        self._db.isolation_level = None if self._autocommit else ""
 
     def _run(self, query, params):
+        if not self._autocommit and not self._in_transaction:
+            self._round_trips.append("BEGIN")
+            self._in_transaction = True
+        self._round_trips.append("statement")
         self._statements.append(query)
         try:
             if params is None:
@@ -153,9 +196,15 @@ class FakePostgresConnection:
         return cursor
 
     def commit(self):
+        if self._in_transaction:
+            self._round_trips.append("COMMIT")
+            self._in_transaction = False
         self._db.commit()
 
     def rollback(self):
+        if self._in_transaction:
+            self._round_trips.append("ROLLBACK")
+            self._in_transaction = False
         self._db.rollback()
 
     def close(self):
@@ -166,10 +215,12 @@ class FakePostgresConnection:
 class FakePsycopg:
     """The fake modules plus what tests inspect: executed statements, connect() and pool calls."""
 
-    def __init__(self, backing_path: Path, connect_error: Exception | None = None):
+    def __init__(self, backing_path: Path, connect_error: Exception | None = None, reuse_connections: bool = False):
         self.backing_path = Path(backing_path)
         self.connect_error = connect_error
+        self.reuse_connections = reuse_connections  # keep returned connections idle, like a real pool
         self.statements: list[str] = []
+        self.round_trips: list[str] = []
         self.connect_calls: list[dict] = []
         self.pools: list["FakePsycopg._Pool"] = []
 
@@ -184,13 +235,20 @@ class FakePsycopg:
         self.numeric.FloatLoader = object()
         self.module.types = self.types
         self.types.numeric = self.numeric
+        self.pq = types.ModuleType("psycopg.pq")
+        self.pq.TransactionStatus = TransactionStatus
+        self.module.pq = self.pq
 
         class _Pool:
-            check_connection = staticmethod(lambda connection: None)
+            @staticmethod
+            def check_connection(connection):
+                # psycopg_pool's check: an empty query in autocommit, one server round trip.
+                fake.round_trips.append("check")
 
             def __init__(self, conninfo, kwargs=None, configure=None, **options):
                 self.conninfo, self.kwargs, self.configure, self.options = conninfo, kwargs or {}, configure, options
                 self.open_connections: list[FakePostgresConnection] = []
+                self.idle: list[FakePostgresConnection] = []
                 self.closed = False
                 fake.pools.append(self)
 
@@ -199,18 +257,31 @@ class FakePsycopg:
                     raise PoolTimeout("pool initialization incomplete after 20.0 sec")
 
             def getconn(self, timeout=None):
-                connection = fake._connect(self.conninfo, **self.kwargs)
-                if self.configure:
-                    self.configure(connection)
-                self.open_connections.append(connection)
+                if self.idle:
+                    connection = self.idle.pop()
+                else:
+                    connection = fake._connect(self.conninfo, **self.kwargs)
+                    if self.configure:
+                        self.configure(connection)
+                    self.open_connections.append(connection)
+                check = self.options.get("check")
+                if check:
+                    check(connection)
                 return connection
 
             def putconn(self, connection):
+                if connection.closed:
+                    return
                 connection.rollback()
-                connection.close()
+                if fake.reuse_connections and not connection.broken:
+                    self.idle.append(connection)
+                else:
+                    connection.close()
 
             def close(self):
                 self.closed = True
+                while self.idle:
+                    self.idle.pop().close()
 
         self.pool_module = types.ModuleType("psycopg_pool")
         self.pool_module.ConnectionPool = _Pool
@@ -220,13 +291,13 @@ class FakePsycopg:
         self.connect_calls.append({"conninfo": conninfo, **kwargs})
         if self.connect_error is not None:
             raise self.connect_error
-        return FakePostgresConnection(self.backing_path, self.statements, kwargs.get("row_factory"))
+        return FakePostgresConnection(self.backing_path, self.statements, kwargs.get("row_factory"), self.round_trips)
 
     @contextmanager
     def installed(self, database_url: str):
         from backend import db
 
-        modules = {"psycopg": self.module, "psycopg.types": self.types,
+        modules = {"psycopg": self.module, "psycopg.types": self.types, "psycopg.pq": self.pq,
                    "psycopg.types.numeric": self.numeric, "psycopg_pool": self.pool_module}
         with patch.dict(sys.modules, modules), patch.dict("os.environ", {"DATABASE_URL": database_url}), \
                 patch.object(db, "_pools", {}), patch.object(db, "_schema_ready", set()):

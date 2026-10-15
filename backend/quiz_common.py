@@ -6,7 +6,7 @@ backend/quiz_attempt_service.py (attempt lifecycle) so neither service imports t
 """
 from backend.auth_store import LEGACY_USER_ID
 from backend.indexed_document_store import list_indexed_documents as load_owned_documents
-from backend.quiz_store import invalidate_document_quizzes_for_topic_schema
+from backend.quiz_store import documents_needing_topic_schema_invalidation, invalidate_document_quizzes_for_topic_schema
 
 
 QUIZ_DIFFICULTIES = {"easy", "medium", "difficult"}
@@ -22,12 +22,14 @@ def list_indexed_documents(owner_id: str = LEGACY_USER_ID) -> list[dict]:
 
     The hash is included internally so generated quizzes can remember which
     exact uploaded file version they belong to.
+
+    Quizzes built for an older topic map are invalidated here, but only for the documents that
+    still have such rows: one read finds them, so a plain listing performs no writes.
     """
     indexed_files = _load_indexed_files(owner_id)
-    for file_name, info in indexed_files.items():
-        invalidate_document_quizzes_for_topic_schema(
-            file_name, int(info.get("topic_schema_version", 0)), owner_id
-        )
+    versions = {file_name: int(info.get("topic_schema_version", 0)) for file_name, info in indexed_files.items()}
+    for file_name in sorted(documents_needing_topic_schema_invalidation(owner_id, versions)):
+        invalidate_document_quizzes_for_topic_schema(file_name, versions[file_name], owner_id)
     return [
         {
             "id": file_name,

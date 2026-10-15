@@ -40,10 +40,11 @@ def learning_dashboard(current_user: dict = Depends(require_current_user)) -> di
         dashboard = build_learning_dashboard(current_user["id"])
         dashboard["subjects"] = group_documents_into_subjects(dashboard.get("materials") or [])
         # Current quiz performance: latest completed quiz per assessed document (unassessed ones left out).
-        dashboard["metrics"]["current_quiz_performance"] = study_progress.current_quiz_performance({
-            row["document_id"]: study_progress.latest_quiz_percentage(current_user["id"], row["document_id"])
-            for row in dashboard.get("materials") or []
-        })
+        dashboard["metrics"]["current_quiz_performance"] = study_progress.current_quiz_performance(
+            study_progress.latest_quiz_percentages(
+                current_user["id"], [row["document_id"] for row in dashboard.get("materials") or []],
+            )
+        )
         return dashboard
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Could not load dashboard: {error}") from error

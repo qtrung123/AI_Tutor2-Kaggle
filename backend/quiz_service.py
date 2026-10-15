@@ -12,7 +12,7 @@ from backend.quiz_store import (
     get_latest_attempt,
     get_quiz,
     list_document_quizzes,
-    list_completed_answer_snapshots,
+    list_completed_answer_snapshots_by_topic,
     list_quiz_history as load_quiz_history,
     invalidate_document_quizzes_for_topic_schema,
     quiz_cache_key,
@@ -800,10 +800,12 @@ def list_quiz_statuses(owner_id: str = LEGACY_USER_ID) -> list[dict]:
 def build_learning_dashboard(student_id: str = LEGACY_USER_ID) -> dict:
     """Aggregate real indexed-document, attempt, and mastery state for Overview."""
     documents = list_indexed_documents(student_id)
+    # Every topic's answer evidence in one read (same rows list_completed_answer_snapshots returns).
+    snapshots = list_completed_answer_snapshots_by_topic(student_id, [document["id"] for document in documents])
     mastery_rows = []
     for document in documents:
         for topic in document.get("topics", []):
-            history = list_completed_answer_snapshots(student_id, document["id"], topic["topic_id"])
+            history = snapshots.get((document["id"], topic["topic_id"]), [])
             mastery = {
                 "student_id": student_id,
                 "document_id": document["id"],

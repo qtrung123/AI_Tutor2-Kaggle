@@ -13,8 +13,8 @@ from backend.study_time import merge_minute_intervals, subtract_minute_interval,
 from config import DATABASE_PATH
 
 
-def _connect() -> db.Connection:
-    return db.connect(DATABASE_PATH)
+def _connect(autocommit: bool = False) -> db.Connection:
+    return db.connect(DATABASE_PATH, autocommit=autocommit)
 
 
 def utc_now_iso() -> str:
@@ -1399,7 +1399,7 @@ def list_sessions(owner_id: str, plan_id: str | None = None, document_id: str | 
     if start_before:
         clauses.append("scheduled_start < ?")
         params.append(start_before)
-    with _connect() as connection:
+    with _connect(autocommit=True) as connection:  # one read: no BEGIN/COMMIT round trips
         rows = connection.execute(
             f"SELECT * FROM study_sessions WHERE {' AND '.join(clauses)} ORDER BY scheduled_start, session_id",
             params,
