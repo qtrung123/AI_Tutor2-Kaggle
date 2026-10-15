@@ -1,6 +1,9 @@
+import threading
+import time
+from contextlib import closing
 from pathlib import Path
 
-from backend import vector_store
+from backend import perf_timing, vector_store
 from backend.conversation_store import (
     add_message,
     get_conversation,
@@ -11,6 +14,8 @@ from backend.ingest import migrate_legacy_vector_ownership
 
 from config import (
     CHAT_MODEL,
+    CHAT_NUM_CTX,
+    GENERATION_KEEP_ALIVE,
     PROMPT_PATH,
     TOP_K,
 )
@@ -161,31 +166,16 @@ def default_conversation_title(message: str, limit: int = 60) -> str:
     return cut.rstrip(" ,.;:-") + "…"
 
 
-def answer_conversation_message(owner_id: str, conversation_id: str, message: str, model_id: str | None = None) -> dict:
-    """Answer and persist one message in a source-isolated conversation."""
-    model = resolve_generation_model(model_id)
-    conversation = get_conversation(owner_id, conversation_id, include_messages=True)
-    user_message = add_message(owner_id, conversation_id, "user", message.strip())
+NO_MATERIAL_ANSWER = "I don't know based on the provided documents. Select at least one material for this conversation."
+NO_CONTEXT_ANSWER = "I don't know based on the provided documents."
 
-    existing_messages = conversation.get("messages", [])
-    if conversation["title"] == "New conversation" and not existing_messages:
-        update_conversation_title(owner_id, conversation_id, default_conversation_title(message))
 
+def _answer_inputs(owner_id: str, conversation: dict, existing_messages: list[dict], message: str):
+    """(fixed answer, retrieved docs, prompt): a fixed answer when there is no material or no
+    relevant chunk (prompt None), else the RAG prompt for the model. Shared by both chat APIs."""
     document_id = conversation.get("document_id")
     if not document_id:
-        answer = "I don't know based on the provided documents. Select at least one material for this conversation."
-        assistant_message = add_message(
-            owner_id, conversation_id, "assistant", answer, "insufficient_context", []
-        )
-        return {
-            "user_message": user_message,
-            "assistant_message": assistant_message,
-            "answer": answer,
-            "model": model,
-            "grounding_status": "insufficient_context",
-            "citations": [],
-        }
-
+        return NO_MATERIAL_ANSWER, [], None
     recent_user_text = " ".join(
         item["content"] for item in existing_messages[-4:] if item["role"] == "user"
     )
@@ -197,40 +187,55 @@ def answer_conversation_message(owner_id: str, conversation_id: str, message: st
         and (getattr(doc, "metadata", {}) or {}).get("document_id") == document_id
     ]
     if not docs:
-        answer = "I don't know based on the provided documents."
-        citations = []
-        grounding_status = "insufficient_context"
-    else:
-        final_prompt = load_prompt_template().format(
-            context=format_docs(docs),
-            conversation_history=_history_for_prompt(existing_messages),
-            question=message.strip(),
-        )
-        response = ChatOllama(model=model, temperature=0).invoke(final_prompt)
-        answer = str(response.content).strip()
-        citations = _build_citations(docs)
-        grounding_status = (
-            "insufficient_context"
-            if "don't know based on the provided documents" in answer.lower()
-            else "supported"
-        )
-
-    stored_citations = [
-        {
-            **citation,
-            "document_id": citation["title"],
-            "chunk": "",
-        }
-        for citation in citations
-    ]
-    assistant_message = add_message(
-        owner_id,
-        conversation_id,
-        "assistant",
-        answer,
-        grounding_status,
-        stored_citations,
+        return NO_CONTEXT_ANSWER, [], None
+    prompt = load_prompt_template().format(
+        context=format_docs(docs),
+        conversation_history=_history_for_prompt(existing_messages),
+        question=message.strip(),
     )
+    return None, docs, prompt
+
+
+def _chat_model(model: str):
+    # Same context window and residency as the Quiz calls, so Qwen is not reloaded between them.
+    return ChatOllama(model=model, temperature=0, num_ctx=CHAT_NUM_CTX, keep_alive=GENERATION_KEEP_ALIVE)
+
+
+def _grounding_status(answer: str) -> str:
+    return "insufficient_context" if "don't know based on the provided documents" in answer.lower() else "supported"
+
+
+def _save_assistant_answer(owner_id: str, conversation_id: str, answer: str, docs: list) -> tuple[dict, str, list]:
+    """Persist the assistant message with its citations: (message, grounding status, citations)."""
+    citations = _build_citations(docs)
+    grounding_status = _grounding_status(answer)
+    stored_citations = [{**citation, "document_id": citation["title"], "chunk": ""} for citation in citations]
+    assistant_message = add_message(owner_id, conversation_id, "assistant", answer, grounding_status, stored_citations)
+    return assistant_message, grounding_status, citations
+
+
+def _set_first_title(owner_id: str, conversation_id: str, conversation: dict, existing_messages: list, message: str):
+    if conversation["title"] == "New conversation" and not existing_messages:
+        update_conversation_title(owner_id, conversation_id, default_conversation_title(message))
+
+
+def answer_conversation_message(owner_id: str, conversation_id: str, message: str, model_id: str | None = None) -> dict:
+    """Answer and persist one message in a source-isolated conversation."""
+    model = resolve_generation_model(model_id)
+    conversation = get_conversation(owner_id, conversation_id, include_messages=True)
+    user_message = add_message(owner_id, conversation_id, "user", message.strip())
+
+    existing_messages = conversation.get("messages", [])
+    _set_first_title(owner_id, conversation_id, conversation, existing_messages, message)
+
+    answer, docs, prompt = _answer_inputs(owner_id, conversation, existing_messages, message)
+    if prompt is not None:
+        started = time.perf_counter()
+        response = _chat_model(model).invoke(prompt)
+        perf_timing.log_llm_call("chat", response, time.perf_counter() - started)
+        answer = str(response.content).strip()
+
+    assistant_message, grounding_status, citations = _save_assistant_answer(owner_id, conversation_id, answer, docs)
     return {
         "user_message": user_message,
         "assistant_message": assistant_message,
@@ -239,6 +244,67 @@ def answer_conversation_message(owner_id: str, conversation_id: str, message: st
         "grounding_status": grounding_status,
         "citations": citations,
     }
+
+
+def stream_conversation_message(owner_id: str, conversation_id: str, message: str, model_id: str | None = None,
+                                cancelled: threading.Event | None = None):
+    """The streaming twin of answer_conversation_message. Validates eagerly (an unknown model or
+    conversation raises ValueError here, before any event), then returns a generator of events:
+
+        {"type": "start", "model": ...}
+        {"type": "delta", "text": ...}       (zero or more, in order: the answer as it is generated)
+        {"type": "done", ...}                (the same payload answer_conversation_message returns)
+
+    Nothing is persisted until the model has finished: the user message, the title of a new chat
+    and the assistant message with its citations are saved together right before "done". When
+    `cancelled` is set (the client went away) or the generator is closed early, it stops reading
+    the model stream -- which closes the request to Ollama/vLLM -- and saves nothing. Model errors
+    propagate to the caller, also with nothing saved."""
+    model = resolve_generation_model(model_id)
+    conversation = get_conversation(owner_id, conversation_id, include_messages=True)
+    text = message.strip()
+
+    def stopped() -> bool:
+        return cancelled is not None and cancelled.is_set()
+
+    def events():
+        yield {"type": "start", "model": model}
+        existing_messages = conversation.get("messages", [])
+        answer, docs, prompt = _answer_inputs(owner_id, conversation, existing_messages, text)
+        if prompt is None:
+            yield {"type": "delta", "text": answer}
+        else:
+            parts, last, first_token = [], None, None
+            started = time.perf_counter()
+            with closing(_chat_model(model).stream(prompt)) as chunks:
+                for chunk in chunks:
+                    if stopped():
+                        return
+                    last = chunk
+                    piece = str(chunk.content or "")
+                    if piece:
+                        first_token = first_token or time.perf_counter()
+                        parts.append(piece)
+                        yield {"type": "delta", "text": piece}
+            perf_timing.log_llm_call("chat_stream", last, time.perf_counter() - started,
+                                     first_token_ms=round((first_token - started) * 1000, 1) if first_token else None)
+            answer = "".join(parts).strip()
+        if stopped():
+            return
+        user_message = add_message(owner_id, conversation_id, "user", text)
+        _set_first_title(owner_id, conversation_id, conversation, existing_messages, text)
+        assistant_message, grounding_status, citations = _save_assistant_answer(owner_id, conversation_id, answer, docs)
+        yield {
+            "type": "done",
+            "user_message": user_message,
+            "assistant_message": assistant_message,
+            "answer": answer,
+            "model": model,
+            "grounding_status": grounding_status,
+            "citations": citations,
+        }
+
+    return events()
 
 
 def explain_quiz_answer(
@@ -280,8 +346,11 @@ Do not mention retrieval, chunks, or these instructions. Do not use outside know
 COURSE MATERIAL CONTEXT:
 {format_docs(docs)}
 """.strip()
-    llm = ChatOllama(model=CHAT_MODEL, temperature=0, num_ctx=4096, num_predict=220)
+    llm = ChatOllama(model=CHAT_MODEL, temperature=0, num_ctx=CHAT_NUM_CTX, num_predict=220,
+                     keep_alive=GENERATION_KEEP_ALIVE)
+    started = time.perf_counter()
     response = llm.invoke(prompt)
+    perf_timing.log_llm_call("quiz_explanation", response, time.perf_counter() - started)
     return {
         "explanation": str(response.content).strip(),
         "model": CHAT_MODEL,

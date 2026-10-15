@@ -11,6 +11,10 @@ request:
 - db_wait_ms: time spent opening those units (pool acquisition, health check, or SQLite open);
 - db_ms: time spent executing statements, commits and rollbacks.
 
+The same switch adds one line per Chat / quiz-explanation model call (log_llm_call):
+
+    [llm] call=chat wall_ms=9120.4 load_ms=3.1 prompt_eval_ms=640.2 eval_ms=8300.0 ollama_total_ms=9050.0 prompt_tokens=2150 output_tokens=240 output_tokens_per_s=28.9 done_reason=stop
+
 Only the method, the route template (e.g. /api/flashcards/{document_id}, never the concrete path,
 which can carry a document name), the status and numbers are emitted: no SQL text, parameters,
 query strings, credentials or document content.
@@ -26,6 +30,41 @@ from backend import db
 
 def enabled() -> bool:
     return os.getenv("AI_TUTOR_PERF_TIMING", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+_NS_DURATIONS = (("load_ms", "load_duration"), ("prompt_eval_ms", "prompt_eval_duration"),
+                 ("eval_ms", "eval_duration"), ("ollama_total_ms", "total_duration"))
+_COUNTS = (("prompt_tokens", "prompt_eval_count"), ("output_tokens", "eval_count"))
+
+
+def llm_timing(response, elapsed_seconds: float) -> dict:
+    """Model timings from a chat response's metadata: Ollama's nanosecond durations as ms and its
+    token counts, each only when present (vLLM reports token counts but no per-phase durations).
+    `load_ms` well above zero means the model was (re)loaded for this call."""
+    metadata = getattr(response, "response_metadata", None) or {}
+    timing = {"wall_ms": round(elapsed_seconds * 1000, 1)}
+    for name, key in _NS_DURATIONS:
+        if isinstance(metadata.get(key), (int, float)):
+            timing[name] = round(metadata[key] / 1_000_000, 1)
+    for name, key in _COUNTS:
+        if isinstance(metadata.get(key), int):
+            timing[name] = metadata[key]
+    if timing.get("output_tokens") and timing.get("eval_ms"):
+        timing["output_tokens_per_s"] = round(timing["output_tokens"] / (timing["eval_ms"] / 1000), 1)
+    return timing
+
+
+def log_llm_call(call: str, response, elapsed_seconds: float, **extra) -> None:
+    """With AI_TUTOR_PERF_TIMING=1, print one [llm] line per model call: the call site, numbers and
+    the backend's done reason only (no prompt, answer or document content). `extra` adds numeric
+    fields such as first_token_ms for a streamed call (None values are left out); for a stream,
+    `response` is its last chunk, which carries the metadata."""
+    if not enabled():
+        return
+    timing = {**llm_timing(response, elapsed_seconds), **{k: v for k, v in extra.items() if v is not None}}
+    metadata = getattr(response, "response_metadata", None) or {}
+    fields = " ".join(f"{key}={value}" for key, value in timing.items())
+    print(f"[llm] call={call} {fields} done_reason={metadata.get('done_reason')}")
 
 
 def server_timing(total_seconds: float, stats: db.RequestStats) -> str:

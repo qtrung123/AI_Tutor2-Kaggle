@@ -257,21 +257,26 @@ function formatBackendAnswer(data) {
   return data.answer || "I could not generate an answer from the current materials.";
 }
 
-async function requestTutorAnswer(userText) {
+// The answer streams (Server-Sent Events) when the backend supports it: onDelta receives each piece
+// as it is generated. A plain JSON reply (an older backend) is still accepted as the full answer.
+async function requestTutorAnswer(userText, options = {}) {
+  const { signal, onDelta = () => {} } = options;
   const conversation = await ensureStudySessionConversation();
   const modelId = await ensureSelectedModelReady();
 
   const response = await fetch(`${CONVERSATIONS_API_URL}/${conversation.id}/messages`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      Accept: `${TUTOR_STREAM_MEDIA_TYPE}, application/json`
     },
     body: JSON.stringify({
       message: userText,
       // This is the registry's safe public ID (for example qwen-2.5-7b),
       // never the Ollama/Hugging Face runtime reference.
       model_id: modelId
-    })
+    }),
+    signal
   });
 
   if (!response.ok) {
@@ -285,6 +290,9 @@ async function requestTutorAnswer(userText) {
     throw new Error(detail);
   }
 
+  if ((response.headers.get("content-type") || "").includes(TUTOR_STREAM_MEDIA_TYPE)) {
+    return readTutorAnswerStream(response, onDelta);
+  }
   return response.json();
 }
 
@@ -661,27 +669,71 @@ async function applyConversationSources() {
   }
 }
 
+let tutorAnswerController = null;   // AbortController of the answer being streamed (Stop cancels it)
+
+function tutorMessageBody(row) {
+  return row.querySelector(".message-body");
+}
+
+function tutorScrolledToEnd() {
+  return messageList.scrollHeight - messageList.scrollTop - messageList.clientHeight < 24;
+}
+
 async function sendTutorMessage(userText) {
   messageList.querySelector(".conversation-empty-hint")?.remove();
   addMessage(userText, "user");
   chatInput.value = "";
   chatInput.disabled = true;
   const submitButton = chatForm.querySelector("button");
-  submitButton.disabled = true;
   chatForm.classList.add("is-sending");
-  submitButton.textContent = "Sending";
+  // While the answer is generated the Send button becomes Stop (see handleChatSubmit).
+  submitButton.textContent = "Stop";
+  submitButton.setAttribute("aria-label", "Stop generating");
   renderConversationList();
   const loadingRow = addMessage("Tutoring is retrieving your course materials and asking the local model...", "tutor", true);
+  const controller = new AbortController();
+  tutorAnswerController = controller;
+  // The loading row stays until the first piece of text; then the answer grows in place, rendered
+  // as Markdown at most every TUTOR_STREAM_RENDER_MS (never once per token).
+  let streamRow = null;
+  let streamed = "";
+  const renderer = createTutorStreamRenderer(() => {
+    const follow = tutorScrolledToEnd();
+    const body = tutorMessageBody(streamRow);
+    body.replaceChildren();
+    appendMarkdown(body, streamed);
+    if (follow) messageList.scrollTop = messageList.scrollHeight;
+  });
+  const onDelta = (text) => {
+    if (!streamRow) {
+      loadingRow.remove();
+      streamRow = addMessage("", "tutor");
+      streamRow.classList.add("is-streaming");
+    }
+    streamed += text;
+    renderer.request();
+  };
 
   try {
-    const data = await requestTutorAnswer(userText);
+    const data = await requestTutorAnswer(userText, { signal: controller.signal, onDelta });
+    renderer.cancel();
     loadingRow.remove();
     const repliedIn = data.assistant_message?.conversation_id;
     if (repliedIn && activeConversation?.id !== repliedIn) {
+      streamRow?.remove();
       conversations = await fetchJson(CONVERSATIONS_API_URL);
       return;
     }
-    const answerElement = addMessage(formatBackendAnswer(data), "tutor");
+    let answerElement = streamRow;
+    if (answerElement) {
+      // The saved answer is authoritative (trimmed by the backend): render it once more, in full.
+      answerElement.classList.remove("is-streaming");
+      const body = tutorMessageBody(answerElement);
+      body.replaceChildren();
+      appendMarkdown(body, formatBackendAnswer(data));
+    } else {
+      answerElement = addMessage(formatBackendAnswer(data), "tutor");
+    }
     appendMessageMeta(answerElement, data.grounding_status, data.citations || []);
     if (answerElement.offsetHeight > messageList.clientHeight) {
       messageList.scrollTop += answerElement.getBoundingClientRect().top - messageList.getBoundingClientRect().top - 8;
@@ -692,16 +744,32 @@ async function sendTutorMessage(userText) {
     renderConversationList();
     updateConversationHeader();
   } catch (error) {
+    renderer.cancel();
     loadingRow.remove();
+    if (error?.name === "AbortError") {
+      // Stopped by the learner: keep what was generated, marked as not saved (the backend saved nothing).
+      if (streamRow) {
+        renderer.flush();
+        streamRow.classList.remove("is-streaming");
+        const note = document.createElement("p");
+        note.className = "message-stopped-note";
+        note.textContent = "Stopped. This answer was not saved.";
+        streamRow.querySelector(".message")?.appendChild(note);
+      }
+      showToast("Answer stopped");
+      return;
+    }
+    streamRow?.remove();   // a partial answer that failed is never shown as if it were complete
     const detail = error.message || "Backend request failed.";
     console.error("AI Tutor message submission failed", error);
     addMessage(`I could not reach the RAG answer right now.\n\n${detail}\n\nCheck that FastAPI is running with the project virtual environment and Ollama is still running.`, "tutor");
     showToast("RAG request failed");
   } finally {
+    if (tutorAnswerController === controller) tutorAnswerController = null;
     chatInput.disabled = false;
-    submitButton.disabled = false;
     chatForm.classList.remove("is-sending");
     submitButton.textContent = "Send";
+    submitButton.removeAttribute("aria-label");
     renderConversationList();
     chatInput.focus();
   }
@@ -709,12 +777,15 @@ async function sendTutorMessage(userText) {
 
 async function handleChatSubmit(event) {
   event.preventDefault();
+  if (chatForm.classList.contains("is-sending")) {   // the button reads Stop while an answer streams
+    tutorAnswerController?.abort();
+    return;
+  }
   const userText = chatInput.value.trim();
   if (!userText) {
     showToast("Type a question first");
     return;
   }
-  if (chatForm.classList.contains("is-sending")) return;
   await sendTutorMessage(userText);
 }
 

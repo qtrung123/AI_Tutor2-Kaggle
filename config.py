@@ -71,6 +71,16 @@ GENERATION_MODELS = tuple(dict.fromkeys(
 DEFAULT_GENERATION_MODEL = os.getenv("OLLAMA_DEFAULT_GENERATION_MODEL", "qwen-2.5-7b")
 QUIZ_DEFAULT_GENERATION_MODEL = os.getenv("OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL", "qwen-2.5-7b")
 QUIZ_VALIDATION_MODEL = os.getenv("QUIZ_VALIDATION_MODEL", CHAT_MODEL)
+# Ollama residency and context for interactive generation. Ollama reloads a model whenever a request
+# asks for a different num_ctx than the loaded one, and unloads it after keep_alive idle time.
+# - CHAT_NUM_CTX matches the live Quiz window (backend/quiz_units.QUIZ_NUM_CTX) and the first
+#   Flashcards tier, so moving between Chat, Quiz and Flashcards keeps Qwen loaded.
+# - GENERATION_KEEP_ALIVE is sent by Chat and Quiz; deployment/start_kaggle.sh also makes it Ollama's
+#   server default (OLLAMA_KEEP_ALIVE) for calls that set none, and warms Qwen with both values.
+#   Residency never blocks another model: Ollama evicts an idle model when a new one needs the VRAM.
+# Both are ignored by the vLLM backend (fixed context, model loaded once at server startup).
+CHAT_NUM_CTX = int(os.getenv("AI_TUTOR_CHAT_NUM_CTX", "16384"))
+GENERATION_KEEP_ALIVE = os.getenv("AI_TUTOR_GENERATION_KEEP_ALIVE", "30m")
 QUIZ_SEMANTIC_VALIDATION_ENABLED = os.getenv(
     "QUIZ_SEMANTIC_VALIDATION_ENABLED", "true"
 ).lower() in {"1", "true", "yes", "on"}

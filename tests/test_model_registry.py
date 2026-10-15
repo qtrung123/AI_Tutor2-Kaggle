@@ -140,7 +140,7 @@ class ModelRegistryTests(unittest.TestCase):
         api = "".join(path.read_text(encoding="utf-8") for path in api_sources)
         self.assertGreaterEqual(api.count("prepare_generation_model("), 6)
 
-    def test_quiz_calls_disable_reasoning_and_kaggle_prepares_without_residency(self):
+    def test_quiz_calls_disable_reasoning_and_share_the_chat_residency(self):
         quiz = (ROOT / "backend" / "quiz_service.py").read_text(encoding="utf-8")
         legacy = (ROOT / "backend" / "quiz_legacy_v2.py").read_text(encoding="utf-8")
         startup = (ROOT / "deployment" / "start_kaggle.sh").read_text(encoding="utf-8")
@@ -150,14 +150,14 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertEqual(quiz.count("reasoning=False"), 1)
         self.assertEqual(legacy.count("reasoning=False"), 6)
         self.assertEqual(quiz.count("reasoning=False") + legacy.count("reasoning=False"), 7)
-        self.assertIn('QUIZ_GENERATION_KEEP_ALIVE = "5m"', quiz)
+        self.assertIn("QUIZ_GENERATION_KEEP_ALIVE = GENERATION_KEEP_ALIVE", quiz)
         self.assertEqual(quiz.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 1)
         self.assertEqual(legacy.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 6)
         self.assertEqual(
             quiz.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE") + legacy.count("keep_alive=QUIZ_GENERATION_KEEP_ALIVE"), 7
         )
         self.assertIn('OLLAMA_GEMMA3_12B_MODEL="${OLLAMA_GEMMA3_12B_MODEL:-gemma3:12b-it-q4_K_M}"', startup)
-        self.assertIn('"keep_alive": 0', startup)
+        self.assertNotIn('"keep_alive": 0', startup)   # Qwen stays resident after the warmup
         self.assertIn('OLLAMA_QUIZ_DEFAULT_GENERATION_MODEL = \\"qwen-2.5-7b\\"', notebook)
 
     def test_kaggle_pulls_qwen_with_the_hugging_face_mechanism_and_no_qwen3(self):
@@ -206,17 +206,19 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertNotIn("hf.co/*", preload)   # generic now: pulls any reference kind, not just hf.co
 
     def test_kaggle_warmup_only_warms_the_startup_default_and_embedding_model(self):
-        """Only Qwen (the startup default) and the embedding model are warmed at startup, both with
-        keep_alive 0/short residency; DeepSeek/Gemma/GLM are never pulled or warmed here."""
+        """Only Qwen (the startup default) and the embedding model are warmed at startup, both kept
+        resident for AI_TUTOR_GENERATION_KEEP_ALIVE (Qwen with the Chat num_ctx); DeepSeek/Gemma/GLM
+        are never pulled or warmed here."""
         startup = (ROOT / "deployment" / "start_kaggle.sh").read_text(encoding="utf-8")
         body = startup[startup.index("warm_models_once() {"):startup.index("assert_health_models() {")]
         requests = [line for line in body.splitlines() if '"model": os.environ[' in line]
         self.assertEqual(len(requests), 2)
         qwen, embedding = requests
         self.assertIn('OLLAMA_CHAT_MODEL', qwen)
-        self.assertIn('"keep_alive": 0', qwen)
+        self.assertIn('"keep_alive": os.environ["AI_TUTOR_GENERATION_KEEP_ALIVE"]', qwen)
+        self.assertIn('"num_ctx": int(os.environ["AI_TUTOR_CHAT_NUM_CTX"])', qwen)
         self.assertIn('OLLAMA_EMBEDDING_MODEL', embedding)
-        self.assertIn('"keep_alive": "10m"', embedding)
+        self.assertIn('"keep_alive": os.environ["AI_TUTOR_GENERATION_KEEP_ALIVE"]', embedding)
         self.assertNotIn("OLLAMA_DEEPSEEK_R1_14B_MODEL", body)
         self.assertNotIn("OLLAMA_GEMMA3_12B_MODEL", body)
         self.assertNotIn("OLLAMA_GLM4_9B_MODEL", body)

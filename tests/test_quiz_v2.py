@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.api.quiz_generation import QuizGenerateRequest, QuizRegenerateRequest
+from config import GENERATION_KEEP_ALIVE
 from backend import quiz_store
 from backend.mastery_service import calculate_mastery
 from backend.quiz_options import strip_leading_option_label
@@ -281,7 +282,7 @@ class QuizV2Tests(unittest.TestCase):
         self.assertEqual(FakeBatchModel.models, ["qwen-2.5-3b-runtime"])
         self.assertEqual(len(saved), 1)
         self.assertEqual({question["source_chunk_ids"][0] for question in result["questions"]}, {"canonical_chunk_1"})
-        self.assertEqual(FakeBatchModel.configurations[0]["keep_alive"], "5m")
+        self.assertEqual(FakeBatchModel.configurations[0]["keep_alive"], GENERATION_KEEP_ALIVE)
         self.assertEqual(FakeBatchModel.configurations[0]["num_ctx"], 8192)
         self.assertEqual(FakeBatchModel.configurations[0]["num_predict"], 1950)
         self.assertNotIn("source_chunk_ids", FakeBatchModel.prompts[0])

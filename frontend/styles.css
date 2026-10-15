@@ -1195,6 +1195,28 @@ body[data-page="tutor"] .tutor-layout {
   font-weight: 850;
 }
 
+/* A tutor answer still arriving: a soft caret after the text; a stopped one says it was not saved. */
+.is-streaming .message-body > :last-child::after {
+  content: "▍";
+  margin-left: 2px;
+  color: var(--muted);
+  animation: tutor-caret 1s steps(2, start) infinite;
+}
+
+@keyframes tutor-caret {
+  to { visibility: hidden; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .is-streaming .message-body > :last-child::after { animation: none; }
+}
+
+.message-stopped-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .message-grounding {
   display: flex;
   flex-wrap: wrap;

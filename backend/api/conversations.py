@@ -1,8 +1,12 @@
 """Study Session conversation routes: create, list, read, rename, delete, set sources and chat."""
+import json
+import threading
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from backend.api.deps import require_current_user
 from backend.conversation_store import (
@@ -14,7 +18,7 @@ from backend.conversation_store import (
     update_conversation_title,
 )
 from backend.model_registry import prepare_generation_model
-from backend.rag_service import answer_conversation_message, list_uploaded_sources
+from backend.rag_service import answer_conversation_message, list_uploaded_sources, stream_conversation_message
 
 router = APIRouter()
 
@@ -96,12 +100,57 @@ def conversation_sources_update(conversation_id: str, request: ConversationSourc
         raise HTTPException(status_code=404, detail=str(error)) from error
 
 
+STREAM_MEDIA_TYPE = "text/event-stream"
+_END = object()
+
+
+def _sse(event: dict) -> str:
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+async def _event_stream(events, cancelled: threading.Event):
+    """Server-Sent Events from the (blocking) answer generator, one event per `data:` frame.
+
+    The generator runs in the threadpool one step at a time. When the client goes away -- this task
+    is cancelled, or the next send fails and the stream is closed -- `finally` flags the generator
+    and closes it, which closes the model request and skips persistence (see
+    stream_conversation_message). A model error becomes one final {"type": "error"} event."""
+    try:
+        while True:
+            event = await run_in_threadpool(next, events, _END)
+            if event is _END:
+                return
+            yield _sse(event)
+    except Exception as error:   # model/backend failure after the response started: report, save nothing
+        yield _sse({"type": "error", "message": f"Could not answer this conversation. Original error: {error}"})
+    finally:
+        cancelled.set()
+        try:
+            events.close()
+        except ValueError:
+            pass   # still running in a worker thread: it sees `cancelled` at its next chunk
+
+
+def _wants_stream(http_request: Request) -> bool:
+    return STREAM_MEDIA_TYPE in http_request.headers.get("accept", "")
+
+
 @router.post("/api/conversations/{conversation_id}/messages")
-def conversation_message(conversation_id: str, request: ConversationMessageRequest, current_user: dict = Depends(require_current_user)) -> dict:
+def conversation_message(conversation_id: str, request: ConversationMessageRequest, http_request: Request,
+                         current_user: dict = Depends(require_current_user)):
+    """One chat answer. `Accept: text/event-stream` streams it (see _event_stream); any other
+    request gets the complete JSON answer, exactly as before."""
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message is required.")
     try:
         prepare_generation_model(request.model_id)
+        if _wants_stream(http_request):
+            cancelled = threading.Event()
+            events = stream_conversation_message(current_user["id"], conversation_id, request.message,
+                                                 request.model_id, cancelled)
+            return StreamingResponse(_event_stream(events, cancelled), media_type=STREAM_MEDIA_TYPE, headers={
+                "Cache-Control": "no-cache", "X-Accel-Buffering": "no",   # nginx: pass frames through unbuffered
+            })
         return answer_conversation_message(current_user["id"], conversation_id, request.message, request.model_id)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error

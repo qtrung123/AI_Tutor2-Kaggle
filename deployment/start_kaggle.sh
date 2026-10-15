@@ -51,6 +51,15 @@ export AI_TUTOR_DATA_DIR="${AI_TUTOR_DATA_DIR:-$PROJECT_ROOT/data}"
 export AI_TUTOR_VECTORSTORE_DIR="${AI_TUTOR_VECTORSTORE_DIR:-$PROJECT_ROOT/vectorstore}"
 export AI_TUTOR_DATABASE_PATH="${AI_TUTOR_DATABASE_PATH:-$AI_TUTOR_DATA_DIR/conversations.db}"
 export QUIZ_GENERATION_RETRY_LIMIT="${QUIZ_GENERATION_RETRY_LIMIT:-3}"
+# Chat context window and model residency (defaults mirror config.py). The warmup below loads Qwen
+# with exactly this num_ctx and keep_alive, so the first Chat/Quiz request finds it loaded instead of
+# paying a cold load. OLLAMA_KEEP_ALIVE makes the same residency Ollama's default for calls that
+# set none (Summary, Flashcards, embeddings). On a 15 GB T4, Qwen 2.5 7B Q4_K_M with a 16k window
+# (~4.7 GB weights + ~0.9 GB KV cache + buffers) and bge-m3 (~1.2 GB) stay well within VRAM; an
+# idle resident model is still evicted by Ollama when a larger one (e.g. Gemma 12B) needs the room.
+export AI_TUTOR_CHAT_NUM_CTX="${AI_TUTOR_CHAT_NUM_CTX:-16384}"
+export AI_TUTOR_GENERATION_KEEP_ALIVE="${AI_TUTOR_GENERATION_KEEP_ALIVE:-30m}"
+export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-$AI_TUTOR_GENERATION_KEEP_ALIVE}"
 
 mkdir -p "$LOG_DIR" "$RUNTIME_DIR" "$AI_TUTOR_DATA_DIR" "$AI_TUTOR_VECTORSTORE_DIR"
 
@@ -230,7 +239,8 @@ warm_models_once() {
   local key marker
   # Only the startup default (Qwen) and the embedding model are warmed here: Gemma is lazy (see
   # /api/models/{id}/prepare) and is never pulled or warmed at startup.
-  key="$(printf '%s\n%s\n' "$OLLAMA_CHAT_MODEL" "$OLLAMA_EMBEDDING_MODEL" | sha256sum | awk '{print $1}')"
+  key="$(printf '%s\n%s\n%s\n%s\n' "$OLLAMA_CHAT_MODEL" "$OLLAMA_EMBEDDING_MODEL" "$AI_TUTOR_CHAT_NUM_CTX" \
+    "$AI_TUTOR_GENERATION_KEEP_ALIVE" | sha256sum | awk '{print $1}')"
   marker="$RUNTIME_DIR/models-warmed-$key"
   if [[ -f "$marker" ]]; then
     log "Model warmup already completed in this runtime"
@@ -239,20 +249,21 @@ warm_models_once() {
   if [[ "$LLM_BACKEND" == "vllm" ]]; then
     log "Chat model is served by vLLM (loaded at its startup); skipping the Ollama chat warmup"
   else
-    log "Warming chat model"
+    log "Warming chat model (num_ctx=$AI_TUTOR_CHAT_NUM_CTX keep_alive=$AI_TUTOR_GENERATION_KEEP_ALIVE)"
     curl --fail --silent --show-error --max-time 600 \
       -H 'Content-Type: application/json' "$OLLAMA_HOST/api/generate" \
-      -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_CHAT_MODEL"], "prompt": "Reply with OK.", "stream": False, "keep_alive": 0}))')" >/dev/null
+      -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_CHAT_MODEL"], "prompt": "Reply with OK.", "stream": False, "keep_alive": os.environ["AI_TUTOR_GENERATION_KEEP_ALIVE"], "options": {"num_ctx": int(os.environ["AI_TUTOR_CHAT_NUM_CTX"])}}))')" >/dev/null
   fi
   log "Warming embedding model"
   curl --fail --silent --show-error --max-time 180 \
     -H 'Content-Type: application/json' "$OLLAMA_HOST/api/embed" \
-    -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_EMBEDDING_MODEL"], "input": "AI Tutor embedding health check.", "keep_alive": "10m"}))')" \
+    -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_EMBEDDING_MODEL"], "input": "AI Tutor embedding health check.", "keep_alive": os.environ["AI_TUTOR_GENERATION_KEEP_ALIVE"]}))')" \
     | python -c 'import json, sys; data=json.load(sys.stdin); assert data.get("embeddings"), "Embedding warmup returned no vector"'
-  # Evidence for the log: only the embedding model may still be resident here (the chat model was
-  # warmed with keep_alive 0, so it is not in VRAM now).
-  log "Models resident after warmup (expected: only $OLLAMA_EMBEDDING_MODEL):"
+  # Evidence for the log: the chat model (Ollama backend) and the embedding model stay resident;
+  # `ollama ps` shows their size, CONTEXT and GPU/CPU split, and nvidia-smi the VRAM actually used.
+  log "Models resident after warmup (expected: $OLLAMA_CHAT_MODEL with context $AI_TUTOR_CHAT_NUM_CTX, and $OLLAMA_EMBEDDING_MODEL):"
   ollama ps || true
+  nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv || true
   touch "$marker"
 }
 

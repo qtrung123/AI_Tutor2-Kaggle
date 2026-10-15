@@ -57,10 +57,10 @@ from backend import quiz_diagnostics
 from backend.auth_store import LEGACY_USER_ID
 from backend.quiz_common import QUIZ_DIFFICULTIES, _document_lookup, list_indexed_documents
 from backend.document_retrieval import get_document_chunks, get_schema_topic_evidence
-from config import CHAT_MODEL
+from config import CHAT_MODEL, GENERATION_KEEP_ALIVE
 
 QUIZ_V2_ALLOWED_QUESTION_COUNTS = set(QUIZ_ALLOWED_QUESTION_COUNTS)
-QUIZ_GENERATION_KEEP_ALIVE = "5m"
+QUIZ_GENERATION_KEEP_ALIVE = GENERATION_KEEP_ALIVE   # shared with Chat (config.py)
 
 # Live Quiz path ("Study Units", see backend/quiz_units.py and _generate_quiz_from_units): no
 # Planner, concept extraction, Question Blueprint, slots, or LLM repair/fill loops. At most THREE LLM

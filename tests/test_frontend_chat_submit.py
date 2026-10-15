@@ -45,7 +45,7 @@ class PersistentTutorSubmitTests(unittest.TestCase):
         body = function_body("sendTutorMessage")
         self.assertIn("addMessage(userText, \"user\")", body)
         self.assertIn('const submitButton = chatForm.querySelector("button")', body)
-        self.assertIn("await requestTutorAnswer(userText)", body)
+        self.assertIn("await requestTutorAnswer(userText, { signal: controller.signal, onDelta })", body)
         self.assertIn("console.error", body)
         self.assertIn("RAG request failed", body)
         self.assertIn("addMessage(`I could not reach the RAG answer", body)
