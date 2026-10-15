@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 from backend.study_session_duration import at_least_minimum
-from backend.study_time import free_minutes_by_date, subtract_minute_interval, to_minutes
+from backend.study_time import at_minute, end_minute, free_minutes_by_date, subtract_minute_interval, to_minutes
 from backend.study_scheduler import (
     DEFAULT_CONFIG, SchedulerConfig, _build_steps, _Step, resolve_clock, spread_end, target_date,
 )
@@ -159,8 +159,7 @@ def _minute(value: str) -> int:
     return to_minutes(value[11:16])
 
 
-def _at(day: date, minute: int) -> str:
-    return datetime(day.year, day.month, day.day, minute // 60, minute % 60).isoformat()
+_at = at_minute  # a session ending at 24:00 is stored as the next day's 00:00
 
 
 class _Calendar:
@@ -195,7 +194,7 @@ class _Calendar:
     def within_availability(self, start: str, end: str) -> bool:
         day = _day(start)
         windows = free_minutes_by_date(day, day, self.availability, [])[day]
-        return any(a <= _minute(start) and _minute(end) <= b for a, b in windows)
+        return any(a <= _minute(start) and end_minute(start, end) <= b for a, b in windows)
 
     def overlaps(self, start: str, end: str, ignore: str | None = None) -> bool:
         return any(s["session_id"] != ignore and s["scheduled_start"] < end and s["scheduled_end"] > start
@@ -216,7 +215,8 @@ class _Calendar:
         free = free_minutes_by_date(day, day, self.availability, [], now=self.now if day == self.now.date() else None)[day]
         for s in sessions:
             gap = config.heavy_gap_minutes if heavy and s["activity_type"] in config.heavy_activities else config.session_gap_minutes
-            free = subtract_minute_interval(free, _minute(s["scheduled_start"]) - gap, _minute(s["scheduled_end"]) + gap)
+            free = subtract_minute_interval(free, _minute(s["scheduled_start"]) - gap,
+                                           end_minute(s["scheduled_start"], s["scheduled_end"]) + gap)
         if not_before is not None and _day(not_before) == day:
             free = subtract_minute_interval(free, 0, _minute(not_before))
         align = config.slot_alignment_minutes

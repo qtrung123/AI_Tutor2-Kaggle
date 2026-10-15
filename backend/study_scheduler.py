@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
 from backend.study_session_duration import MIN_SESSION_MINUTES, at_least_minimum
-from backend.study_time import free_minutes_by_date, subtract_minute_interval, to_minutes
+from backend.study_time import at_minute, end_minute, free_minutes_by_date, subtract_minute_interval, to_minutes
 from backend.study_scheduler_contracts import (
     REASON_DEADLINE_APPROACHING, REASON_FINAL_REVIEW, REASON_LOW_QUIZ_SCORE, REASON_NEW_MATERIAL,
     REASON_QUIZ_IN_PROGRESS, REASON_RETRIEVAL_PRACTICE, REASON_REVIEW_DUE, CandidateActivity, CapacityReport, MaterialContext,
@@ -456,7 +456,7 @@ def _free_by_date(context: SchedulingContext, now: datetime, end: date, config: 
         day = date.fromisoformat(session["scheduled_start"][:10])
         if day in free:
             start = to_minutes(session["scheduled_start"][11:16])
-            finish = to_minutes(session["scheduled_end"][11:16])
+            finish = end_minute(session["scheduled_start"], session["scheduled_end"])
             free[day] = subtract_minute_interval(free[day], start - gap, finish + gap)
     return free
 
@@ -469,8 +469,7 @@ def _find_slot(intervals: list, start_from: int, duration: int, align: int) -> i
     return None
 
 
-def _at(day: date, minute: int) -> str:
-    return datetime(day.year, day.month, day.day, minute // 60, minute % 60).isoformat()
+_at = at_minute  # a session ending at 24:00 is stored as the next day's 00:00
 
 
 def find_next_slot(context: SchedulingContext, duration: int, latest: date, earliest: datetime | None = None,

@@ -15,7 +15,7 @@ from backend.document_study_state import get_document_study_state
 from backend.indexed_document_store import get_indexed_document
 from backend.document_retrieval import get_topic_chunks
 from backend.study_scheduler_contracts import MaterialContext, SchedulingContext
-from backend.study_time import free_minutes_by_date
+from backend.study_time import at_minute, free_minutes_by_date
 
 MIN_BLOCK_MINUTES = 30
 PREFERRED_BLOCK_MINUTES = 60
@@ -81,9 +81,7 @@ def allocate_blocks(
     return allocations, max(0, remaining)
 
 
-def _combine(day: date, minute_of_day: int) -> str:
-    hour, minute = divmod(minute_of_day, 60)
-    return datetime(day.year, day.month, day.day, hour, minute).isoformat()
+_combine = at_minute  # a block ending at 24:00 is stored as the next day's 00:00
 
 
 def _default_block_objective(task: dict) -> str:

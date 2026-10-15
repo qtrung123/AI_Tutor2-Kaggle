@@ -21,6 +21,19 @@ def to_hhmm(minutes: int) -> str:
     return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
 
+def at_minute(day: date, minute: int) -> str:
+    """Naive-local ISO datetime for a minute offset from `day`'s midnight. Minute 1440 (an
+    availability window that ends at 24:00) is the next day's 00:00 -- never hour=24."""
+    return (datetime(day.year, day.month, day.day) + timedelta(minutes=minute)).isoformat()
+
+
+def end_minute(start_at: str, end_at: str) -> int:
+    """Minute of `end_at` counted from `start_at`'s midnight, so a session ending at the next
+    day's 00:00 is 1440 rather than 0 (which would turn its busy interval inside out)."""
+    days = (date.fromisoformat(end_at[:10]) - date.fromisoformat(start_at[:10])).days
+    return to_minutes(end_at[11:16]) + days * 24 * 60
+
+
 def merge_minute_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """Union of possibly-overlapping/adjacent (start, end) minute-of-day intervals into the
     minimal, non-overlapping, sorted set."""
@@ -104,7 +117,7 @@ def free_minutes_by_date(
         if not is_busy:
             continue
         busy_by_date.setdefault(block["start_at"][:10], []).append(
-            (_datetime_minute_of_day(block["start_at"]), _datetime_minute_of_day(block["end_at"]))
+            (_datetime_minute_of_day(block["start_at"]), end_minute(block["start_at"], block["end_at"]))
         )
 
     result: dict[date, list[tuple[int, int]]] = {}

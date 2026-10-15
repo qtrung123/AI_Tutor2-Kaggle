@@ -21,6 +21,13 @@ function plannerToMinutes(hhmm) {
   return hour * 60 + minute;
 }
 
+function plannerEndMinutes(session) {
+  // Minute the session ends, counted from its start day: one ending at 24:00 is stored as the
+  // next day's 00:00 and must read as 1440, not 0.
+  const end = plannerToMinutes(session.scheduled_end.slice(11, 16));
+  return session.scheduled_end.slice(0, 10) > session.scheduled_start.slice(0, 10) ? end + 24 * 60 : end;
+}
+
 function plannerMinutesToLabel(minutes) {
   const hour = Math.floor(minutes / 60), minute = minutes % 60;
   return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
@@ -426,7 +433,7 @@ function plannerSessionAt(dateKey, minute) {
   return plannerSessions.find((session) => {
     if (session.scheduled_start.slice(0, 10) !== dateKey) return false;
     const start = plannerToMinutes(session.scheduled_start.slice(11, 16));
-    const end = plannerToMinutes(session.scheduled_end.slice(11, 16));
+    const end = plannerEndMinutes(session);
     return minute < end && minute + PLANNER_CELL_MINUTES > start;
   });
 }
@@ -1973,7 +1980,7 @@ function pcalRenderGrid() {
     column.setAttribute("aria-label", plannerDayLabel(key));
     const dayItems = items.filter((item) => item.session.scheduled_start.slice(0, 10) === key);
     const busy = dayItems.map((item) => [plannerToMinutes(item.session.scheduled_start.slice(11, 16)),
-      plannerToMinutes(item.session.scheduled_end.slice(11, 16))]);
+      plannerEndMinutes(item.session)]);
     pcalEffectiveAvailabilityFor(key, weekday).forEach((piece) => column.appendChild(pcalAvailabilityBlock(piece, key, busy)));
     pcalGoogleBusyFor(key).forEach(([from, to]) => column.appendChild(pcalBusyBlock(from, to)));
     const lanes = pcalLayoutLanes(busy.map(([start, end]) => ({ start, end })));
@@ -2048,7 +2055,7 @@ function pcalEventBlock({ kind, session, change = null }, { lane = 0, lanes = 1 
   // duration): roomy = title, time · duration, activity + status; medium = title + time · duration;
   // compact = one row, title + start. The full details stay in the tooltip, aria-label and popover.
   const start = plannerToMinutes(session.scheduled_start.slice(11, 16));
-  const end = plannerToMinutes(session.scheduled_end.slice(11, 16));
+  const end = plannerEndMinutes(session);
   const block = pcalEl("button", `pcal-event pcal-event--${kind} pcal-activity--${session.activity_type}`);
   block.type = "button";
   block.dataset.kind = kind;
@@ -2796,7 +2803,7 @@ function pcalCheckTarget(dateKey, weekday, start, source) {
   if (pcalGoogleBusyFor(dateKey).some(([from, to]) => from < end && to > start)) return "That time is busy in your Google Calendar.";
   const clash = pcalOccupied(dateKey, source).some((session) => {
     const from = plannerToMinutes(session.scheduled_start.slice(11, 16));
-    const to = plannerToMinutes(session.scheduled_end.slice(11, 16));
+    const to = plannerEndMinutes(session);
     return from < end && to > start;
   });
   return clash ? "That time is already taken by another session." : null;
