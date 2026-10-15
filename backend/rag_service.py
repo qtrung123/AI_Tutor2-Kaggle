@@ -1,3 +1,4 @@
+import re
 import threading
 import time
 from contextlib import closing
@@ -14,6 +15,7 @@ from backend.ingest import migrate_legacy_vector_ownership
 
 from config import (
     CHAT_MODEL,
+    CHAT_MAX_TOKENS,
     CHAT_NUM_CTX,
     GENERATION_KEEP_ALIVE,
     PROMPT_PATH,
@@ -147,14 +149,78 @@ def _retrieve_conversation_docs(
     return docs
 
 
-def _history_for_prompt(messages: list[dict], limit: int = 8) -> str:
-    recent = messages[-limit:]
-    if not recent:
-        return "No previous messages."
-    return "\n".join(
-        f"{('Student' if message['role'] == 'user' else 'Tutor')}: {message['content']}"
-        for message in recent
-    )
+# Conversation history only resolves follow-ups ("it", "that", "and the second one?"); it is never
+# evidence. So the prompt carries the last few turns, each shortened, within a total budget -- a long
+# tutor answer or an Explain More request never bloats every later prompt.
+HISTORY_MESSAGES = 6              # the last three exchanges
+HISTORY_STUDENT_CHARS = 300
+HISTORY_TUTOR_CHARS = 400
+HISTORY_TOTAL_CHARS = 1800
+# A short question is likely a follow-up: its retrieval query also gets the previous question.
+FOLLOW_UP_MAX_WORDS = 12
+RETRIEVAL_PREVIOUS_CHARS = 200
+# The frontend's quiz review requests (js/quiz.js quizReviewExplainMessage): long, structured
+# messages whose "Question:" line is what a later turn may refer to.
+_EXPLAIN_MORE_PREFIX = "Explain more about this quiz question"
+
+
+def _shorten(text: str, limit: int) -> str:
+    """Whitespace collapsed; when too long, cut at the last sentence end (else word) before `limit`."""
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    sentence = max(head.rfind(". "), head.rfind("? "), head.rfind("! "))
+    if sentence >= limit // 2:
+        return head[:sentence + 1] + " …"
+    return (head.rsplit(" ", 1)[0] if " " in head else head).rstrip(" ,;:-") + " …"
+
+
+def _student_text(text: str, limit: int) -> str:
+    """A student message as later turns need it: an Explain More request becomes its question."""
+    if text.lstrip().startswith(_EXPLAIN_MORE_PREFIX):
+        question = next((line.split(":", 1)[1].strip() for line in text.splitlines()
+                         if line.strip().startswith("Question:")), "")
+        if question:
+            text = f"Explain more about the quiz question: {question}"
+    return _shorten(text, limit)
+
+
+_CITATION = re.compile(r"\s*\(source:[^)]*\)", re.IGNORECASE)
+
+
+def _history_for_prompt(messages: list[dict], limit: int = HISTORY_MESSAGES) -> str:
+    # Past tutor answers lose their (source: ...) citations: history is not evidence, so it must not
+    # look citable.
+    lines = [
+        f"Student: {_student_text(message['content'], HISTORY_STUDENT_CHARS)}" if message["role"] == "user"
+        else f"Tutor: {_shorten(_CITATION.sub('', message['content']), HISTORY_TUTOR_CHARS)}"
+        for message in messages[-limit:]
+    ]
+    while lines and sum(len(line) + 1 for line in lines) > HISTORY_TOTAL_CHARS:
+        lines.pop(0)   # oldest first; the latest exchange matters most for a follow-up
+    return "\n".join(lines) if lines else "No previous messages."
+
+
+def _retrieval_query(existing_messages: list[dict], message: str) -> str:
+    """The new question; a short one (likely a follow-up) also carries the previous question,
+    shortened, so "why?" still finds the right passages. Long requests stand on their own."""
+    question = message.strip()
+    if len(question.split()) > FOLLOW_UP_MAX_WORDS:
+        return question
+    previous = next((item["content"] for item in reversed(existing_messages) if item["role"] == "user"), "")
+    if not previous:
+        return question
+    return f"{_student_text(previous, RETRIEVAL_PREVIOUS_CHARS)}\n{question}"
+
+
+def _complete_answer(answer: str, metadata: dict | None) -> str:
+    """An answer the output cap cut off ends at its last complete sentence (or paragraph) instead of
+    mid-sentence; any other answer is returned unchanged."""
+    if (metadata or {}).get("done_reason") != "length":
+        return answer
+    cut = max(answer.rfind("\n\n"), *(answer.rfind(mark) for mark in (". ", ".\n", "? ", "! ", "。")))
+    return answer[:cut + 1].rstrip() if cut >= len(answer) // 2 else answer
 
 
 def default_conversation_title(message: str, limit: int = 60) -> str:
@@ -176,11 +242,7 @@ def _answer_inputs(owner_id: str, conversation: dict, existing_messages: list[di
     document_id = conversation.get("document_id")
     if not document_id:
         return NO_MATERIAL_ANSWER, [], None
-    recent_user_text = " ".join(
-        item["content"] for item in existing_messages[-4:] if item["role"] == "user"
-    )
-    retrieval_query = f"{recent_user_text}\n{message}".strip()
-    docs = _retrieve_conversation_docs(owner_id, retrieval_query, [document_id])
+    docs = _retrieve_conversation_docs(owner_id, _retrieval_query(existing_messages, message), [document_id])
     docs = [
         doc for doc in docs
         if (getattr(doc, "metadata", {}) or {}).get("owner_id") == owner_id
@@ -198,7 +260,8 @@ def _answer_inputs(owner_id: str, conversation: dict, existing_messages: list[di
 
 def _chat_model(model: str):
     # Same context window and residency as the Quiz calls, so Qwen is not reloaded between them.
-    return ChatOllama(model=model, temperature=0, num_ctx=CHAT_NUM_CTX, keep_alive=GENERATION_KEEP_ALIVE)
+    return ChatOllama(model=model, temperature=0, num_ctx=CHAT_NUM_CTX, num_predict=CHAT_MAX_TOKENS,
+                      keep_alive=GENERATION_KEEP_ALIVE)
 
 
 def _grounding_status(answer: str) -> str:
@@ -233,7 +296,7 @@ def answer_conversation_message(owner_id: str, conversation_id: str, message: st
         started = time.perf_counter()
         response = _chat_model(model).invoke(prompt)
         perf_timing.log_llm_call("chat", response, time.perf_counter() - started)
-        answer = str(response.content).strip()
+        answer = _complete_answer(str(response.content).strip(), getattr(response, "response_metadata", None))
 
     assistant_message, grounding_status, citations = _save_assistant_answer(owner_id, conversation_id, answer, docs)
     return {
@@ -288,7 +351,9 @@ def stream_conversation_message(owner_id: str, conversation_id: str, message: st
                         yield {"type": "delta", "text": piece}
             perf_timing.log_llm_call("chat_stream", last, time.perf_counter() - started,
                                      first_token_ms=round((first_token - started) * 1000, 1) if first_token else None)
-            answer = "".join(parts).strip()
+            # The pieces already streamed may end mid-sentence when the cap hit; the saved answer
+            # (and the "done" event the frontend renders last) does not.
+            answer = _complete_answer("".join(parts).strip(), getattr(last, "response_metadata", None))
         if stopped():
             return
         user_message = add_message(owner_id, conversation_id, "user", text)

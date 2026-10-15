@@ -18,7 +18,7 @@ from langchain_core.messages import AIMessage
 
 from backend import flashcard_service, llm_backend, perf_timing, quiz_service, rag_service
 from backend.quiz_units import QUIZ_NUM_CTX
-from config import CHAT_NUM_CTX, GENERATION_KEEP_ALIVE
+from config import CHAT_MAX_TOKENS, CHAT_NUM_CTX, GENERATION_KEEP_ALIVE
 
 ROOT = Path(__file__).parents[1]
 STARTUP = (ROOT / "deployment" / "start_kaggle.sh").read_text(encoding="utf-8")
@@ -69,7 +69,7 @@ class ModelConfigurationTests(unittest.TestCase):
         result, doc = run_chat()
         [(options, prompt)] = FakeChat.calls
         self.assertEqual(options, {"model": QWEN, "temperature": 0, "num_ctx": CHAT_NUM_CTX,
-                                   "keep_alive": GENERATION_KEEP_ALIVE})
+                                   "num_predict": CHAT_MAX_TOKENS, "keep_alive": GENERATION_KEEP_ALIVE})
         # The RAG prompt, the answer and its citations are exactly what they were.
         expected = rag_service.load_prompt_template().format(
             context=rag_service.format_docs([doc]), conversation_history="No previous messages.",

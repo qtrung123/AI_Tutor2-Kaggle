@@ -80,6 +80,10 @@ QUIZ_VALIDATION_MODEL = os.getenv("QUIZ_VALIDATION_MODEL", CHAT_MODEL)
 #   Residency never blocks another model: Ollama evicts an idle model when a new one needs the VRAM.
 # Both are ignored by the vLLM backend (fixed context, model loaded once at server startup).
 CHAT_NUM_CTX = int(os.getenv("AI_TUTOR_CHAT_NUM_CTX", "16384"))
+# Safety cap on one chat answer's length (num_predict / vLLM max_tokens). The prompt keeps answers
+# short; this only stops a runaway reply, and a capped answer is trimmed to its last full sentence.
+# ~1024 tokens is roughly 700 English words, well above a detailed "explain more" answer.
+CHAT_MAX_TOKENS = int(os.getenv("AI_TUTOR_CHAT_MAX_TOKENS", "1024"))
 GENERATION_KEEP_ALIVE = os.getenv("AI_TUTOR_GENERATION_KEEP_ALIVE", "30m")
 QUIZ_SEMANTIC_VALIDATION_ENABLED = os.getenv(
     "QUIZ_SEMANTIC_VALIDATION_ENABLED", "true"
