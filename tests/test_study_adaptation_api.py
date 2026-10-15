@@ -66,12 +66,14 @@ class StudyAdaptationApiTests(PlannerDatabaseMixin, unittest.TestCase):
         self.add_attempt(self.alice, "mkt", "q1", score=3, answered=10, completed=True,
                          completed_at="2026-09-24T10:00:00+00:00")
         body = self.preview({"kind": "quiz_completed", "document_id": "mkt"}).json()
+        # 30% is very weak: relearn from the summary before the flashcard review, practice and retry.
         self.assertEqual([(a["activity_type"], a["reason_code"]) for a in body["added"]],
-                         [("review", "low_quiz_score"), ("written_quiz", "retrieval_practice"),
-                          ("quiz_retry", "low_quiz_score")])
-        self.assertEqual(body["added"][2]["artifact_id"], "q1")
-        self.assertLess(body["added"][0]["scheduled_start"], body["added"][1]["scheduled_start"])
-        self.assertLess(body["added"][1]["scheduled_start"], body["added"][2]["scheduled_start"])
+                         [("summary", "low_quiz_score"), ("review", "low_quiz_score"),
+                          ("written_quiz", "retrieval_practice"), ("quiz_retry", "low_quiz_score")])
+        self.assertEqual(body["added"][3]["artifact_id"], "q1")
+        starts = [a["scheduled_start"] for a in body["added"]]
+        for before, after in zip(starts, starts[1:]):
+            self.assertLess(before, after)
 
     def test_owner_and_plan_isolation(self):
         missed = self.session("summary", "2026-09-24T09:00:00", "2026-09-24T09:45:00", 45)

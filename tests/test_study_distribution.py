@@ -200,6 +200,95 @@ class DistributionTests(ScheduleAssertions, unittest.TestCase):
                 spread, packed = self.schedule(materials, availability)
                 self.assertLessEqual(spread.capacity.shortfall_minutes, packed.capacity.shortfall_minutes)
 
+    # -- recall practice and quiz follow-ups are paced too (P1.1) ----------------------------------
+    # Before, only new-material steps were paced: a Written Quiz (retrieval practice) or a low-score
+    # follow-up landed on the first free day(s), so a material with a summary and flashcards (an
+    # uploaded PDF) was done in 2 consecutive days and several such materials all started on day one.
+
+    def gaps(self, result, document_id):
+        days = days_used(result, document_id)
+        return [(b - a).days for a, b in zip(days, days[1:])]
+
+    def test_one_flexible_document_is_spaced_over_the_week(self):
+        spread, _ = self.schedule([goal(make_state("mkt", summary=True, cards=10))])   # before: Mon, Tue
+        self.assertEqual(days_used(spread, "mkt"), [date(2026, 9, 28), date(2026, 10, 2)])
+        plain, _ = self.schedule([goal(make_state("mkt"))])           # summary -> flashcards -> quiz
+        self.assertTrue(all(gap >= 2 for gap in self.gaps(plain, "mkt")))
+
+    def test_three_flexible_documents_start_on_different_days_and_stay_spaced(self):
+        docs = ("mkt", "stats", "pbi")
+        spread, _ = self.schedule([goal(make_state(doc, summary=True, cards=10)) for doc in docs])
+        firsts = [days_used(spread, doc)[0] for doc in docs]
+        self.assertEqual(sorted(firsts), [MONDAY.date() + timedelta(days=i) for i in range(3)])   # before: all Monday
+        for doc in docs:
+            self.assertTrue(all(gap >= 2 for gap in self.gaps(spread, doc)), doc)
+        self.assertEqual(max(Counter(p.scheduled_start[:10] for p in spread.proposals).values()), 1)
+        self.assertEqual(len(days_used(spread)), 6)
+
+    def test_low_score_follow_ups_are_spaced_but_the_review_stays_due(self):
+        spread, _ = self.schedule([goal(make_state("mkt", cards=10, percentage=40.0))])   # before: Mon, Tue, Wed
+        self.assertEqual(days_used(spread, "mkt")[0], MONDAY.date())  # review on its due date
+        self.assertTrue(all(gap >= 2 for gap in self.gaps(spread, "mkt")))
+        self.assertEqual([p.activity_type for p in spread.proposals], ["review", "written_quiz", "quiz_retry"])
+
+    def test_documents_with_different_deadlines_all_start_early_and_finish_in_time(self):
+        deadlines = {"a": date(2026, 10, 3), "b": date(2026, 10, 9), "c": date(2026, 10, 14)}
+        materials = [goal(make_state("a"), "2026-10-03"), goal(make_state("b", cards=10), "2026-10-09"),
+                     goal(make_state("c", summary=True, cards=10), "2026-10-14")]
+        spread, _ = self.schedule(materials)
+        self.assertEqual(spread.capacity.status, "on_track")
+        for doc, deadline in deadlines.items():
+            used = days_used(spread, doc)
+            self.assertLessEqual(used[0], MONDAY.date() + timedelta(days=2), doc)   # nobody starved
+            self.assertLess(used[-1], deadline, doc)
+        self.assertEqual(max(per_document_day(spread).values()), 1)
+        self.assertGreaterEqual(self.gaps(spread, "c")[0], 3)         # a far deadline is paced, not crammed
+
+    def test_limited_available_days_avoid_same_day_doubles(self):
+        tue_fri = weekly((1, "19:00", "21:00"), (4, "19:00", "21:00"))
+        spread, packed = self.schedule([goal(make_state(doc, cards=10)) for doc in ("mkt", "stats")], tue_fri)
+        # before: summary + recall practice on the same Tuesday evening
+        self.assertEqual(max(per_document_day(spread).values()), 1)
+        self.assertTrue(all(d.weekday() in (1, 4) for d in days_used(spread)))
+        self.assertEqual(spread.capacity.scheduled_minutes, packed.capacity.scheduled_minutes)
+
+    def test_accepted_sessions_stay_put_and_new_ones_spread_around_them(self):
+        accepted = [{"scheduled_start": f"2026-09-{d}T19:00:00", "scheduled_end": f"2026-09-{d}T19:45:00",
+                     "status": "scheduled"} for d in (28, 30)]
+        materials = [goal(make_state(doc, summary=True, cards=10)) for doc in ("mkt", "stats")]
+        ctx = context(materials, EVENINGS, busy=accepted)
+        spread, _ = self.schedule(materials, busy=accepted)
+        self.assertEqual(ctx.busy_sessions, tuple(accepted))          # inputs only, never rescheduled
+        for doc in ("mkt", "stats"):
+            self.assertTrue(all(gap >= 2 for gap in self.gaps(spread, doc)), doc)
+        self.assertEqual(spread.capacity.status, "on_track")
+
+    def test_late_night_availability_until_midnight(self):
+        late = weekly(*((d, "22:00", "24:00") for d in range(7)))
+        ctx = context([goal(make_state(doc, cards=10)) for doc in ("mkt", "stats")], late,
+                      now=MONDAY.replace(hour=22, minute=30))
+        spread = plan_schedule(ctx)
+        self.assert_well_formed(spread, ctx)
+        for p in spread.proposals:
+            self.assertGreaterEqual(p.scheduled_start[11:16], "22:30" if p.scheduled_start[:10] == "2026-09-28" else "22:00")
+            self.assertTrue(p.scheduled_end[11:16] <= "23:59" or p.scheduled_end[11:] == "00:00:00", p)
+        self.assertEqual(days_used(spread)[0], MONDAY.date())         # tonight's free 90 minutes still count
+        self.assertEqual(max(per_document_day(spread).values()), 1)
+        for doc in ("mkt", "stats"):
+            self.assertTrue(all(gap >= 2 for gap in self.gaps(spread, doc)), doc)
+
+    def test_finish_early_and_deadline_priority_are_unchanged(self):
+        from backend.study_preferences import DEFAULTS, config_from
+        materials = [goal(make_state("mkt", summary=True, cards=10), "2026-10-09"),
+                     goal(make_state("stats", summary=True, cards=10))]
+        ctx = context(materials, EVENINGS)
+        early = plan_schedule(ctx, config_from({**DEFAULTS, "strategy": "finish_early"}))
+        self.assertEqual(early, plan_schedule(ctx, replace(config_from(DEFAULTS), spread_sessions=False)))
+        self.assertEqual(self.gaps(early, "mkt")[0], 1)               # as soon as possible
+        priority = plan_schedule(ctx, config_from({**DEFAULTS, "strategy": "deadline_priority"}))
+        self.assertEqual(days_used(priority, "mkt")[:2], [date(2026, 9, 28), date(2026, 9, 29)])   # deadlined: early
+        self.assertTrue(all(gap >= 2 for gap in self.gaps(priority, "stats")))                  # flexible: balanced
+
     def test_deterministic(self):
         materials = [goal(make_state("a"), "2026-10-06", target="2026-10-03"), goal(make_state("b"))]
         ctx = context(materials, EVENINGS, busy=())

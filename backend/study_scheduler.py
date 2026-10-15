@@ -3,8 +3,9 @@
 Pure and LLM-free. Same input, same output. Flow:
   1. per document, turn its DocumentStudyState into an ordered queue of steps (candidate
      activities with earliest/latest dates and minimum spacing between them);
-  2. pace each document's new-material steps evenly over its usable days (up to the final review
-     window, the soft target date, or a week for flexible learning), staggered across documents;
+  2. pace each document's steps (new material, recall practice, quiz follow-ups) evenly over its
+     usable days (up to the final review window, the soft target date, or a week for flexible
+     learning), staggered across documents;
   3. walk the horizon day by day; on each day repeatedly pick the highest-priority ready step --
      ready = due, at or past its pace day, and not a second session of that document that day
      while later days remain -- and place it in the learner's free availability (Google busy time
@@ -48,6 +49,9 @@ class SchedulerConfig:
     pressure_boost: float = 0.5
     # ...or whose remaining steps need (because of day gaps) every usable day it has left.
     critical_boost: float = 1.0
+    # Today is the last day with room for the material's next step before its deadline: it goes
+    # ahead of a material that can still wait (a later deadline never takes an urgent one's last day).
+    last_chance_boost: float = 1.0
     # Review urgency per step kind (review steps also gain per overdue day).
     review_urgency: dict = field(default_factory=lambda: {
         "learn": 0.3, "finish": 0.9, "review": 0.7, "final": 1.0,
@@ -61,6 +65,9 @@ class SchedulerConfig:
     # Spaced review: (latest quiz percentage strictly below, days until next review).
     review_intervals: tuple = ((50.0, 1), (75.0, 2), (85.0, 3), (math.inf, 5))
     low_score_retry_gap_days: int = 1     # low score: flashcards, then quiz_retry this many days later
+    # A low score strictly below this is very weak: relearn the foundations (re-read the summary,
+    # practice flashcards) before any reassessment.
+    foundational_relearn_below: float = 40.0
     moderate_retry_gap_days: int = 2      # moderate score: review, then quiz_retry this many days later
     quiz_gap_after_learning_days: int = 1  # the first quiz never lands the same day as new material
     final_review_window_days: int = 2     # final review within this many days before the deadline
@@ -226,7 +233,10 @@ def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_
 
     - marked completed           -> only the final review before a deadline;
     - quiz in progress           -> finish that quiz;
-    - quiz attempted, < 60%      -> weak-topic review, written recall practice (with flashcards),
+    - quiz attempted, < 40%      -> relearn the foundations first: re-read the summary (generated
+                                    when missing), then flashcard review + written recall practice
+                                    (or create flashcards when there is no set), then a quiz retry;
+    - quiz attempted, 40-59%     -> weak-topic review, written recall practice (with flashcards),
                                     then a quiz retry on a later day;
     - quiz attempted, 60-79%     -> review of the incorrect topics, practice, then reassessment;
     - quiz attempted, >= 80%     -> lighter spaced repetition (a weak-topic review instead when
@@ -312,7 +322,31 @@ def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_
         facts = {"percentage": result.percentage, "quiz_id": result.quiz_id,
                  "weak_topics": [{"topic_id": t.topic_id, "name": t.name, "severity": t.severity} for t in weak]}
         scored = f'Latest quiz on "{title}" scored {result.percentage:g}%'
-        if code == "low_quiz_score":
+        if code == "low_quiz_score" and result.percentage < config.foundational_relearn_below:
+            # Very weak: relearn the foundations from the summary, then flashcards (the weak-topic
+            # review of an existing set plus recall practice, or a new set to practice), then a retry.
+            stage = {**facts, "learning_stage": "very_low_score"}
+            on = f" on {topics_text}" if weak_names else ""
+            if state.summary.available:
+                steps.append(step("summary", REASON_LOW_QUIZ_SCORE,
+                                  f"{scored}: relearn the foundations -- re-read the summary{on}.", "review",
+                                  earliest=due, metadata=stage))
+            else:
+                steps.append(step("summary", REASON_LOW_QUIZ_SCORE,
+                                  f"{scored}: relearn the foundations -- generate the summary and read it{on}.",
+                                  "review", earliest=due, metadata={**stage, "preparation": "generate_summary"}))
+            if has_cards:
+                focus = f"practice your weak topics ({topics_text})" if weak_names else "practice the key points"
+                steps.append(step("review", REASON_LOW_QUIZ_SCORE, f"{scored}: {focus} with your flashcards.",
+                                  "review", metadata=stage))
+                steps.append(written_quiz(metadata=stage))
+            else:
+                steps.append(step("flashcards", REASON_LOW_QUIZ_SCORE,
+                                  f"{scored}: create flashcards and practice the key points.", "review",
+                                  metadata={**stage, "preparation": "create_flashcards"}))
+            steps.append(step("quiz_retry", REASON_LOW_QUIZ_SCORE, f"{scored}: retake a quiz.", "review",
+                              gap=config.low_score_retry_gap_days, artifact=result.quiz_id, metadata=stage))
+        elif code == "low_quiz_score":
             # Below 60%: weak-topic review first, recall practice, then a retry on a later day.
             focus = f"review your weak topics ({topics_text})" if weak_names else "review the questions you missed"
             stage = {**facts, "learning_stage": "low_score"}
@@ -411,7 +445,19 @@ def _guardrails(plan: _DocumentPlan, day: date, capacity: dict, config: Schedule
         days_needed = 1 + sum(step.gap_days for step in plan.steps[plan.index + 1:])
         if days_left <= days_needed:
             adjustment += config.critical_boost
+        if _last_chance(plan.current, day, capacity):
+            adjustment += config.last_chance_boost
     return adjustment
+
+
+def _last_chance(step: _Step, day: date, capacity: dict) -> bool:
+    """No later day up to the step's latest (the day before the deadline) has room for it."""
+    current = day + timedelta(days=1)
+    while current <= step.latest:
+        if capacity.get(current, 0) >= step.duration:
+            return False
+        current += timedelta(days=1)
+    return True
 
 
 def _priority(plan: _DocumentPlan, day: date, max_remaining: int, capacity: dict,
@@ -531,27 +577,43 @@ def spread_end(deadline: date | None, target: date | None, steps: list, today: d
     return end if end >= today else None
 
 
+_PACED_KINDS = ("learn", "review")   # "finish" (a quiz in progress) and "final" keep their own dates
+
+
 def _pace_days(plans: list, usable: list, today: date, horizon_end: date, config: SchedulerConfig) -> None:
-    """Spread each material's new-material steps evenly over its usable days.
+    """Spread each material's steps evenly over its usable days.
 
     The pacing end is the day before the final review window for a hard deadline, the soft target
-    completion date when it comes sooner, or flexible_spread_days for flexible learning. Step i of k
-    gets the usable day at position round((i + stagger) * N / k) of the N usable days, where the stagger
-    (the material's rank / number of materials) keeps several materials from all landing on the
-    same days. Only "learn" steps are paced: reviews keep the dates spaced repetition chose for them.
-    A pace is a preference: _allocate lifts it when the material runs short of time."""
+    completion date when it comes sooner, or flexible_spread_days for flexible learning -- extended,
+    for flexible learning only, until it holds one usable day per step when availability is sparse.
+    Step i of k gets the usable day at position round(i * N / k + offset) of the N usable days from
+    the first step's earliest day, where the offset (rank / number of materials of one interval, at
+    most `rank` days) keeps several materials from all landing on the same days without leaving one
+    waiting long to start. New material, recall practice and quiz follow-ups are all paced (a pace
+    never comes before a review's spaced-repetition due date); an in-progress quiz and the final
+    review are not. A pace is a preference: _allocate lifts it when the material runs short of time."""
     ranked = sorted(plans, key=lambda p: (p.deadline or date.max, p.target or date.max, p.context.document_id))
     for rank, plan in enumerate(ranked):
         plan.spread_end = spread_end(plan.deadline, plan.target, plan.steps, today, horizon_end, config)
         if plan.spread_end is None or not _balanced(plan, config):
             continue
-        learn = [index for index, step in enumerate(plan.steps) if step.kind == "learn"]
-        days = [d for d in usable if today <= d <= plan.spread_end]
-        if not learn or len(days) < 2:
+        paced = [index for index, step in enumerate(plan.steps) if step.kind in _PACED_KINDS]
+        if not paced:
             continue
-        stagger = rank / len(ranked)
-        for position, index in enumerate(learn):
-            plan.pace[index] = days[min(len(days) - 1, int((position + stagger) * len(days) / len(learn) + 0.5))]
+        start = max(today, plan.steps[paced[0]].earliest)
+        days = [d for d in usable if start <= d <= plan.spread_end]
+        if plan.deadline is None and plan.target is None and len(days) < len(paced):
+            days = [d for d in usable if start <= d <= horizon_end][:len(paced)]
+            plan.spread_end = max(plan.spread_end, days[-1]) if days else plan.spread_end
+        if len(days) < 2:
+            continue
+        interval = len(days) / len(paced)
+        # No material waits more than `rank` days to start; a due quiz-result review starts on its due date.
+        due_review = plan.steps[paced[0]].reason_code in (REASON_LOW_QUIZ_SCORE, REASON_REVIEW_DUE)
+        offset = 0 if due_review else min(rank / len(ranked) * interval, rank)
+        for position, index in enumerate(paced):
+            day = days[min(len(days) - 1, int(position * interval + offset + 0.5))]
+            plan.pace[index] = max(day, plan.steps[index].earliest)
 
 
 def _balanced(plan: _DocumentPlan, config: SchedulerConfig) -> bool:
@@ -569,8 +631,11 @@ def _short_of_time(plan: _DocumentPlan, day: date, capacity: dict, config: Sched
     minutes_left, days_left = _capacity_until(day, end, capacity)
     if not minutes_left or plan.remaining_minutes / minutes_left >= config.pressure_threshold:
         return True
-    days_needed = 1 + sum(step.gap_days for step in plan.steps[plan.index + 1:]) + len(plan.steps) - plan.index - 1
-    return days_left <= days_needed
+    # One day per remaining step, plus the extra empty days longer gaps force between them. Exactly
+    # enough days still allows one session a day; _last_chance keeps any of them from being lost.
+    remaining = plan.steps[plan.index:]
+    days_needed = len(remaining) + sum(max(0, step.gap_days - 1) for step in remaining[1:])
+    return days_left < days_needed
 
 
 def _spread_allows(plan: _DocumentPlan, day: date, usable: list) -> bool:
@@ -581,6 +646,28 @@ def _spread_allows(plan: _DocumentPlan, day: date, usable: list) -> bool:
     end = plan.spread_end or plan.steps[-1].latest
     days_after = sum(1 for d in usable if day < d <= end)
     return days_after < len(plan.steps) - plan.index
+
+
+def deadline_risks(result: ScheduleResult) -> list[dict]:
+    """One entry per material whose activities do not all fit (nearest deadline first, flexible
+    materials last): how many sessions and minutes are missing, whether the final review is among
+    them, and the last session that did fit. Derived from the result itself, so it stays true after
+    the learner's placements; nothing is dropped silently."""
+    missing: dict = {}
+    for candidate in result.capacity.unscheduled:
+        entry = missing.setdefault(candidate.document_id, {
+            "document_id": candidate.document_id, "deadline": candidate.deadline, "unscheduled_count": 0,
+            "shortfall_minutes": 0, "final_review_missing": False, "activities": [],
+        })
+        entry["unscheduled_count"] += 1
+        entry["shortfall_minutes"] += candidate.estimated_minutes or 0
+        entry["final_review_missing"] |= candidate.reason.code == REASON_FINAL_REVIEW
+        entry["activities"].append(candidate.activity_type)
+    for entry in missing.values():
+        placed = [p for p in result.proposals if p.document_id == entry["document_id"]]
+        entry["scheduled_count"] = len(placed)
+        entry["last_scheduled_start"] = max((p.scheduled_start for p in placed), default=None)
+    return sorted(missing.values(), key=lambda e: (e["deadline"] or "9999-12-31", e["document_id"]))
 
 
 def plan_schedule(context: SchedulingContext, config: SchedulerConfig = DEFAULT_CONFIG) -> ScheduleResult:

@@ -109,6 +109,77 @@ class LearningStateTests(ScheduleAssertions, unittest.TestCase):
         self.assertEqual(steps[0].reason.metadata["percentage"], 40.0)
         self.assertEqual(steps[-1].artifact_id, "q-d")
 
+    # -- very weak score (< 40%): foundational relearning before reassessment (P1.2) ----------------
+    # Before, 17% got the same review -> written quiz -> retry as 59% (or only review -> retry
+    # without flashcards): never back to the summary before being assessed again.
+
+    def test_very_low_score_relearns_from_the_summary_before_practice_and_retry(self):
+        state = replace(make_state("d", summary=True, cards=20, percentage=17.0),
+                        weak_topics=weak(("Regression", "high", 10.0), ("Sampling", "high", 20.0)))
+        steps = candidates(state)
+        self.assertEqual([(c.activity_type, c.reason.code, c.estimated_minutes) for c in steps],
+                         [("summary", "low_quiz_score", 45), ("review", "low_quiz_score", 30),
+                          ("written_quiz", "retrieval_practice", 20), ("quiz_retry", "low_quiz_score", 35)])
+        self.assertIn("re-read the summary on Regression, Sampling", steps[0].reason.message)
+        self.assertNotIn("preparation", steps[0].reason.metadata)        # the summary already exists
+        self.assertEqual({c.reason.metadata["learning_stage"] for c in steps}, {"very_low_score"})
+        self.assertEqual(steps[-1].artifact_id, "q-d")
+
+    def test_very_low_score_without_resources_prepares_them_explicitly(self):
+        steps = candidates(make_state("d", percentage=17.0))   # no summary, no flashcards
+        self.assertEqual([(c.activity_type, c.reason.metadata.get("preparation")) for c in steps],
+                         [("summary", "generate_summary"), ("flashcards", "create_flashcards"), ("quiz_retry", None)])
+        self.assertNotIn("written_quiz", [c.activity_type for c in steps])   # needs a persisted set
+        only_summary = candidates(make_state("d", summary=True, percentage=17.0))
+        self.assertEqual([(c.activity_type, c.reason.metadata.get("preparation")) for c in only_summary],
+                         [("summary", None), ("flashcards", "create_flashcards"), ("quiz_retry", None)])
+        # Never a duplicate: one summary, one retry, no separate review that would reopen the summary.
+        self.assertEqual(Counter(c.activity_type for c in only_summary)["summary"], 1)
+        self.assertNotIn("review", [c.activity_type for c in only_summary])
+
+    def test_very_low_score_threshold_is_40(self):
+        for percentage, stage, first in ((0.0, "very_low_score", "summary"), (39.9, "very_low_score", "summary"),
+                                         (40.0, "low_score", "review"), (59.9, "low_score", "review")):
+            with self.subTest(percentage=percentage):
+                head = candidates(make_state("d", summary=True, cards=10, percentage=percentage))[0]
+                self.assertEqual((head.activity_type, head.reason.metadata["learning_stage"]), (first, stage))
+
+    def test_very_low_score_schedules_relearning_first_spaced_and_before_the_deadline(self):
+        ctx = context([material(make_state("d", summary=True, cards=10, percentage=17.0), "2026-10-09")], EVENINGS)
+        result = plan_schedule(ctx)
+        self.assert_well_formed(result, ctx)
+        self.assertEqual(result.capacity.status, "on_track")
+        kinds = [p.activity_type for p in result.proposals]
+        self.assertEqual(kinds[:4], ["summary", "review", "written_quiz", "quiz_retry"])
+        days = [day_of(p.scheduled_start) for p in result.proposals]
+        self.assertEqual(days[0], MONDAY.date())                     # due 1 day after yesterday's quiz
+        self.assertEqual(days, sorted(set(days)))                    # one per day, in order
+        for day in days:
+            self.assertLess(day, date(2026, 10, 9))
+        # Accepted sessions / Google busy time are worked around exactly as before.
+        busy = [{"scheduled_start": "2026-09-28T19:00:00", "scheduled_end": "2026-09-28T20:30:00", "status": "scheduled"}]
+        around = context([material(make_state("d", summary=True, cards=10, percentage=17.0))], EVENINGS, busy=busy)
+        moved = plan_schedule(around)
+        self.assert_well_formed(moved, around)
+        self.assertEqual([p.activity_type for p in moved.proposals],
+                         ["summary", "review", "written_quiz", "quiz_retry"])
+
+    def test_every_learning_state_has_its_own_sequence(self):
+        sequences = {
+            "new": (make_state("d"), ["summary", "flashcards", "quiz"]),
+            "summary, no quiz": (make_state("d", summary=True), ["flashcards", "quiz"]),
+            "summary + cards, no quiz": (make_state("d", summary=True, cards=10), ["written_quiz", "quiz"]),
+            "quiz created": (with_quiz_created(make_state("d", summary=True)), ["quiz"]),
+            "17%": (make_state("d", summary=True, cards=10, percentage=17.0),
+                    ["summary", "review", "written_quiz", "quiz_retry"]),
+            "45%": (make_state("d", cards=10, percentage=45.0), ["review", "written_quiz", "quiz_retry"]),
+            "70%": (make_state("d", cards=10, percentage=70.0), ["review", "written_quiz", "quiz_retry"]),
+            "90%": (make_state("d", percentage=90.0), ["review", "review"]),
+        }
+        for name, (state, expected) in sequences.items():
+            with self.subTest(state=name):
+                self.assertEqual([c.activity_type for c in candidates(state)], expected)
+
     def test_moderate_score_reviews_incorrect_topics_then_reassesses(self):
         state = replace(make_state("d", cards=20, percentage=70.0), weak_topics=weak(("Probability", "moderate", 62.0)))
         steps = candidates(state)

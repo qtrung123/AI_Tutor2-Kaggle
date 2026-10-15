@@ -1265,6 +1265,21 @@ function renderPlannerPreview() {
       ? "Your selected time can’t comfortably hold everything before the deadlines. Add study time, move a deadline, or confirm the part that fits."
       : `${plannerFormatDuration(capacity.scheduled_minutes)} of study in ${count} session${count === 1 ? "" : "s"}. The rest of your selected time stays free.`;
   box.append(title, text);
+  const deadlineRisks = preview.warnings.filter((warning) => warning.code === "deadline_at_risk");
+  if (deadlineRisks.length) {
+    const list = document.createElement("ul");
+    list.className = "planner-deadline-risks";
+    deadlineRisks.forEach((risk) => {
+      const item = document.createElement("li");
+      const name = risk.document_title || risk.document_id;
+      const due = risk.deadline ? ` before ${risk.deadline}` : "";
+      const sessions = `${risk.unscheduled_count} session${risk.unscheduled_count === 1 ? "" : "s"}`;
+      const final = risk.final_review_missing ? ", including the final review" : "";
+      item.textContent = `${name}: ${sessions} (${plannerFormatDuration(risk.shortfall_minutes)}) don’t fit${due}${final}.`;
+      list.appendChild(item);
+    });
+    box.appendChild(list);
+  }
   if (atRisk) {
     const stats = document.createElement("dl");
     stats.className = "planner-capacity-stats";

@@ -217,7 +217,15 @@ class StudyPlanApiTests(PlannerDatabaseMixin, unittest.TestCase):
         unscheduled = capacity["unscheduled"][0]
         self.assertEqual(set(unscheduled), {"document_id", "document_title", "activity_type", "estimated_minutes",
                                             "deadline", "reason", "artifact_id", "candidate_key"})
-        self.assertEqual(body["warnings"], [])
+        # One clear warning per material that cannot be finished before its deadline.
+        risks = [w for w in body["warnings"] if w["code"] == "deadline_at_risk"]
+        self.assertEqual(len(risks), len(body["warnings"]))
+        self.assertEqual({w["document_id"] for w in risks}, {"mkt", "stats"})
+        self.assertEqual(sum(w["shortfall_minutes"] for w in risks), capacity["shortfall_minutes"])
+        for risk in risks:
+            self.assertEqual(risk["deadline"], "2026-09-30")
+            self.assertTrue(risk["document_title"])
+            self.assertTrue(risk["final_review_missing"])
 
     def test_past_deadline_is_judged_on_the_learner_local_date_at_preview(self):
         plan = self.create_plan()

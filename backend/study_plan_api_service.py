@@ -15,7 +15,7 @@ from backend.flashcard_quiz_service import create_flashcard_written_quiz, is_fla
 from backend.quiz_store import get_quiz_by_id
 from backend.indexed_document_store import list_indexed_documents
 from backend import study_preferences
-from backend.study_scheduler import DEFAULT_CONFIG, find_next_slot, plan_schedule
+from backend.study_scheduler import DEFAULT_CONFIG, deadline_risks, find_next_slot, plan_schedule
 from backend.study_session_duration import SessionDurationError, validate_new_session_minutes
 from backend.study_scheduler_contracts import REASON_LABELS, SchedulingContext
 
@@ -285,6 +285,9 @@ def _schedule_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_n
         if material["document_id"] not in titles:
             warnings.append({"code": "document_missing", "document_id": material["document_id"]})
     warnings.extend(calendar_warnings)
+    # Not enough time before a deadline: say which material, what is missing and how much.
+    for risk in deadline_risks(result):
+        warnings.append({"code": "deadline_at_risk", "document_title": titles.get(risk["document_id"]), **risk})
     return local_now, offset, result, warnings, titles, (entries, applied, rejected)
 
 
