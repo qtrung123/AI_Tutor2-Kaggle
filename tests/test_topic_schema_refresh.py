@@ -88,12 +88,13 @@ class TopicSchemaRefreshTests(unittest.TestCase):
         path = self.index_pdf()
         before = indexed_document_store.get_indexed_document(self.owner, PDF_NAME)
         skipped = ingest.index_files([path], self.owner)
-        self.assertEqual(skipped["skipped_files"], [PDF_NAME])
+        self.assertEqual((skipped["skipped_files"], skipped["indexed_documents"]), ([PDF_NAME], []))
 
         self.store.delete(ids=self.store.get(where={"owner_id": self.owner})["ids"])
         result = ingest.index_files([path], self.owner)
 
         self.assertEqual((result["new_files"], result["skipped_files"]), (1, []))
+        self.assertEqual(result["indexed_documents"], [PDF_NAME])   # what the upload adds to the study plan
         self.assertEqual(len(self.store.get(where={"owner_id": self.owner})["ids"]), before["chunks"])
         after = indexed_document_store.get_indexed_document(self.owner, PDF_NAME)
         self.assertEqual((after["document_id"], after["hash"], after["topics"]),

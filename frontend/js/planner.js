@@ -110,20 +110,29 @@ function plannerPlanUrl(suffix = "") {
 }
 
 async function loadPlannerData({ keepWeek = false } = {}) {
+  const seq = ++plannerLoadSeq;   // a slower, older reload (e.g. two uploads finishing) never wins
   try {
     const [plans, availability] = await Promise.all([
       plannerRequest(PLANNER_PLANS_API_URL), plannerRequest(PLANNER_AVAILABILITY_API_URL),
     ]);
-    plannerAvailability = availability;
+    if (seq !== plannerLoadSeq) return;
     const active = plans.filter((plan) => plan.status === "active");
-    plannerPlan = active[active.length - 1] || null;
+    const nextPlan = active[active.length - 1] || null;
+    const [detail, saved] = nextPlan
+      ? await Promise.all([
+        plannerRequest(`${PLANNER_PLANS_API_URL}/${encodeURIComponent(nextPlan.plan_id)}`),
+        plannerRequest(`${PLANNER_PLANS_API_URL}/${encodeURIComponent(nextPlan.plan_id)}/sessions`),
+      ])
+      : [null, []];
+    if (seq !== plannerLoadSeq) return;
+    plannerAvailability = availability;
+    plannerPlan = nextPlan;
     plannerMaterials = [];
     plannerSessions = [];
     plannerHistorySessions = [];
     plannerSessionsById = new Map();
     if (!keepWeek) plannerPlanWeekStart = null;
     if (plannerPlan) {
-      const [detail, saved] = await Promise.all([plannerRequest(plannerPlanUrl()), plannerRequest(plannerPlanUrl("/sessions"))]);
       const sessions = saved.map((session) => ({ ...session, plan_id: plannerPlan.plan_id }));
       plannerSessionsById = new Map(sessions.map((session) => [session.session_id, session]));
       plannerMaterials = detail.materials;
@@ -145,7 +154,74 @@ async function loadPlannerData({ keepWeek = false } = {}) {
     }
     plannerLoadGoogleCalendar();   // every layout: the toolbar Connect control must not need the desktop calendar
   } catch (error) {
-    showToast(error.message || "Could not load Study Planner data");
+    if (seq === plannerLoadSeq) showToast(error.message || "Could not load Study Planner data");
+  }
+}
+
+// -- after a PDF upload ---------------------------------------------------------------------------
+
+function plannerAfterUpload(planner) {
+  // The upload already added the newly indexed documents to the active plan (server side, after
+  // they were stored). Here we only refresh: the suggestions are the usual read-only preview, so
+  // nothing is saved until Accept Plan, and an accepted plan just lists them as still to schedule.
+  if (!planner?.status || planner.status === "unchanged") return;
+  plannerIncludeFailure = planner.status === "failed"
+    ? { documentIds: planner.document_ids || [], message: planner.message || "The study plan could not be updated." }
+    : null;
+  if (planner.status === "updated") plannerAfterMaterialsAdded(planner.plan_id);
+  else if (document.body.dataset.page === "planner") loadPlannerData({ keepWeek: true });
+}
+
+async function plannerAfterMaterialsAdded(planId) {
+  // Not accepted yet: the reload re-runs the usual preview, now covering every material. Accepted:
+  // propose sessions for the new material (adaptation trigger "materials_added"), reviewed on the
+  // calendar like any suggested change -- accepted and hand-edited sessions are never touched.
+  if (document.body.dataset.page === "planner") {
+    await loadPlannerData({ keepWeek: true });
+    if (plannerPlan?.plan_id !== planId || !plannerHasLivePlan()) return;
+  }
+  await plannerProposeNewMaterials(planId);   // the server proposes nothing for a plan with no accepted sessions
+}
+
+async function plannerProposeNewMaterials(planId) {
+  if (!planId) return;
+  const seq = ++plannerNewMaterialSeq;   // a slower, older proposal never replaces a newer one
+  const trigger = { kind: "materials_added" };
+  let proposal = null;
+  try {
+    proposal = await plannerRequest(`${PLANNER_PLANS_API_URL}/${encodeURIComponent(planId)}/adaptation/preview`, {
+      method: "POST", body: { trigger, utc_offset_minutes: plannerUtcOffsetMinutes() },
+    });
+  } catch (error) {
+    if (seq !== plannerNewMaterialSeq) return;
+    // Read-only request: the accepted plan is untouched. Say so and offer a retry.
+    plannerNewMaterialFailure = { planId };
+    showToast("Could not suggest sessions for your new material. Try again in Study Planner.");
+    if (plannerIsDesktop() && document.body.dataset.page === "planner") renderPlannerWorkspace();
+    return;
+  }
+  if (seq !== plannerNewMaterialSeq) return;
+  plannerNewMaterialFailure = null;
+  if (!proposal?.change_count) {
+    if (plannerIsDesktop() && document.body.dataset.page === "planner") renderPlannerWorkspace();
+    return;
+  }
+  if (plannerIsDesktop()) plannerStartCalendarReview(planId, trigger, proposal);
+  else plannerShowAdaptationReview(planId, trigger, proposal);
+}
+
+async function plannerRetryInclude(button) {
+  const failure = plannerIncludeFailure;
+  if (!failure?.documentIds.length) return;
+  if (button) button.disabled = true;
+  try {
+    await plannerRequest(PLANNER_INCLUDE_DOCUMENTS_API_URL, { method: "POST", body: { document_ids: failure.documentIds } });
+    if (plannerIncludeFailure === failure) plannerIncludeFailure = null;
+    showToast("Study plan updated");
+    await loadPlannerData({ keepWeek: true });
+  } catch (error) {
+    if (button) button.disabled = false;
+    showToast(error.message || "Could not update the study plan");
   }
 }
 
@@ -926,7 +1002,7 @@ function plannerStartCalendarReview(planId, trigger, proposal, { prefix = "" } =
   }
   // A session action elsewhere (Home) opens the calendar to show where things go; a finished quiz
   // leaves the learner where they are and the proposal waits in the Planner.
-  if (trigger.kind === "quiz_completed") {
+  if (trigger.kind === "quiz_completed" || trigger.kind === "materials_added") {
     showToast(`${text}. Review them in Study Planner.`);
     return;
   }
@@ -1841,7 +1917,23 @@ function pcalRenderNotice() {
   notice.innerHTML = "";
   notice.dataset.tone = "";
   let text = "";
-  if (plannerAdaptStale && plannerAdaptStale.planId === plannerPlan?.plan_id) {
+  if (plannerIncludeFailure) {
+    text = plannerIncludeFailure.message;
+    notice.dataset.tone = "warn";
+    const action = pcalEl("button", "pcal-notice-action", "Retry");
+    action.type = "button";
+    action.id = "pcal-include-retry";
+    action.addEventListener("click", () => plannerRetryInclude(action));
+    notice.append(pcalEl("span", "", text), action);
+  } else if (plannerNewMaterialFailure && plannerNewMaterialFailure.planId === plannerPlan?.plan_id) {
+    text = "Could not suggest sessions for your new material. Your accepted plan is unchanged.";
+    notice.dataset.tone = "warn";
+    const action = pcalEl("button", "pcal-notice-action", "Try again");
+    action.type = "button";
+    action.id = "pcal-new-material-retry";
+    action.addEventListener("click", () => { action.disabled = true; plannerProposeNewMaterials(plannerNewMaterialFailure.planId); });
+    notice.append(pcalEl("span", "", text), action);
+  } else if (plannerAdaptStale && plannerAdaptStale.planId === plannerPlan?.plan_id) {
     text = "Your plan changed. Review the latest schedule.";
     const action = pcalEl("button", "pcal-notice-action", "Check for new suggestions");
     action.type = "button";
@@ -1865,6 +1957,13 @@ function pcalRenderNotice() {
     notice.appendChild(pcalEl("span", "", text));
     const documents = failure.detail?.code === "deadline_passed" ? failure.detail.documents || [] : [];
     documents.forEach((item) => notice.appendChild(pcalEl("span", "pcal-notice-chip", `${item.document_title || item.document_id} · ${item.deadline}`)));
+    if (!documents.length) {
+      const retry = pcalEl("button", "pcal-notice-action", "Try again");
+      retry.type = "button";
+      retry.id = "pcal-preview-retry";
+      retry.addEventListener("click", () => plannerQueueAutoPreview(0));
+      notice.appendChild(retry);
+    }
   } else if (plannerPreview && !plannerPreviewing && !plannerPreview.sessions.length) {
     text = "Nothing fits in your available time yet. Drag to add more.";
     notice.dataset.tone = "warn";

@@ -5,6 +5,7 @@ The preview builds a SchedulingContext, runs the deterministic scheduler and ser
 result without persisting anything; confirm recomputes the same schedule server-side and saves it.
 """
 
+import threading
 from datetime import date, datetime, timedelta, timezone
 
 from backend import (google_calendar_sync, study_adaptation, study_placement, study_planner_service,
@@ -147,6 +148,42 @@ def add_plan_material(owner_id: str, plan_id: str, document_id: str, deadline: s
             raise PlanConflictError(str(error)) from error
         raise
     return _with_titles(owner_id, [material])[0]
+
+
+# Serializes "find or create the active plan" so two uploads finishing together never create two
+# active plans (one process; the (plan, document) unique key already makes the adds idempotent).
+_AUTO_INCLUDE_LOCK = threading.Lock()
+AUTO_PLAN_TITLE = "My study plan"
+
+
+def include_uploaded_documents(owner_id: str, document_ids: list[str]) -> dict:
+    """Add freshly indexed documents to the learner's active plan (created when there is none), so
+    the planner's suggestions cover them without a manual Add Material. Only materials are added:
+    no session is created, moved or deleted -- suggestions stay a read-only preview until Accept
+    Plan, and on an already accepted plan the new material only shows up as still-to-schedule
+    candidates. Goals, deadlines, preferences and availability are left untouched. Idempotent: a
+    document already in the plan (or no longer indexed) is skipped."""
+    wanted = list(dict.fromkeys(str(item) for item in document_ids if item))
+    indexed = {document["document_id"] for document in list_indexed_documents(owner_id)}
+    wanted = [document_id for document_id in wanted if document_id in indexed]
+    if not wanted:
+        return {"status": "unchanged", "plan_id": None, "added_document_ids": []}
+    with _AUTO_INCLUDE_LOCK:
+        active = [plan for plan in study_planner_store.list_plans(owner_id) if plan["status"] == "active"]
+        # The newest active plan: the same one the planner page opens.
+        plan = active[-1] if active else study_planner_store.create_plan(owner_id, AUTO_PLAN_TITLE)
+        added = []
+        for document_id in wanted:
+            if study_planner_store.get_plan_material(owner_id, plan["plan_id"], document_id):
+                continue
+            try:
+                study_planner_store.add_material(owner_id, plan["plan_id"], document_id)
+            except ValueError as error:
+                if "already part of the study plan" not in str(error):
+                    raise
+                continue
+            added.append(document_id)
+    return {"status": "updated" if added else "unchanged", "plan_id": plan["plan_id"], "added_document_ids": added}
 
 
 def update_plan_material(owner_id: str, plan_id: str, material_id: str, changes: dict) -> dict:

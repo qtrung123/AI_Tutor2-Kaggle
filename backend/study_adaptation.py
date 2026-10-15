@@ -38,7 +38,8 @@ from backend.study_scheduler import (
 )
 from backend.study_scheduler_contracts import REASON_FINAL_REVIEW, REASON_RESCHEDULED, MaterialContext
 
-TRIGGER_KINDS = ("quiz_completed", "session_missed", "session_skipped", "availability_changed", "deadline_changed")
+TRIGGER_KINDS = ("quiz_completed", "session_missed", "session_skipped", "availability_changed", "deadline_changed",
+                 "materials_added")
 _ACTIVITY_NAMES = {"summary": "summary", "flashcards": "flashcards", "quiz": "quiz", "review": "review",
                    "quiz_retry": "quiz retry", "written_quiz": "written quiz"}
 
@@ -60,7 +61,7 @@ DEFAULT_ADAPTATION_CONFIG = AdaptationConfig()
 @dataclass(frozen=True)
 class AdaptationTrigger:
     kind: str
-    document_id: str | None = None   # quiz_completed / deadline_changed
+    document_id: str | None = None   # quiz_completed / deadline_changed (materials_added: optional filter)
     session_id: str | None = None    # session_missed / session_skipped
 
     def __post_init__(self):
@@ -534,6 +535,27 @@ def propose_adaptation(context: AdaptationContext, config: AdaptationConfig = DE
                                              strict_review_window=False, prefer_same_day=True, replaces=None, why=why,
                                              config=config, spread_until=spread_until(material, steps),
                                              avoid_same_day=balanced(material))
+            touched |= changed
+
+    elif trigger.kind == "materials_added":
+        # Materials added to an accepted plan (e.g. a newly uploaded PDF): propose sessions for each
+        # material that has no session in this plan yet, in free time only -- every existing session
+        # (accepted, manually edited, completed) stays exactly where it is and only blocks time.
+        planned = {s["document_id"] for s in context.plan_sessions}
+        if not planned:
+            outcome.reasons.append("This plan has no accepted sessions yet: its suggestions come from the plan preview.")
+        for material in context.materials if planned else ():
+            if material.document_id in planned or trigger.document_id not in (None, material.document_id):
+                continue
+            if material.deadline and date.fromisoformat(material.deadline) < today:
+                outcome.warnings.append({"code": "deadline_passed", "document_id": material.document_id,
+                                         "deadline": material.deadline})
+                continue
+            steps = steps_for(material)
+            _, changed = _reconcile_document(material, steps, [], calendar, outcome, can_add=lambda step: True,
+                                             cancel_unmatched=False, strict_review_window=False, prefer_same_day=False,
+                                             replaces=None, why="new material", config=config,
+                                             spread_until=spread_until(material, steps), avoid_same_day=balanced(material))
             touched |= changed
 
     else:  # availability_changed: move only the sessions that no longer fit; nothing is added or cancelled lightly

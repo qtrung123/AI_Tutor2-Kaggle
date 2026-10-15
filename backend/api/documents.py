@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from backend import document_storage, google_calendar_sync, study_planner_store
+from backend import document_storage, google_calendar_sync, study_plan_api_service, study_planner_store
 from backend.api.deps import require_current_user
 from backend.conversation_store import remove_source_from_conversations
 from backend.flashcard_store import delete_document_flashcards
@@ -49,6 +49,21 @@ class UploadResponse(BaseModel):
     skipped_files: list[str]
     total_indexed_files: int
     sources: list[SourceSummary]
+    # Study Planner auto-include of the newly indexed documents (see include_planner_documents).
+    planner: dict = Field(default_factory=dict)
+
+
+def include_planner_documents(owner_id: str, document_ids: list[str]) -> dict:
+    """Add newly indexed documents to the active study plan. Never fails the upload: the documents
+    are already stored, so a planner error is reported (with the ids, for a manual retry) instead."""
+    if not document_ids:
+        return {"status": "unchanged", "plan_id": None, "added_document_ids": []}
+    try:
+        return study_plan_api_service.include_uploaded_documents(owner_id, document_ids)
+    except Exception as error:   # noqa: BLE001 -- reported, never raised
+        print(f"[planner] auto-include after upload failed: {type(error).__name__}", flush=True)
+        return {"status": "failed", "plan_id": None, "added_document_ids": [], "document_ids": list(document_ids),
+                "message": "Your material was uploaded, but the study plan could not be updated."}
 
 
 class DeleteSourceResponse(BaseModel):
@@ -163,6 +178,8 @@ async def upload_sources(files: list[UploadFile] = File(...), current_user: dict
         # index_files() handles duplicate detection through file hashes and
         # Writes owner-scoped Chroma vectors and SQLite indexed-document metadata.
         result = index_files(saved_paths, current_user["id"])
+        # Only after the originals, vectors and registry rows are all persisted.
+        planner = include_planner_documents(current_user["id"], result.get("indexed_documents") or [])
         sources_result = [SourceSummary(**source) for source in list_uploaded_sources(current_user["id"])]
 
         return UploadResponse(
@@ -171,6 +188,7 @@ async def upload_sources(files: list[UploadFile] = File(...), current_user: dict
             skipped_files=result["skipped_files"],
             total_indexed_files=result["total_indexed_files"],
             sources=sources_result,
+            planner=planner,
         )
     except HTTPException:
         raise

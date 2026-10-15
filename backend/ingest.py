@@ -321,6 +321,7 @@ def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
     total_chunks = 0
     skipped_files = []
     topic_refreshed_files = []
+    indexed_documents = []   # document ids whose content was (re)indexed and persisted by this call
 
     # Process each file in the given list
     for file_path in file_paths:
@@ -396,6 +397,7 @@ def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
 
         total_new_files += 1
         total_chunks += len(chunks)
+        indexed_documents.append(file_key)
 
         print(f"Indexed: {file_path.name} - {len(chunks)} chunks")
 
@@ -404,6 +406,7 @@ def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
         "new_chunks": total_chunks,
         "skipped_files": skipped_files,
         "topic_refreshed_files": topic_refreshed_files,
+        "indexed_documents": indexed_documents,
         "total_indexed_files": len(indexed_files),
     }
 

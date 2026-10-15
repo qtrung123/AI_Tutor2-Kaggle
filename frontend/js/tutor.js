@@ -780,9 +780,12 @@ async function uploadSourceFiles(files) {
     renderConversationSources();
     await loadIndexedDocuments();
     await loadDashboard();
+    if (typeof plannerAfterUpload === "function") plannerAfterUpload(data.planner);
 
     uploadStatus.textContent = `${data.new_files} new file(s), ${data.new_chunks} new chunk(s) indexed`;
-    showToast(data.skipped_files?.length ? "Some files were already indexed" : "Material uploaded");
+    if (data.planner?.status === "failed") showToast("Material uploaded, but the study plan was not updated. Retry in Study Planner.");
+    else if (data.planner?.status === "updated") showToast("Material uploaded and added to your study plan");
+    else showToast(data.skipped_files?.length ? "Some files were already indexed" : "Material uploaded");
   } catch (error) {
     const detail = error.message || "Upload failed.";
     uploadStatus.textContent = detail;
