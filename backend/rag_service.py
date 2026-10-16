@@ -6,6 +6,7 @@ from pathlib import Path
 
 from backend import perf_timing, vector_store
 from backend.conversation_store import (
+    add_exchange,
     add_message,
     get_conversation,
     update_conversation_title,
@@ -272,20 +273,40 @@ def _save_assistant_answer(owner_id: str, conversation_id: str, answer: str, doc
     """Persist the assistant message with its citations: (message, grounding status, citations)."""
     citations = _build_citations(docs)
     grounding_status = _grounding_status(answer)
-    stored_citations = [{**citation, "document_id": citation["title"], "chunk": ""} for citation in citations]
-    assistant_message = add_message(owner_id, conversation_id, "assistant", answer, grounding_status, stored_citations)
+    assistant_message = add_message(owner_id, conversation_id, "assistant", answer, grounding_status,
+                                    _stored_citations(citations))
     return assistant_message, grounding_status, citations
 
 
-def _set_first_title(owner_id: str, conversation_id: str, conversation: dict, existing_messages: list, message: str):
+def _stored_citations(citations: list[dict]) -> list[dict]:
+    return [{**citation, "document_id": citation["title"], "chunk": ""} for citation in citations]
+
+
+def _first_title(conversation: dict, existing_messages: list, message: str) -> str | None:
+    """The title a new chat gets from its first question, else None (the title stays)."""
     if conversation["title"] == "New conversation" and not existing_messages:
-        update_conversation_title(owner_id, conversation_id, default_conversation_title(message))
+        return default_conversation_title(message)
+    return None
+
+
+def _set_first_title(owner_id: str, conversation_id: str, conversation: dict, existing_messages: list, message: str):
+    title = _first_title(conversation, existing_messages, message)
+    if title is not None:
+        update_conversation_title(owner_id, conversation_id, title, return_conversation=False)
+
+
+def _conversation_for_answer(owner_id: str, conversation_id: str) -> dict:
+    """The conversation with just what answering needs: its last HISTORY_MESSAGES messages (the
+    prompt history and the previous question for a follow-up), without citations. The full
+    history with citations is only loaded for the conversation view (GET /api/conversations/{id})."""
+    return get_conversation(owner_id, conversation_id, include_messages=True,
+                            recent_messages=HISTORY_MESSAGES, include_citations=False)
 
 
 def answer_conversation_message(owner_id: str, conversation_id: str, message: str, model_id: str | None = None) -> dict:
     """Answer and persist one message in a source-isolated conversation."""
     model = resolve_generation_model(model_id)
-    conversation = get_conversation(owner_id, conversation_id, include_messages=True)
+    conversation = _conversation_for_answer(owner_id, conversation_id)
     user_message = add_message(owner_id, conversation_id, "user", message.strip())
 
     existing_messages = conversation.get("messages", [])
@@ -324,7 +345,7 @@ def stream_conversation_message(owner_id: str, conversation_id: str, message: st
     the model stream -- which closes the request to Ollama/vLLM -- and saves nothing. Model errors
     propagate to the caller, also with nothing saved."""
     model = resolve_generation_model(model_id)
-    conversation = get_conversation(owner_id, conversation_id, include_messages=True)
+    conversation = _conversation_for_answer(owner_id, conversation_id)
     text = message.strip()
 
     def stopped() -> bool:
@@ -356,9 +377,13 @@ def stream_conversation_message(owner_id: str, conversation_id: str, message: st
             answer = _complete_answer("".join(parts).strip(), getattr(last, "response_metadata", None))
         if stopped():
             return
-        user_message = add_message(owner_id, conversation_id, "user", text)
-        _set_first_title(owner_id, conversation_id, conversation, existing_messages, text)
-        assistant_message, grounding_status, citations = _save_assistant_answer(owner_id, conversation_id, answer, docs)
+        # One transaction: the question, the answer with its citations and a new chat's title.
+        citations = _build_citations(docs)
+        grounding_status = _grounding_status(answer)
+        user_message, assistant_message = add_exchange(
+            owner_id, conversation_id, text, answer, grounding_status, _stored_citations(citations),
+            title=_first_title(conversation, existing_messages, text),
+        )
         yield {
             "type": "done",
             "user_message": user_message,

@@ -60,6 +60,8 @@ def ask(question, history=(), streaming=False):
             patch.object(rag_service, "resolve_generation_model", return_value="qwen"), \
             patch.object(rag_service, "get_conversation", return_value=conversation), \
             patch.object(rag_service, "add_message", side_effect=lambda *a: {"role": a[2], "content": a[3]}), \
+            patch.object(rag_service, "add_exchange", side_effect=lambda owner, conv, user, answer, *a, **k: (
+                {"role": "user", "content": user}, {"role": "assistant", "content": answer})), \
             patch.object(rag_service, "_retrieve_conversation_docs", return_value=[DOC]) as retrieve:
         if streaming:
             events = list(rag_service.stream_conversation_message("u", "c", question, "qwen-2.5-7b"))

@@ -1,6 +1,6 @@
 """Persistence for independent chat conversations and their messages (PostgreSQL or SQLite)."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from backend import db
@@ -146,7 +146,52 @@ def get_conversation_for_document(owner_id: str, document_id: str) -> dict | Non
         return _conversation_result(connection, row) if row else None
 
 
-def get_conversation(owner_id: str, conversation_id: str, include_messages: bool = True) -> dict:
+def _recent_messages(connection: db.Connection, conversation_id: str, limit: int) -> list:
+    """The last `limit` messages in chronological order. When none of them is a student message
+    but older ones exist, the latest student message is put first, so a caller looking back for
+    the previous question finds the same one it would find in the full history."""
+    rows = list(reversed(connection.execute(
+        "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?",
+        (conversation_id, limit),
+    ).fetchall()))
+    if len(rows) == limit and all(row["role"] != "user" for row in rows):
+        latest_user = connection.execute(
+            "SELECT * FROM messages WHERE conversation_id = ? AND role = 'user' ORDER BY created_at DESC LIMIT 1",
+            (conversation_id,),
+        ).fetchone()
+        if latest_user is not None:
+            rows.insert(0, latest_user)
+    return rows
+
+
+def _citations_by_message(connection: db.Connection, conversation_id: str, message_ids: list[str] | None) -> dict:
+    """All citations of the conversation's messages in one query (or of `message_ids` only), grouped
+    by message and kept in insertion (id) order -- the same lists one query per message returned."""
+    if message_ids is None:
+        rows = connection.execute(
+            "SELECT c.message_id, c.document_id, c.page, c.chunk, c.content FROM message_citations c "
+            "JOIN messages m ON m.id = c.message_id WHERE m.conversation_id = ? ORDER BY c.id",
+            (conversation_id,),
+        ).fetchall()
+    else:
+        rows = connection.execute(
+            "SELECT message_id, document_id, page, chunk, content FROM message_citations "
+            f"WHERE message_id IN ({','.join('?' * len(message_ids))}) ORDER BY id",
+            tuple(message_ids),
+        ).fetchall()
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(row["message_id"], []).append(
+            {"document_id": row["document_id"], "page": row["page"], "chunk": row["chunk"], "content": row["content"]}
+        )
+    return grouped
+
+
+def get_conversation(owner_id: str, conversation_id: str, include_messages: bool = True,
+                     recent_messages: int | None = None, include_citations: bool = True) -> dict:
+    """The owner's conversation; with include_messages, its messages oldest first, each with its
+    citations. recent_messages=N keeps only the last N (see _recent_messages) and
+    include_citations=False leaves citations out -- what answering a new question needs."""
     initialize_conversation_store()
     with _connect() as connection:
         row = connection.execute(
@@ -156,23 +201,28 @@ def get_conversation(owner_id: str, conversation_id: str, include_messages: bool
             raise ValueError("Conversation not found.")
         result = _conversation_result(connection, row)
         if include_messages:
-            messages = connection.execute(
-                "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at",
-                (conversation_id,),
-            ).fetchall()
-            result["messages"] = []
-            for message in messages:
-                item = dict(message)
-                citations = connection.execute(
-                    "SELECT document_id, page, chunk, content FROM message_citations WHERE message_id = ? ORDER BY id",
-                    (message["id"],),
+            messages = (
+                connection.execute(
+                    "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at",
+                    (conversation_id,),
                 ).fetchall()
-                item["citations"] = [dict(citation) for citation in citations]
-                result["messages"].append(item)
+                if recent_messages is None else _recent_messages(connection, conversation_id, recent_messages)
+            )
+            citations = {}
+            if include_citations and messages:
+                citations = _citations_by_message(
+                    connection, conversation_id,
+                    None if recent_messages is None else [message["id"] for message in messages],
+                )
+            result["messages"] = [
+                {**dict(message), "citations": citations.get(message["id"], [])} if include_citations else dict(message)
+                for message in messages
+            ]
         return result
 
 
-def update_conversation_title(owner_id: str, conversation_id: str, title: str) -> dict:
+def update_conversation_title(owner_id: str, conversation_id: str, title: str,
+                              return_conversation: bool = True) -> dict | None:
     with _connect() as connection:
         cursor = connection.execute(
             "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ? AND owner_id = ?",
@@ -180,7 +230,7 @@ def update_conversation_title(owner_id: str, conversation_id: str, title: str) -
         )
         if cursor.rowcount == 0:
             raise ValueError("Conversation not found.")
-    return get_conversation(owner_id, conversation_id, include_messages=False)
+    return get_conversation(owner_id, conversation_id, include_messages=False) if return_conversation else None
 
 
 def set_conversation_sources(owner_id: str, conversation_id: str, document_ids: list[str]) -> dict:
@@ -212,7 +262,6 @@ def add_message(
     grounding_status: str | None = None,
     citations: list[dict] | None = None,
 ) -> dict:
-    message_id = str(uuid4())
     timestamp = _now()
     with _connect() as connection:
         exists = connection.execute(
@@ -220,22 +269,33 @@ def add_message(
         ).fetchone()
         if exists is None:
             raise ValueError("Conversation not found.")
-        connection.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, grounding_status, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (message_id, conversation_id, role, content, grounding_status, timestamp),
-        )
-        for citation in citations or []:
-            connection.execute(
-                "INSERT INTO message_citations (message_id, document_id, page, chunk, content) VALUES (?, ?, ?, ?, ?)",
+        message = _insert_message(connection, conversation_id, role, content, grounding_status, citations, timestamp)
+        connection.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (timestamp, conversation_id))
+    return message
+
+
+def _insert_message(connection: db.Connection, conversation_id: str, role: str, content: str,
+                    grounding_status: str | None, citations: list[dict] | None, timestamp: str) -> dict:
+    """Insert one message and its citations (one batched statement) inside the caller's unit."""
+    message_id = str(uuid4())
+    connection.execute(
+        "INSERT INTO messages (id, conversation_id, role, content, grounding_status, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (message_id, conversation_id, role, content, grounding_status, timestamp),
+    )
+    if citations:
+        connection.executemany(
+            "INSERT INTO message_citations (message_id, document_id, page, chunk, content) VALUES (?, ?, ?, ?, ?)",
+            [
                 (
                     message_id,
                     citation.get("document_id") or citation.get("title", "Unknown source"),
                     str(citation.get("page", "Unknown page")),
                     str(citation.get("chunk", "")),
                     citation.get("content", ""),
-                ),
-            )
-        connection.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (timestamp, conversation_id))
+                )
+                for citation in citations
+            ],
+        )
     return {
         "id": message_id,
         "conversation_id": conversation_id,
@@ -245,6 +305,47 @@ def add_message(
         "created_at": timestamp,
         "citations": citations or [],
     }
+
+
+def _after(timestamp: str) -> str:
+    """A timestamp strictly later than `timestamp`, so messages saved together keep their order."""
+    now = _now()
+    if now > timestamp:
+        return now
+    return (datetime.fromisoformat(timestamp) + timedelta(microseconds=1)).isoformat()
+
+
+def add_exchange(
+    owner_id: str,
+    conversation_id: str,
+    user_content: str,
+    assistant_content: str,
+    grounding_status: str | None,
+    citations: list[dict] | None,
+    title: str | None = None,
+) -> tuple[dict, dict]:
+    """Save a student message and the tutor's answer (with its citations) in one unit of work, and
+    the conversation's first title when `title` is given. Same rows, timestamps order and
+    ownership check as add_message() twice plus update_conversation_title(), in one transaction."""
+    with _connect() as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM conversations WHERE id = ? AND owner_id = ?", (conversation_id, owner_id)
+        ).fetchone()
+        if exists is None:
+            raise ValueError("Conversation not found.")
+        user_timestamp = _now()
+        user_message = _insert_message(connection, conversation_id, "user", user_content, None, None, user_timestamp)
+        assistant_timestamp = _after(user_timestamp)
+        assistant_message = _insert_message(connection, conversation_id, "assistant", assistant_content,
+                                            grounding_status, citations, assistant_timestamp)
+        if title is not None:
+            connection.execute(
+                "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+                (title.strip() or "New conversation", assistant_timestamp, conversation_id),
+            )
+        else:
+            connection.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (assistant_timestamp, conversation_id))
+    return user_message, assistant_message
 
 
 def delete_conversation(owner_id: str, conversation_id: str) -> None:
