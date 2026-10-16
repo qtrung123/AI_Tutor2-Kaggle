@@ -1,5 +1,6 @@
 import hashlib
 import re
+from contextlib import contextmanager
 from pathlib import Path
 from typing import List
 
@@ -13,7 +14,7 @@ from backend.topic_extractor import (
     _HIGH_CONFIDENCE as HIGH_STRUCTURE_CONFIDENCE,
     ollama_heading_refiner,
 )
-from backend import document_storage, vector_store
+from backend import document_storage, perf_timing, vector_store
 from backend.assessment_planner import resolve_topic_evidence
 from backend.auth_store import LEGACY_USER_ID
 from backend.indexed_document_store import (
@@ -96,11 +97,13 @@ def load_pdf_pages(file_path: Path):
     documents = clean_documents(PyPDFLoader(str(file_path), extraction_mode="plain").load())
     if not documents or TopicExtractor().detect_headings(documents):
         return documents
+    perf_timing.count(layout_attempt=1)   # a second, full parse in layout mode
     layout = clean_documents(_normalize_layout_text(PyPDFLoader(
         str(file_path), extraction_mode="layout", extraction_kwargs={"layout_mode_space_vertically": False},
     ).load()))
     if layout and _visible_length(layout) >= 0.9 * _visible_length(documents) and _has_reliable_structure(layout):
         print(f"Plain PDF extraction lost heading lines; using layout extraction: {file_path.name}")
+        perf_timing.count(layout_fallback=1)
         return layout
     return documents
 
@@ -200,13 +203,17 @@ def has_source_vectors(vectorstore, owner_id: str, document_id: str) -> bool:
 
 def load_document_chunks(file_path: Path, owner_id: str, file_hash: str):
     """Load pages and split them into chunks carrying the document's ownership metadata."""
-    documents = clean_documents(load_single_file(file_path))
+    with perf_timing.stage("parse"):
+        documents = clean_documents(load_single_file(file_path))
     for doc in documents:
         doc.metadata["source"] = file_path.name
         doc.metadata["document_id"] = file_path.name
         doc.metadata["owner_id"] = owner_id
         doc.metadata["file_hash"] = file_hash
-    return documents, (split_documents(documents) if documents else [])
+    with perf_timing.stage("split"):
+        chunks = split_documents(documents) if documents else []
+    perf_timing.count(pages=len(documents), chunks=len(chunks))
+    return documents, chunks
 
 
 def owner_vector_ids(owner_id: str, provenance_ids: list[str]) -> list[str]:
@@ -299,6 +306,19 @@ def _store_original_for_existing(owner_id: str, file_key: str, file_path: Path, 
     return stored
 
 
+@contextmanager
+def _file_timing(position: int, total: int):
+    """With AI_TUTOR_PERF_TIMING=1, one [ingest] line per file: stage times and counts only."""
+    timer = perf_timing.stage_timer("[ingest]")
+    with perf_timing.recording(timer):
+        perf_timing.count(file=position, files=total)
+        try:
+            yield
+        finally:
+            if timer is not None:
+                timer.emit()
+
+
 def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
     """
     Incremental indexing:
@@ -324,82 +344,99 @@ def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
     indexed_documents = []   # document ids whose content was (re)indexed and persisted by this call
 
     # Process each file in the given list
-    for file_path in file_paths:
-        file_path = Path(file_path)
+    for position, file_path in enumerate(file_paths, start=1):
+        with _file_timing(position, len(file_paths)):
+            file_path = Path(file_path)
 
-        if not file_path.exists():
-            print(f"File does not exist: {file_path}")
-            continue
-
-        file_hash = calculate_file_hash(file_path)
-        file_key = file_path.name
-        durable = document_storage.durable_storage_enabled()
-        previous = indexed_files.get(file_key)
-
-        if (file_key in indexed_files and indexed_files[file_key]["hash"] == file_hash
-                and has_source_vectors(vectorstore, owner_id, file_key)):
-            if durable and not indexed_files[file_key].get("object_path"):
-                indexed_files[file_key] = _store_original_for_existing(
-                    owner_id, file_key, file_path, file_hash, indexed_files[file_key])
-            if indexed_files[file_key].get("topic_schema_version") == TOPIC_SCHEMA_VERSION:
-                print(f"Skipping already indexed file: {file_path.name}")
-                skipped_files.append(file_path.name)
-                continue
-            refreshed = refresh_topic_metadata(vectorstore, file_path, owner_id, indexed_files[file_key])
-            if refreshed:
-                indexed_files[file_key] = refreshed
-                topic_refreshed_files.append(file_path.name)
+            if not file_path.exists():
+                print(f"File does not exist: {file_path}")
+                perf_timing.outcome("missing")
                 continue
 
-        # Durable original first: nothing is recorded for a file that is not safely stored.
-        stored_path = document_storage.upload(owner_id, file_path, file_hash) if durable else None
-        try:
-            documents, chunks = load_document_chunks(file_path, owner_id, file_hash)
+            with perf_timing.stage("hash"):
+                file_hash = calculate_file_hash(file_path)
+            file_key = file_path.name
+            durable = document_storage.durable_storage_enabled()
+            previous = indexed_files.get(file_key)
 
-            if not documents:
-                print(f"No extractable text found in: {file_path.name}")
+            with perf_timing.stage("registry_lookup"):
+                already_indexed = (file_key in indexed_files and indexed_files[file_key]["hash"] == file_hash
+                                   and has_source_vectors(vectorstore, owner_id, file_key))
+            if already_indexed:
+                if durable and not indexed_files[file_key].get("object_path"):
+                    with perf_timing.stage("storage"):
+                        indexed_files[file_key] = _store_original_for_existing(
+                            owner_id, file_key, file_path, file_hash, indexed_files[file_key])
+                if indexed_files[file_key].get("topic_schema_version") == TOPIC_SCHEMA_VERSION:
+                    print(f"Skipping already indexed file: {file_path.name}")
+                    skipped_files.append(file_path.name)
+                    perf_timing.outcome("skipped")
+                    continue
+                with perf_timing.stage("topic_refresh"):
+                    refreshed = refresh_topic_metadata(vectorstore, file_path, owner_id, indexed_files[file_key])
+                if refreshed:
+                    indexed_files[file_key] = refreshed
+                    topic_refreshed_files.append(file_path.name)
+                    perf_timing.outcome("topic_refreshed")
+                    continue
+
+            # Durable original first: nothing is recorded for a file that is not safely stored.
+            with perf_timing.stage("storage"):
+                stored_path = document_storage.upload(owner_id, file_path, file_hash) if durable else None
+            try:
+                documents, chunks = load_document_chunks(file_path, owner_id, file_hash)
+
+                if not documents:
+                    print(f"No extractable text found in: {file_path.name}")
+                    _discard_unreferenced_object(owner_id, stored_path)
+                    perf_timing.outcome("empty")
+                    continue
+
+                if not chunks:
+                    print(f"No chunks created for: {file_path.name}")
+                    _discard_unreferenced_object(owner_id, stored_path)
+                    perf_timing.outcome("empty")
+                    continue
+
+                provenance_ids = [f"{file_hash}_{i}" for i in range(len(chunks))]
+                vector_ids = owner_vector_ids(owner_id, provenance_ids)
+
+                with perf_timing.stage("topics"):   # includes refine_ms (Qwen heading refinement)
+                    topics = add_topic_metadata(documents, chunks, provenance_ids)
+
+                with perf_timing.stage("vectors"):  # embedding + vector write (split into embed/insert on pgvector)
+                    vectorstore.add_documents(
+                        documents=chunks,
+                        ids=vector_ids,
+                    )
+                with perf_timing.stage("stale_cleanup"):
+                    delete_stale_source_vectors(vectorstore, owner_id, file_key, vector_ids)
+
+                info = {
+                    "hash": file_hash,
+                    "chunks": len(chunks),
+                    "path": str(file_path),
+                    "topic_schema_version": TOPIC_SCHEMA_VERSION,
+                    "topics": topics,
+                }
+                if stored_path:
+                    info.update(object_path=stored_path, object_bucket=document_storage.bucket_name())
+                indexed_files[file_key] = info
+                with perf_timing.stage("metadata"):
+                    upsert_indexed_document(owner_id, file_key, info)
+            except BaseException:
                 _discard_unreferenced_object(owner_id, stored_path)
-                continue
+                raise
+            # Replaced content: this document no longer references its previous original.
+            if previous and previous.get("object_path") and previous["object_path"] != stored_path:
+                _discard_unreferenced_object(owner_id, previous["object_path"])
 
-            if not chunks:
-                print(f"No chunks created for: {file_path.name}")
-                _discard_unreferenced_object(owner_id, stored_path)
-                continue
+            total_new_files += 1
+            total_chunks += len(chunks)
+            indexed_documents.append(file_key)
 
-            provenance_ids = [f"{file_hash}_{i}" for i in range(len(chunks))]
-            vector_ids = owner_vector_ids(owner_id, provenance_ids)
-
-            topics = add_topic_metadata(documents, chunks, provenance_ids)
-
-            vectorstore.add_documents(
-                documents=chunks,
-                ids=vector_ids,
-            )
-            delete_stale_source_vectors(vectorstore, owner_id, file_key, vector_ids)
-
-            info = {
-                "hash": file_hash,
-                "chunks": len(chunks),
-                "path": str(file_path),
-                "topic_schema_version": TOPIC_SCHEMA_VERSION,
-                "topics": topics,
-            }
-            if stored_path:
-                info.update(object_path=stored_path, object_bucket=document_storage.bucket_name())
-            indexed_files[file_key] = info
-            upsert_indexed_document(owner_id, file_key, info)
-        except BaseException:
-            _discard_unreferenced_object(owner_id, stored_path)
-            raise
-        # Replaced content: this document no longer references its previous original.
-        if previous and previous.get("object_path") and previous["object_path"] != stored_path:
-            _discard_unreferenced_object(owner_id, previous["object_path"])
-
-        total_new_files += 1
-        total_chunks += len(chunks)
-        indexed_documents.append(file_key)
-
-        print(f"Indexed: {file_path.name} - {len(chunks)} chunks")
+            print(f"Indexed: {file_path.name} - {len(chunks)} chunks")
+            perf_timing.outcome("indexed")
 
     return {
         "new_files": total_new_files,

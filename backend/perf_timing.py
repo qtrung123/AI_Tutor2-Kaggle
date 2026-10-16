@@ -15,11 +15,22 @@ The same switch adds one line per Chat / quiz-explanation model call (log_llm_ca
 
     [llm] call=chat wall_ms=9120.4 load_ms=3.1 prompt_eval_ms=640.2 eval_ms=8300.0 ollama_total_ms=9050.0 prompt_tokens=2150 output_tokens=240 output_tokens_per_s=28.9 done_reason=stop
 
+And one line per uploaded file plus one per upload request for PDF indexing (StageTimer):
+
+    [ingest] outcome=indexed file=1 files=1 pages=42 layout_fallback=0 chunks=310 hash_ms=4.1 registry_lookup_ms=38.2 storage_ms=812.5 parse_ms=1650.3 split_ms=21.7 topics_ms=14210.9 refine_ms=14102.4 refine_calls=1 refine_ok=0 vectors_ms=20480.2 embed_ms=19120.6 embedded_chunks=310 insert_ms=1330.8 stale_cleanup_ms=95.4 metadata_ms=41.0 total_ms=37390.0
+    [upload] outcome=ok files=1 bytes=2483120 read_write_ms=12.3 index_ms=37460.1 new_files=1 new_chunks=310 skipped_files=0 planner_ms=88.0 sources_ms=35.2 total_ms=37600.4
+
+Stage *_ms values are summed per line (a stage that runs twice adds up); topics_ms includes
+refine_ms and vectors_ms includes embed_ms + insert_ms (pgvector only: local Chroma embeds and
+writes in one call, so it reports vectors_ms alone).
+
 Only the method, the route template (e.g. /api/flashcards/{document_id}, never the concrete path,
 which can carry a document name), the status and numbers are emitted: no SQL text, parameters,
-query strings, credentials or document content.
+query strings, credentials or document content -- and no file names, document or user ids.
 """
 
+import contextlib
+import contextvars
 import os
 import time
 
@@ -65,6 +76,84 @@ def log_llm_call(call: str, response, elapsed_seconds: float, **extra) -> None:
     metadata = getattr(response, "response_metadata", None) or {}
     fields = " ".join(f"{key}={value}" for key, value in timing.items())
     print(f"[llm] call={call} {fields} done_reason={metadata.get('done_reason')}")
+
+
+class StageTimer:
+    """Elapsed milliseconds per named stage plus integer counts for one unit of work (an upload
+    request, one indexed file); emit() prints them as one line. Labels and stage/count names are
+    fixed strings from the code -- callers must never pass file names, ids or content."""
+
+    def __init__(self, label: str):
+        self.label = label
+        self.outcome = "error"   # callers set the real outcome on success
+        self.fields: dict[str, float | int] = {}
+        self._started = time.perf_counter()
+
+    @contextlib.contextmanager
+    def stage(self, name: str):
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            key = f"{name}_ms"
+            self.fields[key] = self.fields.get(key, 0.0) + (time.perf_counter() - started) * 1000
+
+    def count(self, **counts: int) -> None:
+        for name, value in counts.items():
+            self.fields[name] = self.fields.get(name, 0) + int(value)
+
+    def line(self) -> str:
+        total_ms = (time.perf_counter() - self._started) * 1000
+        parts = [f"{name}={value:.1f}" if isinstance(value, float) else f"{name}={value}"
+                 for name, value in self.fields.items()]
+        return " ".join([self.label, f"outcome={self.outcome}", *parts, f"total_ms={total_ms:.1f}"])
+
+    def emit(self) -> None:
+        print(self.line(), flush=True)
+
+
+# The StageTimer that stage()/count() report to; None (the default) makes both no-ops, so the
+# instrumented code pays one ContextVar lookup per stage when AI_TUTOR_PERF_TIMING is off.
+_current_timer: contextvars.ContextVar = contextvars.ContextVar("ai_tutor_stage_timer", default=None)
+_NO_STAGE = contextlib.nullcontext()
+
+
+def stage_timer(label: str) -> StageTimer | None:
+    """A new StageTimer when timing is enabled, else None."""
+    return StageTimer(label) if enabled() else None
+
+
+@contextlib.contextmanager
+def recording(timer: StageTimer | None):
+    """Make `timer` the target of stage()/count() inside the block (nothing happens for None)."""
+    if timer is None:
+        yield None
+        return
+    token = _current_timer.set(timer)
+    try:
+        yield timer
+    finally:
+        _current_timer.reset(token)
+
+
+def stage(name: str):
+    """Time a block into the current StageTimer as `<name>_ms`; a no-op context when none is set."""
+    timer = _current_timer.get()
+    return _NO_STAGE if timer is None else timer.stage(name)
+
+
+def count(**counts: int) -> None:
+    """Add integer counts to the current StageTimer, if any."""
+    timer = _current_timer.get()
+    if timer is not None:
+        timer.count(**counts)
+
+
+def outcome(name: str) -> None:
+    """Set the current StageTimer's outcome (a fixed word such as "indexed" or "skipped"), if any."""
+    timer = _current_timer.get()
+    if timer is not None:
+        timer.outcome = name
 
 
 def server_timing(total_seconds: float, stats: db.RequestStats) -> str:

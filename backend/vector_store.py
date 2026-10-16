@@ -16,7 +16,7 @@ import re
 import threading
 from datetime import datetime, timezone
 
-from backend import db
+from backend import db, perf_timing
 from config import COLLECTION_NAME, DATABASE_PATH, EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, VECTORSTORE_DIR
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -204,7 +204,9 @@ class PgVectorStore:
             raise ValueError("Every chunk needs exactly one id.")
         if not documents:
             return []
-        vectors = self.embeddings.embed_documents([document.page_content for document in documents])
+        with perf_timing.stage("embed"):
+            vectors = self.embeddings.embed_documents([document.page_content for document in documents])
+        perf_timing.count(embedded_chunks=len(documents))
         now = datetime.now(timezone.utc).isoformat()
         rows = []
         for position, (document, vector_id, vector) in enumerate(zip(documents, ids, vectors)):
@@ -218,7 +220,7 @@ class PgVectorStore:
                 EMBEDDING_MODEL, EMBEDDING_DIMENSIONS, now,
             ))
         schema = self._schema
-        with self._connect() as connection:
+        with perf_timing.stage("insert"), self._connect() as connection:
             connection.executemany(
                 f"""
                 INSERT INTO document_chunks (vector_id, owner_id, document_id, chunk_index, content,

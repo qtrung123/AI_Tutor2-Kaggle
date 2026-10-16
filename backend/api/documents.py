@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from backend import document_storage, google_calendar_sync, study_plan_api_service, study_planner_store
+from backend import document_storage, google_calendar_sync, perf_timing, study_plan_api_service, study_planner_store
 from backend.api.deps import require_current_user
 from backend.conversation_store import remove_source_from_conversations
 from backend.flashcard_store import delete_document_flashcards
@@ -155,57 +155,74 @@ async def upload_sources(files: list[UploadFile] = File(...), current_user: dict
     user_data_dir = DATA_DIR / "users" / current_user["id"]
     user_data_dir.mkdir(parents=True, exist_ok=True)
     saved_paths = []
+    total_bytes = 0
     allowed_extensions = {".pdf", ".txt"}
 
-    try:
-        for uploaded_file in files:
-            # Keep only the final file name so a browser-provided path cannot
-            # write outside data/.
-            file_name = Path(uploaded_file.filename or "").name
-            suffix = Path(file_name).suffix.lower()
+    # With AI_TUTOR_PERF_TIMING=1: one [upload] line (stage times and counts only) after the
+    # per-file [ingest] lines printed by index_files(); off by default.
+    timer = perf_timing.stage_timer("[upload]")
+    with perf_timing.recording(timer):
+        try:
+            with perf_timing.stage("read_write"):
+                for uploaded_file in files:
+                    # Keep only the final file name so a browser-provided path cannot
+                    # write outside data/.
+                    file_name = Path(uploaded_file.filename or "").name
+                    suffix = Path(file_name).suffix.lower()
 
-            if not file_name or suffix not in allowed_extensions:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Only PDF and TXT files can be uploaded.",
-                )
+                    if not file_name or suffix not in allowed_extensions:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Only PDF and TXT files can be uploaded.",
+                        )
 
-            save_path = user_data_dir / file_name
-            content = await uploaded_file.read()
-            save_path.write_bytes(content)
-            saved_paths.append(save_path)
+                    save_path = user_data_dir / file_name
+                    content = await uploaded_file.read()
+                    save_path.write_bytes(content)
+                    saved_paths.append(save_path)
+                    total_bytes += len(content)
+            perf_timing.count(files=len(saved_paths), bytes=total_bytes)
 
-        # index_files() handles duplicate detection through file hashes and
-        # Writes owner-scoped Chroma vectors and SQLite indexed-document metadata.
-        result = index_files(saved_paths, current_user["id"])
-        # Only after the originals, vectors and registry rows are all persisted.
-        planner = include_planner_documents(current_user["id"], result.get("indexed_documents") or [])
-        sources_result = [SourceSummary(**source) for source in list_uploaded_sources(current_user["id"])]
+            # index_files() handles duplicate detection through file hashes and
+            # Writes owner-scoped Chroma vectors and SQLite indexed-document metadata.
+            with perf_timing.stage("index"):
+                result = index_files(saved_paths, current_user["id"])
+            perf_timing.count(new_files=result["new_files"], new_chunks=result["new_chunks"],
+                              skipped_files=len(result["skipped_files"]))
+            # Only after the originals, vectors and registry rows are all persisted.
+            with perf_timing.stage("planner"):
+                planner = include_planner_documents(current_user["id"], result.get("indexed_documents") or [])
+            with perf_timing.stage("sources"):
+                sources_result = [SourceSummary(**source) for source in list_uploaded_sources(current_user["id"])]
+            perf_timing.outcome("ok")
 
-        return UploadResponse(
-            new_files=result["new_files"],
-            new_chunks=result["new_chunks"],
-            skipped_files=result["skipped_files"],
-            total_indexed_files=result["total_indexed_files"],
-            sources=sources_result,
-            planner=planner,
-        )
-    except HTTPException:
-        raise
-    except document_storage.DocumentStorageError as error:
-        raise HTTPException(
-            status_code=503,
-            detail=f"The file could not be saved to durable storage, so it was not added. {error}",
-        ) from error
-    except Exception as error:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Could not upload and index the selected files. Please check that Ollama is running, "
-                "the embedding model is available, and the files contain extractable text. "
-                f"Original error: {error}"
-            ),
-        ) from error
+            return UploadResponse(
+                new_files=result["new_files"],
+                new_chunks=result["new_chunks"],
+                skipped_files=result["skipped_files"],
+                total_indexed_files=result["total_indexed_files"],
+                sources=sources_result,
+                planner=planner,
+            )
+        except HTTPException:
+            raise
+        except document_storage.DocumentStorageError as error:
+            raise HTTPException(
+                status_code=503,
+                detail=f"The file could not be saved to durable storage, so it was not added. {error}",
+            ) from error
+        except Exception as error:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Could not upload and index the selected files. Please check that Ollama is running, "
+                    "the embedding model is available, and the files contain extractable text. "
+                    f"Original error: {error}"
+                ),
+            ) from error
+        finally:
+            if timer is not None:
+                timer.emit()
 
 
 @router.delete("/api/sources/{document_id}", response_model=DeleteSourceResponse)

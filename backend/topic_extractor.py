@@ -160,11 +160,16 @@ class TopicExtractor:
         selected, confidence = self._select_major_candidates(headings, document_length)
         llm_assignments = None
         if confidence < _HIGH_CONFIDENCE and self.llm_refiner and self._needs_refinement(headings, len(documents)):
+            from backend import perf_timing   # lazy: this module stays free of app imports otherwise
+
             payload = {"candidates": [self._candidate_payload(index, h) for index, h in enumerate(headings[:100])]}
+            perf_timing.count(refine_calls=1, refine_candidates=len(payload["candidates"]))
             try:
-                llm_assignments = self._validate_refinement(self.llm_refiner(payload), headings[:100])
+                with perf_timing.stage("refine"):
+                    llm_assignments = self._validate_refinement(self.llm_refiner(payload), headings[:100])
                 selected = [heading for heading, role, _parent in llm_assignments if role == "major"]
                 confidence = 0.74
+                perf_timing.count(refine_ok=1)
             except Exception as error:
                 print(f"Topic LLM refinement failed; using deterministic topics: {error}")
         if not selected:
@@ -277,7 +282,14 @@ def ollama_heading_refiner(model: str):
             '"parent_id":null|"hN","parent_heading":null|"exact parent text"}]}.\n'
             + json.dumps(payload, ensure_ascii=False)
         )
+        import time
+
+        from backend.perf_timing import log_llm_call
+
+        started = time.perf_counter()
         response = ChatOllama(model=model, temperature=0, num_predict=500, format="json").invoke(prompt)
+        # [llm] call=topic_refine: load_ms shows a model reload, done_reason=length a capped reply.
+        log_llm_call("topic_refine", response, time.perf_counter() - started)
         text = str(response.content).strip()
         parsed = json.loads(text)
         if isinstance(parsed, dict):
