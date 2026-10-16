@@ -173,7 +173,7 @@ class IngestTimingTests(unittest.TestCase):
         self.assertEqual((upload_line["files"], upload_line["bytes"]), ("1", str(len(TEXT.encode("utf-8")))))
         self.assertEqual((int(upload_line["new_files"]), int(upload_line["new_chunks"]), upload_line["skipped_files"]),
                          (1, body["new_chunks"], "0"))
-        for stage in ("read_write", "index", "planner", "sources"):
+        for stage in ("lock_wait", "write", "index", "planner", "sources"):
             self.assertIn(f"{stage}_ms", upload_line, stage)
 
     def test_stage_times_are_measured_and_nest_consistently(self):

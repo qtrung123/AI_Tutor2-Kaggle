@@ -4,9 +4,13 @@ document list.
 Deleting a document also clears every feature's data for it (quiz, summary, flashcards, planner
 and chat sources) through each feature's own store.
 """
+import shutil
+import threading
 from pathlib import Path
+from typing import BinaryIO
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -136,6 +140,52 @@ def source_content(document_id: str, current_user: dict = Depends(require_curren
     return FileResponse(path, media_type=media_type, filename=path.name, content_disposition_type="inline")
 
 
+# One indexing run (or document delete) at a time, across all users. Before uploads ran in the
+# threadpool they were serialized by the blocked event loop; this keeps that guarantee, so two
+# uploads never write the same data/ file or index the same document concurrently, a delete never
+# races an index of the same document, and Ollama embeds one document at a time. A waiting upload
+# holds a threadpool thread, never the event loop. This is a per-process lock: it relies on the
+# single Uvicorn worker that deployment/start_kaggle.sh starts; several workers would need a
+# cross-process lock (e.g. a PostgreSQL advisory lock) instead.
+_INDEXING_LOCK = threading.Lock()
+
+
+def _store_and_index_uploads(owner_id: str, uploads: list[tuple[str, BinaryIO]]):
+    """The blocking part of an upload (runs in a worker thread): save, index, add to the study plan,
+    list sources. `uploads` holds the multipart files Starlette already spooled, copied to disk here
+    in chunks so a waiting upload never keeps its bytes in memory. Stage timing reaches the
+    request's [upload] line through the copied context."""
+    with perf_timing.stage("lock_wait"):
+        _INDEXING_LOCK.acquire()
+    try:
+        with perf_timing.stage("write"):
+            user_data_dir = DATA_DIR / "users" / owner_id
+            user_data_dir.mkdir(parents=True, exist_ok=True)
+            saved_paths = []
+            for file_name, source in uploads:
+                save_path = user_data_dir / file_name
+                source.seek(0)
+                with open(save_path, "wb") as target:
+                    shutil.copyfileobj(source, target)
+                perf_timing.count(bytes=save_path.stat().st_size)
+                saved_paths.append(save_path)
+
+        # index_files() handles duplicate detection through file hashes and
+        # Writes owner-scoped Chroma vectors and SQLite indexed-document metadata.
+        with perf_timing.stage("index"):
+            result = index_files(saved_paths, owner_id)
+        perf_timing.count(new_files=result["new_files"], new_chunks=result["new_chunks"],
+                          skipped_files=len(result["skipped_files"]))
+        # Only after the originals, vectors and registry rows are all persisted.
+        with perf_timing.stage("planner"):
+            planner = include_planner_documents(owner_id, result.get("indexed_documents") or [])
+    finally:
+        _INDEXING_LOCK.release()
+    with perf_timing.stage("sources"):
+        sources_result = [SourceSummary(**source) for source in list_uploaded_sources(owner_id)]
+    return result, planner, sources_result
+
+
 @router.post("/api/sources/upload", response_model=UploadResponse)
 async def upload_sources(files: list[UploadFile] = File(...), current_user: dict = Depends(require_current_user)) -> UploadResponse:
     """
@@ -152,10 +202,7 @@ async def upload_sources(files: list[UploadFile] = File(...), current_user: dict
     if not files:
         raise HTTPException(status_code=400, detail="Upload at least one PDF or TXT file.")
 
-    user_data_dir = DATA_DIR / "users" / current_user["id"]
-    user_data_dir.mkdir(parents=True, exist_ok=True)
-    saved_paths = []
-    total_bytes = 0
+    owner_id = current_user["id"]
     allowed_extensions = {".pdf", ".txt"}
 
     # With AI_TUTOR_PERF_TIMING=1: one [upload] line (stage times and counts only) after the
@@ -163,37 +210,27 @@ async def upload_sources(files: list[UploadFile] = File(...), current_user: dict
     timer = perf_timing.stage_timer("[upload]")
     with perf_timing.recording(timer):
         try:
-            with perf_timing.stage("read_write"):
-                for uploaded_file in files:
-                    # Keep only the final file name so a browser-provided path cannot
-                    # write outside data/.
-                    file_name = Path(uploaded_file.filename or "").name
-                    suffix = Path(file_name).suffix.lower()
+            # Every name is checked before anything is written.
+            uploads = []
+            for uploaded_file in files:
+                # Keep only the final file name so a browser-provided path cannot
+                # write outside data/.
+                file_name = Path(uploaded_file.filename or "").name
+                suffix = Path(file_name).suffix.lower()
 
-                    if not file_name or suffix not in allowed_extensions:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="Only PDF and TXT files can be uploaded.",
-                        )
+                if not file_name or suffix not in allowed_extensions:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Only PDF and TXT files can be uploaded.",
+                    )
 
-                    save_path = user_data_dir / file_name
-                    content = await uploaded_file.read()
-                    save_path.write_bytes(content)
-                    saved_paths.append(save_path)
-                    total_bytes += len(content)
-            perf_timing.count(files=len(saved_paths), bytes=total_bytes)
+                uploads.append((file_name, uploaded_file.file))
+            perf_timing.count(files=len(uploads))
 
-            # index_files() handles duplicate detection through file hashes and
-            # Writes owner-scoped Chroma vectors and SQLite indexed-document metadata.
-            with perf_timing.stage("index"):
-                result = index_files(saved_paths, current_user["id"])
-            perf_timing.count(new_files=result["new_files"], new_chunks=result["new_chunks"],
-                              skipped_files=len(result["skipped_files"]))
-            # Only after the originals, vectors and registry rows are all persisted.
-            with perf_timing.stage("planner"):
-                planner = include_planner_documents(current_user["id"], result.get("indexed_documents") or [])
-            with perf_timing.stage("sources"):
-                sources_result = [SourceSummary(**source) for source in list_uploaded_sources(current_user["id"])]
+            # Everything after this point is blocking (disk, Storage, PDF parsing, Ollama, database):
+            # it runs in the threadpool so the event loop keeps serving Chat streams and other
+            # requests. The response still waits for it, so success means it is all stored.
+            result, planner, sources_result = await run_in_threadpool(_store_and_index_uploads, owner_id, uploads)
             perf_timing.outcome("ok")
 
             return UploadResponse(
@@ -234,7 +271,8 @@ def delete_source(document_id: str, current_user: dict = Depends(require_current
     deletes quiz data for that document so stale quiz questions/attempts cannot be reused.
     """
     try:
-        result = delete_indexed_file(document_id, current_user["id"])
+        with _INDEXING_LOCK:   # never while the same document is being (re)indexed
+            result = delete_indexed_file(document_id, current_user["id"])
         delete_document_quiz_data(result["deleted"], current_user["id"])
         delete_document_summaries(current_user["id"], result["deleted"])
         delete_document_flashcards(current_user["id"], result["deleted"])

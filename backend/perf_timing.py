@@ -18,7 +18,9 @@ The same switch adds one line per Chat / quiz-explanation model call (log_llm_ca
 And one line per uploaded file plus one per upload request for PDF indexing (StageTimer):
 
     [ingest] outcome=indexed file=1 files=1 pages=42 layout_fallback=0 chunks=310 hash_ms=4.1 registry_lookup_ms=38.2 storage_ms=812.5 parse_ms=1650.3 split_ms=21.7 topics_ms=14210.9 refine_ms=14102.4 refine_calls=1 refine_ok=0 vectors_ms=20480.2 embed_ms=19120.6 embedded_chunks=310 insert_ms=1330.8 stale_cleanup_ms=95.4 metadata_ms=41.0 total_ms=37390.0
-    [upload] outcome=ok files=1 bytes=2483120 read_write_ms=12.3 index_ms=37460.1 new_files=1 new_chunks=310 skipped_files=0 planner_ms=88.0 sources_ms=35.2 total_ms=37600.4
+    [upload] outcome=ok files=1 lock_wait_ms=0.1 bytes=2483120 write_ms=12.1 index_ms=37460.1 new_files=1 new_chunks=310 skipped_files=0 planner_ms=88.0 sources_ms=35.2 total_ms=37600.4
+
+lock_wait_ms is the time an upload waited for another upload's indexing (one at a time).
 
 Stage *_ms values are summed per line (a stage that runs twice adds up); topics_ms includes
 refine_ms and vectors_ms includes embed_ms + insert_ms (pgvector only: local Chroma embeds and
