@@ -1211,6 +1211,9 @@ body[data-page="tutor"] .tutor-layout {
   .is-streaming .message-body > :last-child::after { animation: none; }
 }
 
+.message.error-message,
+body[data-page="session"] .persistent-tutor .tutor-message.error-message { border-left: 3px solid var(--danger); }
+
 .message-stopped-note {
   margin: 10px 0 0;
   color: var(--muted);
@@ -2644,7 +2647,10 @@ body[data-page="session"] .persistent-tutor .chat-form .primary-button {
   font-size: 0;
 }
 body[data-page="session"] .persistent-tutor .chat-form .primary-button::after { content: "↑"; font-size: 19px; line-height: 1; }
-body[data-page="session"] .persistent-tutor .chat-form.is-sending .primary-button::after { content: "…"; animation: loadingDots 1.2s steps(4,end) infinite; }
+/* While an answer streams the round Send button is Stop: a square stop glyph, not a spinner (the
+   loading row and caret in the message list already show progress). */
+body[data-page="session"] .persistent-tutor .chat-form.is-sending .primary-button { background: #fff; color: var(--danger); box-shadow: inset 0 0 0 2px var(--danger); }
+body[data-page="session"] .persistent-tutor .chat-form.is-sending .primary-button::after { content: "■"; font-size: 13px; }
 
 @media (max-width: 1050px) {
   body[data-page="session"] .persistent-tutor { width: 100%; max-width: 100%; }
@@ -3075,6 +3081,15 @@ body[data-page="session"] [data-session-pane="quiz"].quiz-player-open #quiz-play
 .quiz-review-section p { margin: 0; font-size: 14px; line-height: 1.55; color: #3f475c; }
 .quiz-review-explain-more { margin-top: 18px; display: flex; justify-content: flex-start; }
 .quiz-review-section p.is-missing { color: var(--muted); font-style: italic; }
+.quiz-review-disclosure > summary, .review-explanation > summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; }
+.quiz-review-disclosure > summary::-webkit-details-marker, .review-explanation > summary::-webkit-details-marker { display: none; }
+.quiz-review-disclosure > summary::before, .review-explanation > summary::before { content: "▸"; color: var(--muted); transition: transform .15s ease; }
+.quiz-review-disclosure[open] > summary::before, .review-explanation[open] > summary::before { transform: rotate(90deg); }
+.quiz-review-disclosure > summary h4 { margin: 0; }
+.quiz-review-disclosure[open] > summary { margin-bottom: 6px; }
+.quiz-review-disclosure > summary:focus-visible, .review-explanation > summary:focus-visible { outline: 2px solid var(--session-accent, #4f5bd5); outline-offset: 3px; border-radius: 6px; }
+.review-explanation > summary { font-size: 13px; font-weight: 650; }
+.review-explanation > p { margin: 6px 0 0; }
 .quiz-player-modal-backdrop {
   position: fixed; inset: 0; background: rgba(15, 20, 35, .45); display: flex;
   align-items: center; justify-content: center; z-index: 60; padding: 20px;
@@ -3168,6 +3183,11 @@ body[data-page="session"] [data-session-pane="quiz"].quiz-player-open #quiz-play
 .session-shell .brand-mark { width: 34px; height: 34px; border-radius: 10px; font-size: 16px; }
 .session-shell .new-session-button { width: 100%; margin: 0; min-height: 44px; border-radius: 12px; font-size: 14px; }
 .session-shell .sidebar-upload-status { margin: 6px 6px 18px; min-height: 16px; }
+/* Upload / indexing state (set by setUploadStatus): a small spinner while the request runs. */
+.upload-status[data-state="busy"]::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 6px; vertical-align: -1px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: flashcardsSpin .8s linear infinite; }
+.upload-status[data-state="done"] { color: #2f7a4a; }
+.upload-status[data-state="error"] { color: var(--danger); }
+@media (prefers-reduced-motion: reduce) { .upload-status[data-state="busy"]::before { animation: none; } }
 .session-shell .sidebar-section-label { margin: 0 8px 6px; font-size: 11px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: #8a91a6; }
 .session-shell .nav-menu { margin: 0 0 20px; display: grid; gap: 2px; }
 .session-shell .nav-item { padding: 10px 12px; border-radius: 10px; font-size: 14px; color: #333d59; transition: background .15s ease, color .15s ease; }

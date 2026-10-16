@@ -45,12 +45,14 @@ class PersistentTutorSubmitTests(unittest.TestCase):
         body = function_body("sendTutorMessage")
         self.assertIn("addMessage(userText, \"user\")", body)
         self.assertIn('const submitButton = chatForm.querySelector("button")', body)
-        self.assertIn("await requestTutorAnswer(userText, { signal: controller.signal, onDelta })", body)
+        self.assertIn("await requestTutorAnswer(userText, { signal: controller.signal, onDelta, onStart })", body)
         self.assertIn("console.error", body)
-        self.assertIn("RAG request failed", body)
-        self.assertIn("addMessage(`I could not reach the RAG answer", body)
+        self.assertIn("AI Tutor request failed", body)
+        self.assertIn("I could not reach the AI Tutor right now.", body)
+        self.assertIn('classList.add("error-message")', body)
+        self.assertNotIn("Check that FastAPI is running", body)   # no local-dev hint in the deployed app
         submit_body = function_body("handleChatSubmit")
-        self.assertIn("await sendTutorMessage(userText)", submit_body)
+        self.assertIn("await sendTutorMessage(userText, { restoreOnError: true })", submit_body)
 
     def test_tab_switches_only_change_visible_panes(self):
         body = re.search(r"function setSessionTab\(tab\) \{([\s\S]*?)\n}\n", SCRIPT).group(1)

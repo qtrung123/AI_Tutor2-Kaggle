@@ -25,8 +25,9 @@ class TutorStreamError extends Error {}
 
 // Read a streamed answer to its end. Calls onDelta(text) per piece and resolves with the "done"
 // payload. Rejects with a TutorStreamError for an "error" event or a stream that ends without
-// "done" (connection lost); an aborted fetch rejects with the browser's AbortError.
-async function readTutorAnswerStream(response, onDelta) {
+// "done" (connection lost); an aborted fetch rejects with the browser's AbortError. The optional
+// onStart(event) runs on the "start" event (the backend accepted the question and is retrieving).
+async function readTutorAnswerStream(response, onDelta, onStart) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -38,7 +39,8 @@ async function readTutorAnswerStream(response, onDelta) {
       const parsed = parseTutorStreamFrames(buffer);
       buffer = parsed.rest;
       for (const event of parsed.events) {
-        if (event.type === "delta" && event.text) onDelta(event.text);
+        if (event.type === "start") onStart?.(event);
+        else if (event.type === "delta" && event.text) onDelta(event.text);
         else if (event.type === "error") throw new TutorStreamError(event.message || "The tutor could not finish this answer.");
         else if (event.type === "done") return event;
       }

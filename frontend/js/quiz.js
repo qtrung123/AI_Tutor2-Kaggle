@@ -801,9 +801,14 @@ async function showQuizHistoryDetail(attemptId) {
         row.textContent = option;
         options.appendChild(row);
       });
-      const explanation = document.createElement("p");
+      // Collapsed by default; each question's explanation opens on its own.
+      const explanation = document.createElement("details");
       explanation.className = "review-explanation";
-      explanation.textContent = result.explanation ? `Explanation: ${result.explanation}` : "Explanation unavailable.";
+      const explanationSummary = document.createElement("summary");
+      explanationSummary.textContent = "Explanation";
+      const explanationText = document.createElement("p");
+      explanationText.textContent = result.explanation || "Explanation unavailable.";
+      explanation.append(explanationSummary, explanationText);
       item.append(question, options, explanation);
       quizHistoryDetail.appendChild(item);
     });
@@ -1649,6 +1654,7 @@ function openQuizReview(index = 0) {
   if (!quizResultState?.result?.items.length) return;
   quizResultState.view = "review";
   quizResultState.reviewIndex = Math.max(0, Math.min(index, quizResultState.result.items.length - 1));
+  quizResultState.renderedReviewIndex = -1;   // entering the review collapses Explanation / Source again
   renderQuizReview();
 }
 
@@ -1722,6 +1728,12 @@ function renderQuizReview() {
   ].filter(Boolean);
   document.getElementById("quiz-review-source").hidden = !sourceParts.length;
   document.getElementById("quiz-review-source-text").textContent = sourceParts.join(" · ");
+  // Explanation and Source start collapsed on every question; each opens on its own (native <details>).
+  if (quizResultState.renderedReviewIndex !== index) {
+    document.getElementById("quiz-review-explanation-details").open = false;
+    document.getElementById("quiz-review-source").open = false;
+    quizResultState.renderedReviewIndex = index;
+  }
 
   document.getElementById("quiz-review-previous").disabled = index === 0;
   document.getElementById("quiz-review-next").textContent = index === total - 1 ? "Back to Results" : "Next";

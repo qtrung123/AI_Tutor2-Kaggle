@@ -123,14 +123,14 @@ const uploadStatus = document.getElementById("upload-status");
           <p class="quiz-player-question" id="quiz-review-question"></p>
           <p class="quiz-review-unanswered-note" id="quiz-review-unanswered-note" hidden>You didn't answer this question.</p>
           <div class="quiz-review-options" id="quiz-review-options"></div>
-          <section class="quiz-review-section">
-            <h4>Explanation</h4>
+          <details class="quiz-review-section quiz-review-disclosure" id="quiz-review-explanation-details">
+            <summary><h4>Explanation</h4></summary>
             <p id="quiz-review-explanation"></p>
-          </section>
-          <section class="quiz-review-section" id="quiz-review-source" hidden>
-            <h4>Source</h4>
+          </details>
+          <details class="quiz-review-section quiz-review-disclosure" id="quiz-review-source" hidden>
+            <summary><h4>Source</h4></summary>
             <p id="quiz-review-source-text"></p>
-          </section>
+          </details>
           <div class="quiz-review-explain-more">
             <button class="secondary-button" id="quiz-review-explain-more" type="button">Explain more</button>
           </div>

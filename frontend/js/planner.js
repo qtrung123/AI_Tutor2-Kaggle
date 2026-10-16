@@ -162,8 +162,9 @@ async function loadPlannerData({ keepWeek = false } = {}) {
 
 function plannerAfterUpload(planner) {
   // The upload already added the newly indexed documents to the active plan (server side, after
-  // they were stored). Here we only refresh: the suggestions are the usual read-only preview, so
-  // nothing is saved until Accept Plan, and an accepted plan just lists them as still to schedule.
+  // they were stored). Here we only refresh and suggest: a plan not yet accepted re-runs its
+  // read-only preview, an accepted plan gets proposed sessions for the new material (see
+  // plannerAfterMaterialsAdded). Nothing is saved until the learner accepts.
   if (!planner?.status || planner.status === "unchanged") return;
   plannerIncludeFailure = planner.status === "failed"
     ? { documentIds: planner.document_ids || [], message: planner.message || "The study plan could not be updated." }

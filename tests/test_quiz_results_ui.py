@@ -177,6 +177,7 @@ const review = () => ({
   })),
   explanation: $("quiz-review-explanation").textContent, explanationMissing: $("quiz-review-explanation").classList.contains("is-missing"),
   source: visible("quiz-review-source") ? $("quiz-review-source-text").textContent : null,
+  explanationOpen: $("quiz-review-explanation-details").open, sourceOpen: $("quiz-review-source").open,
   previousDisabled: $("quiz-review-previous").disabled, nextLabel: $("quiz-review-next").textContent,
   playerText: $("quiz-player").textContent,
 });
@@ -196,6 +197,15 @@ const review = () => ({
   // 2) Review Answers: one question at a time with correct / incorrect / unanswered states.
   $("quiz-results-review").click(); await sleep(50);
   out.review1 = review();
+  // Explanation and Source are collapsed disclosures that open independently.
+  const toggle = (id) => $(id).querySelector("summary").click();
+  const openState = () => ({explanation: $("quiz-review-explanation-details").open, source: $("quiz-review-source").open});
+  toggle("quiz-review-explanation-details"); await sleep(30);
+  out.disclosure = {afterExplanation: openState()};
+  toggle("quiz-review-source"); await sleep(30);
+  out.disclosure.afterBoth = openState();
+  toggle("quiz-review-explanation-details"); await sleep(30);
+  out.disclosure.afterClosingExplanation = openState();
   $("quiz-review-next").click(); await sleep(50);
   out.review2 = review();
   $("quiz-review-next").click(); await sleep(50);
@@ -210,6 +220,7 @@ const review = () => ({
   out.afterBackToResults = { resultsVisible: visible("quiz-results-view"), reviewHidden: $("quiz-review-view").hidden };
   $("quiz-results-review").click(); await sleep(50);
   out.reviewRestartsAtFirst = $("quiz-review-position").textContent;
+  out.disclosure.afterReopen = openState();
   for (let i = 0; i < 4; i += 1) { $("quiz-review-next").click(); await sleep(30); }
   out.afterLastNext = { resultsVisible: visible("quiz-results-view") };
 
@@ -328,6 +339,17 @@ class QuizResultsUiTests(unittest.TestCase):
         self.assertEqual(q1["source"], "Topic: Topic 1 · Concept: Concept Alpha · Based on 2 passages from the document")
         self.assertTrue(q1["previousDisabled"])
         self.assertEqual(q1["nextLabel"], "Next")
+
+    def test_explanation_and_source_start_collapsed_and_toggle_independently(self):
+        for key in ("review1", "review2", "review3"):
+            with self.subTest(question=key):
+                self.assertFalse(self.out[key]["explanationOpen"])
+                self.assertFalse(self.out[key]["sourceOpen"])
+        steps = self.out["disclosure"]
+        self.assertEqual(steps["afterExplanation"], {"explanation": True, "source": False})
+        self.assertEqual(steps["afterBoth"], {"explanation": True, "source": True})
+        self.assertEqual(steps["afterClosingExplanation"], {"explanation": False, "source": True})
+        self.assertEqual(steps["afterReopen"], {"explanation": False, "source": False})   # a fresh review collapses again
 
     def test_review_incorrect_answer_marks_selected_and_correct_options(self):
         q2 = self.out["review2"]

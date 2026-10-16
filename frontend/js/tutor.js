@@ -243,12 +243,12 @@ async function deleteUploadedSource(source, button) {
       renderAssessmentQuiz();
     }
 
-    uploadStatus.textContent = `Deleted ${data.deleted}`;
+    setUploadStatus(`Deleted ${data.deleted}`, "done");
     showToast("Document deleted");
   } catch (error) {
     button.disabled = false;
     button.textContent = "Delete";
-    uploadStatus.textContent = error.message || "Delete failed.";
+    setUploadStatus(error.message || "Delete failed.", "error");
     showToast("Delete failed");
   }
 }
@@ -260,7 +260,7 @@ function formatBackendAnswer(data) {
 // The answer streams (Server-Sent Events) when the backend supports it: onDelta receives each piece
 // as it is generated. A plain JSON reply (an older backend) is still accepted as the full answer.
 async function requestTutorAnswer(userText, options = {}) {
-  const { signal, onDelta = () => {} } = options;
+  const { signal, onDelta = () => {}, onStart } = options;
   const conversation = await ensureStudySessionConversation();
   const modelId = await ensureSelectedModelReady();
 
@@ -291,7 +291,7 @@ async function requestTutorAnswer(userText, options = {}) {
   }
 
   if ((response.headers.get("content-type") || "").includes(TUTOR_STREAM_MEDIA_TYPE)) {
-    return readTutorAnswerStream(response, onDelta);
+    return readTutorAnswerStream(response, onDelta, onStart);
   }
   return response.json();
 }
@@ -669,6 +669,8 @@ async function applyConversationSources() {
   }
 }
 
+const TUTOR_LOADING_SENDING = "Sending your question to the AI Tutor";
+const TUTOR_LOADING_READING = "Reading your study materials and writing the answer";
 let tutorAnswerController = null;   // AbortController of the answer being streamed (Stop cancels it)
 
 function tutorMessageBody(row) {
@@ -679,7 +681,7 @@ function tutorScrolledToEnd() {
   return messageList.scrollHeight - messageList.scrollTop - messageList.clientHeight < 24;
 }
 
-async function sendTutorMessage(userText) {
+async function sendTutorMessage(userText, { restoreOnError = false } = {}) {
   messageList.querySelector(".conversation-empty-hint")?.remove();
   addMessage(userText, "user");
   chatInput.value = "";
@@ -690,7 +692,14 @@ async function sendTutorMessage(userText) {
   submitButton.textContent = "Stop";
   submitButton.setAttribute("aria-label", "Stop generating");
   renderConversationList();
-  const loadingRow = addMessage("Tutoring is retrieving your course materials and asking the local model...", "tutor", true);
+  // The loading row reports only real progress: sent -> the backend's "start" event (it accepted the
+  // question and is reading the materials) -> the first piece of the answer replaces the row.
+  const loadingRow = addMessage(TUTOR_LOADING_SENDING, "tutor", true);
+  loadingRow.querySelector(".message")?.setAttribute("role", "status");
+  const onStart = () => {
+    const body = loadingRow.isConnected && tutorMessageBody(loadingRow);
+    if (body) body.textContent = TUTOR_LOADING_READING;
+  };
   const controller = new AbortController();
   tutorAnswerController = controller;
   // The loading row stays until the first piece of text; then the answer grows in place, rendered
@@ -715,7 +724,7 @@ async function sendTutorMessage(userText) {
   };
 
   try {
-    const data = await requestTutorAnswer(userText, { signal: controller.signal, onDelta });
+    const data = await requestTutorAnswer(userText, { signal: controller.signal, onDelta, onStart });
     renderer.cancel();
     loadingRow.remove();
     const repliedIn = data.assistant_message?.conversation_id;
@@ -762,8 +771,15 @@ async function sendTutorMessage(userText) {
     streamRow?.remove();   // a partial answer that failed is never shown as if it were complete
     const detail = error.message || "Backend request failed.";
     console.error("AI Tutor message submission failed", error);
-    addMessage(`I could not reach the RAG answer right now.\n\n${detail}\n\nCheck that FastAPI is running with the project virtual environment and Ollama is still running.`, "tutor");
-    showToast("RAG request failed");
+    // Nothing was saved, so a typed question goes back into the box: Send asks it again. (Quiz
+    // "Explain" prompts are long generated messages and are not put back.)
+    const restored = restoreOnError && !chatInput.value.trim();
+    if (restored) chatInput.value = userText;
+    const lead = error instanceof TutorStreamError ? "The answer was interrupted and was not saved." : "I could not reach the AI Tutor right now.";
+    const errorRow = addMessage(`${lead}\n\n${detail}${restored ? "\n\nYour question is back in the message box. Press Send to try again." : ""}`, "tutor");
+    errorRow.querySelector(".message")?.classList.add("error-message");
+    errorRow.querySelector(".message")?.setAttribute("role", "alert");
+    showToast("AI Tutor request failed");
   } finally {
     if (tutorAnswerController === controller) tutorAnswerController = null;
     chatInput.disabled = false;
@@ -786,7 +802,7 @@ async function handleChatSubmit(event) {
     showToast("Type a question first");
     return;
   }
-  await sendTutorMessage(userText);
+  await sendTutorMessage(userText, { restoreOnError: true });
 }
 
 async function loadUploadedSources() {
@@ -816,6 +832,23 @@ async function loadUploadedSources() {
   }
 }
 
+// state: "busy" (request running), "done" or "error"; styled via data-state on #upload-status.
+function setUploadStatus(text, state) {
+  uploadStatus.textContent = text;
+  uploadStatus.dataset.state = state;
+}
+
+// Built only from the upload response: files newly indexed, their chunks, and files skipped
+// because the same content was already indexed.
+function uploadResultText(data) {
+  const parts = [];
+  if (data.new_files) parts.push(`${data.new_files} file${data.new_files === 1 ? "" : "s"} indexed (${data.new_chunks} chunk${data.new_chunks === 1 ? "" : "s"})`);
+  const skipped = data.skipped_files || [];
+  if (skipped.length) parts.push(`already in your library: ${skipped.join(", ")}`);
+  const text = parts.join("; ") || "No new content was indexed";
+  return text.charAt(0).toUpperCase() + text.slice(1) + ".";
+}
+
 async function uploadSourceFiles(files) {
   if (!files.length) {
     return;
@@ -825,8 +858,13 @@ async function uploadSourceFiles(files) {
   Array.from(files).forEach((file) => formData.append("files", file));
 
   uploadSourceButton.disabled = true;
+  uploadSourceButton.setAttribute("aria-busy", "true");
   sourceFileInput.disabled = true;
-  uploadStatus.textContent = `Indexing ${files.length} file${files.length === 1 ? "" : "s"}...`;
+  // One request uploads AND indexes (no progress is reported), so the status names the files and
+  // the phase only; it never shows a made-up percentage.
+  const names = Array.from(files, (file) => file.name);
+  const what = names.length === 1 ? `"${names[0]}"` : `${names.length} files`;
+  setUploadStatus(`Uploading and indexing ${what}. Large PDFs can take a few minutes; keep this tab open.`, "busy");
 
   try {
     const response = await fetch(UPLOAD_API_URL, {
@@ -846,6 +884,7 @@ async function uploadSourceFiles(files) {
     }
 
     const data = await response.json();
+    setUploadStatus("Indexed. Updating your library...", "busy");
     uploadedSources = data.sources || [];
     renderSources(uploadedSources, "uploaded");
     renderConversationSources();
@@ -853,16 +892,17 @@ async function uploadSourceFiles(files) {
     await loadDashboard();
     if (typeof plannerAfterUpload === "function") plannerAfterUpload(data.planner);
 
-    uploadStatus.textContent = `${data.new_files} new file(s), ${data.new_chunks} new chunk(s) indexed`;
+    setUploadStatus(uploadResultText(data), "done");
     if (data.planner?.status === "failed") showToast("Material uploaded, but the study plan was not updated. Retry in Study Planner.");
     else if (data.planner?.status === "updated") showToast("Material uploaded and added to your study plan");
     else showToast(data.skipped_files?.length ? "Some files were already indexed" : "Material uploaded");
   } catch (error) {
     const detail = error.message || "Upload failed.";
-    uploadStatus.textContent = detail;
+    setUploadStatus(`Upload failed: ${detail}`, "error");
     showToast("Upload failed");
   } finally {
     uploadSourceButton.disabled = false;
+    uploadSourceButton.removeAttribute("aria-busy");
     sourceFileInput.disabled = false;
     sourceFileInput.value = "";
   }

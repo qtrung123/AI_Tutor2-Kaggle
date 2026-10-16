@@ -150,7 +150,9 @@ const done = (answer) => frame({type: "done", answer, grounding_status: "support
   window.appendMarkdown = (container, text) => { renders++; return realAppendMarkdown(container, text); };
   const snapshot = () => ({loading: list.querySelectorAll(".loading-message").length, streaming: list.querySelectorAll(".is-streaming").length,
     lastText: [...list.querySelectorAll(".agent-row")].pop()?.querySelector(".message-body")?.textContent || "",
-    button: button.textContent, inputDisabled: chatInput.disabled, sending: chatForm.classList.contains("is-sending")});
+    button: button.textContent, inputDisabled: chatInput.disabled, sending: chatForm.classList.contains("is-sending"),
+    loadingText: list.querySelector(".loading-message .message-body")?.textContent || "",
+    loadingRole: list.querySelector(".loading-message")?.getAttribute("role") || "", buttonLabel: button.getAttribute("aria-label") || ""});
   const rowsWithText = (text) => [...list.querySelectorAll(".agent-row .message-body")].filter((b) => b.textContent === text).length;
 
   // 1. Success: 30 pieces, 10 ms apart.
@@ -184,13 +186,30 @@ const done = (answer) => frame({type: "done", answer, grounding_status: "support
   window.__streams.push({frames: [[50, frame({type: "start"})], [20, frame({type: "delta", text: "Half an ans"})], [20, frame({type: "error", message: "Could not answer this conversation. Original error: model crashed"})]]});
   const errorMessages = activeConversation.messages.length;
   await sendTutorMessage("Will fail"); await sleep(50);
-  out.modelError = {...snapshot(), partialShown: list.textContent.includes("Half an ans"), errorBubble: list.textContent.includes("model crashed"),
+  out.modelError = {...snapshot(), inputValue: chatInput.value, partialShown: list.textContent.includes("Half an ans"), errorBubble: list.textContent.includes("model crashed"),
     addedMessages: activeConversation.messages.length - errorMessages};
 
   // 4. The connection drops before "done".
   window.__streams.push({frames: [[50, frame({type: "start"})], [20, frame({type: "delta", text: "Cut"})]]});
   await sendTutorMessage("Will drop"); await sleep(50);
   out.dropped = {...snapshot(), message: list.textContent.includes("connection closed before the answer finished")};
+
+  // 5. Loading phases come only from real events: sent -> "start" -> first text replaces the row.
+  window.__streams.push({frames: [[100, frame({type: "start"})], [300, frame({type: "delta", text: "Late"})], [10, done("Late")]]});
+  const phased = sendTutorMessage("Phases?");
+  await sleep(40); out.phaseSent = snapshot();
+  await sleep(150); out.phaseStarted = snapshot();
+  await phased; await sleep(50);
+  out.phaseDone = snapshot();
+
+  // 6. A typed question that fails goes back into the box; the error bubble is an alert.
+  window.__streams.push({frames: [[50, frame({type: "start"})], [20, frame({type: "error", message: "model crashed"})]]});
+  chatInput.value = "My typed question";
+  chatForm.requestSubmit();
+  await sleep(400);
+  const errorMessage = [...list.querySelectorAll(".agent-row .message")].pop();
+  out.typedError = {...snapshot(), input: chatInput.value, isError: errorMessage.classList.contains("error-message"),
+    role: errorMessage.getAttribute("role"), text: errorMessage.textContent};
   publish();
 })().catch((error) => { out.fatal = String(error && error.stack || error); publish(); });
 }
@@ -250,6 +269,27 @@ class TutorStreamingPageTests(unittest.TestCase):
         self.assertIn("Partial answer", stopped["text"])
         self.assertEqual((stopped["addedMessages"], stopped["requests"], stopped["errorBubble"]), (0, 2, False))
         self.assertEqual((stopped["button"], stopped["sending"], stopped["streaming"]), ("Send", False, 0))
+
+    def test_loading_row_reports_real_phases_and_stop_is_labelled(self):
+        sent, started, done = self.out["phaseSent"], self.out["phaseStarted"], self.out["phaseDone"]
+        self.assertEqual(sent["loadingText"], "Sending your question to the AI Tutor")
+        self.assertEqual(sent["loadingRole"], "status")
+        self.assertEqual((sent["button"], sent["buttonLabel"]), ("Stop", "Stop generating"))
+        self.assertEqual(started["loadingText"], "Reading your study materials and writing the answer")
+        self.assertEqual((done["loading"], done["button"], done["buttonLabel"]), (0, "Send", ""))
+
+    def test_a_failed_typed_question_is_restored_for_retry(self):
+        error = self.out["typedError"]
+        self.assertEqual(error["input"], "My typed question")
+        self.assertTrue(error["isError"])
+        self.assertEqual(error["role"], "alert")
+        self.assertIn("interrupted and was not saved", error["text"])
+        self.assertIn("model crashed", error["text"])
+        self.assertIn("Press Send to try again", error["text"])
+        self.assertEqual((error["button"], error["sending"]), ("Send", False))
+
+    def test_quiz_explain_failures_do_not_fill_the_input(self):
+        self.assertEqual(self.out["modelError"]["inputValue"], "")
 
     def test_model_error_and_dropped_connection_show_an_error_and_save_nothing(self):
         error = self.out["modelError"]
