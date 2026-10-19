@@ -36,6 +36,11 @@ class BackendSelectionTests(unittest.TestCase):
             with self.subTest(url=url.split("://")[0]), patch.dict(os.environ, {"DATABASE_URL": url}):
                 self.assertEqual(db.selected_backend(), db.POSTGRES)
 
+    def test_sqlite_demo_mode_ignores_database_url(self):
+        with patch.dict(os.environ, {"DATABASE_URL": SECRET_URL, "AI_TUTOR_ALLOW_SQLITE": "1"}):
+            self.assertEqual(db.selected_backend(), db.SQLITE)
+            self.assertEqual(db.database_url(), "")
+
     def test_unsupported_url_is_rejected_without_echoing_it(self):
         with patch.dict(os.environ, {"DATABASE_URL": "mysql://alice:s3cr3t-pw@db.private-host.example/tutor"}):
             with self.assertRaises(db.DatabaseConfigurationError) as caught:

@@ -92,12 +92,18 @@ PY
   fi
 }
 
-resolve_secret DATABASE_URL
+# AI_TUTOR_ALLOW_SQLITE=1 is SQLite mode: local SQLite only, no PostgreSQL/Supabase secrets needed,
+# even when a DATABASE_URL secret is attached to the notebook.
+if [[ "${AI_TUTOR_ALLOW_SQLITE:-0}" == "1" ]]; then
+  unset DATABASE_URL
+else
+  resolve_secret DATABASE_URL
+fi
 if [[ -z "${DATABASE_URL:-}" ]]; then
   [[ "${AI_TUTOR_ALLOW_SQLITE:-0}" == "1" ]] ||
     fail "DATABASE_URL is not set. Add the Kaggle Secret DATABASE_URL and attach it to this notebook (or set AI_TUTOR_ALLOW_SQLITE=1 to run on temporary local SQLite)."
-  log "WARNING: DATABASE_URL is not set; using local SQLite at $AI_TUTOR_DATABASE_PATH."
-  log "WARNING: accounts, uploads and saved data will be lost when this Kaggle session ends."
+  log "SQLite mode: using local SQLite at $AI_TUTOR_DATABASE_PATH (PostgreSQL/Supabase not used)."
+  log "WARNING: accounts, uploads and saved data are lost when this Kaggle session ends unless the notebook's state Dataset snapshot saves data/ and vectorstore/."
 else
   resolve_secret SUPABASE_URL
   resolve_secret SUPABASE_SERVICE_ROLE_KEY

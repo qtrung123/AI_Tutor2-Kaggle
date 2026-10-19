@@ -75,12 +75,17 @@ class _SQLiteIntegrityError(IntegrityError, sqlite3.IntegrityError):
     """On SQLite the shared error is also a sqlite3.IntegrityError, so existing handlers still match."""
 
 
+def sqlite_demo_mode() -> bool:
+    """AI_TUTOR_ALLOW_SQLITE=1 selects SQLite mode: local SQLite even if DATABASE_URL is also set."""
+    return os.getenv("AI_TUTOR_ALLOW_SQLITE", "").strip() == "1"
+
+
 def database_url() -> str:
-    return os.getenv("DATABASE_URL", "").strip()
+    return "" if sqlite_demo_mode() else os.getenv("DATABASE_URL", "").strip()
 
 
 def selected_backend() -> str:
-    """POSTGRES when DATABASE_URL is set, SQLITE otherwise. Never echoes the URL."""
+    """POSTGRES when DATABASE_URL is set (outside SQLite mode), SQLITE otherwise. Never echoes the URL."""
     url = database_url()
     if not url:
         return SQLITE
