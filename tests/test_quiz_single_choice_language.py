@@ -414,10 +414,13 @@ class BilingualGenerationTests(unittest.TestCase):
         self.assertEqual(plan["language"], "english")
         self.assertEqual(plan["language_detection"]["detection_basis"], "structural")
         self.assertEqual(len(quiz["questions"]), 12)
-        self.assertEqual(plan["type_distribution"], {"single_choice": 12})
+        # The model writes the multiple choice questions; multi_blank ones come from the document's
+        # sentences in the quiz language only.
+        self.assertLessEqual({"single_choice"}, set(plan["type_distribution"]))
+        self.assertLessEqual(set(plan["type_distribution"]), {"single_choice", "multi_blank"})
         for question in quiz["questions"]:
             self.assertEqual(vietnamese_share(quiz_text(question))[1], 0, question["question"])
-            self.assertEqual(len(question["options"]), 4)
+            self.assertEqual(len(question["options"]), 4 if question["question_type"] == "single_choice" else 0)
         for prompt in FakeModel.prompts:
             self.assertIn(ENGLISH_DIRECTIVE, prompt)
 
@@ -431,7 +434,8 @@ class BilingualGenerationTests(unittest.TestCase):
         self.assertEqual(plan["language_detection"]["detection_basis"], "structural")
         self.assertEqual(plan["validation_results"]["rejection_codes"].get("language_mismatch"), 3)
         self.assertEqual(len(quiz["questions"]), 12)
-        self.assertEqual(plan["type_distribution"], {"single_choice": 12})
+        self.assertLessEqual({"single_choice"}, set(plan["type_distribution"]))
+        self.assertLessEqual(set(plan["type_distribution"]), {"single_choice", "multi_blank"})
         for question in quiz["questions"]:
             self.assertFalse(language_mismatch(question["question"], question["options"], question["explanation"], "vietnamese"))
         self.assertIn(VIETNAMESE_DIRECTIVE, FakeModel.prompts[0])

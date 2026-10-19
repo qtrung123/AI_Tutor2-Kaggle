@@ -1,4 +1,4 @@
-"""Flashcards -> practice quiz (short_answer / fill_blank / matching / mixed), built without any LLM call.
+"""Flashcards -> practice quiz (short_answer / fill_blank / multi_blank / matching / mixed), built without any LLM call.
 
 A persisted flashcard set of one document is reused directly as a practice quiz:
 
@@ -15,8 +15,20 @@ A persisted flashcard set of one document is reused directly as a practice quiz:
 - matching: MATCHING_MIN_PAIRS-MATCHING_MAX_PAIRS cards per activity; the fronts are the prompts
   (one per line under the question text) and the backs the options, shuffled. The answer is one
   option letter per prompt, in prompt order; the activity is correct only when every pair is.
+- multi_blank: one sentence with MULTI_BLANK_MIN_BLANKS-MULTI_BLANK_MAX_BLANKS key words blanked
+  (build_multi_blank). The same question serves Type Answer and Word Bank: every blank keeps its
+  answer as written plus accepted spelling variants, and the word bank adds 1-3 distractors taken
+  from the document's (or the flashcards') own recurring key words. Graded per blank with the
+  fill_blank normalization; correct only when every blank is.
 - mixed: about MIXED_FILL_SHARE fill_blank cards and MIXED_MATCHING_SHARE of the cards in matching
-  activities, the rest short_answer.
+  activities; the rest are multi_blank where the card yields one, else short_answer.
+- auto (Practice as Quiz): every card, MIXED_MATCHING_SHARE of them in matching activities and the
+  rest alternating between single_choice (the card front, its back among three other cards' backs)
+  and multi_blank. No short answers: a card fitting neither becomes a fill_blank, or is left out.
+
+build_document_question_mix adds the same multi_blank and matching questions to a generated
+(LLM, multiple choice) quiz: multi_blank from the quiz's own document excerpts, matching from the
+document's flashcards when it has any.
 
 `question_count` counts CARDS: K <= N usable cards are always all covered, by K questions or fewer
 (one matching activity covers several cards). Normal document quiz generation
@@ -26,6 +38,7 @@ autosave/resume, results, review and history work unchanged, and are never maste
 """
 import random
 import re
+import unicodedata
 
 from backend.auth_store import LEGACY_USER_ID
 from backend.document_retrieval import get_document_chunks
@@ -33,6 +46,7 @@ from backend.flashcard_store import list_flashcards
 from backend.indexed_document_store import get_indexed_document
 from backend.quiz_store import (
     FLASHCARD_WRITTEN_PLANNER_VERSION,
+    MULTI_BLANK_QUESTION_TYPE,
     get_quiz_by_id,
     get_quiz_history_attempt,
     save_quiz,
@@ -40,6 +54,8 @@ from backend.quiz_store import (
 )
 from backend.quiz_units import (
     FILL_BLANK_MARKER,
+    QUIZ_ENGINE_VERSION,
+    QUIZ_FILL_BLANK_MIN_CONTEXT_TOKENS,
     QUIZ_MAX_OPTION_CHARS,
     QUIZ_MAX_STEM_CHARS,
     CandidateRejected,
@@ -53,11 +69,17 @@ from backend.quiz_units import (
     flashcard_cloze,
     normalize_fill_blank_answer,
     squash,
+    text_language,
 )
 
 FLASHCARD_QUIZ_PLANNER_VERSION = FLASHCARD_WRITTEN_PLANNER_VERSION
 FLASHCARD_QUIZ_CONCEPT_ORIGIN = "flashcard"
-FLASHCARD_QUIZ_MODES = ("mixed", "short_answer", "fill_blank", "matching")
+FLASHCARD_QUIZ_MODES = ("auto", "mixed", "short_answer", "fill_blank", "matching")
+CHOICE_DISTRACTORS = 3
+# A generated quiz of N questions: about N/3 multi_blank and N/6 matching activities, the rest
+# multiple choice (12 -> 6 + 4 + 2).
+DOCUMENT_MIX_MULTI_BLANK_SHARE = 1 / 3
+DOCUMENT_MIX_MATCHING_SHARE = 1 / 6
 MATCHING_MIN_PAIRS = 3
 MATCHING_MAX_PAIRS = 4   # one option letter (A-D) per card answer
 MATCHING_INSTRUCTION = "Match each card with its answer."
@@ -70,6 +92,13 @@ NO_FLASHCARDS_MESSAGE = "No flashcards available for this document. Generate fla
 SHORT_ANSWER_AUTO_MAX_WORDS = 6
 SHORT_ANSWER_AUTO_MAX_CHARS = 60
 FILL_BLANK_MIN_SENTENCE_WORDS = 6
+MULTI_BLANK_MIN_BLANKS = 2
+MULTI_BLANK_MAX_BLANKS = 4
+MULTI_BLANK_WORDS_PER_BLANK = 5     # a sentence of N words gets at most N // 5 blanks
+MULTI_BLANK_MAX_DISTRACTORS = 3
+MULTI_BLANK_MIN_KEY_CHARS = 4
+MULTI_BLANK_SENTENCE_CANDIDATES = 3
+MULTI_BLANK_ANSWER_MODES = ("type_answer", "word_bank")
 _LEADING_ARTICLE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?。])\s+|\n+")
 
@@ -201,6 +230,150 @@ def card_fill_blank(card: dict, sentences: list[dict] | None) -> dict | None:
     }
 
 
+def _blank_key_ok(word: str) -> bool:
+    key = _cloze_key(word)
+    return len(key) >= MULTI_BLANK_MIN_KEY_CHARS and not key.isdigit() and not _cloze_minor(word)
+
+
+def keyword_vocabulary(texts: list[str]) -> dict[str, tuple[int, str]]:
+    """Blankable key words of these texts: key -> (occurrences, a written form, lower case preferred).
+    Recurring words are the document's important terms; they rank blanks and supply distractors."""
+    vocabulary: dict[str, tuple[int, str]] = {}
+    for text in texts:
+        for word in _CLOZE_WORD.findall(str(text or "")):
+            if not _blank_key_ok(word):
+                continue
+            key = _cloze_key(word)
+            count, written = vocabulary.get(key, (0, word))
+            vocabulary[key] = (count + 1, word if word.islower() and not written.islower() else written)
+    return vocabulary
+
+
+def _accepted_answers(word: str) -> list[str]:
+    """The blanked word as written, then spelling variants a learner may type for the same word:
+    hyphen as space / joined, and without diacritics (Vietnamese typed without tone marks)."""
+    values = [word]
+    if "-" in word:
+        values += [word.replace("-", " "), word.replace("-", "")]
+    plain = "".join(char for char in unicodedata.normalize("NFKD", word) if not unicodedata.combining(char))
+    values.append(plain.replace("đ", "d").replace("Đ", "D"))
+    unique, seen = [], set()
+    for value in values:
+        key = normalize_fill_blank_answer(value)
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(value)
+    return unique
+
+
+def _multi_blank_sentences(card: dict, sentences: list[dict] | None) -> list[tuple[str, list[str], str]]:
+    """Candidate sentences for one card, best first: (text, source chunk ids, explanation).
+
+    Document sentences of the card's own source chunks or sharing at least two key words with the
+    card come first (none with `sentences=None`); the card's own declarative answer is the fallback."""
+    candidates = []
+    if sentences is not None:
+        source_ids = {str(value) for value in card.get("source_chunk_ids") or []}
+        card_tokens = content_tokens(f"{card.get('front') or ''} {card.get('back') or ''}")
+        ranked = []
+        for position, sentence in enumerate(sentences):
+            if FILL_BLANK_MARKER in sentence["text"]:
+                continue
+            shared = len(card_tokens & content_tokens(sentence["text"]))
+            in_source = sentence["chunk_id"] in source_ids
+            if shared >= 2 or (in_source and shared >= 1):
+                ranked.append(((in_source, shared, -position), sentence))
+        for _, sentence in sorted(ranked, key=lambda item: item[0], reverse=True)[:MULTI_BLANK_SENTENCE_CANDIDATES]:
+            candidates.append((sentence["text"], [sentence["chunk_id"]] if sentence["chunk_id"] else [],
+                               f"From the document: {sentence['text']}"))
+    back = _clean(card.get("back"))
+    if ("?" not in back and FILL_BLANK_MARKER not in back and len(back) <= QUIZ_MAX_STEM_CHARS
+            and len(_CLOZE_WORD.findall(back)) >= FILL_BLANK_MIN_SENTENCE_WORDS):
+        candidates.append((back, [str(value) for value in card.get("source_chunk_ids") or []], f"From your flashcard: {back}"))
+    return candidates
+
+
+def _multi_blank_from_sentence(text: str, card_keys: set[str], vocabulary: dict, rng: random.Random) -> dict | None:
+    words = list(_CLOZE_WORD.finditer(text))
+    keys = [_cloze_key(match.group()) for match in words]
+    # A blank must be unambiguous: written once, with no inflected twin (process/processes) left visible.
+    eligible = [index for index, match in enumerate(words)
+                if _blank_key_ok(match.group()) and sum(_cloze_same_word(keys[index], other) for other in keys) == 1]
+    ranked = sorted(eligible, key=lambda index: (keys[index] in card_keys, vocabulary.get(keys[index], (0, ""))[0],
+                                                 len(keys[index]), -index), reverse=True)
+    limit = min(MULTI_BLANK_MAX_BLANKS, max(MULTI_BLANK_MIN_BLANKS, len(words) // MULTI_BLANK_WORDS_PER_BLANK))
+    chosen: list[int] = []
+    for index in ranked:
+        if len(chosen) == limit:
+            break
+        if all(abs(index - other) >= 2 for other in chosen):   # never two adjacent blanks
+            chosen.append(index)
+    while len(chosen) >= MULTI_BLANK_MIN_BLANKS:
+        blanked = text
+        for index in sorted(chosen, reverse=True):
+            blanked = blanked[:words[index].start()] + FILL_BLANK_MARKER + blanked[words[index].end():]
+        if len(content_tokens(blanked.replace(FILL_BLANK_MARKER, " "))) >= QUIZ_FILL_BLANK_MIN_CONTEXT_TOKENS:
+            break
+        chosen.remove(max(chosen, key=ranked.index))   # too little context left: drop the weakest blank
+    if len(chosen) < MULTI_BLANK_MIN_BLANKS:
+        return None
+    chosen.sort()
+    answers = [words[index].group() for index in chosen]
+    answer_keys = [keys[index] for index in chosen]
+    average = sum(len(key) for key in answer_keys) / len(answer_keys)
+    # Distractors: the document's other recurring key words, closest in length to the answers; never
+    # a word of this sentence (or an inflection of one), so a distractor can never be a right answer.
+    pool = sorted(
+        ((count, key, written) for key, (count, written) in vocabulary.items()
+         if not any(_cloze_same_word(key, other) for other in keys)),
+        key=lambda item: (-item[0], abs(len(item[1]) - average), item[1]),
+    )
+    distractors = [written for _, _, written in pool[:MULTI_BLANK_MAX_DISTRACTORS]]
+    if not distractors:
+        return None
+    word_bank = answers + distractors
+    rng.shuffle(word_bank)
+    if word_bank[:len(answers)] == answers:   # never the answers in blank order
+        word_bank = word_bank[1:] + word_bank[:1]
+    return {
+        "question": blanked,
+        "blanks": [{"id": number, "answer": answer, "accepted_answers": _accepted_answers(answer)}
+                   for number, answer in enumerate(answers, start=1)],
+        "distractors": distractors,
+        "word_bank": word_bank,
+    }
+
+
+def multi_blank_is_valid(question: dict, sentence: str) -> bool:
+    """Structural checks of a built multi_blank question against its evidence sentence."""
+    blanks = question.get("blanks") or []
+    answers = [normalize_fill_blank_answer(blank.get("answer")) for blank in blanks]
+    accepted = {normalize_fill_blank_answer(value) for blank in blanks for value in blank.get("accepted_answers") or []}
+    filled = question["question"]
+    for blank in blanks:
+        filled = filled.replace(FILL_BLANK_MARKER, blank["answer"], 1)
+    return (
+        MULTI_BLANK_MIN_BLANKS <= len(blanks) <= MULTI_BLANK_MAX_BLANKS
+        and question["question"].count(FILL_BLANK_MARKER) == len(blanks)
+        and len(set(answers)) == len(answers) and all(answers)
+        and filled == sentence
+        and 1 <= len(question.get("distractors") or []) <= MULTI_BLANK_MAX_DISTRACTORS
+        and not any(normalize_fill_blank_answer(value) in accepted for value in question["distractors"])
+        and sorted(question.get("word_bank") or []) == sorted([blank["answer"] for blank in blanks] + question["distractors"])
+    )
+
+
+def build_multi_blank(card: dict, sentences: list[dict] | None, vocabulary: dict, rng: random.Random) -> dict | None:
+    """A multi_blank question for this card (see the module docstring), or None. With
+    `sentences=None` only the card's own answer sentence is used (no document sentence)."""
+    card_keys = {_cloze_key(word) for word in _CLOZE_WORD.findall(f"{card.get('front') or ''} {card.get('back') or ''}")}
+    for text, source_chunk_ids, explanation in _multi_blank_sentences(card, sentences):
+        question = _multi_blank_from_sentence(text, card_keys, vocabulary, rng)
+        if question and multi_blank_is_valid(question, text):
+            return {**question, "evidence_sentence": text, "source_chunk_ids": source_chunk_ids, "explanation": explanation}
+    return None
+
+
 def _matching_eligible(card: dict) -> bool:
     return len(_clean(card.get("front"))) <= QUIZ_MAX_OPTION_CHARS and len(_clean(card.get("back"))) <= QUIZ_MAX_OPTION_CHARS
 
@@ -304,6 +477,164 @@ def _fill_blank_question(card: dict, question_id: int, grounded: dict) -> dict:
     }
 
 
+def _multi_blank_question(card: dict, question_id: int, built: dict) -> dict:
+    answers = [blank["answer"] for blank in built["blanks"]]
+    return {
+        **_base_question(card, question_id),
+        "question": built["question"],
+        "question_type": MULTI_BLANK_QUESTION_TYPE,
+        "correct_answer": " | ".join(answers),
+        "correct_answers": answers,   # one canonical answer per blank, in blank order
+        "blanks": built["blanks"],
+        "distractors": built["distractors"],
+        "word_bank": built["word_bank"],
+        "answer_modes": list(MULTI_BLANK_ANSWER_MODES),
+        "explanation": built["explanation"],
+        "source_chunk_ids": built["source_chunk_ids"],
+    }
+
+
+def card_choice(card: dict, cards: list[dict], rng: random.Random) -> dict | None:
+    """A single_choice question from one card, or None: its front as the stem, its back among the
+    backs of three other cards (same topic first, then closest in length). Needs three distinct
+    other backs short enough for an option."""
+    answer = _clean(card.get("back"))
+    if not _clean(card.get("front")) or not answer or len(answer) > QUIZ_MAX_OPTION_CHARS:
+        return None
+    seen, pool = {normalize_fill_blank_answer(answer)}, []
+    for other in cards:
+        text = _clean(other.get("back"))
+        key = normalize_fill_blank_answer(text)
+        if other is card or not key or key in seen or len(text) > QUIZ_MAX_OPTION_CHARS:
+            continue
+        seen.add(key)
+        pool.append(other)
+    if len(pool) < CHOICE_DISTRACTORS:
+        return None
+    pool.sort(key=lambda other: (other.get("topic_id") != card.get("topic_id"),
+                                 abs(len(_clean(other.get("back"))) - len(answer)), _clean(other.get("back"))))
+    options = [answer] + [_clean(other.get("back")) for other in pool[:CHOICE_DISTRACTORS]]
+    rng.shuffle(options)
+    letter = "ABCD"[options.index(answer)]
+    return {"question": _clean(card.get("front")), "options": options, "correct_answer": letter, "correct_answers": [letter]}
+
+
+def _choice_question(card: dict, question_id: int, built: dict) -> dict:
+    return {
+        **_base_question(card, question_id),
+        **built,
+        "question_type": "single_choice",
+        "explanation": f"From your flashcard: {_clean(card.get('back'))}",
+        "source_chunk_ids": [str(value) for value in card.get("source_chunk_ids") or []],
+    }
+
+
+def _auto_written_question(card: dict, question_id: int, cards: list[dict], sentences: list[dict] | None,
+                           vocabulary: dict, counts: dict, rng: random.Random) -> dict | None:
+    """Auto mode, one card outside matching: whichever of single_choice / multi_blank the quiz has
+    fewer of so far (the other when that one cannot be built), else a fill_blank; never a short answer."""
+    def choice():
+        built = card_choice(card, cards, rng)
+        return _choice_question(card, question_id, built) if built else None
+
+    def multi_blank():
+        built = build_multi_blank(card, sentences, vocabulary, rng)
+        return _multi_blank_question(card, question_id, built) if built else None
+
+    builders = {"single_choice": choice, MULTI_BLANK_QUESTION_TYPE: multi_blank}
+    for kind in sorted(builders, key=lambda kind: (counts.get(kind, 0), kind != MULTI_BLANK_QUESTION_TYPE)):
+        question = builders[kind]()
+        if question:
+            return question
+    cloze = card_fill_blank(card, sentences)
+    return _fill_blank_question(card, question_id, cloze) if cloze else None
+
+
+def _document_unit_sentences(units: list[dict]) -> list[tuple[str, dict]]:
+    sentences = []
+    for unit in units:
+        for raw in _SENTENCE_SPLIT.split(str(unit.get("evidence_excerpt") or "")):
+            text = _clean(raw)
+            if (len(_CLOZE_WORD.findall(text)) >= FILL_BLANK_MIN_SENTENCE_WORDS and len(text) <= QUIZ_MAX_STEM_CHARS
+                    and FILL_BLANK_MARKER not in text):
+                sentences.append((text, unit))
+    return sentences
+
+
+def _spread(items: list, count: int) -> list:
+    """`count` items evenly spaced over the list (all of them when it is not longer), in order."""
+    if count <= 0:
+        return []
+    if len(items) <= count:
+        return list(items)
+    if count == 1:
+        return [items[len(items) // 2]]
+    return [items[round(index * (len(items) - 1) / (count - 1))] for index in range(count)]
+
+
+def build_document_question_mix(
+    owner_id: str, document_id: str, units: list[dict], scope_topic: dict, difficulty: str,
+    question_count: int, rng: random.Random, language: str | None = None,
+) -> list[dict]:
+    """The multi_blank and matching questions a generated quiz of `question_count` questions adds to
+    its multiple choice ones (ids are assigned by the caller).
+
+    multi_blank: about DOCUMENT_MIX_MULTI_BLANK_SHARE of the quiz, from sentences of the quiz's own
+    excerpts (`units`) written in the quiz `language` (when given), spread over the document, one
+    per excerpt first. Matching: about
+    DOCUMENT_MIX_MATCHING_SHARE activities from the document's newest flashcards (a topic quiz: that
+    topic's cards); none when the document has no flashcards -- the quiz never requires them."""
+    topic_id = str(scope_topic["topic_id"])
+    shared = {
+        "topic_id": topic_id, "topic_name": str(scope_topic.get("name") or topic_id), "source_subtopic_ids": [],
+        "concept_plan_id": QUIZ_ENGINE_VERSION, "assessment_capacity": 0, "difficulty": difficulty,
+        "validation_outcome": "accepted",
+    }
+    texts = [str(unit.get("evidence_excerpt") or "") for unit in units]
+    vocabulary = keyword_vocabulary(texts)
+    built = []
+    for text, unit in _document_unit_sentences(units):
+        if language and text_language(text) != language:   # a quiz is written in one language
+            continue
+        question = _multi_blank_from_sentence(text, set(), vocabulary, rng)
+        if question and multi_blank_is_valid(question, text):
+            built.append((question, text, unit))
+    target = int(question_count * DOCUMENT_MIX_MULTI_BLANK_SHARE + 0.5)
+    first_per_unit, seen_units = [], set()
+    for index, (_question, _text, unit) in enumerate(built):
+        if unit["unit_id"] not in seen_units:
+            seen_units.add(unit["unit_id"])
+            first_per_unit.append(index)
+    chosen = _spread(first_per_unit, target)
+    chosen += _spread([index for index in range(len(built)) if index not in chosen], target - len(chosen))
+    picked = [built[index] for index in sorted(chosen)]
+    extras = []
+    for question, text, unit in picked:
+        answers = [blank["answer"] for blank in question["blanks"]]
+        extras.append({
+            **shared, "id": 0, "options": [], "question": question["question"],
+            "question_type": MULTI_BLANK_QUESTION_TYPE,
+            "correct_answer": " | ".join(answers), "correct_answers": answers,
+            "blanks": question["blanks"], "distractors": question["distractors"], "word_bank": question["word_bank"],
+            "answer_modes": list(MULTI_BLANK_ANSWER_MODES),
+            "concept_id": unit["unit_id"], "concept_name": unit.get("name") or unit["unit_id"], "concept_origin": "study_unit",
+            "explanation": f"From the document: {text}", "source_chunk_ids": list(unit.get("source_chunk_ids") or []),
+        })
+
+    activities = int(question_count * DOCUMENT_MIX_MATCHING_SHARE + 0.5)
+    cards = [card for card in _usable_cards(owner_id, document_id, None)
+             if (topic_id == "document" or str(card.get("topic_id") or "") == topic_id) and _matching_eligible(card)]
+    pool = rng.sample(cards, len(cards))[:MATCHING_MAX_PAIRS * activities]
+    for group in matching_groups(pool)[:activities]:
+        matching = _matching_question(group, 0, rng)
+        extras.append({
+            **matching, **shared,
+            "concept_id": f"flashcards:{group[0]['flashcard_id']}", "concept_name": "Flashcard matching",
+            "concept_origin": FLASHCARD_QUIZ_CONCEPT_ORIGIN,
+        })
+    return extras
+
+
 def _usable_cards(owner_id: str, document_id: str, set_id: str | None) -> list[dict]:
     return [card for card in list_flashcards(owner_id, document_id, set_id or None)
             if _clean(card.get("front")) and _clean(card.get("back"))]
@@ -332,11 +663,13 @@ def create_flashcard_written_quiz(
 
     `card_only_fill_blank` (also set only by Practice as Quiz) builds every fill_blank from the
     selected card's own front/back -- never from a document sentence.
+
+    `auto` (Practice as Quiz) always includes matching; see the module docstring.
     """
     mode = str(mode or "mixed").strip().lower()
     if mode not in FLASHCARD_QUIZ_MODES or (mode == "matching" and not include_matching):
-        raise ValueError("mode must be mixed, short_answer, fill_blank, or matching." if include_matching
-                         else "mode must be mixed, short_answer, or fill_blank.")
+        raise ValueError("mode must be auto, mixed, short_answer, fill_blank, or matching." if include_matching
+                         else "mode must be auto, mixed, short_answer, or fill_blank.")
     # A plain read (not quiz_common's lookup, which also runs topic-schema invalidation): creating
     # practice must have no side effect on the document's quizzes or mastery.
     document = get_indexed_document(owner_id, document_id)
@@ -353,8 +686,10 @@ def create_flashcard_written_quiz(
     rng = rng or random.Random()
 
     grounded: dict[str, dict] = {}
+    sentences = None
+    if mode in ("fill_blank", "mixed", "auto") and not card_only_fill_blank:
+        sentences = _document_sentences(get_document_chunks(document_id, owner_id))
     if mode in ("fill_blank", "mixed"):
-        sentences = None if card_only_fill_blank else _document_sentences(get_document_chunks(document_id, owner_id))
         for card in cards:
             question = card_fill_blank(card, sentences)
             if question:
@@ -374,10 +709,10 @@ def create_flashcard_written_quiz(
         chosen = [card for card in cards if card["flashcard_id"] in chosen_ids]   # deck order
 
     groups: list[list[dict]] = []
-    if mode == "matching" or (mode == "mixed" and include_matching):
+    if mode in ("matching", "auto") or (mode == "mixed" and include_matching):
         pool = [card for card in chosen if _matching_eligible(card)]
         pool = rng.sample(pool, len(pool))
-        if mode == "mixed":
+        if mode in ("mixed", "auto"):
             target = MATCHING_MAX_PAIRS * int(len(chosen) * MIXED_MATCHING_SHARE / MATCHING_MAX_PAIRS + 0.5)
             # Cards that cannot be blanked go to matching first, so fill_blank keeps its cards.
             pool = sorted(pool, key=lambda card: card["flashcard_id"] in grounded)[:target]
@@ -392,29 +727,52 @@ def create_flashcard_written_quiz(
         target = int(len(chosen) * MIXED_FILL_SHARE + 0.5) if include_matching else len(chosen) // 2
         fill_ids = {card["flashcard_id"] for card in rng.sample(fill_pool, min(target, len(fill_pool)))}
 
+    # Mixed / Auto: the cards left for short answers become multi_blank questions where possible.
+    vocabulary = {}
+    if mode in ("mixed", "auto"):
+        vocabulary = keyword_vocabulary([sentence["text"] for sentence in sentences or []]
+                                        + [f"{card.get('front') or ''} {card.get('back') or ''}" for card in cards])
+
     # Deck order; a matching activity sits where its first card is.
     questions, self_check_ids, emitted = [], [], set()
+    covered, counts = 0, {}
     for card in chosen:
         question_id = len(questions) + 1
         group_index = group_of.get(card["flashcard_id"])
         if group_index is not None:
+            covered += 1
             if group_index not in emitted:
                 emitted.add(group_index)
                 group = sorted(groups[group_index], key=chosen.index)
                 questions.append(_matching_question(group, question_id, rng))
             continue
+        if mode == "auto":
+            question = _auto_written_question(card, question_id, cards, sentences, vocabulary, counts, rng)
+            if question:   # a card fitting no auto question type is left out
+                covered += 1
+                counts[question["question_type"]] = counts.get(question["question_type"], 0) + 1
+                questions.append(question)
+            continue
+        covered += 1
         if card["flashcard_id"] in fill_ids:
             questions.append(_fill_blank_question(card, question_id, grounded[card["flashcard_id"]]))
+            continue
+        built = build_multi_blank(card, sentences, vocabulary, rng) if mode == "mixed" else None
+        if built:
+            questions.append(_multi_blank_question(card, question_id, built))
             continue
         question = _short_answer_question(card, question_id)
         if not short_answer_is_auto_gradable(question["correct_answer"]):
             self_check_ids.append(question_id)
         questions.append(question)
 
+    if not questions:
+        raise ValueError("These flashcards are too few to build a quiz. Add or generate more flashcards.")
     distribution = {}
     for question in questions:
         distribution[question["question_type"]] = distribution.get(question["question_type"], 0) + 1
-    mode_label = {"mixed": "Mixed", "short_answer": "Short Answer", "fill_blank": "Fill in the Blank", "matching": "Matching"}[mode]
+    mode_label = {"auto": "Mixed", "mixed": "Mixed", "short_answer": "Short Answer", "fill_blank": "Fill in the Blank",
+                  "matching": "Matching"}[mode]
     title = _clean(quiz_name)[:200] or f"{document_id} · Flashcard practice ({mode_label})"
     quiz = save_quiz(document_id, FLASHCARD_QUIZ_DIFFICULTY, {
         "title": title,
@@ -431,7 +789,7 @@ def create_flashcard_written_quiz(
             "available_flashcards": len(cards),
             "requested_count": count,
             "actual_count": len(questions),
-            "covered_cards": len(chosen),
+            "covered_cards": covered,
             "type_distribution": distribution,
             "self_check_question_ids": self_check_ids,
         },

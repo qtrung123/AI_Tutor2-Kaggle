@@ -1,9 +1,10 @@
 """Real-browser tests for Flashcards -> "Practice as Quiz" (headless Chrome against the Quiz Player
-mock): the sheet (Type / Questions / Start Quiz), the "No flashcards available" state, the request
-sent for the exact set on screen, opening the created quiz in the focused Quiz Player, text input for
+mock): the sheet (no question type and no card count to choose: always every card, "auto" mode), the
+"No flashcards available" state, the request sent for the exact set on screen, opening the created quiz in the focused Quiz Player, text input for
 short_answer and fill_blank, autosave + resume of typed answers, Results/Review showing the typed and
 the canonical answer, learner-marked self-check questions, and a matching activity (click-to-pair,
-drag and drop, moving and clearing a pair, per-pair review). Backend behavior is covered by
+drag and drop, moving and clearing a pair, per-pair review), and a multi_blank question answered by
+Type Answer and by Word Bank (click, drag, clear; per-blank review). Backend behavior is covered by
 tests/test_flashcard_written_quiz.py; the mock mirrors its normalized exact-match grading.
 
 Skipped when Chrome is not installed (set CHROME_PATH to point at it). No backend, no network.
@@ -52,7 +53,22 @@ window.fetch = async (input, init = {}) => {
   if (p === "/api/flashcards/lecture.pdf" && method === "GET") {
     return json({set_id: "set-1", model_id: "qwen-2.5-7b", cache_hit: true, cards: CARDS});
   }
-  if (p === "/api/flashcards/lecture.pdf/practice-quiz" && method === "POST" && JSON.parse(init.body).mode === "matching") {
+  // Every request is "auto"; the mock answers them in turn: written (older types), matching, multi_blank.
+  if (p === "/api/flashcards/lecture.pdf/practice-quiz" && method === "POST" && window.__practiceBodies.length === 2) {
+    window.__practiceBodies.push(JSON.parse(init.body));
+    const quiz = {quiz_id: "fc-blanks", document_id: "lecture.pdf", title: "Lecture · Flashcard practice (Mixed)", difficulty: "easy",
+      topic_id: "document", topic_name: "Entire document", assessment_scope: "document", created_at: "2026-01-04T00:00:00Z",
+      assessment_plan: {planner_version: "flashcard_written_v1", source: "flashcards", self_check_question_ids: [], type_distribution: {multi_blank: 1}},
+      questions: [{id: 1, question: "A ____ guards shared ____ so that two threads never collide.", options: [],
+        question_type: "multi_blank", correct_answer: "semaphore | counters", correct_answers: ["semaphore", "counters"],
+        blanks: [{id: 1, answer: "semaphore", accepted_answers: ["semaphore"]}, {id: 2, answer: "counters", accepted_answers: ["counters"]}],
+        distractors: ["registers", "scheduler"], word_bank: ["registers", "semaphore", "scheduler", "counters"],
+        answer_modes: ["type_answer", "word_bank"], topic_id: "t1", topic_name: "Topic 1", difficulty: "easy",
+        explanation: "From the document: A semaphore guards shared counters so that two threads never collide.", source_chunk_ids: []}]};
+    window.__quizzes["fc-blanks"] = quiz;
+    return json(quiz);
+  }
+  if (p === "/api/flashcards/lecture.pdf/practice-quiz" && method === "POST" && window.__practiceBodies.length === 1) {
     window.__practiceBodies.push(JSON.parse(init.body));
     const quiz = {quiz_id: "fc-match", document_id: "lecture.pdf", title: "Lecture · Flashcard practice (Matching)", difficulty: "easy",
       topic_id: "document", topic_name: "Entire document", assessment_scope: "document", created_at: "2026-01-03T00:00:00Z",
@@ -83,6 +99,15 @@ window.fetch = async (input, init = {}) => {
     const quiz = window.__quizzes[body.quiz_id];
     let score = 0;
     const question_results = quiz.questions.map((q) => {
+      if (q.question_type === "multi_blank") {
+        const texts = (body.answers[String(q.id)] || []).map((text) => String(text || "").trim());
+        const right = texts.length === q.blanks.length && q.blanks.every((blank, index) =>
+          blank.accepted_answers.some((answer) => normalizeText(answer) === normalizeText(texts[index])));
+        if (right) score += 1;
+        return {question_id: q.id, question: q.question, options: [], question_type: "multi_blank", selected_answer: texts.join(" | "),
+          selected_answers: texts, correct_answer: q.correct_answer, correct_answers: q.correct_answers, is_correct: right,
+          explanation: q.explanation, topic_name: "Topic 1", source_chunk_ids: []};
+      }
       if (q.question_type === "matching") {
         const letters = body.answers[String(q.id)] || [];
         const right = letters.length > 0 && letters.join(",") === q.correct_answers.join(",");
@@ -154,7 +179,9 @@ const reviewRows = () => [...document.querySelectorAll("#quiz-review-options .qu
   $("practice-flashcards-quiz").click();
   await sleep(50);
   out.sheet = {title: $("flashcard-quiz-title").textContent, emptyHidden: $("flashcard-quiz-empty").hidden,
-    modes: segments("flashcard-quiz-mode"), counts: segments("flashcard-quiz-count"), start: $("flashcard-quiz-start").textContent};
+    segments: dialog().querySelectorAll(".quiz-segmented-option").length,
+    fieldLabels: [...dialog().querySelectorAll(".quiz-sheet-field > span")].map((label) => label.textContent),
+    summary: $("flashcard-quiz-summary").textContent, start: $("flashcard-quiz-start").textContent};
   $("flashcard-quiz-start").click();
   await sleep(600);
   out.request = window.__practiceBodies;
@@ -196,15 +223,11 @@ const reviewRows = () => [...document.querySelectorAll("#quiz-review-options .qu
   out.markedScore = $("quiz-results-score").textContent;
   out.overflow = document.documentElement.scrollWidth > window.innerWidth;
 
-  // Matching: the sheet counts cards; one activity pairs the three cards.
+  // Matching: one activity pairs the three cards.
   await openStudySession("lecture.pdf", "flashcards");
   await sleep(400);
   $("practice-flashcards-quiz").click();
   await sleep(50);
-  [...document.querySelectorAll("#flashcard-quiz-mode .quiz-segmented-option")].find((b) => b.textContent === "Matching").click();
-  await sleep(50);
-  out.matchingSheet = {modes: segments("flashcard-quiz-mode").map((m) => m.label), summary: $("flashcard-quiz-summary").textContent,
-    fieldLabels: [...dialog().querySelectorAll(".quiz-sheet-field > span")].map((label) => label.textContent)};
   $("flashcard-quiz-start").click();
   await sleep(600);
   const prompts = () => [...document.querySelectorAll(".quiz-matching-prompt")];
@@ -239,6 +262,48 @@ const reviewRows = () => [...document.querySelectorAll("#quiz-review-options .qu
     classes: [...document.querySelectorAll("#quiz-review-options .quiz-review-option")].map((row) =>
       row.classList.contains("is-correct") ? "correct" : (row.classList.contains("is-wrong") ? "wrong" : "other"))};
   out.matchingOverflow = document.documentElement.scrollWidth > window.innerWidth;
+
+  // multi_blank: Type Answer, then Word Bank (click a word, drag a word, clear a blank), same answer.
+  await openStudySession("lecture.pdf", "flashcards");
+  await sleep(400);
+  $("practice-flashcards-quiz").click();
+  await sleep(50);
+  $("flashcard-quiz-start").click();
+  await sleep(600);
+  const blankInputs = () => [...document.querySelectorAll(".quiz-multi-blank-input")];
+  const blankSlots = () => [...document.querySelectorAll(".quiz-multi-blank-slot")];
+  const chips = () => [...document.querySelectorAll(".quiz-word-bank-chip")];
+  const modeButtons = () => [...document.querySelectorAll(".quiz-multi-blank-modes .quiz-segmented-option")];
+  const sentence = () => document.querySelector(".quiz-multi-blank-sentence")?.textContent;
+  out.blanksOpened = {question: $("quiz-player-question").textContent, inputs: blankInputs().length, sentence: sentence(),
+    modes: modeButtons().map((b) => ({label: b.textContent, active: b.classList.contains("active")})),
+    chips: chips().length, types: $("quiz-player-types").textContent};
+  blankInputs()[1].focus(); blankInputs()[1].value = "Counters"; blankInputs()[1].dispatchEvent(new Event("input", {bubbles: true}));
+  out.typedKeepsFocus = document.activeElement === blankInputs()[1];
+  await sleep(700);
+  out.typedAutosave = window.__lastProgressBody.answers;
+  modeButtons()[1].click(); await sleep(20);                       // Word Bank keeps what was typed
+  out.wordBank = {slots: blankSlots().map((slot) => slot.textContent), chips: chips().map((chip) => chip.textContent),
+    used: chips().map((chip) => chip.classList.contains("is-used")), inputs: blankInputs().length};
+  chips()[0].click(); await sleep(20);                             // "registers" fills the first empty blank
+  out.firstPick = blankSlots().map((slot) => slot.textContent);
+  blankSlots()[0].click(); await sleep(20);                        // clear it; it becomes the active blank
+  out.clearedBlank = {slots: blankSlots().map((slot) => slot.textContent), active: blankSlots()[0].classList.contains("is-active")};
+  const drag = new DataTransfer();                                 // drag "semaphore" onto blank 1
+  chips()[1].dispatchEvent(new DragEvent("dragstart", {bubbles: true, dataTransfer: drag}));
+  blankSlots()[0].dispatchEvent(new DragEvent("dragover", {bubbles: true, cancelable: true, dataTransfer: drag}));
+  blankSlots()[0].dispatchEvent(new DragEvent("drop", {bubbles: true, cancelable: true, dataTransfer: drag}));
+  await sleep(700);
+  out.wordBankAnswer = {slots: blankSlots().map((slot) => slot.textContent), autosave: window.__lastProgressBody.answers,
+    answered: $("quiz-player-answered-count").textContent};
+  modeButtons()[0].click(); await sleep(20);                       // back to Type Answer: the same answer
+  out.backToTyping = blankInputs().map((field) => field.value);
+  $("quiz-player-next").click();   // Finish Quiz
+  await sleep(400);
+  out.blanksResults = {score: $("quiz-results-score").textContent, submitted: window.__lastSubmitBody.answers};
+  $("quiz-results-review").click(); await sleep(100);
+  out.blanksReview = {status: $("quiz-review-status").textContent, question: $("quiz-review-question").textContent, rows: reviewRows()};
+  out.blanksOverflow = document.documentElement.scrollWidth > window.innerWidth;
 
   const pre = document.createElement("pre"); pre.id = "harness-out"; pre.textContent = JSON.stringify(out); document.body.appendChild(pre);
 })().catch((error) => { out.fatal = String(error && error.stack || error); const pre = document.createElement("pre"); pre.id = "harness-out"; pre.textContent = JSON.stringify(out); document.body.appendChild(pre); });
@@ -281,21 +346,17 @@ class FlashcardPracticeQuizUiTests(unittest.TestCase):
         })
         self.assertTrue(self.out["emptyClosed"])
 
-    def test_sheet_offers_type_and_count(self):
+    def test_sheet_has_no_type_or_card_count_to_choose(self):
         self.assertEqual(self.out["buttonLabel"], "Practice as Quiz")
         sheet = self.out["sheet"]
         self.assertEqual(sheet["title"], "Practice as Quiz")
         self.assertTrue(sheet["emptyHidden"])
-        self.assertEqual([m["label"] for m in sheet["modes"]], ["Mixed", "Short Answer", "Fill Blank", "Matching"])
-        self.assertTrue(sheet["modes"][0]["active"])
-        # Three cards: 5 and 10 are unavailable, "All" is chosen.
-        self.assertEqual(sheet["counts"], [
-            {"label": "5", "active": False, "disabled": True}, {"label": "10", "active": False, "disabled": True},
-            {"label": "All (3)", "active": True, "disabled": False}])
+        self.assertEqual((sheet["segments"], sheet["fieldLabels"]), (0, []))
+        self.assertEqual(sheet["summary"], "Uses all 3 cards · a mix of Multiple Choice, Fill in the Blanks and Matching")
         self.assertEqual(sheet["start"], "Start Quiz")
 
     def test_start_uses_the_set_on_screen_and_opens_the_player(self):
-        self.assertEqual(self.out["request"][0], {"mode": "mixed", "question_count": None, "set_id": "set-1"})
+        self.assertEqual(self.out["request"], [{"mode": "auto", "question_count": None, "set_id": "set-1"}] * 3)
         opened = self.out["opened"]
         self.assertTrue(opened["dialogClosed"])
         self.assertTrue(opened["playerVisible"])
@@ -321,11 +382,30 @@ class FlashcardPracticeQuizUiTests(unittest.TestCase):
                                            "Correct answerBecause many processes compete for a few CPU cores at once."])
         self.assertEqual(review3["buttons"], [{"label": "I got it right", "disabled": False}, {"label": "I missed it", "disabled": True}])
 
-    def test_sheet_counts_cards_and_offers_matching(self):
-        sheet = self.out["matchingSheet"]
-        self.assertEqual(sheet["fieldLabels"], ["Type", "Cards"])
-        self.assertEqual(sheet["summary"], "Covers 3 cards · a matching activity pairs up to 4 cards")
-        self.assertEqual(self.out["request"][-1], {"mode": "matching", "question_count": None, "set_id": "set-1"})
+    def test_multi_blank_type_answer_and_word_bank_give_the_same_answer(self):
+        opened = self.out["blanksOpened"]
+        self.assertEqual(opened["question"], "Fill in the blanks.")
+        self.assertEqual(opened["inputs"], 2)
+        self.assertEqual(opened["sentence"], "A  guards shared  so that two threads never collide.")
+        self.assertEqual(opened["modes"], [{"label": "Type Answer", "active": True}, {"label": "Word Bank", "active": False}])
+        self.assertEqual((opened["chips"], opened["types"]), (0, "Fill in the Blanks"))
+        self.assertTrue(self.out["typedKeepsFocus"])
+        self.assertEqual(self.out["typedAutosave"], {"1": ["", "Counters"]})
+        self.assertEqual(self.out["wordBank"], {"slots": ["Blank 1", "Counters"], "chips": ["registers", "semaphore", "scheduler", "counters"],
+                                                "used": [False, False, False, False], "inputs": 0})
+        self.assertEqual(self.out["firstPick"], ["registers", "Counters"])
+        self.assertEqual(self.out["clearedBlank"], {"slots": ["Blank 1", "Counters"], "active": True})
+        self.assertEqual(self.out["wordBankAnswer"], {"slots": ["semaphore", "Counters"], "autosave": {"1": ["semaphore", "Counters"]},
+                                                      "answered": "1 answered"})
+        self.assertEqual(self.out["backToTyping"], ["semaphore", "Counters"])
+
+    def test_multi_blank_results_review_each_blank(self):
+        self.assertEqual(self.out["blanksResults"], {"score": "1 / 1", "submitted": {"1": ["semaphore", "Counters"]}})
+        review = self.out["blanksReview"]
+        self.assertEqual(review["status"], "Correct")
+        self.assertEqual(review["question"], "A (1) ____ guards shared (2) ____ so that two threads never collide.")
+        self.assertEqual(review["rows"], ["✓(1) semaphoreCorrect", "✓(2) CountersCorrect"])
+        self.assertFalse(self.out["blanksOverflow"])
 
     def test_matching_board_click_drag_move_and_clear(self):
         opened = self.out["matchingOpened"]

@@ -229,7 +229,8 @@ class FlashcardWrittenQuizTests(unittest.TestCase):
             fill = types.count("fill_blank")
             self.assertEqual(fill, min(fill_target, fill + len(left_blankable)), count)
             self.assertEqual(types.count("matching"), matching, count)
-            self.assertEqual(types.count("short_answer"), count - fill - matched_cards, count)
+            # The cards left over are multi_blank questions where possible, else short answers.
+            self.assertEqual(types.count("short_answer") + types.count("multi_blank"), count - fill - matched_cards, count)
             covered = sum(len(q["options"]) if q["question_type"] == "matching" else 1 for q in quiz["questions"])
             self.assertEqual(covered, count)
             self.assertEqual(sum(len(q["options"]) for q in quiz["questions"] if q["question_type"] == "matching"), matched_cards)
@@ -237,7 +238,7 @@ class FlashcardWrittenQuizTests(unittest.TestCase):
             self.assertEqual(quiz["assessment_plan"]["actual_count"], len(types))
             self.assertEqual(len({q["id"] for q in quiz["questions"]}), len(types))
         ten = self.types(self.create(mode="mixed", question_count=10).json())
-        self.assertEqual((ten.count("short_answer"), ten.count("fill_blank"), ten.count("matching")), (3, 3, 1))
+        self.assertEqual((ten.count("short_answer") + ten.count("multi_blank"), ten.count("fill_blank"), ten.count("matching")), (3, 3, 1))
 
     def test_mixed_with_fourteen_cards_is_six_short_four_fill_and_one_matching(self):
         extra = [
@@ -249,18 +250,21 @@ class FlashcardWrittenQuizTests(unittest.TestCase):
         save_cards(self.alice, DOC, cards=[*CARDS, *extra])
         quiz = self.create(mode="mixed").json()
         types = self.types(quiz)
-        self.assertEqual((types.count("short_answer"), types.count("fill_blank"), types.count("matching")), (6, 4, 1))
+        written = types.count("short_answer") + types.count("multi_blank")
+        self.assertEqual((written, types.count("fill_blank"), types.count("matching")), (6, 4, 1))
+        self.assertGreater(types.count("multi_blank"), 0)   # short answers are replaced where possible
         self.assertEqual(len(types), 11)
         matching = next(q for q in quiz["questions"] if q["question_type"] == "matching")
         self.assertEqual(len(matching["options"]), 4)
         self.assertEqual(quiz["assessment_plan"]["covered_cards"], 14)
-        self.assertEqual(quiz["assessment_plan"]["type_distribution"], {"short_answer": 6, "fill_blank": 4, "matching": 1})
+        distribution = quiz["assessment_plan"]["type_distribution"]
+        self.assertEqual((distribution.get("short_answer", 0) + distribution.get("multi_blank", 0),
+                          distribution["fill_blank"], distribution["matching"]), (6, 4, 1))
         # Every card is covered exactly once.
-        fronts = [q["question"] for q in quiz["questions"] if q["question_type"] == "short_answer"]
-        fronts += [line.split(". ", 1)[1] for line in matching["question"].split("\n")[1:]]
-        concept_ids = {q["concept_id"] for q in quiz["questions"] if q["question_type"] == "fill_blank"}
-        self.assertEqual(len(fronts) + len(concept_ids), 14)
-        self.assertEqual(len(set(fronts)), len(fronts))
+        fronts = [line.split(". ", 1)[1] for line in matching["question"].split("\n")[1:]]
+        concept_ids = [q["concept_id"] for q in quiz["questions"] if q["question_type"] != "matching"]
+        self.assertEqual(len(fronts) + len(set(concept_ids)), 14)
+        self.assertEqual(len(set(concept_ids)), len(concept_ids))
 
     def test_without_matching_the_service_stays_written_only(self):
         # The Planner's written_quiz sessions call the service directly, without include_matching.
@@ -504,7 +508,7 @@ class FlashcardWrittenQuizTests(unittest.TestCase):
         quiz = self.create(mode="mixed", question_count=10).json()
         submit = self.alice_client.post(f"/api/quiz/{DOC}/submit", json={
             "quiz_id": quiz["quiz_id"], "difficulty": "easy", "topic_id": "document",
-            "answers": {str(q["id"]): q["correct_answers"] if q["question_type"] == "matching" else q["correct_answer"]
+            "answers": {str(q["id"]): q["correct_answers"] if q["question_type"] in ("matching", "multi_blank") else q["correct_answer"]
                         for q in quiz["questions"]},
         })
         self.assertEqual(submit.json()["percentage"], 100.0)

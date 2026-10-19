@@ -783,13 +783,16 @@ async function showQuizHistoryDetail(attemptId) {
       const item = document.createElement("article");
       item.className = `quiz-history-question ${result.is_correct ? "correct" : "incorrect"}`;
       const question = document.createElement("strong");
-      question.textContent = `${index + 1}. ${result.question || `Question ${result.question_id}`}`;
+      const multiBlank = isMultiBlankQuestionType(result.question_type);
+      const questionText = result.question || `Question ${result.question_id}`;
+      question.textContent = `${index + 1}. ${multiBlank ? numberedBlankText(questionText) : questionText}`;
       const options = document.createElement("div");
       options.className = "review-answer-list";
       if (isWrittenQuestionType(result.question_type)) {
         options.append(...fillBlankReviewRows(result.selected_answer || "", result.correct_answers || [result.correct_answer], result.is_correct, "review-answer-option"));
       }
-      (isWrittenQuestionType(result.question_type) ? [] : result.options || []).forEach((option) => {
+      if (multiBlank) options.append(...multiBlankAnswerRows(result));
+      (isWrittenQuestionType(result.question_type) || multiBlank ? [] : result.options || []).forEach((option) => {
         const letter = option.trim().charAt(0).toUpperCase();
         const row = document.createElement("div");
         row.className = "review-answer-option";
@@ -1097,13 +1100,14 @@ function createAssessmentReviewCard(question, result, index, total) {
   number.textContent = `Question ${index + 1}/${total}`;
   heading.appendChild(number);
   const questionText = document.createElement("h3");
-  questionText.textContent = question.question;
+  questionText.textContent = isMultiBlankQuestion(question) ? numberedBlankText(question.question) : question.question;
   const options = document.createElement("div");
   options.className = "review-answer-list";
   if (isWrittenQuestion(question)) {
     options.append(...fillBlankReviewRows(result.selected_answer || "", result.correct_answers || [result.correct_answer], result.is_correct, "review-answer-option"));
   }
-  (isWrittenQuestion(question) ? [] : question.options).forEach((option) => {
+  if (isMultiBlankQuestion(question)) options.append(...multiBlankAnswerRows(result, question.blanks));
+  (isWrittenQuestion(question) || isMultiBlankQuestion(question) ? [] : question.options).forEach((option) => {
     const letter = option.trim().charAt(0).toUpperCase();
     const row = document.createElement("div");
     row.className = "review-answer-option";
@@ -1271,7 +1275,7 @@ function renderAttemptSummary() {
 }
 
 function quizTypeLabel(questionType) {
-  return { single_choice: "Multiple Choice", true_false: "True/False", multi_select: "Multiple Select", fill_blank: "Fill in the Blank", short_answer: "Short Answer", matching: "Matching" }[questionType]
+  return { single_choice: "Multiple Choice", true_false: "True/False", multi_select: "Multiple Select", fill_blank: "Fill in the Blank", multi_blank: "Fill in the Blanks", short_answer: "Short Answer", matching: "Matching" }[questionType]
     || questionType;
 }
 
@@ -1294,7 +1298,7 @@ function quizTypeSummary(questionTypes) {
     const key = questionType || "single_choice";
     counts[key] = (counts[key] || 0) + 1;
   });
-  const order = ["single_choice", "true_false", "multi_select", "fill_blank", "short_answer", "matching"];
+  const order = ["single_choice", "true_false", "multi_select", "fill_blank", "multi_blank", "short_answer", "matching"];
   const types = [...order.filter((questionType) => counts[questionType]),
     ...Object.keys(counts).filter((questionType) => !order.includes(questionType))];
   if (types.length === 1) return quizTypeLabel(types[0]);
@@ -1342,7 +1346,7 @@ function assessmentTitleText(quiz) {
     + (mismatch ? " · Current settings differ: press Regenerate Quiz to use them" : "");
   if (quiz.assessment_scope === "document") {
     const distribution = documentQuizTypeBreakdown(quiz);
-    const parts = ["single_choice", "true_false", "multi_select", "fill_blank", "short_answer", "matching"]
+    const parts = ["single_choice", "true_false", "multi_select", "fill_blank", "multi_blank", "short_answer", "matching"]
       .filter((questionType) => distribution[questionType])
       .map((questionType) => `${distribution[questionType]} ${quizTypeLabel(questionType)}`);
     return `${quizName} · ${quiz.questions.length} questions · ${parts.join(" · ")}` + partialSuffix;
@@ -1439,7 +1443,10 @@ function renderQuizPlayerQuestion() {
   document.getElementById("quiz-player-answered-count").textContent = `${answeredCount} answered`;
   document.getElementById("quiz-player-progress-bar").style.width = `${Math.round(((quizQuestionIndex + 1) / total) * 100)}%`;
   const isMatching = isMatchingQuestion(question);
-  document.getElementById("quiz-player-question").textContent = isMatching ? matchingParts(question).instruction : question.question;
+  const isMultiBlank = isMultiBlankQuestion(question);
+  // A multi_blank sentence is shown inside its board, with its blanks in place.
+  document.getElementById("quiz-player-question").textContent = isMatching ? matchingParts(question).instruction
+    : (isMultiBlank ? "Fill in the blanks." : question.question);
   renderQuizPlayerNav();
 
   const isMultiSelect = question.question_type === "multi_select";
@@ -1449,7 +1456,17 @@ function renderQuizPlayerQuestion() {
   answersEl.innerHTML = "";
   if (isWrittenQuestion(question)) answersEl.appendChild(createQuizPlayerFillBlank(question, selected));
   if (isMatching) answersEl.appendChild(createMatchingBoard(question, selected, () => { renderQuizPlayerQuestion(); scheduleQuizAutosave(); }));
-  (isWrittenQuestion(question) || isMatching ? [] : question.options || []).forEach((option) => {
+  if (isMultiBlank) {
+    answersEl.appendChild(createMultiBlankBoard(question, selected, {
+      onAnswer: () => {
+        document.getElementById("quiz-player-answered-count").textContent = `${Object.keys(quizAnswers).length} answered`;
+        renderQuizPlayerNav();
+        scheduleQuizAutosave();
+      },
+      onRender: renderQuizPlayerQuestion,
+    }));
+  }
+  (isWrittenQuestion(question) || isMatching || isMultiBlank ? [] : question.options || []).forEach((option) => {
     const letter = option.trim().charAt(0).toUpperCase();
     const isSelected = Array.isArray(selected) ? selected.includes(letter) : selected === letter;
     const button = document.createElement("button");
@@ -1541,10 +1558,17 @@ function buildQuizResult(attempt, quiz, fallback = {}) {
     // Written (fill_blank / short_answer) answers are text, shown as written (never upper-cased or
     // sorted like option letters). Matching answers are one letter per prompt, kept in prompt order.
     const matching = isMatchingQuestionType(questionType);
-    const selected = matching ? matchingResultLetters(result.selected_answers, result.selected_answer) : fillBlank
+    // multi_blank answers are one text per blank, in blank order ("" = left empty).
+    const multiBlank = isMultiBlankQuestionType(questionType);
+    const blankTexts = (values, joined) => (Array.isArray(values) && values.length ? values : String(joined || "").split(" | "))
+      .map((value) => String(value || "").trim());
+    const selected = multiBlank ? (blankTexts(result.selected_answers, result.selected_answer).some(Boolean)
+      ? blankTexts(result.selected_answers, result.selected_answer) : [])
+      : matching ? matchingResultLetters(result.selected_answers, result.selected_answer) : fillBlank
       ? [String((result.selected_answers?.length ? result.selected_answers[0] : result.selected_answer) || "").trim()].filter(Boolean)
       : quizResultLetters(result.selected_answers?.length ? result.selected_answers : [result.selected_answer]);
-    const correct = matching ? matchingResultLetters(result.correct_answers, result.correct_answer) : fillBlank
+    const correct = multiBlank ? blankTexts(result.correct_answers, result.correct_answer)
+      : matching ? matchingResultLetters(result.correct_answers, result.correct_answer) : fillBlank
       ? (result.correct_answers?.length ? result.correct_answers : [result.correct_answer]).map((value) => String(value || "").trim()).filter(Boolean)
       : quizResultLetters(result.correct_answers?.length ? result.correct_answers : [result.correct_answer]);
     const unanswered = !selected.some(Boolean);
@@ -1555,6 +1579,7 @@ function buildQuizResult(attempt, quiz, fallback = {}) {
       options: result.options?.length ? result.options : (question.options || []),
       selected,
       correct,
+      blanks: question.blanks || null,   // multi_blank: each blank's accepted answers
       unanswered,
       isCorrect: !unanswered && Boolean(result.is_correct),
       // Flashcard short answers too long for an exact match: the learner marks them after comparing.
@@ -1673,16 +1698,19 @@ function renderQuizReview() {
     + (item.selfCheck && !item.unanswered ? " · Self-check" : "");
   status.className = `quiz-review-status is-${state}`;
   const isMatching = isMatchingQuestionType(item.questionType);
-  document.getElementById("quiz-review-question").textContent = isMatching ? matchingParts(item).instruction : item.question;
+  const isMultiBlank = isMultiBlankQuestionType(item.questionType);
+  document.getElementById("quiz-review-question").textContent = isMatching ? matchingParts(item).instruction
+    : (isMultiBlank ? numberedBlankText(item.question) : item.question);
   document.getElementById("quiz-review-unanswered-note").hidden = !item.unanswered;
 
   const options = document.getElementById("quiz-review-options");
   options.innerHTML = "";
   if (isWrittenQuestionType(item.questionType)) options.append(...fillBlankReviewRows(item.selected[0] || "", item.correct, item.isCorrect));
   if (isMatching) options.append(...matchingReviewRows(item));
+  if (isMultiBlank) options.append(...multiBlankReviewRows(item));
   if (item.selfCheck && !item.unanswered) options.appendChild(createSelfCheckControls(item));
   const isMultiSelect = item.questionType === "multi_select";
-  (isWrittenQuestionType(item.questionType) || isMatching ? [] : item.options).forEach((option, optionIndex) => {
+  (isWrittenQuestionType(item.questionType) || isMatching || isMultiBlank ? [] : item.options).forEach((option, optionIndex) => {
     const letter = QUIZ_OPTION_LETTERS[optionIndex];
     const isSelected = item.selected.includes(letter);
     const isCorrect = item.correct.includes(letter);
@@ -1755,6 +1783,7 @@ function setReviewExplainMoreBusy(busy) {
 function reviewItemAnswerText(item, values) {
   if (!values.length) return "";
   if (isWrittenQuestionType(item.questionType)) return values.map((value) => `"${value}"`).join(" or ");
+  if (isMultiBlankQuestionType(item.questionType)) return values.map((value, index) => `(${index + 1}) "${value || "empty"}"`).join("; ");
   return values.map((letter) => matchingOptionText(item.options, letter) || letter).join("; ");
 }
 
@@ -1767,12 +1796,12 @@ function quizReviewExplainMessage(item, result) {
   const documentItem = indexedDocuments.find((entry) => entry.id === activeDocumentId);
   const documentName = documentItem ? `"${documentItem.title}" (${documentItem.id})` : `"${activeDocumentId}"`;
   const isMatching = isMatchingQuestionType(item.questionType);
-  const isChoice = !isMatching && !isWrittenQuestionType(item.questionType);
+  const isChoice = !isMatching && !isWrittenQuestionType(item.questionType) && !isMultiBlankQuestionType(item.questionType);
   const outcome = item.unanswered ? "I did not answer it" : (item.isCorrect ? "I answered it correctly" : "I answered it incorrectly");
   const lines = [
     `Explain more about this quiz question from the document ${documentName}.`,
     `Question type: ${quizTypeLabel(item.questionType)}`,
-    `Question: ${isMatching ? matchingParts(item).instruction : item.question}`,
+    `Question: ${isMatching ? matchingParts(item).instruction : (isMultiBlankQuestionType(item.questionType) ? numberedBlankText(item.question) : item.question)}`,
   ];
   if (isChoice && item.options.length) lines.push("Options:", ...item.options.map((option) => `  ${option}`));
   if (isMatching) {
@@ -1979,6 +2008,200 @@ function matchingReviewRows(item) {
     tag.textContent = isCorrect ? "Correct pair" : `Correct: ${matchingOptionText(item.options, correct)}`;
     row.append(indicator, label, tag);
     return row;
+  });
+}
+
+// ---- Multi-blank fill-in-the-blank ---------------------------------------------------------------
+// One sentence with 2-4 "____" blanks. The answer is one text per blank, in blank order ("" = still
+// empty). Type Answer types each blank; Word Bank fills the chosen (or first empty) blank by clicking
+// or dragging a word. The mode is only a way of answering: both save the same answer, graded the same.
+
+const MULTI_BLANK_MARKER = "____";
+const quizMultiBlankModes = {};   // question id -> "type_answer" | "word_bank" (kept while the page is open)
+let quizMultiBlankActive = null;  // {questionId, index}: the blank the next Word Bank word fills
+
+function isMultiBlankQuestionType(questionType) {
+  return questionType === "multi_blank";
+}
+
+function isMultiBlankQuestion(question) {
+  return isMultiBlankQuestionType(question?.question_type);
+}
+
+function multiBlankCount(question) {
+  return (question?.blanks || []).length || (question?.correct_answers || []).length;
+}
+
+function multiBlankValues(question, value) {
+  return Array.from({ length: multiBlankCount(question) }, (_, index) => (Array.isArray(value) ? String(value[index] ?? "") : ""));
+}
+
+// "A ____ guards ____." -> "A (1) ____ guards (2) ____." for review text.
+function numberedBlankText(text) {
+  let number = 0;
+  return String(text || "").split(MULTI_BLANK_MARKER).reduce((joined, part, index) => (index ? `${joined}(${++number}) ${MULTI_BLANK_MARKER}${part}` : part), "");
+}
+
+// `onAnswer` runs after every change of the answer (autosave, counts); `onRender` re-renders the
+// question (mode switch, Word Bank moves). Typing never re-renders, so focus and caret stay put.
+function createMultiBlankBoard(question, value, { onAnswer = () => {}, onRender = () => {}, readOnly = false } = {}) {
+  const key = String(question.id);
+  const values = multiBlankValues(question, value);
+  const modes = question.answer_modes?.length ? question.answer_modes : ["type_answer", "word_bank"];
+  const mode = modes.includes(quizMultiBlankModes[key]) ? quizMultiBlankModes[key] : modes[0];
+  const active = quizMultiBlankActive?.questionId === key ? quizMultiBlankActive.index : null;
+  const commit = (next) => {
+    if (next.some((item) => item.trim())) quizAnswers[key] = next;
+    else delete quizAnswers[key];
+    onAnswer();
+  };
+
+  const board = document.createElement("div");
+  board.className = "quiz-multi-blank";
+  board.dataset.mode = mode;
+  if (modes.length > 1 && !readOnly) {
+    const switcher = document.createElement("div");
+    switcher.className = "quiz-multi-blank-modes";
+    switcher.setAttribute("role", "radiogroup");
+    switcher.setAttribute("aria-label", "How to answer");
+    [["type_answer", "Type Answer"], ["word_bank", "Word Bank"]].filter(([option]) => modes.includes(option)).forEach(([option, label]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `quiz-segmented-option${option === mode ? " active" : ""}`;
+      button.dataset.mode = option;
+      button.textContent = label;
+      button.setAttribute("role", "radio");
+      button.setAttribute("aria-checked", String(option === mode));
+      button.addEventListener("click", () => {
+        if (option === mode) return;
+        quizMultiBlankModes[key] = option;
+        quizMultiBlankActive = null;
+        onRender();
+      });
+      switcher.appendChild(button);
+    });
+    board.appendChild(switcher);
+  }
+
+  const place = (index, word) => {
+    const next = values.map((current, position) => (position === index ? word : (current === word ? "" : current)));
+    const empty = next.findIndex((item, position) => position > index && !item);
+    quizMultiBlankActive = empty >= 0 ? { questionId: key, index: empty } : null;
+    commit(next);
+    onRender();
+  };
+  const sentence = document.createElement("p");
+  sentence.className = "quiz-multi-blank-sentence";
+  String(question.question || "").split(MULTI_BLANK_MARKER).forEach((part, index) => {
+    if (index) {
+      const blankIndex = index - 1;
+      if (mode === "type_answer" || readOnly) {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "quiz-multi-blank-input";
+        input.dataset.index = String(blankIndex);
+        input.maxLength = 200;
+        input.autocomplete = "off";
+        input.spellcheck = false;
+        input.placeholder = `Blank ${blankIndex + 1}`;
+        input.setAttribute("aria-label", `Blank ${blankIndex + 1}`);
+        input.value = values[blankIndex];
+        input.disabled = readOnly;
+        input.addEventListener("input", () => {
+          values[blankIndex] = input.value;
+          commit([...values]);
+        });
+        sentence.appendChild(input);
+      } else {
+        const slot = document.createElement("button");
+        slot.type = "button";
+        slot.className = `quiz-multi-blank-slot${values[blankIndex] ? " is-filled" : ""}${active === blankIndex ? " is-active" : ""}`;
+        slot.dataset.index = String(blankIndex);
+        slot.textContent = values[blankIndex] || `Blank ${blankIndex + 1}`;
+        slot.setAttribute("aria-label", values[blankIndex] ? `Blank ${blankIndex + 1}: ${values[blankIndex]} (click to clear)` : `Blank ${blankIndex + 1}, empty`);
+        slot.setAttribute("aria-pressed", String(active === blankIndex));
+        // Clicking a filled blank empties it; either way it becomes the blank the next word fills.
+        slot.addEventListener("click", () => {
+          quizMultiBlankActive = { questionId: key, index: blankIndex };
+          if (values[blankIndex]) commit(values.map((current, position) => (position === blankIndex ? "" : current)));
+          onRender();
+        });
+        slot.addEventListener("dragover", (event) => { event.preventDefault(); slot.classList.add("is-drop-target"); });
+        slot.addEventListener("dragleave", () => slot.classList.remove("is-drop-target"));
+        slot.addEventListener("drop", (event) => {
+          event.preventDefault();
+          const word = event.dataTransfer?.getData("text/plain") || "";
+          if ((question.word_bank || []).includes(word)) place(blankIndex, word);
+        });
+        sentence.appendChild(slot);
+      }
+    }
+    sentence.appendChild(document.createTextNode(part));
+  });
+  board.appendChild(sentence);
+
+  if (mode === "word_bank" && !readOnly) {
+    const hint = document.createElement("p");
+    hint.className = "quiz-multi-blank-hint";
+    hint.textContent = "Click a word to fill the next blank, or drag it onto a blank. Click a filled blank to clear it.";
+    const bank = document.createElement("div");
+    bank.className = "quiz-word-bank";
+    (question.word_bank || []).forEach((word) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = `quiz-word-bank-chip${values.includes(word) ? " is-used" : ""}`;
+      chip.textContent = word;
+      chip.draggable = true;
+      chip.addEventListener("click", () => {
+        const target = active !== null ? active : values.findIndex((item) => !item);
+        if (target >= 0) place(target, word);
+      });
+      chip.addEventListener("dragstart", (event) => event.dataTransfer?.setData("text/plain", word));
+      bank.appendChild(chip);
+    });
+    board.append(hint, bank);
+  }
+  return board;
+}
+
+function normalizeBlankAnswer(value) {
+  return String(value || "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim()
+    .replace(/^[\s.,;:!?"'`“”‘’«»()[\]{}<>…]+|[\s.,;:!?"'`“”‘’«»()[\]{}<>…]+$/g, "");
+}
+
+// Review rows for a multi_blank result: one row per blank with the learner's text, marked right or
+// wrong against that blank's accepted answers, and the correct answer when it was missed.
+function multiBlankReviewRows(item) {
+  return item.correct.map((correct, index) => {
+    const selected = item.selected[index] || "";
+    const accepted = (item.blanks?.[index]?.accepted_answers || [correct]).map(normalizeBlankAnswer);
+    const isCorrect = Boolean(selected) && accepted.includes(normalizeBlankAnswer(selected));
+    const row = document.createElement("div");
+    row.className = `quiz-review-option is-multi-blank ${isCorrect ? "is-correct" : (selected ? "is-wrong" : "is-unpaired")}`;
+    const indicator = document.createElement("span");
+    indicator.className = "quiz-review-option-indicator";
+    indicator.setAttribute("aria-hidden", "true");
+    indicator.textContent = isCorrect ? "✓" : (selected ? "✕" : "");
+    const label = document.createElement("span");
+    label.className = "quiz-review-option-label";
+    label.textContent = `(${index + 1}) ${selected || "No answer"}`;
+    const tag = document.createElement("span");
+    tag.className = "quiz-review-option-tag";
+    tag.textContent = isCorrect ? "Correct" : `Correct: ${correct}`;
+    row.append(indicator, label, tag);
+    return row;
+  });
+}
+
+// The older review lists (attempt history detail, inline review card): per blank, the learner's
+// text and that blank's accepted answers, in the fill_blank row style.
+function multiBlankAnswerRows(result, blanks = null) {
+  const selected = result.selected_answers || [];
+  return (result.correct_answers || []).flatMap((answer, index) => {
+    const accepted = blanks?.[index]?.accepted_answers || [answer];
+    const text = String(selected[index] || "").trim();
+    const isCorrect = Boolean(text) && accepted.map(normalizeBlankAnswer).includes(normalizeBlankAnswer(text));
+    return fillBlankReviewRows(text, accepted, isCorrect, "review-answer-option");
   });
 }
 
@@ -2280,7 +2503,13 @@ function renderAssessmentQuiz() {
     questionText.textContent = matchingParts(question).instruction;
     options.appendChild(createMatchingBoard(question, quizAnswers[String(question.id)], renderAssessmentQuiz, { readOnly: Boolean(currentAttempt?.completed) }));
   }
-  (isWrittenQuestion(question) || isMatchingQuestion(question) ? [] : question.options).forEach((option) => {
+  if (isMultiBlankQuestion(question)) {
+    questionText.textContent = "Fill in the blanks.";
+    options.appendChild(createMultiBlankBoard(question, quizAnswers[String(question.id)], {
+      onRender: renderAssessmentQuiz, readOnly: Boolean(currentAttempt?.completed),
+    }));
+  }
+  (isWrittenQuestion(question) || isMatchingQuestion(question) || isMultiBlankQuestion(question) ? [] : question.options).forEach((option) => {
     const button = document.createElement("button");
     button.className = `answer-option ${isMultiSelect ? "answer-option--checkbox" : "answer-option--radio"}`;
     button.type = "button";
@@ -2528,7 +2757,7 @@ function openQuizCreateDialog() {
   if (!quizCreateDialog) {
     quizCreateDialog = document.createElement("div");
     quizCreateDialog.className = "quiz-create-dialog";
-    quizCreateDialog.innerHTML = '<div class="quiz-create-dialog-card" role="dialog" aria-modal="true" aria-labelledby="quiz-create-title"><div class="quiz-dialog-heading"><div><h2 id="quiz-create-title">Create a Quiz</h2><p>Choose how you want to assess this material.</p></div><button class="text-button quiz-dialog-cancel" type="button">Cancel</button></div><div class="quiz-dialog-fields"></div></div>';
+    quizCreateDialog.innerHTML = '<div class="quiz-create-dialog-card" role="dialog" aria-modal="true" aria-labelledby="quiz-create-title"><div class="quiz-dialog-heading"><div><h2 id="quiz-create-title">Create a Quiz</h2><p>Each quiz automatically mixes Multiple Choice, Fill in the Blanks and Matching questions from this document.</p></div><button class="text-button quiz-dialog-cancel" type="button">Cancel</button></div><div class="quiz-dialog-fields"></div></div>';
     quizCreateDialog.querySelector(".quiz-dialog-cancel").addEventListener("click", () => closeQuizCreateDialog());
     quizCreateDialog.addEventListener("click", (event) => { if (event.target === quizCreateDialog) closeQuizCreateDialog(); });
     document.body.appendChild(quizCreateDialog);

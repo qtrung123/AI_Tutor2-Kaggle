@@ -21,6 +21,9 @@ from backend.quiz_options import canonicalize_option
 LEGACY_TOPIC_ID = "document"
 # Question types answered by typing text (graded by normalized text match, not option letters).
 WRITTEN_QUESTION_TYPES = ("fill_blank", "short_answer")
+# Several blanks in one sentence; answered as one text per blank (typed or picked from its word bank).
+MULTI_BLANK_QUESTION_TYPE = "multi_blank"
+_MULTI_BLANK_SPEC_KEYS = ("blanks", "distractors", "word_bank", "answer_modes")
 # planner_version of written quizzes built from flashcards (backend/flashcard_quiz_service.py).
 FLASHCARD_WRITTEN_PLANNER_VERSION = "flashcard_written_v1"
 
@@ -238,6 +241,8 @@ def _initialize_schema(connection: db.Connection) -> None:
             "source_subtopic_ids_json": "TEXT NOT NULL DEFAULT '[]'",
             "concept_origin": "TEXT NOT NULL DEFAULT ''",
             "concept_plan_id": "TEXT NOT NULL DEFAULT ''",
+            # multi_blank only: blanks (answer + accepted answers), distractors, word bank, answer modes.
+            "blank_spec_json": "TEXT NOT NULL DEFAULT '{}'",
         },
         "quiz_attempts": {
             "topic_id": f"TEXT NOT NULL DEFAULT '{LEGACY_TOPIC_ID}'",
@@ -447,16 +452,17 @@ def _insert_quiz(connection: db.Connection, document_id: str, difficulty: str, q
                 topic_id, difficulty, explanation, source_chunk_ids_json, validation_outcome
                 , topic_name, concept_id, concept_name, assessment_capacity,
                 source_subtopic_ids_json, concept_origin, concept_plan_id,
-                question_type, correct_answers_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                question_type, correct_answers_json, blank_spec_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 quiz_id,
                 question_id,
                 position,
                 str(question.get("question", "")),
-                # Written answers (fill_blank, short_answer) are text kept as written; option answers are letters.
-                (str(question.get("correct_answer", "")).strip() if question.get("question_type") in WRITTEN_QUESTION_TYPES
+                # Written answers (fill_blank, short_answer, multi_blank) are text kept as written; option answers are letters.
+                (str(question.get("correct_answer", "")).strip()
+                 if question.get("question_type") in (*WRITTEN_QUESTION_TYPES, MULTI_BLANK_QUESTION_TYPE)
                  else str(question.get("correct_answer", "")).upper()),
                 str(question.get("topic_id") or stored["topic_id"]),
                 str(question.get("difficulty") or difficulty),
@@ -472,6 +478,8 @@ def _insert_quiz(connection: db.Connection, document_id: str, difficulty: str, q
                 str(question.get("concept_plan_id") or ""),
                 str(question.get("question_type") or "single_choice"),
                 json.dumps(question.get("correct_answers") or [question.get("correct_answer", "")], ensure_ascii=False),
+                json.dumps({key: question[key] for key in _MULTI_BLANK_SPEC_KEYS if key in question}
+                           if question.get("question_type") == MULTI_BLANK_QUESTION_TYPE else {}, ensure_ascii=False),
             ),
         )
         for option_index, option in enumerate(_normalize_options(question.get("options")), start=0):
@@ -493,7 +501,7 @@ def _row_to_quiz(connection: db.Connection, row) -> dict:
                explanation, source_chunk_ids_json, validation_outcome,
                topic_name, concept_id, concept_name, assessment_capacity,
                source_subtopic_ids_json, concept_origin, concept_plan_id
-               , question_type, correct_answers_json
+               , question_type, correct_answers_json, blank_spec_json
         FROM quiz_questions WHERE quiz_id = ? ORDER BY position
         """,
         (row["quiz_id"],),
@@ -528,6 +536,8 @@ def _row_to_quiz(connection: db.Connection, row) -> dict:
                 "source_subtopic_ids": json.loads(question_row["source_subtopic_ids_json"] or "[]"),
                 "concept_origin": question_row["concept_origin"],
                 "concept_plan_id": question_row["concept_plan_id"],
+                # Older question types store no spec, so their dicts are unchanged.
+                **json.loads(question_row["blank_spec_json"] or "{}"),
             }
         )
     return {
@@ -714,7 +724,7 @@ def _attempt_from_rows(row, answer_rows) -> dict:
     answers = {
         str(answer["question_id"]): (
             json.loads(answer["selected_answers_json"] or "[]")
-            if (answer["question_type"] or "single_choice") in ("multi_select", "matching")
+            if (answer["question_type"] or "single_choice") in ("multi_select", "matching", MULTI_BLANK_QUESTION_TYPE)
             else answer["selected_answer"]
         )
         for answer in answer_rows

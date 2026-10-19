@@ -27,6 +27,7 @@ from backend.quiz_store import (
     utc_now_iso,
     WRITTEN_QUESTION_TYPES,
     FLASHCARD_WRITTEN_PLANNER_VERSION,
+    MULTI_BLANK_QUESTION_TYPE,
 )
 from backend.quiz_units import fill_blank_is_correct, normalize_fill_blank_answer
 from backend.rag_service import explain_quiz_answer
@@ -42,14 +43,38 @@ def _fill_blank_correct_answers(question: dict) -> list[str]:
     if not isinstance(values, list) or not values:
         values = [question.get("correct_answer", "")]
     canonical = str(question.get("correct_answer") or "").strip()
-    ordered = ([canonical] if canonical else []) + [str(value).strip() for value in values]
+    return _unique_written_answers(([canonical] if canonical else []) + list(values))
+
+
+def _unique_written_answers(values) -> list[str]:
     unique, seen = [], set()
-    for value in ordered:
+    for value in values:
+        value = str(value or "").strip()
         key = normalize_fill_blank_answer(value)
         if key and key not in seen:
             seen.add(key)
             unique.append(value)
     return unique
+
+
+def _multi_blank_accepted(question: dict) -> list[list[str]]:
+    """Each blank's accepted answers, canonical first. An attempt snapshot keeps no blank spec, so
+    its canonical answers (correct_answers, one per blank) are then the only accepted ones."""
+    blanks = question.get("blanks")
+    if isinstance(blanks, list) and blanks:
+        return [_unique_written_answers([blank.get("answer"), *(blank.get("accepted_answers") or [])])
+                for blank in blanks if isinstance(blank, dict)]
+    return [_unique_written_answers([value]) for value in question.get("correct_answers") or []]
+
+
+def _multi_blank_answer(question: dict, value) -> list[str]:
+    """A multi_blank answer: one text per blank (typed, or a word picked from the word bank; ""
+    = still empty), in blank order. Positional, like a matching answer."""
+    blanks = len(_multi_blank_accepted(question))
+    values = value if isinstance(value, list) else []
+    if len(values) != blanks or not all(isinstance(item, str) or item is None for item in values):
+        raise ValueError("A multi-blank answer must give one answer per blank.")
+    return [_fill_blank_answer(item or "") for item in values]
 
 
 def _correct_answers(question: dict) -> list[str]:
@@ -105,6 +130,9 @@ def _saved_answer(question: dict, value):
     if _question_type(question) == "matching":
         letters = _matching_answer(question, value) if value not in (None, "", []) else []
         return letters if any(letters) else None
+    if _question_type(question) == MULTI_BLANK_QUESTION_TYPE:
+        texts = _multi_blank_answer(question, value) if value not in (None, "", []) else []
+        return texts if any(texts) else None
     if value in (None, "", []):
         return None
     selected = _selected_answers(value)
@@ -169,7 +197,8 @@ def load_quiz_with_attempt(
 def _quiz_from_attempt_snapshot(attempt: dict) -> dict | None:
     results = list(attempt.get("question_results") or [])
     if not results or any(
-        len(result.get("options") or []) != 4 and result.get("question_type") not in (*WRITTEN_QUESTION_TYPES, "matching")
+        len(result.get("options") or []) != 4
+        and result.get("question_type") not in (*WRITTEN_QUESTION_TYPES, "matching", MULTI_BLANK_QUESTION_TYPE)
         for result in results
     ):
         return None
@@ -342,6 +371,12 @@ def submit_quiz_attempt(
                 normalized_answers[str(key)] = letters
             elif not allow_unanswered:
                 raise ValueError("Every quiz question must be answered exactly once before submission.")
+        elif question is not None and _question_type(question) == MULTI_BLANK_QUESTION_TYPE:
+            texts = _multi_blank_answer(question, value) if value not in (None, "", []) else []
+            if any(texts):
+                normalized_answers[str(key)] = texts   # partly filled: graded, the empty blanks are wrong
+            elif not allow_unanswered:
+                raise ValueError("Every quiz question must be answered exactly once before submission.")
         elif not (allow_unanswered and value in (None, "", [])):
             normalized_answers[str(key)] = _selected_answers(value)
     expected_ids = {str(question.get("id")) for question in questions}
@@ -355,7 +390,7 @@ def submit_quiz_attempt(
             continue
         selected = normalized_answers[str(question.get("id"))]
         question_type = _question_type(question)
-        if question_type in WRITTEN_QUESTION_TYPES or question_type == "matching":
+        if question_type in (*WRITTEN_QUESTION_TYPES, "matching", MULTI_BLANK_QUESTION_TYPE):
             continue
         valid_letters = set("ABCD"[:len(question.get("options") or [])])
         if any(answer not in valid_letters for answer in selected):
@@ -376,17 +411,24 @@ def submit_quiz_attempt(
             # Positional: correct only when every prompt is paired with its own card's answer.
             correct_answers = [str(value).strip().upper() for value in question.get("correct_answers") or []]
             is_correct = bool(selected_answers) and selected_answers == correct_answers
+        elif _question_type(question) == MULTI_BLANK_QUESTION_TYPE:
+            # Per blank, the same normalized exact match as fill_blank; correct only when every blank is.
+            accepted = _multi_blank_accepted(question)
+            correct_answers = [values[0] for values in accepted]
+            is_correct = (bool(selected_answers) and len(selected_answers) == len(accepted)
+                          and all(fill_blank_is_correct(text, values) for text, values in zip(selected_answers, accepted)))
         else:
             correct_answers = sorted(_correct_answers(question))
             is_correct = option_answers_correct(selected_answers, correct_answers)
-        matching = _question_type(question) == "matching"
+        # Positional answers are shown joined: matching letters "A,C,B", blanks "word | word".
+        joiner = {"matching": ",", MULTI_BLANK_QUESTION_TYPE: " | "}.get(_question_type(question))
         results.append({
             "question_id": int(question_id),
             "question": question.get("question", ""),
             "options": list(question.get("options", [])),
-            "selected_answer": (",".join(selected_answers) if matching else selected_answers[0]) if selected_answers else "",
+            "selected_answer": (joiner.join(selected_answers) if joiner else selected_answers[0]) if selected_answers else "",
             "selected_answers": selected_answers,
-            "correct_answer": ",".join(correct_answers) if matching else correct_answers[0],
+            "correct_answer": joiner.join(correct_answers) if joiner else correct_answers[0],
             "correct_answers": correct_answers,
             "question_type": _question_type(question),
             "is_correct": is_correct,
@@ -559,6 +601,8 @@ def explain_quiz_question(
         question=question["question"],
         options=question["options"],
         correct_answer=(_fill_blank_correct_answers(question) if _is_written(question)
+                        else [values[0] for values in _multi_blank_accepted(question)]
+                        if _question_type(question) == MULTI_BLANK_QUESTION_TYPE
                         else _correct_answers(question)),
     )
     saved = {

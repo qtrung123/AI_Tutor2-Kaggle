@@ -250,45 +250,18 @@ async function showFlashcardsState() {
 }
 
 // ---- Flashcards -> "Practice as Quiz" ------------------------------------------------------------
-// Turns the flashcard set on screen into a practice quiz (short answer / fill in the blank / matching)
-// without generating anything new (backend/flashcard_quiz_service.py), then opens it in the Quiz Player.
-// The count is in cards: one matching activity covers several cards.
-const FLASHCARD_QUIZ_MODES = [["mixed", "Mixed"], ["short_answer", "Short Answer"], ["fill_blank", "Fill Blank"], ["matching", "Matching"]];
-const FLASHCARD_QUIZ_COUNTS = [5, 10, "all"];
+// Turns every card of the flashcard set on screen into a practice quiz -- an automatic mix of
+// Multiple Choice, Fill in the Blanks and Matching ("auto" mode) -- without generating anything new
+// (backend/flashcard_quiz_service.py), then opens it in the Quiz Player. There is nothing to choose:
+// no question type and no card count (one matching activity covers several cards).
 let flashcardQuizDialog = null;
-let flashcardQuizSettings = { mode: "mixed", count: 10 };
 let flashcardQuizInFlight = false;
-
-function renderFlashcardQuizSegments(containerId, choices, selected, onSelect) {
-  const container = flashcardQuizDialog.querySelector(`#${containerId}`);
-  container.innerHTML = "";
-  choices.forEach(([value, label, disabled]) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "quiz-segmented-option";
-    button.textContent = label;
-    button.setAttribute("role", "radio");
-    button.setAttribute("aria-checked", String(value === selected));
-    button.classList.toggle("active", value === selected);
-    button.disabled = Boolean(disabled);
-    button.addEventListener("click", () => onSelect(value));
-    container.appendChild(button);
-  });
-}
 
 function renderFlashcardQuizDialog() {
   if (!flashcardQuizDialog) return;
   const available = flashcards.length;
-  if (flashcardQuizSettings.count !== "all" && flashcardQuizSettings.count > available) flashcardQuizSettings.count = "all";
-  renderFlashcardQuizSegments("flashcard-quiz-mode", FLASHCARD_QUIZ_MODES, flashcardQuizSettings.mode, (mode) => {
-    flashcardQuizSettings.mode = mode; renderFlashcardQuizDialog();
-  });
-  renderFlashcardQuizSegments("flashcard-quiz-count",
-    FLASHCARD_QUIZ_COUNTS.map((count) => [count, count === "all" ? `All (${available})` : String(count), count !== "all" && count > available]),
-    flashcardQuizSettings.count, (count) => { flashcardQuizSettings.count = count; renderFlashcardQuizDialog(); });
-  const cards = flashcardQuizSettings.count === "all" ? available : flashcardQuizSettings.count;
-  flashcardQuizDialog.querySelector("#flashcard-quiz-summary").textContent = `Covers ${cards} card${cards === 1 ? "" : "s"}`
-    + (["mixed", "matching"].includes(flashcardQuizSettings.mode) ? " · a matching activity pairs up to 4 cards" : "");
+  flashcardQuizDialog.querySelector("#flashcard-quiz-summary").textContent = `Uses all ${available} card${available === 1 ? "" : "s"}`
+    + " · a mix of Multiple Choice, Fill in the Blanks and Matching";
   flashcardQuizDialog.querySelector("#flashcard-quiz-empty").hidden = available > 0;
   flashcardQuizDialog.querySelector("#flashcard-quiz-fields").hidden = available === 0;
   const start = flashcardQuizDialog.querySelector("#flashcard-quiz-start");
@@ -305,8 +278,6 @@ function openFlashcardQuizDialog() {
       + '<button class="text-button quiz-dialog-cancel" type="button">Cancel</button></div>'
       + '<p class="flashcard-quiz-empty" id="flashcard-quiz-empty" hidden>No flashcards available. Generate flashcards for this document first.</p>'
       + '<div class="flashcard-quiz-fields" id="flashcard-quiz-fields">'
-      + '<div class="quiz-sheet-field"><span>Type</span><div class="quiz-segmented" role="radiogroup" id="flashcard-quiz-mode"></div></div>'
-      + '<div class="quiz-sheet-field"><span>Cards</span><div class="quiz-segmented" role="radiogroup" id="flashcard-quiz-count"></div></div>'
       + '<p class="flashcard-quiz-summary" id="flashcard-quiz-summary"></p></div>'
       + '<p class="flashcard-quiz-error" id="flashcard-quiz-error" role="alert" hidden></p>'
       + '<button class="primary-button flashcard-quiz-start" id="flashcard-quiz-start" type="button">Start Quiz</button></div>';
@@ -337,11 +308,7 @@ async function startFlashcardQuiz() {
     quiz = await fetchJson(`${FLASHCARDS_API_BASE_URL}/${encodeURIComponent(documentId)}/practice-quiz`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        mode: flashcardQuizSettings.mode,
-        question_count: flashcardQuizSettings.count === "all" ? null : flashcardQuizSettings.count,
-        set_id: flashcardSet?.set_id || null,
-      }),
+      body: JSON.stringify({ mode: "auto", question_count: null, set_id: flashcardSet?.set_id || null }),
     });
   } catch (requestError) {
     error.textContent = requestError.message || "Could not create the practice quiz.";

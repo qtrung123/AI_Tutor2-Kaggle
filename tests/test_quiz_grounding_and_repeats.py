@@ -362,7 +362,8 @@ class FollowUpsPreferUnusedEvidenceTests(unittest.TestCase):
                  candidate(two_facts[2], "What does the compiler do?", "translates sources", ["guards counters", "assigns blocks", "verifies bytes"])]
         result = self.run_engine([{"questions": first}, {"questions": again}, {"questions": []}, {"questions": []}], chunks, question_count=12)
         plan = result["assessment_plan"]
-        self.assertEqual(len(result["questions"]), 6)                               # 3 sentences, 6 facts: capacity is the facts, not the sentences
+        choices = [q for q in result["questions"] if q["question_type"] == "single_choice"]
+        self.assertEqual(len(choices), 6)                                           # 3 sentences, 6 facts: capacity is the facts, not the sentences
         self.assertEqual(plan["status"], "partial")
         self.assertEqual(plan["validation_results"]["duplicate_rejections"], 1)      # only the genuine repeat
         self.assertEqual(plan["validation_results"]["grounding_rejections"], 0)

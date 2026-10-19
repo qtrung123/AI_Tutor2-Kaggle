@@ -1,4 +1,5 @@
 import json
+import random
 import re
 import time
 from collections import Counter
@@ -57,6 +58,7 @@ from backend import quiz_diagnostics
 from backend.auth_store import LEGACY_USER_ID
 from backend.quiz_common import QUIZ_DIFFICULTIES, _document_lookup, list_indexed_documents
 from backend.document_retrieval import get_document_chunks, get_schema_topic_evidence
+from backend.flashcard_quiz_service import build_document_question_mix
 from config import CHAT_MODEL, GENERATION_KEEP_ALIVE
 
 QUIZ_V2_ALLOWED_QUESTION_COUNTS = set(QUIZ_ALLOWED_QUESTION_COUNTS)
@@ -126,6 +128,28 @@ def _generate_with_deadline(llm, prompt: str, deadline_s: float) -> tuple[str, d
     return "".join(parts), metadata, cut
 
 
+def _mix_question_types(choice_questions: list[dict], mixed_questions: list[dict],
+                        evidence: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Spread the multi_blank / matching questions evenly between the multiple choice ones, then
+    renumber everything 1..N (the evidence records follow their questions) and give every question
+    the quiz's assessment capacity (its distinct concepts)."""
+    total = len(choice_questions) + len(mixed_questions)
+    positions = {int((index + 0.5) * total / len(mixed_questions)) for index in range(len(mixed_questions))} if mixed_questions else set()
+    choices, extras, ordered = iter(choice_questions), iter(mixed_questions), []
+    for position in range(total):
+        ordered.append(next(extras) if position in positions else next(choices))
+    choice_ids, renumbered = {id(question) for question in choice_questions}, {}
+    for number, question in enumerate(ordered, start=1):
+        if id(question) in choice_ids:
+            renumbered[int(question["id"])] = number
+        question["id"] = number
+    capacity = max(1, len({question["concept_id"] for question in ordered}))
+    for question in ordered:
+        question["assessment_capacity"] = capacity
+    return ordered, [{**record, "question_id": renumbered.get(int(record["question_id"]), record["question_id"])}
+                     for record in evidence]
+
+
 def _generate_quiz_from_units(
     document: dict,
     scope: str,
@@ -193,8 +217,16 @@ def _generate_quiz_from_units(
     )
     language = language_detection["detected_language"]
     print(f"[quiz-units-language] {json.dumps(language_detection)}")
-    pool_target = candidate_target(question_count)
-    max_calls = max_llm_calls(question_count)
+    # The quiz is a mix: multi_blank questions from these excerpts and matching activities from the
+    # document's flashcards (when it has any) are built first, without the model; the model writes
+    # only the multiple choice questions that remain.
+    mixed_questions = build_document_question_mix(
+        owner_id, document["id"], units, scope_topic, difficulty, question_count, random.Random(generation_run_id),
+        language=language,
+    )
+    choice_target = max(1, question_count - len(mixed_questions))
+    pool_target = candidate_target(choice_target)
+    max_calls = max_llm_calls(choice_target)
     # The model every call below is sent to (ChatOllama(model=model_id)); stored with the quiz.
     generation_model = describe_generation_model(model_id)
 
@@ -229,7 +261,7 @@ def _generate_quiz_from_units(
             avoid_stems = avoid_quotes = None
             deadline_s = min(QUIZ_FIRST_CALL_DEADLINE_S, remaining_s)
         else:
-            missing = question_count - len(accepted)
+            missing = choice_target - len(accepted)
             if missing <= 0:
                 break
             if stalled_calls >= QUIZ_STALL_LIMIT:
@@ -253,7 +285,7 @@ def _generate_quiz_from_units(
             print(f"[quiz-units-followup] call={call_number}/{max_calls} missing={missing} asking={requested}")
             diag.record_retry(
                 concept_id="pool", original_attempt=1, retry_attempt=call_number - 1,
-                reason=f"{len(accepted)}/{question_count} valid questions after call {call_number - 1}",
+                reason=f"{len(accepted)}/{choice_target} valid questions after call {call_number - 1}",
                 stage="validation",
             )
         shown_ids.update(unit["unit_id"] for unit in shown_units)
@@ -419,7 +451,7 @@ def _generate_quiz_from_units(
         print(f"[quiz-units-call] {json.dumps(call_record)}")
     else:
         stop_reason = stop_reason or "call limit reached"
-    if len(accepted) < question_count and stop_reason:
+    if len(accepted) < choice_target and stop_reason:
         validation_results["reasons"].append(f"more questions were not generated: {stop_reason}")
 
     followups = max(0, llm_calls - 1)
@@ -468,7 +500,8 @@ def _generate_quiz_from_units(
         )
 
     # final_count = min(valid candidates, requested_count). Short is "partial", never a failure.
-    selected, question_evidence = finalize_questions(select_questions(accepted, question_count))
+    selected, question_evidence = finalize_questions(select_questions(accepted, choice_target))
+    selected, question_evidence = _mix_question_types(selected, mixed_questions, question_evidence)
     actual_count = len(selected)
     missing_count = max(0, question_count - actual_count)
     status = "complete" if actual_count >= question_count else "partial"

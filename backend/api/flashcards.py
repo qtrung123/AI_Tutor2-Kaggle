@@ -34,7 +34,8 @@ class FlashcardUpdateRequest(BaseModel):
 
 
 class FlashcardPracticeQuizRequest(BaseModel):
-    mode: Literal["mixed", "short_answer", "fill_blank", "matching"] = "mixed"
+    # "auto" (the only mode the UI offers): multiple choice + multi_blank + matching from every card.
+    mode: Literal["auto", "mixed", "short_answer", "fill_blank", "matching"] = "auto"
     # Cards to cover; None = every usable card of the set ("All").
     question_count: Optional[int] = Field(default=None, ge=1, le=500)
     set_id: Optional[str] = None
@@ -120,8 +121,8 @@ def flashcard_delete(document_id: str, flashcard_id: str,
 @router.post("/api/flashcards/{document_id}/practice-quiz")
 def flashcard_practice_quiz(document_id: str, request: FlashcardPracticeQuizRequest,
                             current_user: dict = Depends(require_current_user)) -> dict:
-    """Turn this owner's persisted flashcards of this document into a practice quiz (short_answer /
-    fill_blank / matching, no LLM call). 409 when the document has no flashcards."""
+    """Turn this owner's persisted flashcards of this document into a practice quiz (no LLM call).
+    409 when the document has no flashcards."""
     try:
         return create_flashcard_written_quiz(
             current_user["id"], document_id, mode=request.mode, question_count=request.question_count,
