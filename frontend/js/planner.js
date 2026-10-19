@@ -158,33 +158,12 @@ async function loadPlannerData({ keepWeek = false } = {}) {
   }
 }
 
-// -- after a PDF upload ---------------------------------------------------------------------------
-
-function plannerAfterUpload(planner) {
-  // The upload already added the newly indexed documents to the active plan (server side, after
-  // they were stored). Here we only refresh and suggest: a plan not yet accepted re-runs its
-  // read-only preview, an accepted plan gets proposed sessions for the new material (see
-  // plannerAfterMaterialsAdded). Nothing is saved until the learner accepts.
-  if (!planner?.status || planner.status === "unchanged") return;
-  plannerIncludeFailure = planner.status === "failed"
-    ? { documentIds: planner.document_ids || [], message: planner.message || "The study plan could not be updated." }
-    : null;
-  if (planner.status === "updated") plannerAfterMaterialsAdded(planner.plan_id);
-  else if (document.body.dataset.page === "planner") loadPlannerData({ keepWeek: true });
-}
-
-async function plannerAfterMaterialsAdded(planId) {
-  // Not accepted yet: the reload re-runs the usual preview, now covering every material. Accepted:
-  // propose sessions for the new material (adaptation trigger "materials_added"), reviewed on the
-  // calendar like any suggested change -- accepted and hand-edited sessions are never touched.
-  if (document.body.dataset.page === "planner") {
-    await loadPlannerData({ keepWeek: true });
-    if (plannerPlan?.plan_id !== planId || !plannerHasLivePlan()) return;
-  }
-  await plannerProposeNewMaterials(planId);   // the server proposes nothing for a plan with no accepted sessions
-}
+// -- material added to an accepted plan ------------------------------------------------------------
 
 async function plannerProposeNewMaterials(planId) {
+  // Add Material on an accepted plan: propose sessions for the new material (adaptation trigger
+  // "materials_added") in free time only, reviewed on the calendar like any suggested change --
+  // accepted, hand-edited and completed sessions are never touched, nothing is saved until accepted.
   if (!planId) return;
   const seq = ++plannerNewMaterialSeq;   // a slower, older proposal never replaces a newer one
   const trigger = { kind: "materials_added" };
@@ -209,21 +188,6 @@ async function plannerProposeNewMaterials(planId) {
   }
   if (plannerIsDesktop()) plannerStartCalendarReview(planId, trigger, proposal);
   else plannerShowAdaptationReview(planId, trigger, proposal);
-}
-
-async function plannerRetryInclude(button) {
-  const failure = plannerIncludeFailure;
-  if (!failure?.documentIds.length) return;
-  if (button) button.disabled = true;
-  try {
-    await plannerRequest(PLANNER_INCLUDE_DOCUMENTS_API_URL, { method: "POST", body: { document_ids: failure.documentIds } });
-    if (plannerIncludeFailure === failure) plannerIncludeFailure = null;
-    showToast("Study plan updated");
-    await loadPlannerData({ keepWeek: true });
-  } catch (error) {
-    if (button) button.disabled = false;
-    showToast(error.message || "Could not update the study plan");
-  }
 }
 
 function plannerSetStep(step) {
@@ -749,8 +713,14 @@ async function plannerSessionAction(session, kind, button, group) {
         return;
       }
       // A missing artifact is fine: the tool's own empty state offers to generate/create it.
-      if (result.tool === "quiz") await openStudySession(session.document_id, "quiz", "", { quizTarget: await plannerQuizTarget(session) });
-      else await openStudySession(session.document_id, result.tool);
+      if (result.tool === "quiz") {
+        const quizTarget = await plannerQuizTarget(session);
+        await openStudySession(session.document_id, "quiz", "", { quizTarget });
+        // No quiz yet: the Quiz tab's unified Create Quiz sheet (nothing is generated until the
+        // learner asks). Without flashcards it shows "Create Flashcards first" with a link to them.
+        if (!quizTarget && !result.artifact_available && typeof openQuizCreateDialog === "function") openQuizCreateDialog();
+        if (result.prerequisite === "flashcards") showToast("Create Flashcards first, then create the quiz");
+      } else await openStudySession(session.document_id, result.tool);
     } else if (kind === "complete") showToast("Session completed. Nice work!");
     else if (kind === "skip") skipped = { changed: Boolean(result.changed) };
     else {
@@ -1570,6 +1540,8 @@ async function pcalAddMaterial(documentId, goal, button) {
     pcalSheetGoals.delete(documentId);
     if (plannerHasLivePlan() && material.deadline) {
       await plannerSuggestAdaptation(plannerPlan.plan_id, { kind: "deadline_changed", document_id: documentId });
+    } else if (plannerHasLivePlan()) {
+      await plannerProposeNewMaterials(plannerPlan.plan_id);
     }
   } catch (error) {
     showToast(error.message || "Could not add this material");
@@ -1933,15 +1905,7 @@ function pcalRenderNotice() {
   notice.innerHTML = "";
   notice.dataset.tone = "";
   let text = "";
-  if (plannerIncludeFailure) {
-    text = plannerIncludeFailure.message;
-    notice.dataset.tone = "warn";
-    const action = pcalEl("button", "pcal-notice-action", "Retry");
-    action.type = "button";
-    action.id = "pcal-include-retry";
-    action.addEventListener("click", () => plannerRetryInclude(action));
-    notice.append(pcalEl("span", "", text), action);
-  } else if (plannerNewMaterialFailure && plannerNewMaterialFailure.planId === plannerPlan?.plan_id) {
+  if (plannerNewMaterialFailure && plannerNewMaterialFailure.planId === plannerPlan?.plan_id) {
     text = "Could not suggest sessions for your new material. Your accepted plan is unchanged.";
     notice.dataset.tone = "warn";
     const action = pcalEl("button", "pcal-notice-action", "Try again");

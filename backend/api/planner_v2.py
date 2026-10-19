@@ -29,11 +29,6 @@ class StudyPlanV2UpdateRequest(BaseModel):
     status: Optional[str] = None
 
 
-class PlannerIncludeDocumentsRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    document_ids: list[str] = Field(min_length=1, max_length=50)
-
-
 class PlanMaterialCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     document_id: str = Field(min_length=1)
@@ -164,17 +159,6 @@ def planner_v2_delete_plan(plan_id: str, current_user: dict = Depends(require_cu
     try:
         study_plan_api_service.delete_plan(current_user["id"], plan_id)
         return {"deleted": plan_id}
-    except _PLAN_V2_ERRORS as error:
-        raise _plan_v2_error(error) from error
-
-
-@router.post("/api/planner/include-documents")
-def planner_v2_include_documents(request: PlannerIncludeDocumentsRequest,
-                                 current_user: dict = Depends(require_current_user)) -> dict:
-    """Manual retry of the post-upload auto-include: add the owner's indexed documents to the active
-    plan (created if needed). Materials only -- never creates, moves or deletes a session."""
-    try:
-        return study_plan_api_service.include_uploaded_documents(current_user["id"], request.document_ids)
     except _PLAN_V2_ERRORS as error:
         raise _plan_v2_error(error) from error
 

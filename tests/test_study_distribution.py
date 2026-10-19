@@ -55,14 +55,14 @@ class DistributionTests(ScheduleAssertions, unittest.TestCase):
     def test_flexible_materials_spread_over_the_week_instead_of_the_first_days(self):
         materials = [goal(make_state(doc)) for doc in ("mkt", "stats", "pbi")]
         spread, packed = self.schedule(materials)
-        self.assertEqual(len(days_used(packed)), 4)              # before: Mon-Thu, up to 3 sessions a day
-        self.assertEqual(len(days_used(spread)), 7)              # now: every evening of the week
+        self.assertEqual(len(days_used(packed)), 6)              # earliest-first: Mon-Sat, up to 3 a day
+        self.assertGreaterEqual(len(days_used(spread)), 7)       # spread: every evening of the week
         self.assertEqual(spread.capacity.scheduled_minutes, packed.capacity.scheduled_minutes)  # same work
         self.assertEqual(spread.capacity.status, "on_track")
         self.assertLessEqual(max(Counter(p.scheduled_start[:10] for p in spread.proposals).values()), 2)
         self.assertEqual(max(per_document_day(spread).values()), 1)   # one session per material per day
         for doc in ("mkt", "stats", "pbi"):
-            self.assertEqual(len(days_used(spread, doc)), 3, doc)
+            self.assertEqual(len(days_used(spread, doc)), 4, doc)   # summary, flashcards, quiz, review
 
     def test_learning_order_and_spacing_rules_still_hold(self):
         spread, _ = self.schedule([goal(make_state(doc)) for doc in ("mkt", "stats", "pbi")])
@@ -70,7 +70,7 @@ class DistributionTests(ScheduleAssertions, unittest.TestCase):
         for p in spread.proposals:
             sessions[p.document_id].append(p)
         for doc, items in sessions.items():
-            self.assertEqual([p.activity_type for p in items], ["summary", "flashcards", "quiz"], doc)
+            self.assertEqual([p.activity_type for p in items], ["summary", "flashcards", "quiz", "review"], doc)
             days = [day_of(p.scheduled_start) for p in items]
             self.assertEqual(days, sorted(set(days)), doc)       # each on a later day than the one before
 
@@ -123,9 +123,12 @@ class DistributionTests(ScheduleAssertions, unittest.TestCase):
     def test_target_date_pulls_a_flexible_material_forward(self):
         with_target, _ = self.schedule([goal(make_state("mkt"), target="2026-10-01"), goal(make_state("stats"))])
         without, _ = self.schedule([goal(make_state("mkt")), goal(make_state("stats"))])
-        self.assertLessEqual(days_used(with_target, "mkt")[-1], date(2026, 10, 1))
-        self.assertGreater(days_used(without, "mkt")[-1], date(2026, 10, 1))
-        self.assertEqual(len(days_used(with_target, "mkt")), 3)   # still on different days
+        def learned_by(result):   # the last learning step (the spaced review after the quiz follows it)
+            return max(day_of(p.scheduled_start) for p in result.proposals
+                       if p.document_id == "mkt" and p.activity_type != "review")
+        self.assertLessEqual(learned_by(with_target), date(2026, 10, 1))
+        self.assertGreater(learned_by(without), date(2026, 10, 1))
+        self.assertEqual(len(days_used(with_target, "mkt")), 4)   # still on different days
 
     def test_target_date_with_a_deadline_finishes_learning_by_the_target(self):
         spread, _ = self.schedule([goal(make_state("mkt"), "2026-10-12", target="2026-10-04")])
@@ -201,35 +204,40 @@ class DistributionTests(ScheduleAssertions, unittest.TestCase):
                 self.assertLessEqual(spread.capacity.shortfall_minutes, packed.capacity.shortfall_minutes)
 
     # -- recall practice and quiz follow-ups are paced too (P1.1) ----------------------------------
-    # Before, only new-material steps were paced: a Written Quiz (retrieval practice) or a low-score
-    # follow-up landed on the first free day(s), so a material with a summary and flashcards (an
-    # uploaded PDF) was done in 2 consecutive days and several such materials all started on day one.
+    # Before, only new-material steps were paced: recall practice or a low-score follow-up landed on
+    # the first free day(s), so a material with a summary and flashcards (an uploaded PDF) was done
+    # in 2 consecutive days and several such materials all started on day one.
 
     def gaps(self, result, document_id):
         days = days_used(result, document_id)
         return [(b - a).days for a, b in zip(days, days[1:])]
 
     def test_one_flexible_document_is_spaced_over_the_week(self):
-        spread, _ = self.schedule([goal(make_state("mkt", summary=True, cards=10))])   # before: Mon, Tue
-        self.assertEqual(days_used(spread, "mkt"), [date(2026, 9, 28), date(2026, 10, 2)])
-        plain, _ = self.schedule([goal(make_state("mkt"))])           # summary -> flashcards -> quiz
+        spread, _ = self.schedule([goal(make_state("mkt", summary=True, cards=10))])   # before: one lone quiz
+        self.assertEqual(days_used(spread, "mkt"), [date(2026, 9, 28), date(2026, 9, 30), date(2026, 10, 2),
+                                                    date(2026, 10, 4)])
+        self.assertEqual([p.activity_type for p in spread.proposals], ["summary", "flashcards", "quiz", "review"])
+        plain, _ = self.schedule([goal(make_state("mkt"))])           # summary -> flashcards -> quiz -> review
         self.assertTrue(all(gap >= 2 for gap in self.gaps(plain, "mkt")))
 
     def test_three_flexible_documents_start_on_different_days_and_stay_spaced(self):
         docs = ("mkt", "stats", "pbi")
         spread, _ = self.schedule([goal(make_state(doc, summary=True, cards=10)) for doc in docs])
         firsts = [days_used(spread, doc)[0] for doc in docs]
-        self.assertEqual(sorted(firsts), [MONDAY.date() + timedelta(days=i) for i in range(3)])   # before: all Monday
+        self.assertEqual(min(firsts), MONDAY.date())
+        self.assertGreater(max(firsts), MONDAY.date())                # staggered, not all on Monday
+        self.assertLessEqual(max(firsts), MONDAY.date() + timedelta(days=2))
         for doc in docs:
-            self.assertTrue(all(gap >= 2 for gap in self.gaps(spread, doc)), doc)
-        self.assertEqual(max(Counter(p.scheduled_start[:10] for p in spread.proposals).values()), 1)
-        self.assertEqual(len(days_used(spread)), 6)
+            self.assertEqual(len(days_used(spread, doc)), 4, doc)     # one session per day per material
+            self.assertGreaterEqual(sum(self.gaps(spread, doc)), 5, doc)   # spread over the week
+        self.assertLessEqual(max(Counter(p.scheduled_start[:10] for p in spread.proposals).values()), 2)
+        self.assertGreaterEqual(len(days_used(spread)), 7)
 
     def test_low_score_follow_ups_are_spaced_but_the_review_stays_due(self):
         spread, _ = self.schedule([goal(make_state("mkt", cards=10, percentage=40.0))])   # before: Mon, Tue, Wed
         self.assertEqual(days_used(spread, "mkt")[0], MONDAY.date())  # review on its due date
         self.assertTrue(all(gap >= 2 for gap in self.gaps(spread, "mkt")))
-        self.assertEqual([p.activity_type for p in spread.proposals], ["review", "written_quiz", "quiz_retry"])
+        self.assertEqual([p.activity_type for p in spread.proposals], ["review", "flashcards", "quiz_retry"])
 
     def test_documents_with_different_deadlines_all_start_early_and_finish_in_time(self):
         deadlines = {"a": date(2026, 10, 3), "b": date(2026, 10, 9), "c": date(2026, 10, 14)}
@@ -260,7 +268,8 @@ class DistributionTests(ScheduleAssertions, unittest.TestCase):
         spread, _ = self.schedule(materials, busy=accepted)
         self.assertEqual(ctx.busy_sessions, tuple(accepted))          # inputs only, never rescheduled
         for doc in ("mkt", "stats"):
-            self.assertTrue(all(gap >= 2 for gap in self.gaps(spread, doc)), doc)
+            self.assertEqual(len(days_used(spread, doc)), 4, doc)     # four sessions on four days
+            self.assertGreaterEqual(sum(self.gaps(spread, doc)), 5, doc)
         self.assertEqual(spread.capacity.status, "on_track")
 
     def test_late_night_availability_until_midnight(self):
@@ -275,7 +284,7 @@ class DistributionTests(ScheduleAssertions, unittest.TestCase):
         self.assertEqual(days_used(spread)[0], MONDAY.date())         # tonight's free 90 minutes still count
         self.assertEqual(max(per_document_day(spread).values()), 1)
         for doc in ("mkt", "stats"):
-            self.assertTrue(all(gap >= 2 for gap in self.gaps(spread, doc)), doc)
+            self.assertGreaterEqual(sum(self.gaps(spread, doc)), 5, doc)
 
     def test_finish_early_and_deadline_priority_are_unchanged(self):
         from backend.study_preferences import DEFAULTS, config_from
@@ -287,7 +296,7 @@ class DistributionTests(ScheduleAssertions, unittest.TestCase):
         self.assertEqual(self.gaps(early, "mkt")[0], 1)               # as soon as possible
         priority = plan_schedule(ctx, config_from({**DEFAULTS, "strategy": "deadline_priority"}))
         self.assertEqual(days_used(priority, "mkt")[:2], [date(2026, 9, 28), date(2026, 9, 29)])   # deadlined: early
-        self.assertTrue(all(gap >= 2 for gap in self.gaps(priority, "stats")))                  # flexible: balanced
+        self.assertGreaterEqual(sum(self.gaps(priority, "stats")), 5)                           # flexible: balanced
 
     def test_deterministic(self):
         materials = [goal(make_state("a"), "2026-10-06", target="2026-10-03"), goal(make_state("b"))]

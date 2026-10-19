@@ -60,7 +60,7 @@ class DurationAndBreakTests(ScheduleAssertions, unittest.TestCase):
         # A moderate score brings a weak-topic (spaced) review and a retry quiz.
         weak = self.schedule([material(make_state("stats", summary=True, cards=20, percentage=60.0))])
         self.assertEqual({p.activity_type: p.duration_minutes for p in weak.proposals},
-                         {"review": 30, "written_quiz": 20, "quiz_retry": 35})
+                         {"review": 30, "flashcards": 20, "quiz_retry": 35})
 
     def test_durations_do_not_depend_on_document_size(self):
         small, large = make_state("s", chunks=2, cards=4), make_state("l", chunks=200, cards=300)
@@ -139,7 +139,7 @@ class DurationAndBreakTests(ScheduleAssertions, unittest.TestCase):
     def test_balanced_distribution_still_holds(self):
         result = self.schedule([material(make_state(doc)) for doc in ("mkt", "stats", "pbi")])
         self.assertEqual(result.capacity.status, "on_track")
-        self.assertEqual(len({p.scheduled_start[:10] for p in result.proposals}), 7)
+        self.assertGreaterEqual(len({p.scheduled_start[:10] for p in result.proposals}), 7)
         self.assertEqual(max(Counter((p.document_id, p.scheduled_start[:10]) for p in result.proposals).values()), 1)
         far = self.schedule([material(make_state("mkt"), "2026-10-08")])
         learn = [day_of(p.scheduled_start) for p in far.proposals if p.reason.code != "final_review"]

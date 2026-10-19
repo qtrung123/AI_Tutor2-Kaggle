@@ -21,7 +21,8 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from planner_fixtures import PlannerDatabaseMixin
 
-from backend import google_calendar_service, google_calendar_store, google_calendar_sync, study_planner_store
+from backend import (flashcard_quiz_service, google_calendar_service, google_calendar_store, google_calendar_sync,
+                     study_planner_store)
 from backend.main import app
 from backend.study_time import free_minutes_by_date
 
@@ -772,9 +773,12 @@ class GoogleSessionSyncTests(GoogleCalendarTestBase):
             self.assertNotRegex(event["description"], r"\d+ ?%|answer|score:")
 
     def test_written_quiz_session_stays_deep_linkable(self):
+        # An older plan's Written Quiz session keeps opening the practice quiz it already created.
         self.add_flashcards(self.alice, "stats", 6)
+        practice = flashcard_quiz_service.create_flashcard_written_quiz(self.alice, "stats", "mixed", 5)
         plan = self.plan_with("stats")
         session = self.session(plan, "written_quiz", "2026-09-28T09:00:00", "2026-09-28T09:30:00")
+        study_planner_store.update_session(self.alice, session["session_id"], {"artifact_id": practice["quiz_id"]})
         self.sync()
         event = next(iter(self.events().values()))
         self.assertEqual(event["extendedProperties"]["private"],
@@ -782,7 +786,7 @@ class GoogleSessionSyncTests(GoogleCalendarTestBase):
         started = self.call("POST", f"/api/planner/sessions/{session['session_id']}/start",
                             json={"utc_offset_minutes": 0, "local_now": "2026-09-28T09:05:00"}).json()
         self.assertEqual((started["tool"], started["artifact_available"]), ("quiz", True))
-        self.assertTrue(started["session"]["artifact_id"])
+        self.assertEqual(started["session"]["artifact_id"], practice["quiz_id"])
         self.assertEqual(len(self.events()), 1)
 
     def test_quiz_and_quiz_retry_sessions_stay_deep_linkable(self):

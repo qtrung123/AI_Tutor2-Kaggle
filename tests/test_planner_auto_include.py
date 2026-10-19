@@ -1,13 +1,11 @@
-"""Study Planner auto-include after a PDF upload.
+"""Study Planner materials are chosen explicitly -- an upload never auto-includes a document.
 
-Upload A -> the active plan (created if needed) gets A and its suggestions cover A; upload B, then
-C -> the same plan covers A + B (+ C). Only materials are added: suggestions stay the read-only
-preview until Accept Plan, an accepted plan's sessions are never touched, a duplicate upload
-changes nothing, and a planner failure never fails the upload (manual retry endpoint).
+Upload A, B, C -> no plan, material, session or Google Calendar change; only the documents the
+learner adds through Add Material are previewed and accepted. On an accepted plan, Add Material
+becomes a reviewable proposal (adaptation trigger "materials_added"): accepted and hand-edited
+sessions are never touched.
 """
 
-import threading
-import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,7 +14,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from planner_fixtures import PlannerDatabaseMixin
 
-from backend import study_plan_api_service, study_planner_store
+from backend import google_calendar_sync, study_plan_api_service, study_planner_store
 from backend.api import documents as documents_api
 from backend.main import app
 
@@ -25,7 +23,7 @@ LOCAL_NOW = "2026-09-28T08:00:00"
 SCHEDULE = {"utc_offset_minutes": 0, "local_now": LOCAL_NOW}
 
 
-class PlannerAutoIncludeTests(PlannerDatabaseMixin, unittest.TestCase):
+class PlannerMaterialSelectionTests(PlannerDatabaseMixin, unittest.TestCase):
     def setUp(self):
         self.start_planner_database()
         for patcher in (patch.object(study_plan_api_service, "_utc_now", return_value=UTC_NOW),
@@ -62,77 +60,101 @@ class PlannerAutoIncludeTests(PlannerDatabaseMixin, unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
 
+    def create_plan(self):
+        response = self.client.post("/api/planner/plans", json={"title": "My study plan"})
+        self.assertEqual(response.status_code, 201, response.text)
+        return response.json()["plan_id"]
+
+    def add_material(self, plan_id, document_id, **goal):
+        response = self.client.post(f"/api/planner/plans/{plan_id}/materials", json={"document_id": document_id, **goal})
+        self.assertEqual(response.status_code, 201, response.text)
+        return response.json()
+
     def active_plans(self):
         return [plan for plan in study_planner_store.list_plans(self.alice) if plan["status"] == "active"]
 
     def materials(self, plan_id):
         return sorted(material["document_id"] for material in study_planner_store.list_materials(self.alice, plan_id))
 
-    def preview_documents(self, plan_id):
+    def preview(self, plan_id):
         response = self.client.post(f"/api/planner/plans/{plan_id}/preview", json=SCHEDULE)
         self.assertEqual(response.status_code, 200, response.text)
-        return {session["document_id"] for session in response.json()["sessions"]}
+        return response.json()
 
-    def test_first_second_and_third_upload_extend_the_same_suggested_plan(self):
-        first = self.upload("a.pdf")["planner"]
-        self.assertEqual((first["status"], first["added_document_ids"]), ("updated", ["a.pdf"]))
-        [plan] = self.active_plans()
-        self.assertEqual((plan["plan_id"], plan["title"]), (first["plan_id"], "My study plan"))
-        self.assertEqual(self.preview_documents(plan["plan_id"]), {"a.pdf"})
+    def confirm(self, plan_id):
+        response = self.client.post(f"/api/planner/plans/{plan_id}/confirm", json=SCHEDULE)
+        self.assertEqual(response.status_code, 201, response.text)
+        return response.json()
 
-        second = self.upload("b.pdf")["planner"]
-        self.assertEqual((second["plan_id"], second["added_document_ids"]), (plan["plan_id"], ["b.pdf"]))
-        self.assertEqual(self.preview_documents(plan["plan_id"]), {"a.pdf", "b.pdf"})
+    # -- uploading never plans ----------------------------------------------------------------------
 
-        third = self.upload("c.pdf")["planner"]
-        self.assertEqual((third["plan_id"], third["added_document_ids"]), (plan["plan_id"], ["c.pdf"]))
-        self.assertEqual([p["plan_id"] for p in self.active_plans()], [plan["plan_id"]])
-        self.assertEqual(self.materials(plan["plan_id"]), ["a.pdf", "b.pdf", "c.pdf"])
-        self.assertEqual(self.preview_documents(plan["plan_id"]), {"a.pdf", "b.pdf", "c.pdf"})
-        # Suggestions only: nothing is saved until Accept Plan.
-        self.assertEqual(study_planner_store.list_sessions(self.alice, plan_id=plan["plan_id"]), [])
-        self.assertEqual(study_planner_store.list_plan_schedule_runs(self.alice, plan["plan_id"]), [])
+    def test_upload_creates_no_plan_material_session_or_calendar_change(self):
+        with patch.object(google_calendar_sync, "after_planner_change") as calendar:
+            for name in ("a.pdf", "b.pdf", "c.pdf"):
+                body = self.upload(name)
+                self.assertEqual(body["new_files"], 1)
+                self.assertNotIn("planner", body)
+        self.assertEqual(self.active_plans(), [])
+        self.assertEqual(study_planner_store.list_sessions(self.alice), [])
+        calendar.assert_not_called()
 
-    def test_existing_goals_and_plan_are_kept(self):
-        plan = self.client.post("/api/planner/plans", json={"title": "Finals"}).json()
+    def test_upload_leaves_an_existing_plan_and_its_accepted_sessions_alone(self):
         self.add_document(self.alice, "old.pdf", "Old")
-        material = self.client.post(f"/api/planner/plans/{plan['plan_id']}/materials", json={
-            "document_id": "old.pdf", "goal_type": "deadline", "deadline": "2026-10-20"}).json()
+        plan_id = self.create_plan()
+        material = self.add_material(plan_id, "old.pdf", goal_type="deadline", deadline="2026-10-20")
+        self.confirm(plan_id)
+        sessions = study_planner_store.list_sessions(self.alice, plan_id=plan_id)
+        runs = study_planner_store.list_plan_schedule_runs(self.alice, plan_id)
         before = study_planner_store.get_material(self.alice, material["material_id"])
 
-        self.assertEqual(self.upload("new.pdf")["planner"]["plan_id"], plan["plan_id"])   # the user's own plan
+        with patch.object(google_calendar_sync, "after_planner_change") as calendar:
+            self.upload("new.pdf")
+        calendar.assert_not_called()
+        self.assertEqual(self.materials(plan_id), ["old.pdf"])   # not silently added
         self.assertEqual(study_planner_store.get_material(self.alice, material["material_id"]), before)
-        self.assertEqual(study_planner_store.get_plan(self.alice, plan["plan_id"])["title"], "Finals")
-        self.assertEqual(self.materials(plan["plan_id"]), ["new.pdf", "old.pdf"])
-
-    def test_duplicate_upload_and_removed_material_change_nothing(self):
-        plan_id = self.upload("a.pdf")["planner"]["plan_id"]
-        self.assertEqual(self.upload("a.pdf")["planner"]["status"], "unchanged")
-        material = study_planner_store.get_plan_material(self.alice, plan_id, "a.pdf")
-        self.client.delete(f"/api/planner/plans/{plan_id}/materials/{material['material_id']}")
-        self.assertEqual(self.upload("a.pdf")["planner"]["status"], "unchanged")   # not silently re-added
-        self.assertEqual(self.materials(plan_id), [])
-        self.assertEqual(len(self.active_plans()), 1)
-
-    def test_accepted_plan_sessions_are_never_touched(self):
-        plan_id = self.upload("a.pdf")["planner"]["plan_id"]
-        confirmed = self.client.post(f"/api/planner/plans/{plan_id}/confirm", json=SCHEDULE)
-        self.assertEqual(confirmed.status_code, 201, confirmed.text)
-        before = study_planner_store.list_sessions(self.alice, plan_id=plan_id)
-        self.assertTrue(before)
-        runs = study_planner_store.list_plan_schedule_runs(self.alice, plan_id)
-
-        for name in ("b.pdf", "c.pdf"):
-            self.assertEqual(self.upload(name)["planner"]["added_document_ids"], [name])
-        self.assertEqual(study_planner_store.list_sessions(self.alice, plan_id=plan_id), before)
+        self.assertEqual(study_planner_store.list_sessions(self.alice, plan_id=plan_id), sessions)
         self.assertEqual(study_planner_store.list_plan_schedule_runs(self.alice, plan_id), runs)
-        self.assertEqual(self.materials(plan_id), ["a.pdf", "b.pdf", "c.pdf"])
-        # The new materials are offered as still-to-schedule candidates, for the learner to place.
-        candidates = self.client.get(f"/api/planner/plans/{plan_id}/candidates",
-                                     params={"utc_offset_minutes": 0, "local_now": LOCAL_NOW}).json()
-        self.assertTrue({"b.pdf", "c.pdf"} <= {item["document_id"] for item in candidates})
+        self.assertEqual([plan["plan_id"] for plan in self.active_plans()], [plan_id])
 
-    # -- accepted plan: new material becomes a proposal (adaptation trigger "materials_added") -------
+    def test_the_auto_include_endpoint_is_gone(self):
+        self.add_document(self.alice, "a.pdf", "A")
+        response = self.client.post("/api/planner/include-documents", json={"document_ids": ["a.pdf"]})
+        self.assertIn(response.status_code, (404, 405))
+        self.assertEqual(self.active_plans(), [])
+
+    # -- only the selected materials are planned --------------------------------------------------
+
+    def test_generate_uses_only_the_selected_materials(self):
+        for name in ("a.pdf", "b.pdf", "c.pdf"):
+            self.upload(name)
+        plan_id = self.create_plan()
+        self.add_material(plan_id, "a.pdf")
+        self.add_material(plan_id, "c.pdf")
+        self.assertEqual({s["document_id"] for s in self.preview(plan_id)["sessions"]}, {"a.pdf", "c.pdf"})
+        confirmed = self.confirm(plan_id)
+        self.assertEqual({s["document_id"] for s in confirmed["sessions"]}, {"a.pdf", "c.pdf"})
+
+    def test_removed_material_leaves_the_preview(self):
+        for name in ("a.pdf", "b.pdf"):
+            self.upload(name)
+        plan_id = self.create_plan()
+        self.add_material(plan_id, "a.pdf")
+        material = self.add_material(plan_id, "b.pdf")
+        self.client.delete(f"/api/planner/plans/{plan_id}/materials/{material['material_id']}")
+        self.assertEqual({s["document_id"] for s in self.preview(plan_id)["sessions"]}, {"a.pdf"})
+
+    def test_a_flexible_document_gets_a_meaningful_week(self):
+        # Summary -> Flashcards -> Quiz -> Review on different days, not one lone quiz.
+        self.upload("a.pdf")
+        plan_id = self.create_plan()
+        self.add_material(plan_id, "a.pdf")
+        sessions = sorted(self.preview(plan_id)["sessions"], key=lambda s: s["scheduled_start"])
+        self.assertEqual([s["activity_type"] for s in sessions], ["summary", "flashcards", "quiz", "review"])
+        self.assertEqual(len({s["scheduled_start"][:10] for s in sessions}), 4)
+        self.assertLessEqual(sessions[-1]["scheduled_start"][:10], "2026-10-04")   # within the week
+        self.assertNotIn("written_quiz", {s["activity_type"] for s in sessions})
+
+    # -- accepted plan: Add Material becomes a proposal (adaptation trigger "materials_added") -----
 
     def propose_new_materials(self, plan_id):
         response = self.client.post(f"/api/planner/plans/{plan_id}/adaptation/preview",
@@ -160,8 +182,10 @@ class PlannerAutoIncludeTests(PlannerDatabaseMixin, unittest.TestCase):
             taken.append((start, end))
 
     def accepted_plan_with_a_manual_edit(self):
-        plan_id = self.upload("a.pdf")["planner"]["plan_id"]
-        self.assertEqual(self.client.post(f"/api/planner/plans/{plan_id}/confirm", json=SCHEDULE).status_code, 201)
+        self.upload("a.pdf")
+        plan_id = self.create_plan()
+        self.add_material(plan_id, "a.pdf")
+        self.confirm(plan_id)
         first = study_planner_store.list_sessions(self.alice, plan_id=plan_id)[0]
         edited = self.client.post(f"/api/planner/sessions/{first['session_id']}/reschedule",
                                   json={**SCHEDULE, "duration_minutes": first["duration_minutes"] + 10})
@@ -170,17 +194,22 @@ class PlannerAutoIncludeTests(PlannerDatabaseMixin, unittest.TestCase):
         self.assertTrue(any(s.get("manual_edit") for s in sessions))
         return plan_id, sessions
 
-    def test_new_pdf_after_an_accepted_plan_is_proposed_not_accepted(self):
+    def test_uploaded_pdf_is_not_proposed_until_it_is_added(self):
         plan_id, accepted = self.accepted_plan_with_a_manual_edit()
-        self.assertEqual(self.upload("b.pdf")["planner"]["added_document_ids"], ["b.pdf"])
+        self.upload("b.pdf")
+        self.assertEqual(self.propose_new_materials(plan_id)["change_count"], 0)
+        self.assertEqual(study_planner_store.list_sessions(self.alice, plan_id=plan_id), accepted)
+
+    def test_added_material_on_an_accepted_plan_is_proposed_not_accepted(self):
+        plan_id, accepted = self.accepted_plan_with_a_manual_edit()
+        self.upload("b.pdf")
+        self.add_material(plan_id, "b.pdf")
 
         proposal = self.propose_new_materials(plan_id)
         self.assertFalse(proposal["persisted"])
-        self.assertTrue(proposal["added"])
         self.assertEqual({item["document_id"] for item in proposal["added"]}, {"b.pdf"})
         self.assertEqual((proposal["moved"], proposal["cancelled"]), ([], []))   # nothing accepted moves
         self.assert_free_and_disjoint(plan_id, proposal["added"])
-        # Only a proposal: nothing is saved until the learner accepts it.
         self.assertEqual(study_planner_store.list_sessions(self.alice, plan_id=plan_id), accepted)
 
         applied = self.apply_new_materials(plan_id)
@@ -192,92 +221,19 @@ class PlannerAutoIncludeTests(PlannerDatabaseMixin, unittest.TestCase):
         new = [s for s in after if s["session_id"] not in {a["session_id"] for a in accepted}]
         self.assertEqual({s["document_id"] for s in new}, {"b.pdf"})
         self.assertEqual(len(new), len(proposal["added"]))
+        self.assertEqual(self.propose_new_materials(plan_id)["change_count"], 0)   # never proposed twice
 
-    def test_second_and_third_pdf_each_get_their_own_proposal(self):
-        plan_id, _ = self.accepted_plan_with_a_manual_edit()
-        self.upload("b.pdf")
-        self.apply_new_materials(plan_id)
-        before_c = study_planner_store.list_sessions(self.alice, plan_id=plan_id)
-
-        self.upload("c.pdf")
-        proposal = self.propose_new_materials(plan_id)
-        self.assertEqual({item["document_id"] for item in proposal["added"]}, {"c.pdf"})   # B is already planned
-        self.assertEqual((proposal["moved"], proposal["cancelled"]), ([], []))
-        self.assert_free_and_disjoint(plan_id, proposal["added"])
-        self.assertEqual(study_planner_store.list_sessions(self.alice, plan_id=plan_id), before_c)
-
-        self.apply_new_materials(plan_id)
-        self.assertEqual(self.propose_new_materials(plan_id)["change_count"], 0)   # nothing left to propose
-
-    def test_two_pdfs_uploaded_before_review_share_one_proposal(self):
-        plan_id, _ = self.accepted_plan_with_a_manual_edit()
-        self.upload("b.pdf")
-        self.upload("c.pdf")
-        proposal = self.propose_new_materials(plan_id)
-        self.assertEqual({item["document_id"] for item in proposal["added"]}, {"b.pdf", "c.pdf"})
-        self.assert_free_and_disjoint(plan_id, proposal["added"])
-
-    def test_no_proposal_before_the_plan_is_accepted(self):
-        plan_id = self.upload("a.pdf")["planner"]["plan_id"]
-        self.upload("b.pdf")
-        proposal = self.propose_new_materials(plan_id)   # suggestions come from the regular preview instead
-        self.assertEqual(proposal["change_count"], 0)
-        self.assertEqual(study_planner_store.list_sessions(self.alice, plan_id=plan_id), [])
-
-    def test_accepted_plan_with_no_free_time_left_gets_warnings_not_overlaps(self):
+    def test_no_free_time_left_gets_warnings_not_overlaps(self):
         plan_id, accepted = self.accepted_plan_with_a_manual_edit()
         for day in range(7):   # remove every free slot
             self.client.post("/api/planner/availability/remove", json={
                 "start_at": "09:00", "end_at": "21:00", "is_recurring": True, "day_of_week": day})
         self.upload("b.pdf")
+        self.add_material(plan_id, "b.pdf")
         proposal = self.propose_new_materials(plan_id)
         self.assertEqual(proposal["added"], [])
         self.assertTrue(any(w["code"] == "no_available_slot" for w in proposal["warnings"]))
         self.assertEqual(study_planner_store.list_sessions(self.alice, plan_id=plan_id), accepted)
-
-    def test_planner_failure_keeps_the_upload_and_can_be_retried(self):
-        plan_id = self.upload("a.pdf")["planner"]["plan_id"]
-        with patch.object(study_plan_api_service.study_planner_store, "add_material", side_effect=RuntimeError("db down")):
-            body = self.upload("b.pdf")
-        self.assertEqual(body["new_files"], 1)
-        planner = body["planner"]
-        self.assertEqual((planner["status"], planner["document_ids"]), ("failed", ["b.pdf"]))
-        self.assertNotIn("db down", planner["message"])
-        self.assertIn("b.pdf", {d["document_id"] for d in study_plan_api_service.list_indexed_documents(self.alice)})
-        self.assertEqual(self.materials(plan_id), ["a.pdf"])
-
-        retried = self.client.post("/api/planner/include-documents", json={"document_ids": planner["document_ids"]})
-        self.assertEqual(retried.status_code, 200, retried.text)
-        self.assertEqual((retried.json()["plan_id"], retried.json()["added_document_ids"]), (plan_id, ["b.pdf"]))
-        self.assertEqual(self.materials(plan_id), ["a.pdf", "b.pdf"])
-
-    def test_retry_only_accepts_the_owners_indexed_documents(self):
-        bob = self.user("Bob")
-        self.add_document(bob, "bob.pdf", "Bob")
-        response = self.client.post("/api/planner/include-documents", json={"document_ids": ["bob.pdf", "missing.pdf"]})
-        self.assertEqual(response.json(), {"status": "unchanged", "plan_id": None, "added_document_ids": []})
-        self.assertEqual(self.active_plans(), [])
-
-    def test_concurrent_uploads_share_one_active_plan(self):
-        for name in ("x.pdf", "y.pdf"):
-            self.add_document(self.alice, name, name)
-        real_create = study_planner_store.create_plan
-
-        def slow_create(*args, **kwargs):
-            time.sleep(0.05)   # widen the find-or-create window
-            return real_create(*args, **kwargs)
-
-        results = []
-        with patch.object(study_plan_api_service.study_planner_store, "create_plan", side_effect=slow_create):
-            threads = [threading.Thread(target=lambda n=name: results.append(
-                study_plan_api_service.include_uploaded_documents(self.alice, [n]))) for name in ("x.pdf", "y.pdf")]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
-        [plan] = self.active_plans()
-        self.assertEqual({result["plan_id"] for result in results}, {plan["plan_id"]})
-        self.assertEqual(self.materials(plan["plan_id"]), ["x.pdf", "y.pdf"])
 
 
 if __name__ == "__main__":

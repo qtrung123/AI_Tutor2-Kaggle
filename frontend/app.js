@@ -1376,7 +1376,6 @@ let plannerPreviewFailure = null; // the last preview error (e.g. a deadline alr
 let plannerPreviewTimer = null;
 let plannerPreviewSeq = 0;        // only the newest preview response is shown
 let plannerLoadSeq = 0;           // only the newest planner reload is applied
-let plannerIncludeFailure = null; // uploaded documents the plan could not take in: {documentIds, message}
 let plannerNewMaterialSeq = 0;    // only the newest "sessions for new material" proposal is shown
 let plannerNewMaterialFailure = null; // {planId}: that proposal could not be computed (retry offered)
 let plannerAvailabilityTimer = null;

@@ -110,7 +110,6 @@ class IngestTimingTests(unittest.TestCase):
 
         for patcher in (
             patch.object(documents_api, "DATA_DIR", root / "data"),
-            patch.object(documents_api, "include_planner_documents", return_value={"status": "unchanged"}),
             patch.object(documents_api, "list_uploaded_sources", return_value=[]),
             patch.object(ingest, "DATA_DIR", root / "data"),
             patch.object(ingest, "VECTORSTORE_DIR", root / "vectors"),
@@ -153,7 +152,7 @@ class IngestTimingTests(unittest.TestCase):
         response, output = self.upload(enabled=True)
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
-        self.assertEqual(sorted(body), ["new_chunks", "new_files", "planner", "skipped_files", "sources", "total_indexed_files"])
+        self.assertEqual(sorted(body), ["new_chunks", "new_files", "skipped_files", "sources", "total_indexed_files"])
         lines = [match.group(0) for match in LINE.finditer(output)]
         self.assertEqual([line.split()[0] for line in lines], ["[ingest]", "[upload]"])   # per file, then per request
         ingest_line, upload_line = fields(lines[0]), fields(lines[1])
@@ -173,8 +172,9 @@ class IngestTimingTests(unittest.TestCase):
         self.assertEqual((upload_line["files"], upload_line["bytes"]), ("1", str(len(TEXT.encode("utf-8")))))
         self.assertEqual((int(upload_line["new_files"]), int(upload_line["new_chunks"]), upload_line["skipped_files"]),
                          (1, body["new_chunks"], "0"))
-        for stage in ("lock_wait", "write", "index", "planner", "sources"):
+        for stage in ("lock_wait", "write", "index", "sources"):
             self.assertIn(f"{stage}_ms", upload_line, stage)
+        self.assertNotIn("planner_ms", upload_line)   # an upload never touches the Study Planner
 
     def test_stage_times_are_measured_and_nest_consistently(self):
         _response, output = self.upload(enabled=True)
@@ -188,7 +188,7 @@ class IngestTimingTests(unittest.TestCase):
         stages = sum(value for key, value in ingest_line.items() if key not in {"total_ms", "refine_ms", "embed_ms", "insert_ms"})
         self.assertGreaterEqual(ingest_line["total_ms"], stages)
         self.assertGreaterEqual(upload_line["index_ms"], ingest_line["total_ms"])
-        self.assertGreaterEqual(upload_line["total_ms"], upload_line["index_ms"] + upload_line["planner_ms"])
+        self.assertGreaterEqual(upload_line["total_ms"], upload_line["index_ms"])
 
     def test_timing_lines_never_carry_names_ids_or_content(self):
         _response, output = self.upload(enabled=True)

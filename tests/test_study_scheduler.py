@@ -2,6 +2,7 @@
 
 import unittest
 from collections import defaultdict
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -116,15 +117,21 @@ class SchedulerUnitTests(ScheduleAssertions, unittest.TestCase):
         return [(c.activity_type, c.reason.code) for c in select_candidates(material(state, deadline), MONDAY)]
 
     def test_candidate_selection_per_state(self):
-        self.assertEqual(self.kinds(make_state("d")), [
-            ("summary", "new_material"), ("flashcards", "new_material"), ("quiz", "new_material")])
+        # Summary -> Flashcards -> Quiz -> Review for flexible material (the final review replaces
+        # the post-quiz review before a deadline).
+        learn = [("summary", "new_material"), ("flashcards", "new_material"), ("quiz", "new_material"),
+                 ("review", "review_due")]
+        self.assertEqual(self.kinds(make_state("d")), learn)
         self.assertEqual(self.kinds(make_state("d"), "2026-10-01"), [
             ("summary", "deadline_approaching"), ("flashcards", "deadline_approaching"),
             ("quiz", "deadline_approaching"), ("review", "final_review")])
-        self.assertEqual(self.kinds(make_state("d", summary=True)), [("flashcards", "new_material"), ("quiz", "new_material")])
-        # Persisted flashcards: a Written Quiz (retrieval practice) comes before the normal quiz.
-        self.assertEqual(self.kinds(make_state("d", summary=True, cards=10)),
-                         [("written_quiz", "retrieval_practice"), ("quiz", "new_material")])
+        # A generated summary / flashcard set still has to be read / practiced: no lone quiz.
+        self.assertEqual(self.kinds(make_state("d", summary=True)), learn)
+        self.assertEqual(self.kinds(make_state("d", summary=True, cards=10)), learn)
+        # ...until the learner completed a planner session of that activity.
+        studied = replace(make_state("d", summary=True, cards=10), completed_activities=("flashcards", "summary"))
+        self.assertEqual(self.kinds(studied), [("quiz", "new_material"), ("review", "review_due")])
+        self.assertNotIn("written_quiz", {kind for kind, _ in self.kinds(make_state("d", cards=10, percentage=40.0))})
         self.assertEqual(self.kinds(make_state("d", in_progress=True)), [("quiz", "quiz_in_progress")])
         # Below 60%: a weak-topic review (never practice on flashcards that do not exist), then a retry.
         self.assertEqual(self.kinds(make_state("d", percentage=40.0)), [
@@ -142,7 +149,8 @@ class SchedulerUnitTests(ScheduleAssertions, unittest.TestCase):
         in_progress = select_candidates(material(make_state("d", in_progress=True)), MONDAY)
         self.assertEqual(in_progress[0].artifact_id, "q-d")
         low = select_candidates(material(make_state("d", cards=12, percentage=40.0)), MONDAY)
-        # The written quiz's practice quiz is created (and linked) when its session starts.
+        # Recall practice opens the flashcards themselves; only the retry links the quiz to retake.
+        self.assertEqual([c.activity_type for c in low], ["review", "flashcards", "quiz_retry"])
         self.assertEqual([c.artifact_id for c in low], [None, None, "q-d"])
 
     # -- 3/4. spaced review and durations -------------------------------------
@@ -260,7 +268,7 @@ class FinalRetrievalTests(ScheduleAssertions, unittest.TestCase):
                       weekly((0, "18:00", "22:00"), (1, "18:00", "22:00")))
         result = plan_schedule(ctx)
         self.assert_well_formed(result, ctx)
-        self.assertEqual([p.activity_type for p in result.proposals], ["review", "written_quiz", "quiz_retry"])
+        self.assertEqual([p.activity_type for p in result.proposals], ["review", "flashcards", "quiz_retry"])
         self.assertEqual(result.capacity.status, "on_track")
 
     def test_separate_final_review_only_on_a_later_day(self):
@@ -484,12 +492,12 @@ class GoldenScenarioTests(ScheduleAssertions, PlannerDatabaseMixin, unittest.Tes
         # so Statistics' 30-minute weak-topic review waits for the first day with room (Thursday).
         monday_docs = {p.document_id for docs in self.sessions.values() for p in docs if day_of(p.scheduled_start) == MONDAY.date()}
         self.assertEqual(monday_docs, {"mkt"})
-        # Low score: Statistics starts with a weak-topic review, then written retrieval practice,
+        # Low score: Statistics starts with a weak-topic review, then flashcard recall practice,
         # then a retry on a later day.
         stats = self.sessions["stats"]
         self.assertEqual((stats[0].activity_type, stats[0].reason.code, day_of(stats[0].scheduled_start)),
                          ("review", "low_quiz_score", date(2026, 10, 1)))
-        self.assertEqual((stats[1].activity_type, stats[1].reason.code), ("written_quiz", "retrieval_practice"))
+        self.assertEqual((stats[1].activity_type, stats[1].reason.code), ("flashcards", "retrieval_practice"))
         self.assertEqual(stats[2].activity_type, "quiz_retry")
         self.assertGreater(day_of(stats[2].scheduled_start), day_of(stats[1].scheduled_start))
         # High score avoids unnecessary next-day repetition; its spaced review comes days later.

@@ -5,13 +5,12 @@ The preview builds a SchedulingContext, runs the deterministic scheduler and ser
 result without persisting anything; confirm recomputes the same schedule server-side and saves it.
 """
 
-import threading
 from datetime import date, datetime, timedelta, timezone
 
 from backend import (google_calendar_sync, study_adaptation, study_placement, study_planner_service,
                      study_planner_store, study_progress)
 from backend.document_study_state import get_document_study_state
-from backend.flashcard_quiz_service import create_flashcard_written_quiz, is_flashcard_quiz
+from backend.flashcard_quiz_service import is_flashcard_quiz
 from backend.quiz_store import get_quiz_by_id
 from backend.indexed_document_store import list_indexed_documents
 from backend import study_preferences
@@ -148,42 +147,6 @@ def add_plan_material(owner_id: str, plan_id: str, document_id: str, deadline: s
             raise PlanConflictError(str(error)) from error
         raise
     return _with_titles(owner_id, [material])[0]
-
-
-# Serializes "find or create the active plan" so two uploads finishing together never create two
-# active plans (one process; the (plan, document) unique key already makes the adds idempotent).
-_AUTO_INCLUDE_LOCK = threading.Lock()
-AUTO_PLAN_TITLE = "My study plan"
-
-
-def include_uploaded_documents(owner_id: str, document_ids: list[str]) -> dict:
-    """Add freshly indexed documents to the learner's active plan (created when there is none), so
-    the planner's suggestions cover them without a manual Add Material. Only materials are added:
-    no session is created, moved or deleted -- suggestions stay a read-only preview until Accept
-    Plan, and on an already accepted plan the new material only shows up as still-to-schedule
-    candidates. Goals, deadlines, preferences and availability are left untouched. Idempotent: a
-    document already in the plan (or no longer indexed) is skipped."""
-    wanted = list(dict.fromkeys(str(item) for item in document_ids if item))
-    indexed = {document["document_id"] for document in list_indexed_documents(owner_id)}
-    wanted = [document_id for document_id in wanted if document_id in indexed]
-    if not wanted:
-        return {"status": "unchanged", "plan_id": None, "added_document_ids": []}
-    with _AUTO_INCLUDE_LOCK:
-        active = [plan for plan in study_planner_store.list_plans(owner_id) if plan["status"] == "active"]
-        # The newest active plan: the same one the planner page opens.
-        plan = active[-1] if active else study_planner_store.create_plan(owner_id, AUTO_PLAN_TITLE)
-        added = []
-        for document_id in wanted:
-            if study_planner_store.get_plan_material(owner_id, plan["plan_id"], document_id):
-                continue
-            try:
-                study_planner_store.add_material(owner_id, plan["plan_id"], document_id)
-            except ValueError as error:
-                if "already part of the study plan" not in str(error):
-                    raise
-                continue
-            added.append(document_id)
-    return {"status": "updated" if added else "unchanged", "plan_id": plan["plan_id"], "added_document_ids": added}
 
 
 def update_plan_material(owner_id: str, plan_id: str, material_id: str, changes: dict) -> dict:
@@ -433,10 +396,15 @@ ACTIVITY_TOOLS = {"summary": "summary", "flashcards": "flashcards", "quiz": "qui
                   "written_quiz": "quiz"}
 
 
-def _session_tool(owner_id: str, session: dict) -> tuple[str, bool]:
-    """(tool, artifact_available) for a session. review prefers the flashcards (spaced review of
-    the key points), then the summary, then a quiz the learner already has; with none of them it
-    opens Flashcards, whose empty state offers to create the set."""
+def _session_tool(owner_id: str, session: dict) -> tuple[str, bool, str | None]:
+    """(tool, artifact_available, prerequisite) for a session. review prefers the flashcards
+    (spaced review of the key points), then the summary, then a quiz the learner already has; with
+    none of them it opens Flashcards, whose empty state offers to create the set.
+
+    A quiz session without any quiz yet opens the Quiz tab's unified Create Quiz flow; a new quiz is
+    built from the document's flashcards, so without them prerequisite="flashcards" (the Create Quiz
+    sheet then says "Create Flashcards first" and links to the Flashcards tab). Nothing is generated
+    here."""
     state = get_document_study_state(owner_id, session["document_id"])
     has_summary = bool(state and state.summary.available)
     has_cards = bool(state and state.flashcards.available and state.flashcards.card_count)
@@ -444,39 +412,28 @@ def _session_tool(owner_id: str, session: dict) -> tuple[str, bool]:
     activity = session["activity_type"]
     if activity == "review":
         if has_cards:
-            return "flashcards", True
+            return "flashcards", True, None
         if has_summary:
-            return "summary", True
+            return "summary", True, None
         if has_quiz:
-            return "quiz", True
-        return "flashcards", False
+            return "quiz", True, None
+        return "flashcards", False, None
     tool = ACTIVITY_TOOLS[activity]
-    return tool, {"summary": has_summary, "flashcards": has_cards, "quiz": has_quiz}[tool]
+    available = {"summary": has_summary, "flashcards": has_cards, "quiz": has_quiz}[tool]
+    prerequisite = "flashcards" if tool == "quiz" and not available and not has_cards else None
+    return tool, available, prerequisite
 
 
 def _written_quiz_artifact(owner_id: str, session: dict) -> str | None:
-    """The exact flashcard practice quiz a written_quiz session opens (its quiz_id), or None when the
-    document has no usable flashcards. Resolved once: the first start creates the practice quiz from
-    the document's current persisted flashcard set (no LLM) and stores its quiz_id as the session's
-    artifact_id, so every later Start/Resume/reload opens that same quiz."""
-    document_id = session["document_id"]
+    """The flashcard practice quiz an earlier written_quiz session already created (its quiz_id),
+    so it keeps opening that same quiz with its saved answers and score; None otherwise. The planner
+    no longer creates written (short answer) quizzes: such a session without one practices the
+    flashcards instead."""
     if session.get("artifact_id"):
         quiz = get_quiz_by_id(session["artifact_id"], owner_id)
-        if is_flashcard_quiz(quiz) and quiz.get("document_id") == document_id:
+        if is_flashcard_quiz(quiz) and quiz.get("document_id") == session["document_id"]:
             return quiz["quiz_id"]
-    state = get_document_study_state(owner_id, document_id)
-    if not (state and state.flashcards.available and state.flashcards.card_count):
-        return None
-    count = min(state.flashcards.card_count, DEFAULT_CONFIG.written_quiz_questions)
-    try:
-        try:
-            quiz = create_flashcard_written_quiz(owner_id, document_id, "mixed", count, set_id=state.flashcards.set_id)
-        except ValueError:   # fewer usable cards than counted: practice every usable one
-            quiz = create_flashcard_written_quiz(owner_id, document_id, "mixed", None, set_id=state.flashcards.set_id)
-    except ValueError:
-        return None
-    study_planner_store.update_session(owner_id, session["session_id"], {"artifact_id": quiz["quiz_id"]})
-    return quiz["quiz_id"]
+    return None
 
 
 def _transition(owner_id: str, session_id: str, action: str) -> tuple[dict, bool]:
@@ -499,15 +456,18 @@ def start_session(owner_id: str, session_id: str, utc_offset_minutes: int, local
         raise SessionConflictError("session_missed", "This session's time has passed. Reschedule it instead.",
                                    status=current["status"])
     session, started = _transition(owner_id, session_id, "start")
+    prerequisite = None
     if session["activity_type"] == "written_quiz":
-        quiz_id = _written_quiz_artifact(owner_id, session)
-        session = study_planner_store.get_session(owner_id, session_id) or session
-        # Without usable flashcards there is nothing to practice: open Flashcards to create them.
-        tool, artifact_available = ("quiz", True) if quiz_id else ("flashcards", False)
+        # An older session: its saved practice quiz, else recall practice in Flashcards.
+        if _written_quiz_artifact(owner_id, session):
+            tool, artifact_available = "quiz", True
+        else:
+            tool, artifact_available, _ = _session_tool(owner_id, {**session, "activity_type": "flashcards"})
     else:
-        tool, artifact_available = _session_tool(owner_id, session)
+        tool, artifact_available, prerequisite = _session_tool(owner_id, session)
     return _with_calendar_sync(owner_id, {"session": _saved_session(session, _document_titles(owner_id)), "started": started,
-                                          "tool": tool, "artifact_available": artifact_available}, utc_offset_minutes)
+                                          "tool": tool, "artifact_available": artifact_available,
+                                          "prerequisite": prerequisite}, utc_offset_minutes)
 
 
 def complete_session(owner_id: str, session_id: str) -> dict:

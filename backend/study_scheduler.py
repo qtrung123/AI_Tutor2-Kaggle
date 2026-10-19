@@ -70,6 +70,10 @@ class SchedulerConfig:
     foundational_relearn_below: float = 40.0
     moderate_retry_gap_days: int = 2      # moderate score: review, then quiz_retry this many days later
     quiz_gap_after_learning_days: int = 1  # the first quiz never lands the same day as new material
+    # Flexible material (no deadline): a review of the key points this many days after the first
+    # quiz, so the week ends Summary -> Flashcards -> Quiz -> Review. A deadline's final review
+    # plays that role instead.
+    post_quiz_review_gap_days: int = 2
     final_review_window_days: int = 2     # final review within this many days before the deadline
     # A strong score (>= 80%) gets a second, lighter spaced review this many intervals after the first.
     second_review_interval_factor: int = 2
@@ -89,8 +93,6 @@ class SchedulerConfig:
         "summary": 45, "flashcards": 20, "quiz": 35, "quiz_retry": 35, "review": 30,
         "written_quiz": 20, "final_review": 45, "light_review": 20,
     })
-    # A written_quiz session practices at most this many of the document's flashcards.
-    written_quiz_questions: int = 10
     # Daily shape: availability is permission, not obligation.
     daily_target_minutes: int = 90
     # Break between two consecutive study sessions (also kept around accepted sessions).
@@ -234,20 +236,27 @@ def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_
     - marked completed           -> only the final review before a deadline;
     - quiz in progress           -> finish that quiz;
     - quiz attempted, < 40%      -> relearn the foundations first: re-read the summary (generated
-                                    when missing), then flashcard review + written recall practice
+                                    when missing), then flashcard review + flashcard recall practice
                                     (or create flashcards when there is no set), then a quiz retry;
-    - quiz attempted, 40-59%     -> weak-topic review, written recall practice (with flashcards),
+    - quiz attempted, 40-59%     -> weak-topic review, flashcard recall practice (with flashcards),
                                     then a quiz retry on a later day;
     - quiz attempted, 60-79%     -> review of the incorrect topics, practice, then reassessment;
     - quiz attempted, >= 80%     -> lighter spaced repetition (a weak-topic review instead when
                                     topic mastery still shows a clearly weak topic);
-    - quiz created, not attempted -> the initial quiz (after the summary when there is none yet);
-    - no quiz yet                -> learn the material first (summary, flashcards, recall practice),
-                                    then create and take a first quiz.
+    - quiz created, not attempted -> read the summary / practice the flashcards not studied yet,
+                                    then the initial quiz;
+    - no quiz yet                -> learn the material first (summary, then flashcards), then create
+                                    a first quiz in the Quiz tab and take it;
+    and, for a flexible material, a review of the key points a few days after that first quiz.
 
-    A step never assumes a resource that does not exist: a missing summary / flashcard set / quiz is
-    an explicit preparation step ("generate", "create") whose session opens that tool's create
-    state; weak-topic reviews open whatever the document has (see study_plan_api_service._session_tool)."""
+    A generated summary or flashcard set is not the same as having studied it: reading / practicing
+    it stays a step until the learner completed a planner session of that activity. A step never
+    assumes a resource that does not exist: a missing summary / flashcard set / quiz is an explicit
+    preparation step ("generate", "create") whose session opens that tool's create state -- the
+    planner itself never generates anything, and a new quiz (built from the flashcards, which come
+    first) is only ever created in the Quiz tab. Weak-topic reviews open whatever the document has
+    (see study_plan_api_service._session_tool). Recall practice uses the flashcards themselves: the
+    planner no longer schedules new written (short answer) quizzes."""
     state = material.state
     title = state.title
     deadline = date.fromisoformat(material.deadline) if material.deadline else None
@@ -276,16 +285,41 @@ def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_
         base = local_date(quiz.latest_completed.completed_at, utc_offset, today)
         return base + timedelta(days=review_interval_days(percentage, config))
 
-    # Written Quiz (retrieval practice) is only possible from a persisted, usable flashcard set.
+    # Recall practice is only possible from a persisted, usable flashcard set.
     has_cards = bool(state.flashcards.available and state.flashcards.card_count)
+    done = set(state.completed_activities)
     weak = tuple(state.weak_topics)
     weak_names = [topic.name for topic in weak[:config.weak_topics_in_message]]
     topics_text = ", ".join(weak_names)
 
-    def written_quiz(earliest=today, gap=0, metadata=None) -> _Step:
-        return step("written_quiz", REASON_RETRIEVAL_PRACTICE,
-                    f'Written Quiz on "{title}": reinforce recall before your next assessment.', "review",
-                    earliest=earliest, gap=gap, metadata=metadata)
+    def recall_practice(earliest=today, gap=0, metadata=None) -> _Step:
+        return step("flashcards", REASON_RETRIEVAL_PRACTICE,
+                    f'Practice "{title}" with your flashcards: reinforce recall before your next assessment.',
+                    "review", earliest=earliest, gap=gap, metadata=metadata)
+
+    def learn_first(stage: dict, create_cards: bool) -> list[_Step]:
+        """Summary, then flashcards -- each a preparation step when missing, a reading / practice
+        step when it exists but no planner session of it was completed yet."""
+        learn = []
+        if not state.summary.available:
+            learn.append(step("summary", learn_reason(), learn_message("generate the summary and read it"), "learn",
+                              metadata={**stage, "preparation": "generate_summary"}))
+        elif "summary" not in done:
+            learn.append(step("summary", learn_reason(), learn_message("read the summary"), "learn", metadata=stage))
+        if has_cards:
+            if "flashcards" not in done:
+                learn.append(step("flashcards", learn_reason(), learn_message("practice the flashcards"), "learn",
+                                  metadata=stage))
+        elif create_cards:
+            learn.append(step("flashcards", learn_reason(), learn_message("create flashcards and practice them"),
+                              "learn", metadata={**stage, "preparation": "create_flashcards"}))
+        return learn
+
+    def review_after_quiz(stage: dict) -> list[_Step]:
+        if deadline is not None:
+            return []   # the final review before the deadline follows instead
+        return [step("review", REASON_REVIEW_DUE, f'Review the key points of "{title}" after your quiz.', "review",
+                     gap=config.post_quiz_review_gap_days, metadata=stage)]
 
     steps: list[_Step] = []
     if code == "marked_completed":
@@ -295,27 +329,22 @@ def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_
                           "finish", artifact=quiz.latest_quiz_id if quiz.latest_quiz_status == "in_progress" else None,
                           metadata={"learning_stage": "quiz_in_progress"}))
     elif code in ("no_study_activity", "study_started") and quiz.quiz_count and quiz.latest_quiz_status == "not_started":
-        # Quiz created but not attempted: the initial assessment is the priority.
-        if not state.summary.available:
-            steps.append(step("summary", learn_reason(), learn_message("generate the summary and read it"), "learn",
-                              metadata={"learning_stage": "quiz_not_attempted", "preparation": "generate_summary"}))
+        # Quiz created but not attempted: study what is not studied yet, then take that quiz (no new
+        # flashcards are required -- the quiz already exists).
+        stage = {"learning_stage": "quiz_not_attempted"}
+        steps.extend(learn_first(stage, create_cards=False))
         steps.append(step("quiz", learn_reason(), learn_message("take the quiz you created"), "learn",
                           gap=config.quiz_gap_after_learning_days if steps else 0, artifact=quiz.latest_quiz_id,
-                          metadata={"learning_stage": "quiz_not_attempted"}))
+                          metadata=stage))
+        steps.extend(review_after_quiz(stage))
     elif code in ("no_study_activity", "study_started"):
-        # No quiz to take yet: learn the material first, then create a first quiz.
+        # No quiz to take yet: summary -> flashcards (a new quiz needs them) -> quiz -> review.
         stage = {"learning_stage": "no_quiz"}
-        if not state.summary.available:
-            steps.append(step("summary", learn_reason(), learn_message("generate the summary and read it"), "learn",
-                              metadata={**stage, "preparation": "generate_summary"}))
-        if not state.flashcards.available:
-            steps.append(step("flashcards", learn_reason(), learn_message("create flashcards and practice them"), "learn",
-                              metadata={**stage, "preparation": "create_flashcards"}))
-        if has_cards:   # summary -> flashcards -> written quiz -> quiz
-            steps.append(written_quiz(metadata=stage))
-        steps.append(step("quiz", learn_reason(), learn_message("create a first quiz and take it"), "learn",
-                          gap=config.quiz_gap_after_learning_days if steps else 0,
+        steps.extend(learn_first(stage, create_cards=True))
+        steps.append(step("quiz", learn_reason(), learn_message("create a first quiz in the Quiz tab and take it"),
+                          "learn", gap=config.quiz_gap_after_learning_days if steps else 0,
                           metadata={**stage, "preparation": "create_quiz"}))
+        steps.extend(review_after_quiz(stage))
     elif code in ("low_quiz_score", "moderate_quiz_score", "strong_quiz_score"):
         result = quiz.latest_completed
         due = review_due(result.percentage)
@@ -339,7 +368,7 @@ def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_
                 focus = f"practice your weak topics ({topics_text})" if weak_names else "practice the key points"
                 steps.append(step("review", REASON_LOW_QUIZ_SCORE, f"{scored}: {focus} with your flashcards.",
                                   "review", metadata=stage))
-                steps.append(written_quiz(metadata=stage))
+                steps.append(recall_practice(metadata=stage))
             else:
                 steps.append(step("flashcards", REASON_LOW_QUIZ_SCORE,
                                   f"{scored}: create flashcards and practice the key points.", "review",
@@ -353,7 +382,7 @@ def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_
             steps.append(step("review", REASON_LOW_QUIZ_SCORE, f"{scored}: {focus}.", "review", earliest=due,
                               metadata=stage))
             if has_cards:
-                steps.append(written_quiz(metadata=stage))
+                steps.append(recall_practice(metadata=stage))
             steps.append(step("quiz_retry", REASON_LOW_QUIZ_SCORE, f"{scored}: retake a quiz.", "review",
                               gap=config.low_score_retry_gap_days, artifact=result.quiz_id, metadata=stage))
         elif code == "moderate_quiz_score":
@@ -366,7 +395,7 @@ def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_
                                   metadata=stage))
             practice_gap = 1 if has_cards and config.moderate_retry_gap_days > 1 else 0
             if has_cards:
-                steps.append(written_quiz(earliest=due, gap=practice_gap, metadata=stage))
+                steps.append(recall_practice(earliest=due, gap=practice_gap, metadata=stage))
             steps.append(step("quiz_retry", REASON_REVIEW_DUE, f'{scored}: check "{title}" again with a quiz.', "review",
                               earliest=due, gap=config.moderate_retry_gap_days - practice_gap, artifact=result.quiz_id,
                               metadata=stage))

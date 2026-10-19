@@ -183,7 +183,9 @@ def live_candidates(context, plan_sessions: list[dict], config=None) -> list[dic
     covered: dict = {}
     for session in plan_sessions:
         if session["status"] in ("scheduled", "in_progress"):
-            pair = (session["document_id"], session["activity_type"])
+            # An older plan's Written Quiz covers today's flashcard recall practice.
+            activity = "flashcards" if session["activity_type"] == "written_quiz" else session["activity_type"]
+            pair = (session["document_id"], activity)
             covered[pair] = covered.get(pair, 0) + 1
     found = []
     for material in context.materials:

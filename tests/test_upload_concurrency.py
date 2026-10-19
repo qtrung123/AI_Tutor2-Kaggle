@@ -44,11 +44,9 @@ class UploadConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.counter_lock = threading.Lock()
         self.index_calls = []
         self.index_error = None
-        self.planner_calls = []
         for patcher in (
             patch.object(documents_api, "DATA_DIR", self.data_dir),
             patch.object(documents_api, "index_files", side_effect=self.fake_index_files),
-            patch.object(documents_api, "include_planner_documents", side_effect=self.fake_planner),
             patch.object(documents_api, "list_uploaded_sources", return_value=[]),
         ):
             patcher.start()
@@ -106,10 +104,6 @@ class UploadConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             with self.counter_lock:
                 self.active -= 1
 
-    def fake_planner(self, owner_id, document_ids):
-        self.planner_calls.append((owner_id, list(document_ids)))
-        return {"status": "updated", "plan_id": "p1", "added_document_ids": list(document_ids)}
-
     def upload(self, name="lecture.pdf", user="alice", content=PDF):
         return self.client.post("/api/sources/upload", headers={"x-test-user": user},
                                 files=[("files", (name, content, "application/pdf"))])
@@ -153,12 +147,11 @@ class UploadConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.hold = False
         response = await self.upload("week1.pdf", user="alice")
         self.assertEqual(response.status_code, 200, response.text)
+        # An upload never adds the document to the Study Planner (no "planner" outcome either).
         self.assertEqual(response.json(), {"new_files": 1, "new_chunks": 7, "skipped_files": [], "total_indexed_files": 1,
-                                           "sources": [], "planner": {"status": "updated", "plan_id": "p1",
-                                                                      "added_document_ids": ["week1.pdf"]}})
+                                           "sources": []})
         self.assertEqual(self.events, ["index_done"])
         self.assertEqual(self.index_calls, [("alice", ["week1.pdf"], [PDF], ["alice"])])
-        self.assertEqual(self.planner_calls, [("alice", ["week1.pdf"])])
         self.assertEqual((self.data_dir / "users" / "alice" / "week1.pdf").read_bytes(), PDF)
 
     async def test_failures_keep_their_status_codes_and_release_the_lock(self):
@@ -170,7 +163,6 @@ class UploadConcurrencyTests(unittest.IsolatedAsyncioTestCase):
                 response = await self.upload()
                 self.assertEqual(response.status_code, status)
                 self.assertIn(str(error), response.json()["detail"])
-        self.assertEqual(self.planner_calls, [])
         self.index_error = None
         response = await self.upload()   # the lock was released by the failures
         self.assertEqual(response.status_code, 200, response.text)
@@ -200,7 +192,6 @@ class UploadConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         owners = sorted((owner, content[0], folder[0]) for owner, _names, content, folder in self.index_calls)
         self.assertEqual(owners, [("alice", b"%PDF alice", "alice"), ("alice", b"%PDF alice v2", "alice"),
                                   ("bob", b"%PDF bob", "bob")])   # each indexed exactly the bytes it uploaded
-        self.assertEqual(sorted(self.planner_calls), [("alice", ["same.pdf"]), ("alice", ["same.pdf"]), ("bob", ["same.pdf"])])
 
     async def test_delete_waits_for_a_running_index(self):
         deleted_at = []

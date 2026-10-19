@@ -249,6 +249,9 @@ def _matches(step: _Step, session: dict) -> bool:
     if step.activity_type == "review" and step.kind == "review" and session["activity_type"] == "flashcards":
         # Flashcard practice already planned is a valid weak-topic / spaced review: keep it.
         return session.get("reason") != REASON_FINAL_REVIEW
+    if step.activity_type == "flashcards" and session["activity_type"] == "written_quiz":
+        # A Written Quiz planned before recall practice moved to the flashcards still covers it.
+        return True
     if step.activity_type != session["activity_type"]:
         return False
     if step.activity_type == "review":   # a final review and a spaced review are different steps
@@ -538,7 +541,7 @@ def propose_adaptation(context: AdaptationContext, config: AdaptationConfig = DE
             touched |= changed
 
     elif trigger.kind == "materials_added":
-        # Materials added to an accepted plan (e.g. a newly uploaded PDF): propose sessions for each
+        # Materials added to an accepted plan (Add Material): propose sessions for each
         # material that has no session in this plan yet, in free time only -- every existing session
         # (accepted, manually edited, completed) stays exactly where it is and only blocks time.
         planned = {s["document_id"] for s in context.plan_sessions}

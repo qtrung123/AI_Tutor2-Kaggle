@@ -32,7 +32,9 @@ window.fetch = async (input, init = {}) => {
     window.__startCalls.push(start[1]);
     const started = session.status === "scheduled";
     session.status = "in_progress";
-    return json({session: {...session}, started, tool: "quiz", artifact_available: Boolean(session.artifact_id)});
+    // The mock document already has quizzes (A, B, C), as the backend's artifact_available says;
+    // a session may override that (no quiz yet / missing flashcards) through `start`.
+    return json({session: {...session}, started, tool: "quiz", artifact_available: true, prerequisite: null, ...(session.start || {})});
   }
   const detail = p.match(/^\/api\/quiz\/([^/]+)$/);
   if (detail && (init.method || "GET").toUpperCase() === "GET") {
@@ -63,6 +65,7 @@ const state = () => ({
   answers: {...quizAnswers},
   nav: [...$("quiz-player-nav").querySelectorAll(".quiz-player-nav-item")].map((b) => (b.classList.contains("is-current") ? "C" : "") + (b.classList.contains("is-answered") ? "A" : "") || "-"),
   resultsVisible: !$("quiz-results-view").hidden, questionVisible: !$("quiz-player-question-view").hidden,
+  dialogOpen: Boolean(document.querySelector(".quiz-create-dialog.open")),
 });
 const plannerOpen = async (session) => {
   // The planner's own session card and its Start/Resume button (the same element Home and the
@@ -129,6 +132,15 @@ window.__plannerSessions = {};
   const card = [...document.querySelectorAll(".quiz-saved-card")].find((c) => c.querySelector("strong")?.textContent === "Quiz C");
   card.querySelector(".quiz-history-actions button").click(); await sleep(400);
   out.libraryEntry = state();
+  await exitPlayer();
+
+  // 7. The document has no quiz yet and no flashcards: the unified Create Quiz sheet opens (nothing
+  //    is generated) and the learner is told to create the flashcards first.
+  setPage("overview"); await sleep(100);
+  out.createQuiz = await plannerOpen({...session("s-new", "quiz", null, "scheduled"),
+    start: {artifact_available: false, prerequisite: "flashcards"}});
+  out.createQuiz.toast = document.getElementById("toast")?.textContent || "";
+  if (out.createQuiz.dialogOpen) closeQuizCreateDialog();
 
   out.startCalls = window.__startCalls;
   out.detailRequests = window.__detailRequests;
@@ -218,8 +230,19 @@ class PlannerQuizEntryTests(unittest.TestCase):
         self.assertEqual(len(self.out["libraryEntry"]["nav"]), 3)   # the same question navigator
         self.assertEqual(sum("C" in item for item in self.out["libraryEntry"]["nav"]), 1)
 
+    def test_without_any_quiz_the_create_quiz_sheet_opens_with_the_flashcards_prerequisite(self):
+        created = self.out["createQuiz"]
+        self.assertEqual((created["page"], created["tab"]), ("session", "quiz"))
+        self.assertFalse(created["playerOpen"])
+        self.assertTrue(created["dialogOpen"])
+        self.assertIn("Create Flashcards first", created["toast"])
+
+    def test_an_existing_quiz_never_opens_the_create_sheet(self):
+        for key in ("resume", "start", "retry", "noArtifact", "library"):
+            self.assertFalse(self.out[key]["dialogOpen"], key)
+
     def test_planner_path_never_loads_the_default_quiz(self):
-        self.assertEqual(self.out["startCalls"], ["s-resume", "s-start", "s-retry", "s-none", "s-lib"])
+        self.assertEqual(self.out["startCalls"], ["s-resume", "s-start", "s-retry", "s-none", "s-lib", "s-new"])
         self.assertNotIn(None, self.out["detailRequests"])   # every detail request names its exact quiz_id
 
 

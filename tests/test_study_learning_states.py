@@ -1,8 +1,8 @@
 """Study Planner adaptive learning from quiz progress (Task 4).
 
 Learning states, from persisted data only:
-- no quiz yet               -> learn first (summary / flashcards / recall), then create a first quiz;
-- quiz created, not taken   -> the initial quiz;
+- no quiz yet               -> learn first (summary, flashcards), create a first quiz, then review;
+- quiz created, not taken   -> study what is not studied yet, the initial quiz, then review;
 - quiz < 60%                -> weak-topic review, practice, quiz retry;
 - quiz 60-79%               -> review of the incorrect topics, then reassessment;
 - quiz >= 80%               -> lighter spaced repetition.
@@ -60,15 +60,19 @@ class LearningStateTests(ScheduleAssertions, unittest.TestCase):
     def test_no_quiz_learns_first_and_never_assumes_a_quiz_exists(self):
         new = candidates(make_state("d"))
         self.assertEqual([(c.activity_type, c.reason.metadata.get("preparation")) for c in new],
-                         [("summary", "generate_summary"), ("flashcards", "create_flashcards"), ("quiz", "create_quiz")])
-        quiz = new[-1]
+                         [("summary", "generate_summary"), ("flashcards", "create_flashcards"), ("quiz", "create_quiz"),
+                          ("review", None)])
+        quiz = new[2]
         self.assertIsNone(quiz.artifact_id)
-        self.assertIn("create a first quiz", quiz.reason.message)
+        self.assertIn("create a first quiz in the Quiz tab", quiz.reason.message)
         self.assertEqual({c.reason.metadata["learning_stage"] for c in new}, {"no_quiz"})
-        # Summary and flashcards already there: recall practice, then a first quiz to create.
+        # Summary and flashcards already there: read and practice them (nothing to generate), then a
+        # first quiz to create from those flashcards, then a review.
         ready = candidates(make_state("d", summary=True, cards=12))
         self.assertEqual([(c.activity_type, c.reason.metadata.get("preparation")) for c in ready],
-                         [("written_quiz", None), ("quiz", "create_quiz")])
+                         [("summary", None), ("flashcards", None), ("quiz", "create_quiz"), ("review", None)])
+        self.assertIn("read the summary", ready[0].reason.message)
+        self.assertIn("practice the flashcards", ready[1].reason.message)
 
     def test_no_quiz_schedules_learning_before_the_quiz(self):
         ctx = context([material(make_state("d"), "2026-10-09")], EVENINGS)
@@ -84,12 +88,18 @@ class LearningStateTests(ScheduleAssertions, unittest.TestCase):
         state = with_quiz_created(make_state("d", summary=True))
         self.assertEqual(state.state_reason.code, "study_started")
         first = candidates(state)
-        self.assertEqual([(c.activity_type, c.artifact_id, c.estimated_minutes) for c in first], [("quiz", "q-new", 35)])
-        self.assertEqual(first[0].reason.metadata["learning_stage"], "quiz_not_attempted")
-        self.assertIn("take the quiz you created", first[0].reason.message)
+        # Before: one lone 35-minute quiz. Now the summary is read first and a review follows.
+        self.assertEqual([(c.activity_type, c.artifact_id, c.estimated_minutes) for c in first],
+                         [("summary", None, 45), ("quiz", "q-new", 35), ("review", None, 30)])
+        self.assertEqual({c.reason.metadata["learning_stage"] for c in first}, {"quiz_not_attempted"})
+        self.assertIn("take the quiz you created", first[1].reason.message)
+        # The existing quiz needs no new flashcards; once the summary was read, the quiz comes first.
+        read = replace(state, completed_activities=("summary",))
+        self.assertEqual([(c.activity_type, c.artifact_id) for c in candidates(read)], [("quiz", "q-new"), ("review", None)])
         # Without a summary it is generated first; the quiz follows on a later day.
         no_summary = candidates(with_quiz_created(make_state("d")))
-        self.assertEqual([(c.activity_type, c.artifact_id) for c in no_summary], [("summary", None), ("quiz", "q-new")])
+        self.assertEqual([(c.activity_type, c.artifact_id) for c in no_summary],
+                         [("summary", None), ("quiz", "q-new"), ("review", None)])
         ctx = context([material(with_quiz_created(make_state("d")))], EVENINGS)
         result = plan_schedule(ctx)
         self.assert_well_formed(result, ctx)
@@ -102,7 +112,7 @@ class LearningStateTests(ScheduleAssertions, unittest.TestCase):
                         weak_topics=weak(("Regression", "high", 30.0), ("Sampling", "moderate", 55.0)))
         steps = candidates(state)
         self.assertEqual([(c.activity_type, c.reason.code, c.estimated_minutes) for c in steps],
-                         [("review", "low_quiz_score", 30), ("written_quiz", "retrieval_practice", 20),
+                         [("review", "low_quiz_score", 30), ("flashcards", "retrieval_practice", 20),
                           ("quiz_retry", "low_quiz_score", 35)])
         self.assertIn("Regression, Sampling", steps[0].reason.message)
         self.assertEqual([t["name"] for t in steps[0].reason.metadata["weak_topics"]], ["Regression", "Sampling"])
@@ -119,7 +129,7 @@ class LearningStateTests(ScheduleAssertions, unittest.TestCase):
         steps = candidates(state)
         self.assertEqual([(c.activity_type, c.reason.code, c.estimated_minutes) for c in steps],
                          [("summary", "low_quiz_score", 45), ("review", "low_quiz_score", 30),
-                          ("written_quiz", "retrieval_practice", 20), ("quiz_retry", "low_quiz_score", 35)])
+                          ("flashcards", "retrieval_practice", 20), ("quiz_retry", "low_quiz_score", 35)])
         self.assertIn("re-read the summary on Regression, Sampling", steps[0].reason.message)
         self.assertNotIn("preparation", steps[0].reason.metadata)        # the summary already exists
         self.assertEqual({c.reason.metadata["learning_stage"] for c in steps}, {"very_low_score"})
@@ -150,7 +160,7 @@ class LearningStateTests(ScheduleAssertions, unittest.TestCase):
         self.assert_well_formed(result, ctx)
         self.assertEqual(result.capacity.status, "on_track")
         kinds = [p.activity_type for p in result.proposals]
-        self.assertEqual(kinds[:4], ["summary", "review", "written_quiz", "quiz_retry"])
+        self.assertEqual(kinds[:4], ["summary", "review", "flashcards", "quiz_retry"])
         days = [day_of(p.scheduled_start) for p in result.proposals]
         self.assertEqual(days[0], MONDAY.date())                     # due 1 day after yesterday's quiz
         self.assertEqual(days, sorted(set(days)))                    # one per day, in order
@@ -162,18 +172,20 @@ class LearningStateTests(ScheduleAssertions, unittest.TestCase):
         moved = plan_schedule(around)
         self.assert_well_formed(moved, around)
         self.assertEqual([p.activity_type for p in moved.proposals],
-                         ["summary", "review", "written_quiz", "quiz_retry"])
+                         ["summary", "review", "flashcards", "quiz_retry"])
 
     def test_every_learning_state_has_its_own_sequence(self):
         sequences = {
-            "new": (make_state("d"), ["summary", "flashcards", "quiz"]),
-            "summary, no quiz": (make_state("d", summary=True), ["flashcards", "quiz"]),
-            "summary + cards, no quiz": (make_state("d", summary=True, cards=10), ["written_quiz", "quiz"]),
-            "quiz created": (with_quiz_created(make_state("d", summary=True)), ["quiz"]),
+            "new": (make_state("d"), ["summary", "flashcards", "quiz", "review"]),
+            "summary, no quiz": (make_state("d", summary=True), ["summary", "flashcards", "quiz", "review"]),
+            "summary + cards, no quiz": (make_state("d", summary=True, cards=10), ["summary", "flashcards", "quiz", "review"]),
+            "summary + cards studied": (replace(make_state("d", summary=True, cards=10),
+                                                completed_activities=("flashcards", "summary")), ["quiz", "review"]),
+            "quiz created": (with_quiz_created(make_state("d", summary=True)), ["summary", "quiz", "review"]),
             "17%": (make_state("d", summary=True, cards=10, percentage=17.0),
-                    ["summary", "review", "written_quiz", "quiz_retry"]),
-            "45%": (make_state("d", cards=10, percentage=45.0), ["review", "written_quiz", "quiz_retry"]),
-            "70%": (make_state("d", cards=10, percentage=70.0), ["review", "written_quiz", "quiz_retry"]),
+                    ["summary", "review", "flashcards", "quiz_retry"]),
+            "45%": (make_state("d", cards=10, percentage=45.0), ["review", "flashcards", "quiz_retry"]),
+            "70%": (make_state("d", cards=10, percentage=70.0), ["review", "flashcards", "quiz_retry"]),
             "90%": (make_state("d", percentage=90.0), ["review", "review"]),
         }
         for name, (state, expected) in sequences.items():
@@ -184,7 +196,7 @@ class LearningStateTests(ScheduleAssertions, unittest.TestCase):
         state = replace(make_state("d", cards=20, percentage=70.0), weak_topics=weak(("Probability", "moderate", 62.0)))
         steps = candidates(state)
         self.assertEqual([(c.activity_type, c.reason.code, c.estimated_minutes) for c in steps],
-                         [("review", "review_due", 30), ("written_quiz", "retrieval_practice", 20),
+                         [("review", "review_due", 30), ("flashcards", "retrieval_practice", 20),
                           ("quiz_retry", "review_due", 35)])
         self.assertIn("topics you got wrong (Probability)", steps[0].reason.message)
         self.assertEqual(steps[0].reason.metadata["learning_stage"], "moderate_score")
@@ -227,9 +239,9 @@ class LearningStateTests(ScheduleAssertions, unittest.TestCase):
             with self.subTest(percentage=state.quiz.latest_completed.percentage):
                 kinds = [c.activity_type for c in candidates(state)]
                 self.assertNotIn("flashcards", kinds)      # no set to practice
-                self.assertNotIn("written_quiz", kinds)    # needs flashcards
         with_cards = [c.activity_type for c in candidates(make_state("d", cards=10, percentage=40.0))]
-        self.assertIn("written_quiz", with_cards)
+        self.assertIn("flashcards", with_cards)            # recall practice with the existing set
+        self.assertNotIn("written_quiz", with_cards)       # the planner never creates written quizzes
 
     # -- multiple documents and deadlines ------------------------------------------------------------
 
@@ -243,7 +255,7 @@ class LearningStateTests(ScheduleAssertions, unittest.TestCase):
         first = {}
         for p in result.proposals:
             first.setdefault(p.document_id, (p.activity_type, p.reason.metadata.get("learning_stage")))
-        self.assertEqual(first, {"new": ("summary", "no_quiz"), "taken": ("quiz", "quiz_not_attempted"),
+        self.assertEqual(first, {"new": ("summary", "no_quiz"), "taken": ("summary", "quiz_not_attempted"),
                                  "low": ("review", "low_score"), "mid": ("review", "moderate_score"),
                                  "top": ("review", "strong_score")})
         self.assertEqual(max(Counter((p.document_id, p.scheduled_start[:10]) for p in result.proposals).values()), 1)
@@ -254,7 +266,7 @@ class LearningStateTests(ScheduleAssertions, unittest.TestCase):
         result = plan_schedule(ctx)
         self.assert_well_formed(result, ctx)
         self.assertEqual(result.capacity.status, "on_track")
-        self.assertEqual([p.activity_type for p in result.proposals][:3], ["review", "written_quiz", "quiz_retry"])
+        self.assertEqual([p.activity_type for p in result.proposals][:3], ["review", "flashcards", "quiz_retry"])
         for p in result.proposals:
             self.assertLess(day_of(p.scheduled_start), date(2026, 10, 2))
         # No time at all before the deadline: reported, never forced.
@@ -314,7 +326,7 @@ class BalancedAdaptationTests(unittest.TestCase):
         state = make_state("mkt", cards=10, percentage=40.0, completed_at=self.QUIZ_THIS_MORNING)
         result = self.propose(AdaptationTrigger("quiz_completed", document_id="mkt"), [material(state)], [])
         added = [(a.activity_type, a.scheduled_start[:10], a.duration_minutes) for a in result.added]
-        self.assertEqual(added, [("review", "2026-09-25", 30), ("written_quiz", "2026-09-26", 20),
+        self.assertEqual(added, [("review", "2026-09-25", 30), ("flashcards", "2026-09-26", 20),
                                  ("quiz_retry", "2026-09-27", 35)])
 
     def test_after_a_strong_quiz_only_light_spaced_reviews_are_added(self):
@@ -343,11 +355,11 @@ class BalancedAdaptationTests(unittest.TestCase):
 
     def test_missed_session_replacement_avoids_a_day_the_document_already_studies(self):
         mat = material(make_state("stats", summary=True, cards=8))
-        sessions = [session("missed", "stats", "written_quiz", "2026-09-24T09:00:00", 20),
+        sessions = [session("missed", "stats", "flashcards", "2026-09-24T09:00:00", 20),
                     session("other", "stats", "quiz", "2026-09-27T18:00:00", 35)]
         result = self.propose(AdaptationTrigger("session_missed", session_id="missed"), [mat],
                               sessions + [session("busy", "stats", "review", "2026-09-24T18:00:00", 20, status="completed")])
-        self.assertEqual([(a.activity_type, a.scheduled_start[:10]) for a in result.added], [("written_quiz", "2026-09-25")])
+        self.assertEqual([(a.activity_type, a.scheduled_start[:10]) for a in result.added], [("flashcards", "2026-09-25")])
         self.assertEqual((result.moved, result.cancelled), ((), ()))     # the planned quiz stays put
 
     def test_accepted_sessions_keep_their_length_and_google_busy_time_is_respected(self):

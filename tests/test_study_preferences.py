@@ -184,7 +184,9 @@ class PreferencesAppliedTests(PlannerApiCase):
         candidates = self.client.get(f"/api/planner/plans/{plan['plan_id']}/candidates",
                                      params={"utc_offset_minutes": 0, "local_now": LOCAL_NOW}).json()
         lengths = {c["activity_type"]: c["estimated_minutes"] for c in candidates}
-        self.assertEqual(lengths.get("review"), 40)
+        # The plan's review after the first quiz is still scheduled, so the retry is what is left.
+        self.assertEqual(lengths.get("quiz_retry"), 25)
+        self.assertEqual(study_preferences.scheduler_config(self.alice).durations["review"], 40)
 
 
 class ManualEditTests(PlannerApiCase):

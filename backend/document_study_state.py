@@ -122,6 +122,9 @@ class DocumentStudyState:
     learning_state: str  # derived: new | learning | needs_review | on_track | completed
     state_reason: StateReason
     weak_topics: tuple[WeakTopic, ...] = ()   # weakest first; empty when mastery has no evidence
+    # Activity types of the learner's completed planner sessions (any plan), e.g. ("summary",):
+    # the scheduler does not plan a reading/practice step the learner already completed.
+    completed_activities: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -264,4 +267,5 @@ def get_document_study_state(owner_id: str, document_id: str, plan_id: str | Non
         last_activity_at=_latest_timestamp(last_session_at, quiz.last_activity_at),
         plan_id=plan_id if material else None, planner_learning_state=planner_learning_state,
         learning_state=learning_state, state_reason=state_reason, weak_topics=weak_topics,
+        completed_activities=tuple(sorted({session["activity_type"] for session in completed_sessions})),
     )

@@ -69,7 +69,7 @@ class StudyAdaptationApiTests(PlannerDatabaseMixin, unittest.TestCase):
         # 30% is very weak: relearn from the summary before the flashcard review, practice and retry.
         self.assertEqual([(a["activity_type"], a["reason_code"]) for a in body["added"]],
                          [("summary", "low_quiz_score"), ("review", "low_quiz_score"),
-                          ("written_quiz", "retrieval_practice"), ("quiz_retry", "low_quiz_score")])
+                          ("flashcards", "retrieval_practice"), ("quiz_retry", "low_quiz_score")])
         self.assertEqual(body["added"][3]["artifact_id"], "q1")
         starts = [a["scheduled_start"] for a in body["added"]]
         for before, after in zip(starts, starts[1:]):

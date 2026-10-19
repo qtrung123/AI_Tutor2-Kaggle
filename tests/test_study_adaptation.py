@@ -81,10 +81,10 @@ class QuizTriggerTests(AdaptationAssertions, unittest.TestCase):
         result = propose(quiz_done("mkt"), [mkt], sessions)
         self.assertEqual([(m.session_id, m.to_start) for m in result.moved], [("cards", "2026-09-25T18:00:00")])
         # The planned flashcard practice (kept, with its own 10 minutes) is the weak-topic review; the
-        # Written Quiz (retrieval practice) goes to the next day rather than the same one, and the
-        # quiz retry a day after that.
+        # flashcard recall practice goes to the next day rather than the same one, and the quiz retry
+        # a day after that.
         self.assertEqual([(a.activity_type, a.scheduled_start, a.reason_code) for a in result.added],
-                         [("written_quiz", "2026-09-26T18:00:00", "retrieval_practice"),
+                         [("flashcards", "2026-09-26T18:00:00", "retrieval_practice"),
                           ("quiz_retry", "2026-09-27T18:00:00", "low_quiz_score")])
         self.assertEqual(result.added[1].artifact_id, "q-mkt")
         self.assertEqual((result.cancelled, result.significance, result.unchanged_count), ((), "large", 0))
@@ -122,9 +122,9 @@ class QuizTriggerTests(AdaptationAssertions, unittest.TestCase):
         mkt = fx.material(fx.make_state("mkt", "Marketing", summary=True, cards=10, percentage=70,
                                         completed_at=QUIZ_THIS_MORNING))
         result = propose(quiz_done("mkt"), [mkt], [])
-        # 70% -> review in 2 days, a Written Quiz as reinforcement, then a retry still 2 days after the review.
+        # 70% -> review in 2 days, flashcard recall practice as reinforcement, then a retry still 2 days after the review.
         self.assertEqual([(a.activity_type, a.scheduled_start) for a in result.added],
-                         [("review", "2026-09-26T18:00:00"), ("written_quiz", "2026-09-27T18:00:00"),
+                         [("review", "2026-09-26T18:00:00"), ("flashcards", "2026-09-27T18:00:00"),
                           ("quiz_retry", "2026-09-28T18:00:00")])
         self.assertEqual((result.moved, result.cancelled), ((), ()))
 
@@ -193,7 +193,8 @@ class MissedAndSkippedTests(AdaptationAssertions, unittest.TestCase):
         self.assert_rules(result, sessions, [stats], other)
 
     def test_no_replacement_when_no_longer_needed(self):
-        stats = fx.material(fx.make_state("stats", "Statistics", summary=True))
+        # The summary was read in an earlier completed session: a missed reading is not needed again.
+        stats = fx.material(replace(fx.make_state("stats", "Statistics", summary=True), completed_activities=("summary",)))
         sessions = [session("missed", "stats", "summary", "2026-09-24T09:00:00", 40)]
         result = propose(AdaptationTrigger("session_missed", session_id="missed"), [stats], sessions)
         self.assertEqual(result.change_count, 0)
@@ -253,7 +254,9 @@ class AvailabilityAndDeadlineTests(AdaptationAssertions, unittest.TestCase):
         self.assertEqual(result.reasons, ("No changes needed: the plan still fits.",))
 
     def test_earlier_deadline_moves_late_sessions_inside_it(self):
-        mkt = fx.material(fx.make_state("mkt", "Marketing", summary=True, cards=10), deadline="2026-09-28")
+        # An older plan: its Written Quiz still counts as the flashcard practice (the summary was read).
+        mkt = fx.material(replace(fx.make_state("mkt", "Marketing", summary=True, cards=10),
+                                  completed_activities=("summary",)), deadline="2026-09-28")
         sessions = [session("written", "mkt", "written_quiz", "2026-09-24T18:00:00", 15, reason="retrieval_practice"),
                     session("quiz", "mkt", "quiz", "2026-09-29T18:00:00", 30),
                     session("final", "mkt", "review", "2026-10-04T18:00:00", 10, reason="final_review")]
@@ -265,7 +268,8 @@ class AvailabilityAndDeadlineTests(AdaptationAssertions, unittest.TestCase):
         self.assert_rules(result, sessions, [mkt])
 
     def test_new_deadline_adds_a_final_review(self):
-        mkt = fx.material(fx.make_state("mkt", "Marketing", summary=True, cards=10), deadline="2026-09-30")
+        mkt = fx.material(replace(fx.make_state("mkt", "Marketing", summary=True, cards=10),
+                                  completed_activities=("summary",)), deadline="2026-09-30")
         sessions = [session("written", "mkt", "written_quiz", "2026-09-24T18:00:00", 15, reason="retrieval_practice"),
                     session("quiz", "mkt", "quiz", "2026-09-25T18:00:00", 30)]
         result = propose(AdaptationTrigger("deadline_changed", document_id="mkt"), [mkt], sessions)

@@ -54,7 +54,6 @@ const FLASHCARDS_API_BASE_URL = apiUrl("/api/flashcards");
 const PLANNER_AVAILABILITY_API_URL = apiUrl("/api/planner/availability");
 
 const PLANNER_PLANS_API_URL = apiUrl("/api/planner/plans");
-const PLANNER_INCLUDE_DOCUMENTS_API_URL = apiUrl("/api/planner/include-documents");
 
 const PLANNER_SESSIONS_API_URL = apiUrl("/api/planner/sessions");
 
