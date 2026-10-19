@@ -161,7 +161,8 @@ const cardText = (card) => card.textContent;
   };
 
   out.practiceEmptyBefore = Boolean(document.querySelector("#quiz-history-list .quiz-practice-empty"));
-  // Delete both Practice items: the toast says Practice and the section turns into its empty state.
+  // Delete both Practice items: the toast says Practice and the section disappears (no creation entry:
+  // new quizzes are only made with Create Quiz).
   for (const title of ["Flashcard Practice", "Completed Practice"]) {
     const practiceMenu = byTitle(title).querySelector(".quiz-card-menu");
     practiceMenu.open = true;
@@ -171,14 +172,10 @@ const cardText = (card) => card.textContent;
   const practiceSection = document.querySelector("#quiz-history-list .quiz-list-section-practice");
   out.practiceEmpty = {
     toast: document.getElementById("toast").textContent,
-    heading: practiceSection?.querySelector(".quiz-list-section-heading")?.textContent,
-    text: practiceSection?.querySelector(".quiz-practice-empty p")?.textContent,
-    action: practiceSection?.querySelector(".quiz-practice-empty button")?.textContent,
+    sectionShown: Boolean(practiceSection),
+    practiceEntries: document.querySelectorAll("#quiz-history-list .quiz-practice-empty").length,
     cardTitles: cards().map((c) => c.querySelector("strong")?.textContent),
   };
-  practiceSection?.querySelector(".quiz-practice-empty button")?.click();
-  await sleep(300);
-  out.practiceEmpty.sessionTab = document.body.dataset.sessionTab;
 
   const pre = document.createElement("pre"); pre.id = "harness-out"; pre.textContent = JSON.stringify(out); document.body.appendChild(pre);
 })().catch((error) => { out.fatal = String(error && error.stack || error); const pre = document.createElement("pre"); pre.id = "harness-out"; pre.textContent = JSON.stringify(out); document.body.appendChild(pre); });
@@ -241,18 +238,13 @@ class QuizLibraryUiTests(unittest.TestCase):
     def test_completed_practice_never_offers_regenerate_quiz(self):
         self.assertEqual(self.out["practiceDone"]["buttons"], ["Retake Practice", "Review Answers"])
 
-    def test_practice_empty_state_only_when_no_practice_exists(self):
+    def test_without_practice_the_section_is_gone_and_offers_no_practice_creation(self):
         self.assertFalse(self.out["practiceEmptyBefore"])
         empty = self.out["practiceEmpty"]
         self.assertEqual(empty["toast"], "Practice deleted")
-        self.assertEqual(empty["heading"], "Practice")
-        self.assertEqual(empty["text"], "Practice is created from your flashcards.")
+        self.assertFalse(empty["sectionShown"])
+        self.assertEqual(empty["practiceEntries"], 0)
         self.assertEqual(set(empty["cardTitles"]), {"In Progress Quiz", "Completed Quiz"})
-
-    def test_practice_empty_state_without_loaded_flashcards_goes_to_the_flashcards_tab(self):
-        # The mock has no saved flashcards, so availability is unknown here: the action navigates.
-        self.assertEqual(self.out["practiceEmpty"]["action"], "Go to Flashcards")
-        self.assertEqual(self.out["practiceEmpty"]["sessionTab"], "flashcards")
 
     def test_completed_normal_quiz_keeps_its_actions(self):
         self.assertEqual(self.out["completedButtons"], ["Retake Quiz", "Review Answers", "Regenerate Quiz"])

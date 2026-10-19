@@ -295,7 +295,8 @@ def saved_quiz(planner_version: str) -> dict:
     return {
         "quiz_id": f"saved-{planner_version}", "document_id": DOCUMENT["id"], "difficulty": "easy", "topic_id": "document",
         "title": "Lecture", "assessment_scope": "document",
-        "assessment_plan": {"planner_version": planner_version, "requested_count": 12},
+        "assessment_plan": {"planner_version": planner_version, "requested_count": 12,
+                            "composition": quiz_service.QUIZ_COMPOSITION_VERSION, "count_mode": "custom"},
         "questions": [{"id": index + 1, "question_type": "single_choice"} for index in range(12)],
     }
 

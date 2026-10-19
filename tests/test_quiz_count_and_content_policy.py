@@ -18,21 +18,22 @@ TOPIC = {"topic_id": "topic_1", "name": "Transport"}
 
 
 class QuizCountAndContentPolicyTests(unittest.TestCase):
-    def test_only_12_15_18_and_20_are_allowed_and_frontend_defaults_to_twelve(self):
+    def test_ai_auto_by_default_or_a_custom_total_and_the_frontend_defaults_to_auto(self):
         for model in (QuizGenerateRequest, QuizRegenerateRequest):
             required = {"difficulty": "easy", "assessment_scope": "document"}
             if model is QuizGenerateRequest:
                 required["document_id"] = "lecture.pdf"
                 required["quiz_name"] = "Sample Quiz"
-            self.assertEqual(model(**required).question_count, 12)
-            for count in (12, 15, 18, 20):
+            self.assertIsNone(model(**required).question_count)
+            for count in (5, 10, 16, 25, 40):
                 self.assertEqual(model(**required, question_count=count).question_count, count)
-            for count in (10, 16, 19, 25):
+            for count in (0, 4, 41):
                 with self.assertRaises(ValidationError):
                     model(**required, question_count=count)
         frontend = frontend_script_text()
-        self.assertIn("[12, 15, 18, 20].includes(value) ? value : 12", frontend)
-        self.assertIn("[12, 15, 18, 20].forEach((count)", frontend)
+        self.assertIn('option.selected = value === "auto";', frontend)
+        self.assertIn("const QUIZ_CUSTOM_MIN_QUESTIONS = 5;", frontend)
+        self.assertIn("const QUIZ_CUSTOM_MAX_QUESTIONS = 40;", frontend)
 
     def test_initial_prompt_requires_evidence_led_mixed_types_without_ratio(self):
         prompt = _build_v2_prompt("lecture.pdf", TOPIC, "easy", [GROUP], 1, [], False)

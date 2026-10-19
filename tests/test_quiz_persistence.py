@@ -214,6 +214,7 @@ class ExplicitGenerateAlwaysCreatesANewQuizTests(unittest.TestCase):
             patch.object(quiz_service, "ChatOllama", FakeModel),
             patch.object(quiz_generation_api, "prepare_generation_model"),
             patch.object(quiz_generation_api, "resolve_generation_model", side_effect=lambda value: value),
+            patch.object(quiz_generation_api, "usable_flashcards", return_value=[{"flashcard_id": "f1"}]),
         ):
             return quiz_generation_api.quiz_generate(request, current_user=self.owner)
 

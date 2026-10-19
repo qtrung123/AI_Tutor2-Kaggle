@@ -414,7 +414,7 @@ class WiringTests(unittest.TestCase):
         for topic in ("quiz-topic", "Topic"):
             self.assertNotIn(topic, form)
         self.assertIn('caption.textContent = "Number of questions"', SOURCE)
-        self.assertIn("[12, 15, 18, 20].forEach", SOURCE)
+        self.assertIn('[["auto", "AI Auto"], ["custom", "Custom"]].forEach', SOURCE)
         self.assertLess(SOURCE.index('caption.textContent = "Number of questions"'), SOURCE.index("generateQuizButton.before(label)"))
         for removed in ("quizTopicSelect", "quizTopicField", "updateTopicOptions", "updateAssessmentScope", "Choose an extracted topic",
                         "quizHistoryScopeFilter", 'makeFilter("Scope"'):

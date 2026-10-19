@@ -10,11 +10,47 @@ function currentQuizKey() {
 }
 
 // A saved quiz counts as "saved" for the current form only if it was made with the same model and
-// number of questions. (A quiz saved before models were recorded has neither: it stays "saved".)
+// (for a Custom count) number of questions. (A quiz saved before models were recorded has neither:
+// it stays "saved".) AI Auto sizes every quiz from its material, so any count matches it.
 function variantMatchesSettings(variant) {
   const modelMatches = !variant.model_id && !variant.model_name || !selectedModelId || variant.model_id === selectedModelId;
-  const countMatches = !variant.requested_count || variant.requested_count === selectedQuestionCount();
+  const count = selectedQuestionCount();
+  const countMatches = count === null || !variant.requested_count || variant.requested_count === count;
   return modelMatches && countMatches;
+}
+
+// A new quiz is built from the document's flashcards and its text: without flashcards the Create
+// Quiz sheet says "Create Flashcards first" and links to the Flashcards tab (nothing is generated
+// for the learner). flashcard_count comes with the quiz statuses; unknown counts as available and
+// the backend still refuses (409) when there are none.
+function selectedDocumentHasFlashcards() {
+  const count = getSelectedQuizStatus()?.flashcard_count;
+  return count === undefined || count > 0;
+}
+
+function renderQuizFlashcardRequirement() {
+  if (!generateQuizButton) return;
+  let panel = document.getElementById("quiz-flashcards-required");
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "quiz-flashcards-required";
+    panel.className = "quiz-flashcards-required";
+    panel.innerHTML = '<p><strong>Create Flashcards first</strong><span>A quiz is built from this document’s flashcards and its text. Generate the flashcards in the Flashcards tab, then come back here.</span></p>';
+    const go = document.createElement("button");
+    go.type = "button";
+    go.className = "secondary-button";
+    go.id = "quiz-go-to-flashcards";
+    go.textContent = "Go to Flashcards";
+    go.addEventListener("click", () => {
+      closeQuizCreateDialog();
+      setSessionTab("flashcards");
+    });
+    panel.appendChild(go);
+    generateQuizButton.before(panel);
+  }
+  const ready = selectedDocumentHasFlashcards();
+  panel.hidden = ready;
+  if (!quizGenerationInFlight) generateQuizButton.disabled = !ready;
 }
 
 function updateDifficultyOptions() {
@@ -491,7 +527,7 @@ function renderQuizHistory() {
   const filterSelects = filters.querySelectorAll("select");
   filterSelects[0].value = quizHistoryDifficultyFilter;
 
-  const { visibleGroups, visibleSaved, visiblePending, emptyMessage, hasPractice } = quizListState(groups);
+  const { visibleGroups, visibleSaved, visiblePending, emptyMessage } = quizListState(groups);
   if (emptyMessage) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
@@ -507,7 +543,6 @@ function renderQuizHistory() {
       create.addEventListener("click", openQuizCreateDialog);
       quizHistoryList.appendChild(create);
     }
-    if (!hasPractice) quizHistoryList.appendChild(createPracticeEmptySection());
     return;
   }
   // Flashcard written practice (backend `practice` flag, planner_version flashcard_written_v1) is
@@ -583,31 +618,11 @@ function renderQuizHistory() {
     card.append(info, score, actions, history);
     sectionListFor(isPractice).appendChild(card);
   });
-  // An empty section is hidden, except that a document with no Practice at all says where it comes from.
+  // An empty section is hidden. Practice quizzes made earlier (Flashcards -> Practice as Quiz, the
+  // Planner's written quizzes) stay listed; new quizzes are only created with Create Quiz.
   [quizzesSection, practiceSection].forEach(({ section, list }) => {
     if (list.children.length) quizHistoryList.appendChild(section);
   });
-  if (!hasPractice) quizHistoryList.appendChild(createPracticeEmptySection());
-}
-
-// `flashcards` holds this document's saved set only once the Flashcards tab has looked it up (for the
-// selected model/language), so an empty list means "not known here", not "no flashcards": then the
-// action opens the Flashcards tab, which shows either the deck (with Practice as Quiz) or Generate.
-function createPracticeEmptySection() {
-  const { section, list } = createQuizListSection("Practice", "quiz-list-section-practice");
-  const empty = document.createElement("div");
-  empty.className = "quiz-practice-empty";
-  const text = document.createElement("p");
-  text.textContent = "Practice is created from your flashcards.";
-  const action = document.createElement("button");
-  action.className = "text-button";
-  action.type = "button";
-  const flashcardsLoaded = flashcards.length > 0 && loadedFlashcardKey === flashcardsKey();
-  action.textContent = flashcardsLoaded ? "Create Practice" : "Go to Flashcards";
-  action.addEventListener("click", () => (flashcardsLoaded ? openFlashcardQuizDialog() : setSessionTab("flashcards")));
-  empty.append(text, action);
-  list.appendChild(empty);
-  return section;
 }
 
 function createQuizListSection(headingText, className) {
@@ -644,7 +659,7 @@ function createQuizStatusCard(className, titleText, metaText, statusText, detail
 function createPendingQuizCard(pending) {
   return createQuizStatusCard(
     "quiz-pending-card", pending.name || "Untitled Quiz", `Entire Document · ${pending.difficulty}`,
-    `Generating ${pending.count} questions…`, `Using ${modelLabel(pending.modelId)} · this quiz appears here as soon as it is ready`,
+    pending.count ? `Generating ${pending.count} questions…` : "Generating quiz (AI Auto)…", `Using ${modelLabel(pending.modelId)} · this quiz appears here as soon as it is ready`,
   ).card;
 }
 
@@ -912,6 +927,11 @@ async function generateAssessmentQuiz() {
     return;
   }
 
+  if (!selectedDocumentHasFlashcards()) {
+    renderQuizFlashcardRequirement();
+    showToast("Create Flashcards first");
+    return;
+  }
   const generationRequest = selectedQuizGenerationRequest();
   if (!generationRequest.quiz_name) {
     showToast("Enter a quiz name");
@@ -937,11 +957,12 @@ async function generateAssessmentQuiz() {
     const generatedQuiz = await requestGeneratedQuiz(generationRequest);
     if (quizNameInput) quizNameInput.value = "";
     closeQuizCreateDialog({ force: true });
-    // A partial result (fewer grounded questions than requested) is still a success -- grounding
-    // quality was prioritized over hitting the exact requested count.
+    // A partial result (fewer distinct grounded questions than requested) is still a success -- the
+    // quiz never repeats a concept or invents material to reach the count.
+    const actual = generatedQuiz.actual_count ?? generatedQuiz.question_count;
     showToast(generatedQuiz.status === "partial"
-      ? `Quiz created with ${generatedQuiz.actual_count ?? generatedQuiz.question_count} questions. Grounded quality was prioritized.`
-      : "Quiz created");
+      ? (generatedQuiz.assessment_plan?.shortfall_message || `Quiz created with ${actual} questions. Grounded quality was prioritized.`)
+      : `Quiz created with ${actual} questions`);
   } catch (error) {
     showQuizSheetError(error.message || "Assessment Agent could not generate a quiz.");
   } finally {
@@ -1335,7 +1356,8 @@ function quizSettingsMismatch(quiz, request = selectedQuizGenerationRequest()) {
   const countDiffers = Boolean(requested && request.question_count && requested !== Number(request.question_count));
   if (!modelDiffers && !countDiffers) return "";
   const made = [info ? `generated by ${modelLabel(info.model_id, info.name)}` : "", requested ? `${requested} questions` : ""].filter(Boolean).join(", ");
-  return `This saved quiz was ${made}. Your current settings are ${modelLabel(request.model_id)}, ${request.question_count} questions. Use Regenerate Quiz to create a new one with them.`;
+  const count = request.question_count ? `${request.question_count} questions` : "AI Auto question count";
+  return `This saved quiz was ${made}. Your current settings are ${modelLabel(request.model_id)}, ${count}. Use Regenerate Quiz to create a new one with them.`;
 }
 
 function assessmentTitleText(quiz) {
@@ -2665,14 +2687,16 @@ function ensureQuizQuestionCountSelect() {
   label.id = "quiz-question-count-field";
   const caption = document.createElement("span");
   caption.textContent = "Number of questions";
+  // "auto" (default): the backend sizes the quiz from the document and its flashcards. "custom": the
+  // learner's TOTAL number of questions across every type (#quiz-question-count-input).
   quizQuestionCountSelect = document.createElement("select");
   quizQuestionCountSelect.id = "quiz-question-count-select";
   quizQuestionCountSelect.className = "visually-hidden";
-  [12, 15, 18, 20].forEach((count) => {
+  [["auto", "AI Auto"], ["custom", "Custom"]].forEach(([value, text]) => {
     const option = document.createElement("option");
-    option.value = String(count);
-    option.textContent = String(count);
-    option.selected = count === 12;
+    option.value = value;
+    option.textContent = text;
+    option.selected = value === "auto";
     quizQuestionCountSelect.appendChild(option);
   });
   const segmented = document.createElement("div");
@@ -2680,29 +2704,55 @@ function ensureQuizQuestionCountSelect() {
   segmented.id = "quiz-count-segmented";
   segmented.setAttribute("role", "radiogroup");
   segmented.setAttribute("aria-label", "Number of questions");
+  quizQuestionCountInput = document.createElement("input");
+  quizQuestionCountInput.type = "number";
+  quizQuestionCountInput.id = "quiz-question-count-input";
+  quizQuestionCountInput.className = "quiz-question-count-input";
+  quizQuestionCountInput.min = String(QUIZ_CUSTOM_MIN_QUESTIONS);
+  quizQuestionCountInput.max = String(QUIZ_CUSTOM_MAX_QUESTIONS);
+  quizQuestionCountInput.step = "1";
+  quizQuestionCountInput.value = "20";
+  quizQuestionCountInput.setAttribute("aria-label", "Total number of questions");
+  const hint = document.createElement("small");
+  hint.id = "quiz-question-count-hint";
+  hint.className = "quiz-question-count-hint";
   // Changing the settings never changes a saved quiz: only the "saved" marks and the hint update.
-  quizQuestionCountSelect.addEventListener("change", () => {
+  const settingsChanged = () => {
     updateDifficultyOptions();
     renderQuizCountSegments();
     if (currentQuiz?.questions?.length) assessmentTitle.textContent = assessmentTitleText(currentQuiz);
+  };
+  quizQuestionCountSelect.addEventListener("change", settingsChanged);
+  quizQuestionCountInput.addEventListener("change", () => {
+    quizQuestionCountInput.value = String(selectedQuestionCount() ?? QUIZ_CUSTOM_MIN_QUESTIONS);   // clamp what was typed
+    settingsChanged();
   });
-  label.append(caption, quizQuestionCountSelect, segmented);
+  label.append(caption, quizQuestionCountSelect, segmented, quizQuestionCountInput, hint);
   generateQuizButton.before(label);
   quizQuestionCountField = label;
   renderQuizCountSegments();
 }
 
-// The Create Quiz sheet's visible Question count control: segmented buttons mirroring the real
-// (visually hidden) #quiz-question-count-select.
+// The Create Quiz sheet's visible Question count control: AI Auto / Custom buttons mirroring the
+// real (visually hidden) #quiz-question-count-select, and the total field shown for Custom only.
 function renderQuizCountSegments() {
   const container = document.getElementById("quiz-count-segmented");
   if (!container || !quizQuestionCountSelect) return;
   container.innerHTML = "";
+  const custom = quizQuestionCountSelect.value === "custom";
+  if (quizQuestionCountInput) quizQuestionCountInput.hidden = !custom;
+  const hint = document.getElementById("quiz-question-count-hint");
+  if (hint) {
+    hint.textContent = custom
+      ? `Total questions (${QUIZ_CUSTOM_MIN_QUESTIONS}–${QUIZ_CUSTOM_MAX_QUESTIONS}) across Multiple Choice, Fill in the Blanks and Matching. A matching activity counts as one question.`
+      : "The quiz size is chosen from the document’s topics, content and flashcards.";
+  }
   Array.from(quizQuestionCountSelect.options).forEach((option) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "quiz-segmented-option";
-    button.textContent = option.value;
+    button.dataset.value = option.value;
+    button.textContent = option.textContent;
     button.setAttribute("role", "radio");
     const selected = option.value === quizQuestionCountSelect.value;
     button.setAttribute("aria-checked", String(selected));
@@ -2754,6 +2804,9 @@ function openQuizCreateDialog() {
   renderQuizDifficultySegments();
   renderQuizCountSegments();
   renderQuizSheetModelSummary();
+  renderQuizFlashcardRequirement();
+  // Flashcards may have been generated since the statuses were read: check again.
+  loadQuizStatuses().then(renderQuizFlashcardRequirement);
   if (!quizCreateDialog) {
     quizCreateDialog = document.createElement("div");
     quizCreateDialog.className = "quiz-create-dialog";

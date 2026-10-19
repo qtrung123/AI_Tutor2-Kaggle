@@ -36,6 +36,7 @@ document's flashcards when it has any.
 artifacts (planner_version FLASHCARD_QUIZ_PLANNER_VERSION) so the Quiz Library, Quiz Player,
 autosave/resume, results, review and history work unchanged, and are never mastery evidence.
 """
+import math
 import random
 import re
 import unicodedata
@@ -80,6 +81,13 @@ CHOICE_DISTRACTORS = 3
 # multiple choice (12 -> 6 + 4 + 2).
 DOCUMENT_MIX_MULTI_BLANK_SHARE = 1 / 3
 DOCUMENT_MIX_MATCHING_SHARE = 1 / 6
+CARD_SHARE_OF_CHOICE = 0.5   # flashcards write at most half of a generated quiz's multiple choice part
+MATCHING_CARD_SHARE = 0.4    # ... and at most this share of the cards go to matching activities
+# Question count of a generated quiz: AI Auto (auto_question_count) or a custom TOTAL in this range.
+QUIZ_AUTO_MIN_QUESTIONS = 10
+QUIZ_AUTO_MAX_QUESTIONS = 30
+QUIZ_CUSTOM_MIN_QUESTIONS = 5
+QUIZ_CUSTOM_MAX_QUESTIONS = 40
 MATCHING_MIN_PAIRS = 3
 MATCHING_MAX_PAIRS = 4   # one option letter (A-D) per card answer
 MATCHING_INSTRUCTION = "Match each card with its answer."
@@ -572,46 +580,145 @@ def _spread(items: list, count: int) -> list:
     return [items[round(index * (len(items) - 1) / (count - 1))] for index in range(count)]
 
 
+def _round_robin_by_topic(cards: list[dict]) -> list[dict]:
+    """The cards reordered to take one card per topic in turn (topics in first-seen order), so every
+    question type draws on every topic before any topic repeats."""
+    by_topic: dict[str, list[dict]] = {}
+    for card in cards:
+        by_topic.setdefault(str(card.get("topic_id") or ""), []).append(card)
+    queues, ordered = list(by_topic.values()), []
+    while any(queues):
+        for queue in queues:
+            if queue:
+                ordered.append(queue.pop(0))
+    return ordered
+
+
+def auto_question_count(units: list[dict], cards: list[dict], topic_count: int) -> int:
+    """AI Auto: the TOTAL number of question activities the material supports.
+
+    One per distinct concept: every document excerpt (about one testable fact each), plus half the
+    flashcards (they are drawn from the same text, so about half add a concept the excerpts would
+    not), plus one per topic beyond the first (spread). Kept within QUIZ_AUTO_MIN_QUESTIONS..
+    QUIZ_AUTO_MAX_QUESTIONS, and never above excerpts + flashcards: nothing is inflated."""
+    concepts = len(units) + math.ceil(len(cards) / 2) + max(0, topic_count - 1)
+    capacity = max(1, len(units) + len(cards))
+    return max(min(QUIZ_AUTO_MIN_QUESTIONS, capacity), min(QUIZ_AUTO_MAX_QUESTIONS, concepts, capacity))
+
+
+def _alternate_types(questions: list[dict]) -> list[dict]:
+    """One question of each type in turn, so a quiz never shows a run of the same activity."""
+    by_type: dict[str, list[dict]] = {}
+    for question in questions:
+        by_type.setdefault(question["question_type"], []).append(question)
+    queues, ordered = list(by_type.values()), []
+    while any(queues):
+        for queue in queues:
+            if queue:
+                ordered.append(queue.pop(0))
+    return ordered
+
+
 def build_document_question_mix(
     owner_id: str, document_id: str, units: list[dict], scope_topic: dict, difficulty: str,
-    question_count: int, rng: random.Random, language: str | None = None,
-) -> list[dict]:
-    """The multi_blank and matching questions a generated quiz of `question_count` questions adds to
-    its multiple choice ones (ids are assigned by the caller).
+    question_count: int, rng: random.Random, language: str | None = None, cards: list[dict] | None = None,
+) -> dict:
+    """Everything of a generated quiz of `question_count` TOTAL activities that the model does not
+    write. Returns {"questions", "text_multi_blanks", "text_target", "choice_target", "avoid_answers",
+    "avoid_sentences"}; ids are assigned by the caller.
 
-    multi_blank: about DOCUMENT_MIX_MULTI_BLANK_SHARE of the quiz, from sentences of the quiz's own
-    excerpts (`units`) written in the quiz `language` (when given), spread over the document, one
-    per excerpt first. Matching: about
-    DOCUMENT_MIX_MATCHING_SHARE activities from the document's newest flashcards (a topic quiz: that
-    topic's cards); none when the document has no flashcards -- the quiz never requires them."""
+    Targets: about DOCUMENT_MIX_MATCHING_SHARE matching activities (a matching activity is ONE
+    question), DOCUMENT_MIX_MULTI_BLANK_SHARE multi_blank, the rest multiple choice. Every card is
+    used at most once (one concept, one question) and the cards are taken one topic at a time:
+      1. matching from the flashcards;
+      2. multi_blank: half from flashcards (a document sentence about the card, else its own answer
+         sentence), the rest from the quiz's own excerpts (`text_multi_blanks`, chosen by the caller
+         with pick_text_multi_blanks), flashcards again when excerpts run out -- never the same
+         sentence twice;
+      3. multiple choice from flashcards, at most CARD_SHARE_OF_CHOICE of the multiple choice part.
+    `choice_target` is what is left for the model (more when a source ran short). The avoid sets
+    let the caller drop model questions that repeat a card answer or a flashcard multi_blank sentence.
+    Cards and sentences in another language than the quiz `language` are skipped."""
     topic_id = str(scope_topic["topic_id"])
     shared = {
         "topic_id": topic_id, "topic_name": str(scope_topic.get("name") or topic_id), "source_subtopic_ids": [],
         "concept_plan_id": QUIZ_ENGINE_VERSION, "assessment_capacity": 0, "difficulty": difficulty,
         "validation_outcome": "accepted",
     }
-    texts = [str(unit.get("evidence_excerpt") or "") for unit in units]
-    vocabulary = keyword_vocabulary(texts)
-    built = []
-    for text, unit in _document_unit_sentences(units):
-        if language and text_language(text) != language:   # a quiz is written in one language
+    if cards is None:
+        cards = _usable_cards(owner_id, document_id, None)
+    cards = [card for card in cards
+             if (topic_id == "document" or str(card.get("topic_id") or "") == topic_id)
+             and (not language or text_language(f"{card.get('front') or ''} {card.get('back') or ''}") in (language, None))]
+    cards = _round_robin_by_topic(rng.sample(cards, len(cards)))
+    matching_target = int(question_count * DOCUMENT_MIX_MATCHING_SHARE + 0.5)
+    multi_target = int(question_count * DOCUMENT_MIX_MULTI_BLANK_SHARE + 0.5)
+    choice_total = question_count - matching_target - multi_target
+    questions, used_cards, used_sentences = [], set(), set()
+
+    def card_fields(card: dict) -> dict:
+        return {**shared, "concept_id": f"flashcard:{card['flashcard_id']}",
+                "concept_name": str(card.get("subtopic_name") or card.get("topic_name") or ""),
+                "concept_origin": FLASHCARD_QUIZ_CONCEPT_ORIGIN}
+
+    # 1. Matching, on at most MATCHING_CARD_SHARE of the cards so the other types keep cards too.
+    cap = min(MATCHING_MAX_PAIRS * matching_target, max(MATCHING_MIN_PAIRS, math.ceil(len(cards) * MATCHING_CARD_SHARE)))
+    pool = [card for card in cards if _matching_eligible(card)][:cap]
+    for group in matching_groups(pool)[:matching_target]:
+        questions.append({**_matching_question(group, 0, rng), **card_fields(group[0]), "concept_name": "Flashcard matching"})
+        used_cards.update(card["flashcard_id"] for card in group)
+
+    # 2. multi_blank.
+    sentences = [{"text": text, "chunk_id": (unit.get("source_chunk_ids") or [""])[0], "unit": unit}
+                 for text, unit in _document_unit_sentences(units)
+                 if not language or text_language(text) in (language, None)]   # None: too short to tell
+    vocabulary = keyword_vocabulary([str(unit.get("evidence_excerpt") or "") for unit in units]
+                                    + [f"{card.get('front') or ''} {card.get('back') or ''}" for card in cards])
+    multi_count = 0
+
+    def card_multi_blanks(limit: int) -> None:
+        nonlocal multi_count
+        for card in cards:
+            if limit <= 0:
+                return
+            if card["flashcard_id"] in used_cards:
+                continue
+            built = build_multi_blank(card, sentences, vocabulary, rng)
+            if not built or squash(built["evidence_sentence"]) in used_sentences:
+                continue
+            questions.append({**_multi_blank_question(card, 0, built), **card_fields(card)})
+            used_cards.add(card["flashcard_id"])
+            used_sentences.add(squash(built["evidence_sentence"]))
+            multi_count += 1
+            limit -= 1
+
+    card_multi_blanks((multi_target + 1) // 2)
+    # Document sentences: candidates only. The caller picks them AFTER the model's questions, skipping
+    # every sentence a model question already tests (the model's questions keep their sentence).
+    text_candidates = []
+    for sentence in sentences:
+        if squash(sentence["text"]) in used_sentences:
             continue
-        question = _multi_blank_from_sentence(text, set(), vocabulary, rng)
-        if question and multi_blank_is_valid(question, text):
-            built.append((question, text, unit))
-    target = int(question_count * DOCUMENT_MIX_MULTI_BLANK_SHARE + 0.5)
+        question = _multi_blank_from_sentence(sentence["text"], set(), vocabulary, rng)
+        if question and multi_blank_is_valid(question, sentence["text"]):
+            text_candidates.append((question, sentence))
+    text_target = min(multi_target - multi_count, len(text_candidates))
+    card_multi_blanks(multi_target - multi_count - text_target)   # flashcards again when the text runs short
     first_per_unit, seen_units = [], set()
-    for index, (_question, _text, unit) in enumerate(built):
-        if unit["unit_id"] not in seen_units:
-            seen_units.add(unit["unit_id"])
+    for index, (_question, sentence) in enumerate(text_candidates):
+        if sentence["unit"]["unit_id"] not in seen_units:
+            seen_units.add(sentence["unit"]["unit_id"])
             first_per_unit.append(index)
-    chosen = _spread(first_per_unit, target)
-    chosen += _spread([index for index in range(len(built)) if index not in chosen], target - len(chosen))
-    picked = [built[index] for index in sorted(chosen)]
-    extras = []
-    for question, text, unit in picked:
+    # Preference order: spread over the excerpts (one per excerpt first), then everything else.
+    preferred = _spread(first_per_unit, text_target)
+    preferred += [index for index in first_per_unit if index not in preferred]
+    preferred += [index for index in range(len(text_candidates)) if index not in preferred]
+    text_multi_blanks = []
+    for index in preferred:
+        question, sentence = text_candidates[index]
+        unit, text = sentence["unit"], sentence["text"]
         answers = [blank["answer"] for blank in question["blanks"]]
-        extras.append({
+        text_multi_blanks.append((index, squash(text), {
             **shared, "id": 0, "options": [], "question": question["question"],
             "question_type": MULTI_BLANK_QUESTION_TYPE,
             "correct_answer": " | ".join(answers), "correct_answers": answers,
@@ -619,20 +726,53 @@ def build_document_question_mix(
             "answer_modes": list(MULTI_BLANK_ANSWER_MODES),
             "concept_id": unit["unit_id"], "concept_name": unit.get("name") or unit["unit_id"], "concept_origin": "study_unit",
             "explanation": f"From the document: {text}", "source_chunk_ids": list(unit.get("source_chunk_ids") or []),
-        })
+        }))
 
-    activities = int(question_count * DOCUMENT_MIX_MATCHING_SHARE + 0.5)
-    cards = [card for card in _usable_cards(owner_id, document_id, None)
-             if (topic_id == "document" or str(card.get("topic_id") or "") == topic_id) and _matching_eligible(card)]
-    pool = rng.sample(cards, len(cards))[:MATCHING_MAX_PAIRS * activities]
-    for group in matching_groups(pool)[:activities]:
-        matching = _matching_question(group, 0, rng)
-        extras.append({
-            **matching, **shared,
-            "concept_id": f"flashcards:{group[0]['flashcard_id']}", "concept_name": "Flashcard matching",
-            "concept_origin": FLASHCARD_QUIZ_CONCEPT_ORIGIN,
-        })
-    return extras
+    # 3. Multiple choice from flashcards (the model writes the rest, from the document).
+    card_choices = 0
+    for card in cards:
+        if card_choices >= math.ceil(choice_total * CARD_SHARE_OF_CHOICE):
+            break
+        if card["flashcard_id"] in used_cards:
+            continue
+        built = card_choice(card, cards, rng)
+        if built:
+            questions.append({**_choice_question(card, 0, built), **card_fields(card)})
+            used_cards.add(card["flashcard_id"])
+            card_choices += 1
+
+    used = [card for card in cards if card["flashcard_id"] in used_cards]
+    return {
+        "questions": questions,
+        # (document order, sentence key, question) in preference order; take text_target of them.
+        "text_multi_blanks": text_multi_blanks,
+        "text_target": text_target,
+        "choice_target": max(0, question_count - len(questions) - text_target),
+        "avoid_answers": {normalize_fill_blank_answer(card.get("back")) for card in used} - {""},
+        "avoid_sentences": used_sentences,
+        # A document sentence stating a used card's answer tests that card's concept again.
+        "card_answer_keys": {key for key in (squash(card.get("back")) for card in used) if len(key) >= 6},
+    }
+
+
+def pick_text_multi_blanks(mix: dict, taken_quotes: list[str], count: int) -> list[dict]:
+    """Up to `count` of the mix's document-sentence multi_blank questions whose sentence no model
+    question tests (`taken_quotes`: their squashed evidence quotes) and that states no answer of a
+    flashcard the quiz already uses, in document order."""
+    def taken(key: str) -> bool:
+        return (any(len(quote) >= 20 and (quote in key or key in quote) for quote in taken_quotes)
+                or any(answer in key for answer in mix.get("card_answer_keys") or ()))
+    picked = [item for item in mix["text_multi_blanks"] if not taken(item[1])][:max(0, count)]
+    return [question for _index, _key, question in sorted(picked, key=lambda item: item[0])]
+
+
+def alternate_types(questions: list[dict]) -> list[dict]:
+    return _alternate_types(questions)
+
+
+def usable_flashcards(owner_id: str, document_id: str) -> list[dict]:
+    """The document's newest flashcard set, cards with both sides filled in (what a quiz can use)."""
+    return _usable_cards(owner_id, document_id, None)
 
 
 def _usable_cards(owner_id: str, document_id: str, set_id: str | None) -> list[dict]:

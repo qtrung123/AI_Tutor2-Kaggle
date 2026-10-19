@@ -278,35 +278,57 @@ class AutoPracticeQuizTests(QuizDbTestCase):
 
 
 class DocumentQuestionMixTests(QuizDbTestCase):
-    """Create a Quiz: multi_blank from the quiz's own excerpts, matching only when flashcards exist."""
+    """Create a Quiz: the parts the model does not write -- matching, multi_blank and multiple choice
+    from the flashcards, multi_blank candidates from the quiz's own excerpts."""
 
     def units(self):
         from backend.quiz_units import build_study_units
         return build_study_units(CHUNKS)
 
-    def mix(self, owner):
+    def mix(self, owner, total=12):
         return flashcard_quiz_service.build_document_question_mix(
-            owner, DOC, self.units(), {"topic_id": "document", "name": "Entire document"}, "medium", 12, random.Random(2),
+            owner, DOC, self.units(), {"topic_id": "document", "name": "Entire document"}, "medium", total, random.Random(2),
             language="english")
 
-    def test_mix_adds_grounded_multi_blank_and_flashcard_matching(self):
-        extras = self.mix(self.owner)
-        types = [q["question_type"] for q in extras]
-        self.assertIn("multi_blank", types)
-        self.assertEqual(types.count("matching"), 2)   # 12 questions -> 2 activities
-        document_text = squash(" ".join(chunk["content"] for chunk in CHUNKS))
-        unit_ids = {unit["unit_id"] for unit in self.units()}
-        for question in extras:
+    def test_mix_uses_every_source_and_each_card_once(self):
+        mix = self.mix(self.owner)
+        types = [q["question_type"] for q in mix["questions"]]
+        self.assertLessEqual({"matching", "multi_blank", "single_choice"}, set(types))
+        self.assertNotIn("short_answer", types)
+        self.assertEqual(types.count("matching"), 1)                     # 10 cards: at most 4 go to matching
+        concepts = [q["concept_id"] for q in mix["questions"]]
+        self.assertEqual(len(concepts), len(set(concepts)))             # one card, one question
+        matched = sum(len(q["options"]) for q in mix["questions"] if q["question_type"] == "matching")
+        self.assertLessEqual(matched, 4)
+        self.assertEqual(mix["choice_target"], 12 - len(mix["questions"]) - mix["text_target"])
+        for question in mix["questions"]:
             self.assertEqual((question["topic_id"], question["difficulty"]), ("document", "medium"))
-            if question["question_type"] == "multi_blank":
-                self.assertIn(squash(fill(question, question["correct_answers"])), document_text)
-                self.assertIn(question["concept_id"], unit_ids)
+        # Document-sentence candidates are grounded in the excerpts and never repeat a used card answer.
+        document_text = squash(" ".join(chunk["content"] for chunk in CHUNKS))
+        picked = flashcard_quiz_service.pick_text_multi_blanks(mix, [], 10)
+        for question in picked:
+            self.assertIn(squash(fill(question, question["correct_answers"])), document_text)
+            self.assertFalse(any(answer in squash(question["explanation"]) for answer in mix["card_answer_keys"]))
 
-    def test_without_flashcards_the_quiz_needs_none(self):
+    def test_without_flashcards_only_document_multi_blanks_are_offered(self):
         other = auth_store.create_user("No Cards", "no-cards@example.com", "long-password-123")["id"]
-        extras = self.mix(other)
-        self.assertTrue(extras)
-        self.assertEqual({q["question_type"] for q in extras}, {"multi_blank"})
+        mix = self.mix(other)
+        self.assertEqual(mix["questions"], [])
+        self.assertTrue(mix["text_multi_blanks"])
+        self.assertEqual(mix["choice_target"], 12 - mix["text_target"])
+
+    def test_a_sentence_a_model_question_tests_is_not_reused(self):
+        mix = self.mix(auth_store.create_user("No Cards", "nc2@example.com", "long-password-123")["id"])
+        first = mix["text_multi_blanks"][0][1]
+        picked = flashcard_quiz_service.pick_text_multi_blanks(mix, [first], 10)
+        self.assertNotIn(first, [squash(question["explanation"].removeprefix("From the document: ")) for question in picked])
+
+    def test_model_questions_repeating_a_card_answer_or_sentence_are_dropped(self):
+        from backend.quiz_service import _repeats_mixed_question
+        mix = {"avoid_answers": {"semaphore"}, "avoid_sentences": {squash("A semaphore guards shared counters so that two threads never update them together.")}}
+        self.assertTrue(_repeats_mixed_question({"_meta": {"answer_text": "Semaphore", "quote": "x"}}, mix))
+        self.assertTrue(_repeats_mixed_question({"_meta": {"answer_text": "threads", "quote": "A semaphore guards shared counters"}}, mix))
+        self.assertFalse(_repeats_mixed_question({"_meta": {"answer_text": "pages", "quote": "Virtual memory is divided into pages"}}, mix))
 
     def test_mix_question_types_spreads_and_renumbers(self):
         from backend.quiz_service import _mix_question_types
@@ -321,25 +343,120 @@ class DocumentQuestionMixTests(QuizDbTestCase):
         self.assertEqual([record["question_id"] for record in evidence], [by_concept[f"U{n}"] for n in range(1, 7)])
 
 
-class GeneratedQuizMixTests(unittest.TestCase):
-    def test_generated_quiz_mixes_types_and_the_model_writes_only_the_rest(self):
-        from quiz_fixtures import FakeModel, candidates, make_chunks
-        from test_quiz_single_choice_language import run_generate
+class AutoQuestionCountTests(unittest.TestCase):
+    def test_auto_count_follows_the_material_within_limits(self):
+        count = flashcard_quiz_service.auto_question_count
+        units = lambda n: [{"unit_id": f"U{i}"} for i in range(n)]   # noqa: E731
+        cards = lambda n: [{"flashcard_id": f"f{i}"} for i in range(n)]   # noqa: E731
+        self.assertEqual(count(units(12), cards(15), 3), 12 + 8 + 2)   # excerpts + half the cards + extra topics
+        self.assertEqual(count(units(40), cards(30), 6), 30)           # capped
+        self.assertEqual(count(units(4), cards(4), 1), 8)              # never more than the material holds
+        self.assertEqual(count(units(5), cards(10), 1), 10)            # small documents still get the minimum
+        self.assertGreater(count(units(12), cards(10), 2), 12)         # broader than the old 12 default
 
-        quiz = run_generate([{"questions": candidates(range(15))}], make_chunks(12, 2) + CHUNKS)
+
+def run_unified(payloads, chunks, cards, question_count):
+    """The live generation pipeline with a fake model, these flashcards and no persistence."""
+    from quiz_fixtures import FakeModel
+    from test_quiz_single_choice_language import DOCUMENT, TOPIC
+    from backend import quiz_service, quiz_units
+
+    FakeModel.reset(payloads)
+    document = {**DOCUMENT, "topics": [TOPIC, {**TOPIC, "topic_id": "t2", "name": "Other"}]}
+    with (
+        patch.object(quiz_service, "_document_lookup", return_value={DOCUMENT["id"]: document}),
+        patch.object(quiz_service, "invalidate_document_quizzes_for_topic_schema"),
+        patch.object(quiz_service, "get_quiz", return_value=None),
+        patch.object(quiz_service, "get_document_chunks", return_value=chunks),
+        patch.object(quiz_service, "ChatOllama", FakeModel),
+        patch.object(quiz_service, "save_quiz_validation_event"),
+        patch.object(quiz_service, "save_quiz", side_effect=lambda _d, _x, quiz, _o: quiz),
+        patch.object(quiz_service, "usable_flashcards", return_value=cards),
+        patch.object(quiz_units, "select_flashcard_fill_blanks"),
+    ):
+        return quiz_service.generate_quiz(DOCUMENT["id"], "easy", "document", question_count=question_count, owner_id="owner")
+
+
+def os_cards():
+    from test_flashcard_written_quiz import CARDS
+    return [{"flashcard_id": f"f{index}", "set_id": "s", "front": front, "back": back, "topic_id": topic,
+             "topic_name": topic.title(), "source_chunk_ids": sources} for index, (front, back, topic, sources) in enumerate(CARDS)]
+
+
+class GeneratedQuizMixTests(unittest.TestCase):
+    def test_without_flashcards_the_model_writes_only_what_the_text_does_not(self):
+        from quiz_fixtures import FakeModel, candidates, make_chunks
+
+        quiz = run_unified([{"questions": candidates(range(15))}], make_chunks(12, 2) + CHUNKS, [], 12)
         types = [q["question_type"] for q in quiz["questions"]]
         blanks = types.count("multi_blank")
         self.assertGreater(blanks, 0)
         self.assertEqual(len(types), 12)
         self.assertEqual(types.count("single_choice"), 12 - blanks)
-        self.assertNotIn("short_answer", types)
         self.assertEqual([q["id"] for q in quiz["questions"]], list(range(1, 13)))
         plan = quiz["assessment_plan"]
-        self.assertEqual((plan["requested_count"], plan["status"]), (12, "complete"))
-        self.assertEqual(plan["type_distribution"], {"single_choice": 12 - blanks, "multi_blank": blanks})
+        self.assertEqual((plan["requested_count"], plan["status"], plan["count_mode"]), (12, "complete", "custom"))
+        self.assertEqual(plan["composition"], "unified_mix_v1")
         evidence_ids = {record["question_id"] for record in plan["question_evidence"]}
-        self.assertEqual(evidence_ids, {q["id"] for q in quiz["questions"] if q["question_type"] == "single_choice"})
+        self.assertEqual(evidence_ids, {q["id"] for q in quiz["questions"] if q["question_type"] == "single_choice"
+                                        and q["concept_origin"] == "study_unit"})
         self.assertEqual(len(FakeModel.prompts), 1)
+        # No document sentence is tested twice (a multi_blank never reuses a model question's quote).
+        quotes = {squash(record["evidence_quote"]) for record in plan["question_evidence"]}
+        for question in quiz["questions"]:
+            if question["question_type"] == "multi_blank":
+                self.assertNotIn(squash(question["explanation"].removeprefix("From the document: ")), quotes)
+
+    def test_custom_total_counts_every_activity_once_across_both_sources(self):
+        from quiz_fixtures import candidates, make_chunks
+
+        quiz = run_unified([{"questions": candidates(range(24))}], make_chunks(12, 2) + CHUNKS, os_cards(), 20)
+        types = [q["question_type"] for q in quiz["questions"]]
+        self.assertEqual(len(types), 20)                                  # 20 TOTAL, matching counted once
+        self.assertLessEqual({"single_choice", "multi_blank", "matching"}, set(types))
+        self.assertNotIn("short_answer", types)
+        origins = {q["concept_origin"] for q in quiz["questions"]}
+        self.assertEqual(origins, {"flashcard", "study_unit"})            # flashcards AND the PDF
+        concepts = [q["concept_id"] for q in quiz["questions"]]
+        flashcard_concepts = [c for c in concepts if c.startswith("flashcard:")]
+        self.assertEqual(len(flashcard_concepts), len(set(flashcard_concepts)))   # each card once
+        self.assertEqual(quiz["assessment_plan"]["type_distribution"].get("matching"), types.count("matching"))
+        others = [index for index, kind in enumerate(types) if kind != "single_choice"]
+        self.assertGreater(others[-1] - others[0], len(others))           # spread over the quiz, not bunched
+
+    def test_ai_auto_sizes_the_quiz_and_says_so_when_short(self):
+        from quiz_fixtures import candidates, make_chunks
+
+        chunks = make_chunks(12, 2) + CHUNKS
+        quiz = run_unified([{"questions": candidates(range(6))}, {"questions": []}, {"questions": []}], chunks, os_cards(), None)
+        plan = quiz["assessment_plan"]
+        self.assertEqual(plan["count_mode"], "auto")
+        from backend.quiz_units import build_study_units
+        expected = flashcard_quiz_service.auto_question_count(build_study_units(chunks), os_cards(), 2)
+        self.assertEqual(plan["requested_count"], expected)
+        if plan["status"] == "partial":
+            self.assertIn(f"of the {expected} requested questions", plan["shortfall_message"])
+            self.assertEqual(quiz["actual_count"], len(quiz["questions"]))
+        else:
+            self.assertEqual(plan["shortfall_message"], "")
+
+
+class QuizFlashcardPrerequisiteTests(QuizDbTestCase):
+    def test_generate_needs_flashcards_and_statuses_report_them(self):
+        indexed_document_store.upsert_indexed_document(self.owner, "empty.pdf", {
+            "hash": "h2", "chunks": 1, "path": "empty.pdf", "topic_schema_version": 2, "topics": TOPICS})
+        body = {"document_id": "empty.pdf", "assessment_scope": "document", "difficulty": "easy", "quiz_name": "Q"}
+        with patch("backend.api.quiz_generation.generate_quiz", side_effect=AssertionError("must not generate")):
+            response = self.client.post("/api/quiz/generate", json=body)
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("Create Flashcards first", response.json()["detail"])
+            regenerate = self.client.post("/api/quiz/empty.pdf/regenerate", json={"assessment_scope": "document", "difficulty": "easy"})
+            self.assertEqual(regenerate.status_code, 409)
+        statuses = {row["document_id"]: row for row in self.client.get("/api/quizzes").json()}
+        self.assertEqual(statuses[DOC]["flashcard_count"], 10)
+        self.assertEqual(statuses["empty.pdf"]["flashcard_count"], 0)
+        for bad in (4, 41):
+            self.assertEqual(self.client.post("/api/quiz/generate", json={**body, "document_id": DOC, "question_count": bad}).status_code, 422)
 
 
 if __name__ == "__main__":

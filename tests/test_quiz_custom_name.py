@@ -176,6 +176,8 @@ class QuizNameApiRouteTests(unittest.TestCase):
         self.patchers.append(
             patch.object(indexed_document_store, "INDEXED_FILES_PATH", Path(self.temp_dir.name) / "indexed_files.json")
         )
+        # A new quiz needs the document's flashcards (409 otherwise); these route tests are about names.
+        self.patchers.append(patch("backend.api.quiz_generation.usable_flashcards", return_value=[{"flashcard_id": "f1"}]))
         self.mock_generate_quiz = None
         started = [patcher.start() for patcher in self.patchers]
         self.mock_generate_quiz = started[0]

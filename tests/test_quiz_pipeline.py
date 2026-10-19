@@ -120,25 +120,26 @@ class SizingTests(unittest.TestCase):
                                 quiz_units.QUIZ_MIN_CALL_S)
         self.assertLessEqual(quiz_units.QUIZ_LLM_TIMEOUT_S, quiz_units.QUIZ_FIRST_CALL_DEADLINE_S)
 
-    def test_the_api_accepts_exactly_12_15_18_and_20(self):
+    def test_the_api_takes_ai_auto_or_a_custom_total_of_5_to_40(self):
         required = dict(document_id="d.pdf", assessment_scope="document", difficulty="easy", quiz_name="Quiz")
-        for count in (12, 15, 18, 20):
+        for count in (5, 12, 18, 30, 40):
             self.assertEqual(QuizGenerateRequest(**required, question_count=count).question_count, count)
             self.assertEqual(QuizRegenerateRequest(assessment_scope="document", difficulty="easy",
                                                    question_count=count).question_count, count)
-        for bad in (0, 10, 11, 13, 16, 19, 21, 24, 30):
+        for bad in (0, 4, 41, 100):
             with self.assertRaises(ValidationError):
                 QuizGenerateRequest(**required, question_count=bad)
-        self.assertEqual(QuizGenerateRequest(**required).question_count, 12)
+        self.assertIsNone(QuizGenerateRequest(**required).question_count)   # AI Auto by default
+        self.assertIsNone(QuizRegenerateRequest(assessment_scope="document", difficulty="easy").question_count)
 
-    def test_the_ui_offers_the_four_counts(self):
+    def test_the_ui_offers_ai_auto_and_custom(self):
         frontend = frontend_script_text()
-        self.assertIn("[12, 15, 18, 20].includes(value) ? value : 12", frontend)
-        self.assertIn("[12, 15, 18, 20].forEach((count)", frontend)
+        self.assertIn('[["auto", "AI Auto"], ["custom", "Custom"]]', frontend)
+        self.assertIn('if ((quizQuestionCountSelect?.value || "auto") !== "custom") return null;', frontend)
 
-    def test_the_service_rejects_other_counts(self):
+    def test_the_service_rejects_counts_outside_the_custom_range(self):
         with patch.object(quiz_service, "_document_lookup", return_value={DOCUMENT["id"]: DOCUMENT}):
-            for bad in (10, 16, 25):
+            for bad in (4, 41):
                 with self.assertRaises(ValueError):
                     quiz_service._generate_quiz(DOCUMENT["id"], "easy", "document", question_count=bad)
 
@@ -1059,7 +1060,8 @@ class CacheAndMetadataTests(unittest.TestCase):
         return {
             "quiz_id": "old", "document_id": DOCUMENT["id"], "question_count": actual,
             "assessment_plan": {"planner_version": planner_version, "target_questions": requested,
-                                "requested_count": requested, "actual_count": actual},
+                                "requested_count": requested, "actual_count": actual,
+                                "composition": quiz_service.QUIZ_COMPOSITION_VERSION, "count_mode": "custom"},
             "questions": [{"id": index} for index in range(1, actual + 1)],
         }
 
@@ -1095,6 +1097,13 @@ class CacheAndMetadataTests(unittest.TestCase):
             self.assertEqual(result["quiz_id"], "old")
             self.assertEqual(FakeModel.prompts, [])
             self.assertEqual((result["requested_count"], result["actual_count"]), (requested, actual))
+
+    def test_an_older_multiple_choice_only_quiz_is_never_reused(self):
+        saved = self.saved_quiz(quiz_units.QUIZ_ENGINE_VERSION, 12, 12)
+        del saved["assessment_plan"]["composition"]                 # saved before the unified mix
+        result = self.call(saved, count=12)
+        self.assertNotEqual(result["quiz_id"], "old")
+        self.assertEqual(len(self.candidate_prompts()), 1)
 
     def test_a_different_requested_count_or_regeneration_generates_again(self):
         saved = self.saved_quiz(quiz_units.QUIZ_ENGINE_VERSION, 12, 12)

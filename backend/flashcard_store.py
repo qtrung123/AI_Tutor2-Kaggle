@@ -189,6 +189,26 @@ def delete_document_flashcards(owner_id: str, document_id: str) -> None:
         connection.execute("DELETE FROM flashcard_sets WHERE owner_id=? AND document_id=?", (owner_id, document_id))
 
 
+def count_latest_flashcards(owner_id: str) -> dict[str, int]:
+    """document_id -> usable cards (non-empty front and back) in that document's newest set, for every
+    document of this owner that has one: the same set list_flashcards(owner, document) reads. One query."""
+    initialize_flashcard_store()
+    with _connect(autocommit=True) as connection:
+        rows = connection.execute(
+            """
+            SELECT c.document_id, COUNT(*) AS card_count
+            FROM flashcards c
+            JOIN flashcard_sets s ON s.set_id = c.set_id AND s.owner_id = c.owner_id
+            WHERE c.owner_id=? AND TRIM(c.front) <> '' AND TRIM(c.back) <> ''
+              AND s.created_at = (SELECT MAX(n.created_at) FROM flashcard_sets n
+                                  WHERE n.owner_id = s.owner_id AND n.document_id = s.document_id)
+            GROUP BY c.document_id
+            """,
+            (owner_id,),
+        ).fetchall()
+    return {row["document_id"]: int(row["card_count"]) for row in rows}
+
+
 def get_latest_flashcard_set_info(owner_id: str, document_id: str, document_hash: str, topic_schema_version: int,
                                   flashcard_version: str) -> dict | None:
     """Model/language-agnostic lookup for the Study Planner: the newest flashcard set generated

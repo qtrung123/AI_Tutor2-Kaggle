@@ -45,11 +45,13 @@ from backend.quiz_units import (
     followup_request,
     followup_units,
     max_llm_calls,
+    normalize_fill_blank_answer,
     output_schema_for,
     parse_candidates,
     public_unit,
     select_context_units,
     select_questions,
+    squash,
     validate_candidate,
 )
 from backend.model_registry import describe_generation_model
@@ -58,10 +60,23 @@ from backend import quiz_diagnostics
 from backend.auth_store import LEGACY_USER_ID
 from backend.quiz_common import QUIZ_DIFFICULTIES, _document_lookup, list_indexed_documents
 from backend.document_retrieval import get_document_chunks, get_schema_topic_evidence
-from backend.flashcard_quiz_service import build_document_question_mix
+from backend.flashcard_store import count_latest_flashcards
+from backend.flashcard_quiz_service import (
+    QUIZ_CUSTOM_MAX_QUESTIONS,
+    QUIZ_CUSTOM_MIN_QUESTIONS,
+    alternate_types,
+    auto_question_count,
+    build_document_question_mix,
+    pick_text_multi_blanks,
+    usable_flashcards,
+)
 from config import CHAT_MODEL, GENERATION_KEEP_ALIVE
 
 QUIZ_V2_ALLOWED_QUESTION_COUNTS = set(QUIZ_ALLOWED_QUESTION_COUNTS)
+# A generated quiz mixes multiple choice, multi_blank and matching from the PDF and the flashcards
+# (see _generate_quiz_from_units). Stored in the plan; only a quiz of this composition is reused by
+# the cache, so an older multiple-choice-only quiz is never returned for a new request.
+QUIZ_COMPOSITION_VERSION = "unified_mix_v1"
 QUIZ_GENERATION_KEEP_ALIVE = GENERATION_KEEP_ALIVE   # shared with Chat (config.py)
 
 # Live Quiz path ("Study Units", see backend/quiz_units.py and _generate_quiz_from_units): no
@@ -130,14 +145,16 @@ def _generate_with_deadline(llm, prompt: str, deadline_s: float) -> tuple[str, d
 
 def _mix_question_types(choice_questions: list[dict], mixed_questions: list[dict],
                         evidence: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Spread the multi_blank / matching questions evenly between the multiple choice ones, then
-    renumber everything 1..N (the evidence records follow their questions) and give every question
-    the quiz's assessment capacity (its distinct concepts)."""
-    total = len(choice_questions) + len(mixed_questions)
-    positions = {int((index + 0.5) * total / len(mixed_questions)) for index in range(len(mixed_questions))} if mixed_questions else set()
-    choices, extras, ordered = iter(choice_questions), iter(mixed_questions), []
-    for position in range(total):
-        ordered.append(next(extras) if position in positions else next(choices))
+    """Spread every question type evenly over the quiz (each type's questions keep their own order:
+    the k-th of n sits near position (k + 0.5) / n), then renumber everything 1..N (the evidence
+    records follow their model questions) and give every question the quiz's assessment capacity
+    (its distinct concepts)."""
+    by_type: dict[str, list[dict]] = {}
+    for question in [*choice_questions, *mixed_questions]:
+        by_type.setdefault(question["question_type"], []).append(question)
+    keyed = [((index + 0.5) / len(group), position, question)
+             for position, group in enumerate(by_type.values()) for index, question in enumerate(group)]
+    ordered = [question for _key, _position, question in sorted(keyed, key=lambda item: (item[0], item[1]))]
     choice_ids, renumbered = {id(question) for question in choice_questions}, {}
     for number, question in enumerate(ordered, start=1):
         if id(question) in choice_ids:
@@ -150,6 +167,14 @@ def _mix_question_types(choice_questions: list[dict], mixed_questions: list[dict
                      for record in evidence]
 
 
+def _repeats_mixed_question(question: dict, mix: dict) -> bool:
+    meta = question.get("_meta") or {}
+    if normalize_fill_blank_answer(meta.get("answer_text")) in mix["avoid_answers"]:
+        return True
+    quote = squash(meta.get("quote") or "")
+    return len(quote) >= 20 and any(quote in sentence or sentence in quote for sentence in mix["avoid_sentences"])
+
+
 def _generate_quiz_from_units(
     document: dict,
     scope: str,
@@ -160,7 +185,7 @@ def _generate_quiz_from_units(
     owner_id: str,
     model_id: str,
     regenerate: bool,
-    question_count: int = 12,
+    question_count: int | None = 12,
     quiz_title: str | None = None,
     retrieval_ms: int = 0,
 ) -> dict:
@@ -182,7 +207,9 @@ def _generate_quiz_from_units(
            it used and prefers excerpts no call has shown -> repeat
         -> best `question_count` candidates -> quiz
 
-    `question_count` is a target, not a condition of success: the quiz holds
+    `question_count` is the TOTAL of the mixed quiz (None = AI Auto, auto_question_count); the model
+    writes only the multiple choice questions the flashcards and the document's multi_blank sentences
+    do not cover (build_document_question_mix). It is a target, not a condition of success: the quiz holds
     min(valid candidates, question_count) questions and is "partial" when the calls run out first
     (or the time budget does, or two calls in a row add nothing). Only when there is not a single
     valid candidate does generation fail. No rule is relaxed and nothing is invented to reach the
@@ -220,13 +247,19 @@ def _generate_quiz_from_units(
     # The quiz is a mix: multi_blank questions from these excerpts and matching activities from the
     # document's flashcards (when it has any) are built first, without the model; the model writes
     # only the multiple choice questions that remain.
-    mixed_questions = build_document_question_mix(
+    cards = usable_flashcards(owner_id, document["id"])
+    count_mode = "auto" if question_count is None else "custom"
+    if question_count is None:
+        topic_count = 1 if scope == "topic" else len(document.get("topics") or [])
+        question_count = auto_question_count(units, cards, topic_count)
+    mix = build_document_question_mix(
         owner_id, document["id"], units, scope_topic, difficulty, question_count, random.Random(generation_run_id),
-        language=language,
+        language=language, cards=cards,
     )
-    choice_target = max(1, question_count - len(mixed_questions))
-    pool_target = candidate_target(choice_target)
-    max_calls = max_llm_calls(choice_target)
+    mixed_questions = mix["questions"]
+    choice_target = mix["choice_target"]
+    pool_target = candidate_target(choice_target) if choice_target else 0
+    max_calls = max_llm_calls(choice_target) if choice_target else 0
     # The model every call below is sent to (ChatOllama(model=model_id)); stored with the quiz.
     generation_model = describe_generation_model(model_id)
 
@@ -482,8 +515,12 @@ def _generate_quiz_from_units(
     timings["response_failures"] = validation_results["response_failures"]
     timings["total_quiz_generation_ms"] = round((time.perf_counter() - total_started) * 1000)
 
+    # A model question that repeats a flashcard answer or a multi_blank sentence of this quiz is a
+    # duplicate concept: dropped before selection (the candidate surplus usually replaces it).
+    accepted = [question for question in accepted if not _repeats_mixed_question(question, mix)]
+
     # The ONLY failure: not a single valid question.
-    if not accepted:
+    if not accepted and not mixed_questions and not mix["text_multi_blanks"]:
         timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
         timings["total_request_ms"] = timings["total_ms"]
         print(f"[quiz-units-timing] {json.dumps({**timings, 'llm_calls': llm_calls})}")
@@ -500,8 +537,19 @@ def _generate_quiz_from_units(
         )
 
     # final_count = min(valid candidates, requested_count). Short is "partial", never a failure.
-    selected, question_evidence = finalize_questions(select_questions(accepted, choice_target))
-    selected, question_evidence = _mix_question_types(selected, mixed_questions, question_evidence)
+    # Document-sentence multi_blank questions only on sentences no selected model question tests;
+    # when too few are left, more of the model's own questions take their place.
+    choices = select_questions(accepted, choice_target)
+    text_blanks = pick_text_multi_blanks(mix, [squash(q["_meta"]["quote"]) for q in choices], mix["text_target"])
+    short = mix["text_target"] - len(text_blanks)
+    if short > 0:
+        blank_keys = [squash(q["explanation"].removeprefix("From the document: ")) for q in text_blanks]
+        spare = [q for q in accepted if q not in choices
+                 and not any(squash(q["_meta"]["quote"]) in key or key in squash(q["_meta"]["quote"]) for key in blank_keys)]
+        choices = select_questions(choices + spare, choice_target + short)
+    selected, question_evidence = finalize_questions(choices)
+    selected, question_evidence = _mix_question_types(
+        selected, alternate_types(mixed_questions + text_blanks), question_evidence)
     actual_count = len(selected)
     missing_count = max(0, question_count - actual_count)
     status = "complete" if actual_count >= question_count else "partial"
@@ -538,6 +586,10 @@ def _generate_quiz_from_units(
             "missing_count": missing_count,
             "candidate_pool_size": len(accepted),
             "partial": status == "partial",
+            "composition": QUIZ_COMPOSITION_VERSION,
+            "count_mode": count_mode,
+            "shortfall_message": (f"Only {actual_count} of the {question_count} requested questions could be made from "
+                                  "this document's distinct content." if status == "partial" else ""),
             "type_distribution": dict(Counter(question["question_type"] for question in selected)),
             "language": language,
             "language_detection": language_detection,
@@ -667,11 +719,11 @@ def generate_quiz(
     regenerate: bool = False,
     owner_id: str = LEGACY_USER_ID,
     model_id: str = CHAT_MODEL,
-    question_count: int = 12,
+    question_count: int | None = 12,
     quiz_name: str | None = None,
 ) -> dict:
     """
-    Public entry point for Quiz generation.
+    Public entry point for Quiz generation. `question_count` None = AI Auto.
 
     This is a thin instrumentation wrapper around _generate_quiz() -- it does not
     change generation behavior, prompts, models, retries, validation, or output.
@@ -713,7 +765,7 @@ def _generate_quiz(
     regenerate: bool = False,
     owner_id: str = LEGACY_USER_ID,
     model_id: str = CHAT_MODEL,
-    question_count: int = 12,
+    question_count: int | None = 12,
     quiz_name: str | None = None,
 ) -> dict:
     """
@@ -735,8 +787,8 @@ def _generate_quiz(
     assessment_scope = str(assessment_scope).lower().strip()
     if assessment_scope not in {"topic", "document"}:
         raise ValueError("assessment_scope must be topic or document.")
-    if question_count not in QUIZ_V2_ALLOWED_QUESTION_COUNTS:
-        raise ValueError("question_count must be one of 12, 15, 18 or 20.")
+    if question_count is not None and not QUIZ_CUSTOM_MIN_QUESTIONS <= int(question_count) <= QUIZ_CUSTOM_MAX_QUESTIONS:
+        raise ValueError(f"question_count must be between {QUIZ_CUSTOM_MIN_QUESTIONS} and {QUIZ_CUSTOM_MAX_QUESTIONS}.")
     topic_lookup = {topic.get("topic_id"): topic for topic in document.get("topics", [])}
     if assessment_scope == "topic" and topic_id not in topic_lookup:
         raise ValueError("topic_id was not found in the selected document.")
@@ -753,9 +805,12 @@ def _generate_quiz(
         saved_planner = str(saved_plan.get("planner_version") or "legacy")
         saved_requested = int(saved_plan.get("requested_count") or saved_plan.get("target_questions") or 0)
         saved_questions = list((saved_quiz or {}).get("questions") or [])
+        # AI Auto reuses any auto quiz; a custom count only a quiz of that exact count.
+        count_matches = (saved_plan.get("count_mode") == "auto" if question_count is None
+                         else saved_plan.get("count_mode") == "custom" and saved_requested == question_count)
         if (
-            saved_quiz and saved_questions and saved_requested == question_count and saved_planner == QUIZ_ENGINE_VERSION
-            and _saved_quiz_uses_model(saved_quiz, model_id)
+            saved_quiz and saved_questions and count_matches and saved_planner == QUIZ_ENGINE_VERSION
+            and saved_plan.get("composition") == QUIZ_COMPOSITION_VERSION and _saved_quiz_uses_model(saved_quiz, model_id)
         ):
             print(f"[quiz-cache] key={cache_key} HIT")
             diag.set_counts(cache_hit=True, requested_questions=question_count,
@@ -811,6 +866,8 @@ def _generate_quiz(
 def list_quiz_statuses(owner_id: str = LEGACY_USER_ID) -> list[dict]:
     """Return quiz/status information for every indexed document."""
     statuses = []
+    # A new quiz needs the document's flashcards: the Quiz tab shows "Create Flashcards first" at 0.
+    flashcard_counts = count_latest_flashcards(owner_id)
 
     for document in list_indexed_documents(owner_id):
         document_id = document["id"]
@@ -823,6 +880,7 @@ def list_quiz_statuses(owner_id: str = LEGACY_USER_ID) -> list[dict]:
                 "title": document["title"],
                 "chunks": document["chunks"],
                 "has_quiz": bool(variants),
+                "flashcard_count": flashcard_counts.get(document_id, 0),
                 "variants": variants,
             }
         )

@@ -1,6 +1,6 @@
-"""Real-browser tests for Flashcards -> "Practice as Quiz" (headless Chrome against the Quiz Player
-mock): the sheet (no question type and no card count to choose: always every card, "auto" mode), the
-"No flashcards available" state, the request sent for the exact set on screen, opening the created quiz in the focused Quiz Player, text input for
+"""Real-browser tests for flashcard practice quizzes (headless Chrome against the Quiz Player
+mock): the Flashcards tab no longer creates quizzes (they are made in the Quiz tab); practice quizzes
+saved earlier still open by quiz_id in the focused Quiz Player, with text input for
 short_answer and fill_blank, autosave + resume of typed answers, Results/Review showing the typed and
 the canonical answer, learner-marked self-check questions, and a matching activity (click-to-pair,
 drag and drop, moving and clearing a pair, per-pair review), and a multi_blank question answered by
@@ -150,7 +150,14 @@ const out = {errors: []};
 window.addEventListener("error", (e) => out.errors.push(String(e.message) + " @ " + e.filename + ":" + e.lineno));
 window.addEventListener("unhandledrejection", (e) => out.errors.push("rejection: " + String(e.reason && e.reason.message || e.reason)));
 const $ = (id) => document.getElementById(id);
-const dialog = () => document.querySelector(".flashcard-quiz-dialog");
+// A practice quiz saved earlier (Practice as Quiz / the Planner), opened like any saved quiz: by quiz_id.
+const openSavedPractice = async () => {
+  const quiz = await fetchJson("/api/flashcards/lecture.pdf/practice-quiz", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({mode: "auto", question_count: null, set_id: "set-1"})});
+  setSessionTab("quiz");
+  await loadQuizStatuses();
+  await openQuizPlayer({document_id: "lecture.pdf", topic_id: quiz.topic_id || "document", difficulty: quiz.difficulty, quiz_id: quiz.quiz_id});
+};
 const segments = (id) => [...document.querySelectorAll(`#${id} .quiz-segmented-option`)].map((b) =>
   ({label: b.textContent, active: b.classList.contains("active"), disabled: b.disabled}));
 const input = () => $("quiz-player-fill-input");
@@ -161,31 +168,14 @@ const reviewRows = () => [...document.querySelectorAll("#quiz-review-options .qu
 (async () => {
   await sleep(1500);
 
-  // No flashcards: the sheet says so and cannot start.
-  await openStudySession("notes.pdf", "flashcards");
-  await sleep(400);
-  $("practice-flashcards-quiz").click();
-  await sleep(50);
-  out.empty = {open: dialog().classList.contains("open"), emptyVisible: !$("flashcard-quiz-empty").hidden,
-    emptyText: $("flashcard-quiz-empty").textContent, fieldsHidden: $("flashcard-quiz-fields").hidden, startDisabled: $("flashcard-quiz-start").disabled};
-  dialog().querySelector(".quiz-dialog-cancel").click();
-  await sleep(50);
-  out.emptyClosed = !dialog().classList.contains("open");
-
-  // With the three cards on screen.
+  // The Flashcards tab (with the three cards on screen) offers no quiz creation: quizzes are made in the Quiz tab.
   await openStudySession("lecture.pdf", "flashcards");
   await sleep(400);
-  out.buttonLabel = $("practice-flashcards-quiz").textContent;
-  $("practice-flashcards-quiz").click();
-  await sleep(50);
-  out.sheet = {title: $("flashcard-quiz-title").textContent, emptyHidden: $("flashcard-quiz-empty").hidden,
-    segments: dialog().querySelectorAll(".quiz-segmented-option").length,
-    fieldLabels: [...dialog().querySelectorAll(".quiz-sheet-field > span")].map((label) => label.textContent),
-    summary: $("flashcard-quiz-summary").textContent, start: $("flashcard-quiz-start").textContent};
-  $("flashcard-quiz-start").click();
-  await sleep(600);
-  out.request = window.__practiceBodies;
-  out.opened = {dialogClosed: !dialog().classList.contains("open"), playerVisible: !$("quiz-player").hidden,
+  out.flashcardsTab = {practiceButton: Boolean($("practice-flashcards-quiz")), practiceDialog: Boolean(document.querySelector(".flashcard-quiz-dialog")),
+    buttons: [...document.querySelectorAll(".flashcards-actions button")].map((b) => b.textContent)};
+  await openSavedPractice();
+  await sleep(300);
+  out.opened = {playerVisible: !$("quiz-player").hidden,
     title: $("quiz-player-title").textContent, position: $("quiz-player-position").textContent,
     question: $("quiz-player-question").textContent, hasInput: Boolean(input()),
     caption: document.querySelector(".quiz-player-fill-caption")?.textContent, maxLength: input()?.maxLength,
@@ -224,12 +214,8 @@ const reviewRows = () => [...document.querySelectorAll("#quiz-review-options .qu
   out.overflow = document.documentElement.scrollWidth > window.innerWidth;
 
   // Matching: one activity pairs the three cards.
-  await openStudySession("lecture.pdf", "flashcards");
-  await sleep(400);
-  $("practice-flashcards-quiz").click();
-  await sleep(50);
-  $("flashcard-quiz-start").click();
-  await sleep(600);
+  await openSavedPractice();
+  await sleep(300);
   const prompts = () => [...document.querySelectorAll(".quiz-matching-prompt")];
   const answers = () => [...document.querySelectorAll(".quiz-matching-answer")];
   const slots = () => prompts().map((prompt) => prompt.querySelector(".quiz-matching-slot").textContent);
@@ -264,12 +250,8 @@ const reviewRows = () => [...document.querySelectorAll("#quiz-review-options .qu
   out.matchingOverflow = document.documentElement.scrollWidth > window.innerWidth;
 
   // multi_blank: Type Answer, then Word Bank (click a word, drag a word, clear a blank), same answer.
-  await openStudySession("lecture.pdf", "flashcards");
-  await sleep(400);
-  $("practice-flashcards-quiz").click();
-  await sleep(50);
-  $("flashcard-quiz-start").click();
-  await sleep(600);
+  await openSavedPractice();
+  await sleep(300);
   const blankInputs = () => [...document.querySelectorAll(".quiz-multi-blank-input")];
   const blankSlots = () => [...document.querySelectorAll(".quiz-multi-blank-slot")];
   const chips = () => [...document.querySelectorAll(".quiz-word-bank-chip")];
@@ -339,26 +321,14 @@ class FlashcardPracticeQuizUiTests(unittest.TestCase):
         self.assertEqual(self.out["errors"], [])
         self.assertFalse(self.out["overflow"])
 
-    def test_no_flashcards_state(self):
-        self.assertEqual(self.out["empty"], {
-            "open": True, "emptyVisible": True, "fieldsHidden": True, "startDisabled": True,
-            "emptyText": "No flashcards available. Generate flashcards for this document first.",
-        })
-        self.assertTrue(self.out["emptyClosed"])
+    def test_the_flashcards_tab_offers_no_quiz_creation(self):
+        tab = self.out["flashcardsTab"]
+        self.assertFalse(tab["practiceButton"])
+        self.assertFalse(tab["practiceDialog"])
+        self.assertNotIn("Practice as Quiz", tab["buttons"])
 
-    def test_sheet_has_no_type_or_card_count_to_choose(self):
-        self.assertEqual(self.out["buttonLabel"], "Practice as Quiz")
-        sheet = self.out["sheet"]
-        self.assertEqual(sheet["title"], "Practice as Quiz")
-        self.assertTrue(sheet["emptyHidden"])
-        self.assertEqual((sheet["segments"], sheet["fieldLabels"]), (0, []))
-        self.assertEqual(sheet["summary"], "Uses all 3 cards · a mix of Multiple Choice, Fill in the Blanks and Matching")
-        self.assertEqual(sheet["start"], "Start Quiz")
-
-    def test_start_uses_the_set_on_screen_and_opens_the_player(self):
-        self.assertEqual(self.out["request"], [{"mode": "auto", "question_count": None, "set_id": "set-1"}] * 3)
+    def test_a_saved_practice_quiz_opens_in_the_player(self):
         opened = self.out["opened"]
-        self.assertTrue(opened["dialogClosed"])
         self.assertTrue(opened["playerVisible"])
         self.assertEqual(opened["title"], "Lecture · Flashcard practice (Mixed)")
         self.assertEqual((opened["position"], opened["question"]), ("Question 1 of 3", "Which component orders processes?"))

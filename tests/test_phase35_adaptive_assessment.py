@@ -204,10 +204,10 @@ class AdaptiveAssessmentTests(unittest.TestCase):
     def test_request_models_and_frontend_support_allowed_question_counts(self):
         self.assertIn("question_count", QuizGenerateRequest.model_fields)
         self.assertIn("question_count", QuizRegenerateRequest.model_fields)
-        self.assertEqual(QuizGenerateRequest(
+        self.assertIsNone(QuizGenerateRequest(   # None = AI Auto
             document_id="doc.pdf", assessment_scope="topic", topic_id="topic_a", difficulty="easy",
             quiz_name="Sample Quiz",
-        ).question_count, 12)
+        ).question_count)
         frontend = frontend_script_text()
         self.assertIn("quizQuestionCountSelect", frontend)
         self.assertIn("question_count:", frontend)

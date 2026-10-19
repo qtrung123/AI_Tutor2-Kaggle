@@ -52,7 +52,8 @@ window.fetch = async (input, init = {}) => {
     return json({status: "ready", ready: true});
   }
   if (p === "/api/documents") return json([{id: "lecture.pdf", title: "Lecture", chunks: 12, topics: [{topic_id: "t1", name: "Topic 1"}], topic_schema_version: 2}]);
-  if (p === "/api/quizzes") return json([{document_id: "lecture.pdf", title: "Lecture", chunks: 12, has_quiz: window.__libraryVariants.length > 0, variants: window.__libraryVariants}]);
+  if (p === "/api/quizzes") return json([{document_id: "lecture.pdf", title: "Lecture", chunks: 12, has_quiz: window.__libraryVariants.length > 0,
+    flashcard_count: window.__flashcardCount ?? 10, variants: window.__libraryVariants}]);
   if (p === "/api/quiz-history") return json([]);
   if (p === "/api/quiz/lecture.pdf" && method === "GET") return json({document_id: "lecture.pdf", difficulty: u.searchParams.get("difficulty"), topic_id: u.searchParams.get("topic_id"), quiz: null, latest_attempt: null, attempt_summary: null});
   if (p === "/api/quiz/generate" && method === "POST") {
@@ -62,7 +63,7 @@ window.fetch = async (input, init = {}) => {
     if (window.__generateStatus === "fail") {
       return json({detail: "prediction aborted, token repeat limit reached (raw ollama text)"}, 500);
     }
-    const total = window.__generateStatus === "partial" ? 8 : body.question_count;
+    const total = window.__generateStatus === "partial" ? 8 : (body.question_count ?? 18);   // null = AI Auto
     const quizId = "q-" + window.__calls.length;
     window.__libraryVariants.unshift({
       quiz_id: quizId, title: body.quiz_name, topic_id: "document", topic_name: "", difficulty: body.difficulty,
@@ -124,6 +125,9 @@ const generateCalls = () => window.__calls.filter((c) => c.startsWith("POST /api
     scopeText: document.getElementById("quiz-scope-select").options[0].text,
     difficultyOptions: [...document.querySelectorAll("#quiz-difficulty-segmented .quiz-segmented-option")].map((b) => b.textContent),
     countOptions: [...document.querySelectorAll("#quiz-count-segmented .quiz-segmented-option")].map((b) => b.textContent),
+    countDefault: document.querySelector("#quiz-count-segmented .quiz-segmented-option.active")?.textContent,
+    customInputHidden: document.getElementById("quiz-question-count-input")?.hidden,
+    flashcardsRequiredHidden: document.getElementById("quiz-flashcards-required")?.hidden,
     noSecondModelSelect: document.querySelectorAll(".quiz-dialog-fields select:not(.visually-hidden):not(#quiz-scope-select)").length,
     modelName: document.querySelector(".quiz-sheet-model-name")?.textContent,
     modelHint: document.querySelector(".quiz-sheet-model-hint")?.textContent,
@@ -142,7 +146,10 @@ const generateCalls = () => window.__calls.filter((c) => c.startsWith("POST /api
   // Pick non-default Difficulty/Question count via the segmented buttons, to prove the sheet
   // submits what was actually selected, not just the defaults.
   [...document.querySelectorAll("#quiz-difficulty-segmented .quiz-segmented-option")].find((b) => b.textContent === "Medium").click();
-  [...document.querySelectorAll("#quiz-count-segmented .quiz-segmented-option")].find((b) => b.textContent === "15").click();
+  [...document.querySelectorAll("#quiz-count-segmented .quiz-segmented-option")].find((b) => b.textContent === "Custom").click();
+  out.customInputVisible = !document.getElementById("quiz-question-count-input").hidden;
+  document.getElementById("quiz-question-count-input").value = "15";
+  document.getElementById("quiz-question-count-input").dispatchEvent(new Event("change", {bubbles: true}));
   // The bootstrap's own silent "prime the selected model" call already marked it ready before
   // __prepareHold existed, so force it back to not-ready to make this prepare call actually hit
   // the network (same technique as the Flashcards/Summary generation-state tests).
@@ -219,6 +226,32 @@ const generateCalls = () => window.__calls.filter((c) => c.startsWith("POST /api
   await sleep(300);
   out.afterRetry = { dialogOpen: dialogOpen(), newGenerateCalls: generateCalls().length - callsBeforeRetry };
 
+  // 8) AI Auto sends no count (the backend sizes the quiz); a Custom total is clamped to 5-40.
+  document.querySelector(".quiz-landing-header button").click(); await sleep(100);
+  const countInput = document.getElementById("quiz-question-count-input");
+  countInput.value = "99"; countInput.dispatchEvent(new Event("change", {bubbles: true}));
+  out.clamped = countInput.value;
+  [...document.querySelectorAll("#quiz-count-segmented .quiz-segmented-option")].find((b) => b.textContent === "AI Auto").click();
+  quizNameInput.value = "Auto Quiz";
+  document.getElementById("generate-quiz-button").click();
+  await sleep(300);
+  out.autoRequest = { questionCount: window.__lastGenerateBody.question_count, toast: document.getElementById("toast").textContent };
+
+  // 9) No flashcards: "Create Flashcards first", Generate disabled, nothing sent; the button opens Flashcards.
+  window.__flashcardCount = 0;
+  const callsBeforeNoCards = generateCalls().length;
+  document.querySelector(".quiz-landing-header button").click(); await sleep(200);
+  quizNameInput.value = "No Cards";
+  await generateAssessmentQuiz();
+  out.noFlashcards = {
+    panelVisible: !document.getElementById("quiz-flashcards-required").hidden,
+    text: document.getElementById("quiz-flashcards-required").textContent,
+    generateDisabled: document.getElementById("generate-quiz-button").disabled,
+    newGenerateCalls: generateCalls().length - callsBeforeNoCards,
+  };
+  document.getElementById("quiz-go-to-flashcards").click(); await sleep(200);
+  out.wentToFlashcards = { dialogOpen: dialogOpen(), flashcardsPaneVisible: !document.querySelector('[data-session-pane="flashcards"]').hidden };
+
   const pre = document.createElement("pre"); pre.id = "harness-out"; pre.textContent = JSON.stringify(out); document.body.appendChild(pre);
 })().catch((error) => { out.fatal = String(error && error.stack || error); const pre = document.createElement("pre"); pre.id = "harness-out"; pre.textContent = JSON.stringify(out); document.body.appendChild(pre); });
 """
@@ -267,7 +300,11 @@ class CreateQuizSheetTests(unittest.TestCase):
         self.assertTrue(opened["scopeDisabled"])
         self.assertEqual(opened["scopeText"], "Entire document")
         self.assertEqual(opened["difficultyOptions"], ["Easy", "Medium", "Difficult"])
-        self.assertEqual(opened["countOptions"], ["12", "15", "18", "20"])
+        self.assertEqual(opened["countOptions"], ["AI Auto", "Custom"])
+        self.assertEqual(opened["countDefault"], "AI Auto")
+        self.assertTrue(opened["customInputHidden"])
+        self.assertTrue(opened["flashcardsRequiredHidden"])
+        self.assertTrue(self.out["customInputVisible"])
         self.assertEqual(opened["noSecondModelSelect"], 0)
         self.assertEqual(opened["modelName"], "Qwen 2.5 7B")
         self.assertIn("Study Session selector", opened["modelHint"])
@@ -309,7 +346,7 @@ class CreateQuizSheetTests(unittest.TestCase):
         self.assertFalse(after_success["dialogOpen"])
         self.assertTrue(after_success["isLanding"])
         self.assertFalse(after_success["playerHasQuiz"])
-        self.assertEqual(after_success["toast"], "Quiz created")
+        self.assertEqual(after_success["toast"], "Quiz created with 15 questions")
         self.assertEqual(after_success["libraryCardCount"], 1)
 
     def test_partial_generation_is_treated_as_success_with_a_subtle_message(self):
@@ -328,6 +365,19 @@ class CreateQuizSheetTests(unittest.TestCase):
         self.assertNotIn("token repeat limit", after_failure["message"])
         self.assertIn("try again or switch models", after_failure["message"].lower())
         self.assertIn("token repeat limit", after_failure["technical"])   # still reachable, just not primary
+
+    def test_ai_auto_sends_no_count_and_custom_is_clamped(self):
+        self.assertEqual(self.out["clamped"], "40")
+        self.assertIsNone(self.out["autoRequest"]["questionCount"])
+        self.assertEqual(self.out["autoRequest"]["toast"], "Quiz created with 18 questions")
+
+    def test_without_flashcards_the_sheet_asks_to_create_them_first(self):
+        no_cards = self.out["noFlashcards"]
+        self.assertTrue(no_cards["panelVisible"])
+        self.assertIn("Create Flashcards first", no_cards["text"])
+        self.assertTrue(no_cards["generateDisabled"])
+        self.assertEqual(no_cards["newGenerateCalls"], 0)
+        self.assertEqual(self.out["wentToFlashcards"], {"dialogOpen": False, "flashcardsPaneVisible": True})
 
     def test_retry_recovers_and_closes_the_sheet(self):
         after_retry = self.out["afterRetry"]

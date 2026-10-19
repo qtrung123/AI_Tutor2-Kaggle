@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.api.deps import require_current_user
+from backend.flashcard_quiz_service import QUIZ_CUSTOM_MAX_QUESTIONS, QUIZ_CUSTOM_MIN_QUESTIONS, usable_flashcards
 from backend.model_registry import prepare_generation_model, resolve_generation_model
 from backend.quiz_attempt_service import load_quiz_with_attempt
 from backend.quiz_service import QuizGenerationError, generate_quiz
@@ -18,6 +19,18 @@ router = APIRouter()
 # quiz attempt routes), keeping the app's route registration order unchanged.
 regenerate_router = APIRouter()
 
+CREATE_FLASHCARDS_FIRST = "Create Flashcards first: a quiz is built from this document's flashcards and its text."
+# None = AI Auto (the quiz decides its TOTAL from the material); a number is a custom TOTAL of question
+# activities across every type (a matching activity counts once).
+QuestionCount = Optional[int]
+QUESTION_COUNT_FIELD = Field(default=None, ge=QUIZ_CUSTOM_MIN_QUESTIONS, le=QUIZ_CUSTOM_MAX_QUESTIONS)
+
+
+def _require_flashcards(owner_id: str, document_id: str) -> None:
+    """A new quiz needs the document's flashcards; they are never generated here."""
+    if not usable_flashcards(owner_id, document_id):
+        raise HTTPException(status_code=409, detail=CREATE_FLASHCARDS_FIRST)
+
 
 class QuizGenerateRequest(BaseModel):
     """Request body for POST /api/quiz/generate."""
@@ -25,7 +38,7 @@ class QuizGenerateRequest(BaseModel):
     assessment_scope: str = Field(pattern="^(topic|document)$")
     topic_id: Optional[str] = None
     difficulty: str = Field(pattern="^(easy|medium|difficult)$")
-    question_count: Literal[12, 15, 18, 20] = 12
+    question_count: QuestionCount = QUESTION_COUNT_FIELD
     model_id: Optional[str] = None
     quiz_name: str = Field(min_length=1, max_length=200)
     # The live frontend always sends true: an explicit Generate/Create Quiz click must always
@@ -41,7 +54,7 @@ class QuizRegenerateRequest(BaseModel):
     model_id: Optional[str] = None
     assessment_scope: str = Field(pattern="^(topic|document)$")
     topic_id: Optional[str] = None
-    question_count: Literal[12, 15, 18, 20] = 12
+    question_count: QuestionCount = QUESTION_COUNT_FIELD
     # Omitted or blank keeps the quiz's existing name; regeneration must never
     # silently rename a quiz the user already gave a custom name.
     quiz_name: Optional[str] = Field(default=None, max_length=200)
@@ -53,8 +66,13 @@ class QuizQuestion(BaseModel):
     question: str
     options: list[str]
     correct_answer: str
-    question_type: Literal["single_choice", "true_false", "multi_select", "fill_blank"] = "single_choice"
+    question_type: Literal["single_choice", "true_false", "multi_select", "fill_blank", "multi_blank", "matching"] = "single_choice"
     correct_answers: list[str] = Field(default_factory=list)
+    # multi_blank only: each blank's answer and accepted answers, the word bank and its distractors.
+    blanks: Optional[list[dict]] = None
+    distractors: Optional[list[str]] = None
+    word_bank: Optional[list[str]] = None
+    answer_modes: Optional[list[str]] = None
     topic_id: str
     topic_name: str = ""
     concept_id: str = ""
@@ -118,7 +136,8 @@ def quiz_detail(
 @router.post("/api/quiz/generate", response_model=QuizGenerateResponse)
 def quiz_generate(request: QuizGenerateRequest, current_user: dict = Depends(require_current_user)) -> QuizGenerateResponse:
     """
-    Generate a grounded multiple-choice quiz from one indexed document.
+    Generate one grounded quiz (multiple choice, multi_blank and matching) from one indexed
+    document and its flashcards (409 when it has none).
 
     The real quiz-RAG logic lives in backend.quiz_service.generate_quiz(). This
     route validates the API-level request and translates service errors into
@@ -131,6 +150,7 @@ def quiz_generate(request: QuizGenerateRequest, current_user: dict = Depends(req
     if not quiz_name:
         raise HTTPException(status_code=400, detail="quiz_name must not be empty or whitespace-only.")
 
+    _require_flashcards(current_user["id"], request.document_id)
     try:
         print(
             f"[quiz-api] document_id={request.document_id}, "
@@ -176,6 +196,7 @@ def quiz_regenerate(document_id: str, request: QuizRegenerateRequest, current_us
     Attempts for that document are reset after a successful regeneration so
     old answers are not shown against a new question set.
     """
+    _require_flashcards(current_user["id"], document_id)
     try:
         quiz_model_id = getattr(request, "model_id", None) or QUIZ_DEFAULT_GENERATION_MODEL
         prepare_generation_model(quiz_model_id)
