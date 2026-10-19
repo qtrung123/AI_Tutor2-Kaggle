@@ -66,6 +66,11 @@ mkdir -p "$LOG_DIR" "$RUNTIME_DIR" "$AI_TUTOR_DATA_DIR" "$AI_TUTOR_VECTORSTORE_D
 log() { printf '[ai-tutor] %s\n' "$*"; }
 tail_log() { [[ -f "$1" ]] && tail -n 80 "$1" >&2 || true; }
 fail() { log "ERROR: $1"; [[ $# -lt 2 ]] || tail_log "$2"; exit 1; }
+# "[timing] <stage>: <seconds>s" lines are parsed by the notebook into its startup timing table.
+now() { date +%s.%N; }
+log_timing() { awk -v stage="$1" -v start="$2" -v end="$(now)" 'BEGIN { printf "[timing] %s: %.1fs\n", stage, end - start }'; }
+
+stage_started="$(now)"
 
 # Kaggle is compute only. Accounts and app data live in external PostgreSQL (DATABASE_URL), document
 # vectors in the same database (pgvector) and original uploads in a private Supabase Storage bucket
@@ -115,6 +120,7 @@ fi
 # Connection, schema (incl. pgvector), private bucket and Data API lock-down; fails clearly.
 db_status="$(cd "$PROJECT_ROOT" && python -m backend.durable_setup 2>&1)" || fail "Durable storage check failed: $db_status"
 while IFS= read -r line; do log "$line"; done <<<"$db_status"
+log_timing "secrets + durable storage check" "$stage_started"
 
 on_error() {
   local exit_code=$?
@@ -169,18 +175,21 @@ ollama_has_model() {
 # ("blocked redirect to a different host", e.g. us.aws.cdn.hf.co), so hf.co/* models are pulled
 # with --insecure first and, if that also fails, with a plain pull. --insecure is used only for
 # hf.co/* models, never for the registry.ollama.ai models (e.g. the embedding model).
+# The optional second argument gives a parallel pull its own log instead of the shared ollama.log.
 pull_model() {
-  local model="$1"
+  local model="$1" pull_log="${2:-$LOG_DIR/ollama.log}" started
+  started="$(now)"
   if [[ "$model" == hf.co/* ]]; then
-    if ! ollama pull --insecure "$model" >>"$LOG_DIR/ollama.log" 2>&1; then
+    if ! ollama pull --insecure "$model" >>"$pull_log" 2>&1; then
       log "ollama pull --insecure failed for $model; retrying without --insecure"
-      ollama pull "$model" >>"$LOG_DIR/ollama.log" 2>&1 ||
-        fail "Could not pull Hugging Face model '$model' (tried --insecure and a plain pull)." "$LOG_DIR/ollama.log"
+      ollama pull "$model" >>"$pull_log" 2>&1 ||
+        fail "Could not pull Hugging Face model '$model' (tried --insecure and a plain pull)." "$pull_log"
     fi
   else
-    ollama pull "$model" >>"$LOG_DIR/ollama.log" 2>&1 || fail "Could not pull model '$model'." "$LOG_DIR/ollama.log"
+    ollama pull "$model" >>"$pull_log" 2>&1 || fail "Could not pull model '$model'." "$pull_log"
   fi
-  ollama_has_model "$model" || fail "Model '$model' is still absent after pulling it." "$LOG_DIR/ollama.log"
+  ollama_has_model "$model" || fail "Model '$model' is still absent after pulling it." "$pull_log"
+  log_timing "pull $model" "$started"
 }
 
 prepare_kaggle_chroma() {
@@ -242,7 +251,7 @@ PY
 }
 
 warm_models_once() {
-  local key marker
+  local key marker started
   # Only the startup default (Qwen) and the embedding model are warmed here: Gemma is lazy (see
   # /api/models/{id}/prepare) and is never pulled or warmed at startup.
   key="$(printf '%s\n%s\n%s\n%s\n' "$OLLAMA_CHAT_MODEL" "$OLLAMA_EMBEDDING_MODEL" "$AI_TUTOR_CHAT_NUM_CTX" \
@@ -256,15 +265,19 @@ warm_models_once() {
     log "Chat model is served by vLLM (loaded at its startup); skipping the Ollama chat warmup"
   else
     log "Warming chat model (num_ctx=$AI_TUTOR_CHAT_NUM_CTX keep_alive=$AI_TUTOR_GENERATION_KEEP_ALIVE)"
+    started="$(now)"
     curl --fail --silent --show-error --max-time 600 \
       -H 'Content-Type: application/json' "$OLLAMA_HOST/api/generate" \
       -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_CHAT_MODEL"], "prompt": "Reply with OK.", "stream": False, "keep_alive": os.environ["AI_TUTOR_GENERATION_KEEP_ALIVE"], "options": {"num_ctx": int(os.environ["AI_TUTOR_CHAT_NUM_CTX"])}}))')" >/dev/null
+    log_timing "warmup chat model" "$started"
   fi
   log "Warming embedding model"
+  started="$(now)"
   curl --fail --silent --show-error --max-time 180 \
     -H 'Content-Type: application/json' "$OLLAMA_HOST/api/embed" \
     -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_EMBEDDING_MODEL"], "input": "AI Tutor embedding health check.", "keep_alive": os.environ["AI_TUTOR_GENERATION_KEEP_ALIVE"]}))')" \
     | python -c 'import json, sys; data=json.load(sys.stdin); assert data.get("embeddings"), "Embedding warmup returned no vector"'
+  log_timing "warmup embedding model" "$started"
   # Evidence for the log: the chat model (Ollama backend) and the embedding model stay resident;
   # `ollama ps` shows their size, CONTEXT and GPU/CPU split, and nvidia-smi the VRAM actually used.
   log "Models resident after warmup (expected: $OLLAMA_CHAT_MODEL with context $AI_TUTOR_CHAT_NUM_CTX, and $OLLAMA_EMBEDDING_MODEL):"
@@ -284,10 +297,24 @@ for service in nginx frontend backend vllm ollama; do stop_pid "$service"; done
 nginx -s stop -c "$PROJECT_ROOT/deployment/nginx.kaggle.conf" 2>/dev/null || true
 
 log "Starting Ollama"
+stage_started="$(now)"
 ollama serve >"$LOG_DIR/ollama.log" 2>&1 & echo $! >"$RUNTIME_DIR/ollama.pid"
 wait_http "Ollama" "$OLLAMA_HOST/api/tags" 120 "$LOG_DIR/ollama.log"
+log_timing "ollama serve ready" "$stage_started"
 
-if [[ "$LLM_BACKEND" == "vllm" ]]; then
+models_started="$(now)"
+if [[ "$LLM_BACKEND" != "vllm" && "$OLLAMA_CHAT_MODEL" == hf.co/* ]] && ! ollama_has_model "$OLLAMA_CHAT_MODEL" &&
+   ! ollama_has_model "$OLLAMA_EMBEDDING_MODEL"; then
+  # Both required models are missing: pull them concurrently, each into its own log. Both pulls are
+  # always awaited (no orphan keeps the notebook's output pipe open) and startup stops if either fails.
+  log "Pulling Hugging Face chat model $OLLAMA_CHAT_MODEL and embedding model $OLLAMA_EMBEDDING_MODEL in parallel"
+  pull_model "$OLLAMA_CHAT_MODEL" "$LOG_DIR/ollama-pull-chat.log" & chat_pull_pid=$!
+  pull_model "$OLLAMA_EMBEDDING_MODEL" "$LOG_DIR/ollama-pull-embedding.log" & embedding_pull_pid=$!
+  chat_pull_status=0; wait "$chat_pull_pid" || chat_pull_status=$?
+  embedding_pull_status=0; wait "$embedding_pull_pid" || embedding_pull_status=$?
+  (( chat_pull_status == 0 )) || fail "Chat model pull failed (exit $chat_pull_status): $OLLAMA_CHAT_MODEL" "$LOG_DIR/ollama-pull-chat.log"
+  (( embedding_pull_status == 0 )) || fail "Embedding model pull failed (exit $embedding_pull_status): $OLLAMA_EMBEDDING_MODEL" "$LOG_DIR/ollama-pull-embedding.log"
+elif [[ "$LLM_BACKEND" == "vllm" ]]; then
   # Started before the embedding model is warmed so vLLM can reserve its GPU memory share first.
   log "LLM_BACKEND=vllm: starting vLLM instead of pulling $OLLAMA_CHAT_MODEL into Ollama"
   VLLM_PORT="$VLLM_PORT" bash "$PROJECT_ROOT/deployment/start_vllm.sh"
@@ -327,38 +354,51 @@ if ! ollama_has_model "$OLLAMA_EMBEDDING_MODEL"; then
 else
   log "Embedding model already exists: $OLLAMA_EMBEDDING_MODEL"
 fi
+log_timing "model pulls (total)" "$models_started"
 
+stage_started="$(now)"
 warm_models_once
+log_timing "model warmup (total)" "$stage_started"
 
+stage_started="$(now)"
 prepare_kaggle_chroma
+log_timing "chroma check" "$stage_started"
 
 if [[ "${AI_TUTOR_AUTO_INDEX_DATA:-1}" == "1" ]]; then
   log "Incrementally indexing PDF/TXT files in $AI_TUTOR_DATA_DIR"
+  stage_started="$(now)"
   cd "$PROJECT_ROOT"
   python -m backend.ingest >>"$LOG_DIR/backend.log" 2>&1
+  log_timing "indexing" "$stage_started"
 fi
 
 log "Starting FastAPI"
+stage_started="$(now)"
 cd "$PROJECT_ROOT"
 python -m uvicorn backend.main:app --host 127.0.0.1 --port "$BACKEND_PORT" >>"$LOG_DIR/backend.log" 2>&1 &
 echo $! >"$RUNTIME_DIR/backend.pid"
 wait_http "FastAPI" "http://127.0.0.1:$BACKEND_PORT/api/health" 120 "$LOG_DIR/backend.log"
 log "Backend health:"
 assert_health_models "http://127.0.0.1:$BACKEND_PORT/api/health"
+log_timing "fastapi ready" "$stage_started"
 
 log "Starting frontend"
+stage_started="$(now)"
 cd "$PROJECT_ROOT/frontend"
 API_BASE_URL="" FRONTEND_HOST=127.0.0.1 node server.js >"$LOG_DIR/frontend.log" 2>&1 &
 echo $! >"$RUNTIME_DIR/frontend.pid"
 wait_http "Frontend" "http://127.0.0.1:$FRONTEND_PORT/" 60 "$LOG_DIR/frontend.log"
+log_timing "frontend ready" "$stage_started"
 
 log "Starting Nginx"
+stage_started="$(now)"
 nginx -c "$PROJECT_ROOT/deployment/nginx.kaggle.conf" >"$LOG_DIR/nginx.log" 2>&1
 cp /kaggle/working/ai-tutor-runtime/nginx.pid "$RUNTIME_DIR/nginx.pid" 2>/dev/null || true
 wait_http "Public gateway" "http://127.0.0.1:$PUBLIC_PORT/" 30 "$LOG_DIR/nginx.log"
 wait_http "Proxied health endpoint" "http://127.0.0.1:$PUBLIC_PORT/api/health" 30 "$LOG_DIR/nginx.log"
 log "Proxied health:"
 assert_health_models "http://127.0.0.1:$PUBLIC_PORT/api/health"
+log_timing "nginx ready" "$stage_started"
 
 log "All services are running"
 for service in ollama vllm backend frontend nginx; do
