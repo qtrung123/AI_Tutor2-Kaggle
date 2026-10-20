@@ -295,7 +295,9 @@ async function requestQuizSubmission({ allowUnanswered = false } = {}) {
       topic_id: currentQuiz.topic_id,
       quiz_id: currentQuiz.quiz_id,
       answers: quizAnswers,
-      ...(allowUnanswered ? { allow_unanswered: true } : {})
+      ...(allowUnanswered ? { allow_unanswered: true } : {}),
+      // The started Planner session this quiz belongs to; the server checks it before completing it.
+      ...(plannerQuizSessionFor(currentQuiz.document_id) ? { planner_session_id: plannerQuizSessionFor(currentQuiz.document_id) } : {})
     })
   });
   if (!response.ok) {
@@ -2387,6 +2389,7 @@ async function submitQuizPlayer() {
     await loadDashboard();
     renderQuizHistory();
     showQuizResults(buildQuizResult(currentAttempt, currentQuiz));
+    await plannerAfterQuizSubmission(currentAttempt.planner_completion);
     // Flashcard written practice is not an assessment: it never re-shapes the plan.
     if (!isPracticeQuiz(currentQuiz)) plannerAdaptAfterQuiz(currentQuiz.document_id);
   } catch (error) {
@@ -2596,6 +2599,7 @@ async function submitAssessmentQuiz(event) {
     await loadDashboard();
     renderAssessmentQuiz();
     showToast(`Attempt ${currentAttempt.attempt_number}: ${currentAttempt.score}/${currentAttempt.total}`);
+    await plannerAfterQuizSubmission(currentAttempt.planner_completion);
     if (!isPracticeQuiz(currentQuiz)) plannerAdaptAfterQuiz(currentQuiz.document_id);
   } catch (error) {
     renderAssessmentQuiz();

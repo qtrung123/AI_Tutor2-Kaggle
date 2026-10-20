@@ -1247,6 +1247,101 @@ def complete_session_step(owner_id: str, session_id: str, step_index: int) -> tu
     return get_session(owner_id, session_id), changed
 
 
+QUIZ_STEP_ACTIVITIES = ("quiz", "quiz_retry")
+
+
+def complete_quiz_activity(owner_id: str, session_id: str, *, document_id: str, quiz_id: str,
+                           attempt_id: str, practice: bool = False) -> tuple[dict, bool, int | None]:
+    """A submitted quiz attempt completes the quiz part of the session it was taken in: a single
+    quiz / quiz retry / written quiz session as a whole, or the quiz step of a combined session.
+
+    The session must be the owner's, already started (in_progress -- opening a quiz never counts),
+    for the attempt's document, and hold a quiz activity of the attempt's kind (written practice
+    only for a written quiz session, an assessment otherwise); when the session or step names a quiz
+    (artifact_id) it must be that quiz. The quiz step is the one exception to step order: it can be
+    done before the first step, which keeps the session in progress until every step is done. Done
+    again it is a no-op, so a repeated submission never counts twice. One BEGIN IMMEDIATE
+    transaction. Returns (session, changed, quiz step index or None)."""
+    initialize_study_planner_store()
+    connection = _connect()
+    try:
+        connection.begin_immediate()
+        row = _locked_session(connection, owner_id, session_id)
+        status = row["status"]
+        steps = json.loads(row["steps_json"]) if row["steps_json"] else []
+        if row["document_id"] != document_id:
+            raise SessionTransitionError("quiz_session_mismatch", "This quiz belongs to another document.", status)
+        if steps:
+            index = next((i for i, step in enumerate(steps) if step["activity_type"] in QUIZ_STEP_ACTIVITIES), None)
+            if index is None or practice:
+                raise SessionTransitionError("quiz_session_mismatch", "This session has no quiz step for this quiz.", status)
+            # The step's own quiz only: a combined row's artifact_id may be its first step's (e.g. a
+            # flashcard set when the quiz does not exist yet).
+            expected = steps[index].get("artifact_id")
+            done = steps[index]["status"] == "completed"
+        else:
+            index = None
+            kind_matches = row["activity_type"] == "written_quiz" if practice else row["activity_type"] in QUIZ_STEP_ACTIVITIES
+            if not kind_matches:
+                raise SessionTransitionError("quiz_session_mismatch", "This session is not a quiz session for this quiz.", status)
+            expected = row["artifact_id"]
+            done = status == "completed"
+        if expected and expected != quiz_id:
+            raise SessionTransitionError("quiz_session_mismatch", "This session is for a different quiz.", status)
+        changed = False
+        if not done:
+            if status != "in_progress":
+                raise SessionTransitionError("session_not_started", "Start this session before its quiz can complete it.", status)
+            now = utc_now_iso()
+            if steps:
+                steps[index] = {**steps[index], "status": "completed", "completed_at": now, "attempt_id": attempt_id}
+                finished = combined.current_step_index(steps) is None
+                connection.execute(
+                    "UPDATE study_sessions SET steps_json=?, updated_at=?"
+                    + (", status='completed', completed_at=COALESCE(completed_at, ?)" if finished else "")
+                    + " WHERE session_id=? AND owner_id=? AND status='in_progress'",
+                    (json.dumps(steps, ensure_ascii=False), now, *((now,) if finished else ()), session_id, owner_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE study_sessions SET status='completed', updated_at=?, completed_at=COALESCE(completed_at, ?)"
+                    " WHERE session_id=? AND owner_id=? AND status='in_progress'",
+                    (now, now, session_id, owner_id),
+                )
+            changed = True
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    return get_session(owner_id, session_id), changed, index
+
+
+def in_progress_quiz_sessions(owner_id: str, document_id: str, quiz_id: str) -> list[str]:
+    """Started sessions (active plans) for this document that name exactly this quiz -- as a single
+    quiz session or as a combined session's quiz step. Used only when a submission carries no
+    session: a document match alone is never enough, the quiz itself must be the planned one."""
+    initialize_study_planner_store()
+    with _connect() as connection:
+        rows = connection.execute(
+            """SELECT s.session_id, s.activity_type, s.artifact_id, s.steps_json FROM study_sessions s
+               JOIN study_plans p ON p.plan_id = s.plan_id
+               WHERE s.owner_id=? AND s.document_id=? AND s.status='in_progress' AND p.status='active'""",
+            (owner_id, document_id),
+        ).fetchall()
+    matches = []
+    for row in rows:
+        steps = json.loads(row["steps_json"]) if row["steps_json"] else []
+        if steps:
+            quiz_steps = [step for step in steps if step["activity_type"] in QUIZ_STEP_ACTIVITIES]
+            if quiz_steps and quiz_steps[0].get("artifact_id") == quiz_id:
+                matches.append(row["session_id"])
+        elif row["activity_type"] in (*QUIZ_STEP_ACTIVITIES, "written_quiz") and row["artifact_id"] == quiz_id:
+            matches.append(row["session_id"])
+    return matches
+
+
 RESCHEDULABLE_STATUSES = ("scheduled", "missed")
 
 

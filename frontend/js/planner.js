@@ -701,6 +701,52 @@ async function plannerQuizTarget(session) {
   return { document_id: session.document_id, topic_id: variant?.topic_id || "document", difficulty: variant?.difficulty, quiz_id: quizId };
 }
 
+// The started session a quiz is being taken for: sent with the submission as planner_session_id
+// (the server verifies it and completes the quiz part). Kept per tab in sessionStorage, so a refresh
+// during the quiz still completes the right session.
+const PLANNER_QUIZ_SESSION_KEY = "aiTutor.plannerQuizSession";
+
+function plannerHasQuizActivity(session) {
+  const activities = session.steps?.length ? session.steps.map((step) => step.activity_type) : [session.activity_type];
+  return activities.some((activity) => ["quiz", "quiz_retry", "written_quiz"].includes(activity));
+}
+
+function plannerRememberQuizSession(session) {
+  try {
+    if (session.status === "in_progress" && plannerHasQuizActivity(session)) {
+      sessionStorage.setItem(PLANNER_QUIZ_SESSION_KEY, JSON.stringify({ session_id: session.session_id, document_id: session.document_id }));
+    } else sessionStorage.removeItem(PLANNER_QUIZ_SESSION_KEY);   // another session started: the old link no longer applies
+  } catch (error) { /* storage unavailable: the server can still match a session that planned this exact quiz */ }
+}
+
+function plannerForgetQuizSession(sessionId) {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(PLANNER_QUIZ_SESSION_KEY) || "null");
+    if (saved && (!sessionId || saved.session_id === sessionId)) sessionStorage.removeItem(PLANNER_QUIZ_SESSION_KEY);
+  } catch (error) { /* nothing to forget */ }
+}
+
+// The remembered session for a quiz on this document (never another document's session).
+function plannerQuizSessionFor(documentId) {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(PLANNER_QUIZ_SESSION_KEY) || "null");
+    return saved && saved.document_id === documentId ? saved.session_id : null;
+  } catch (error) { return null; }
+}
+
+// After a submitted quiz: what the server did to its planned session (planner_completion).
+async function plannerAfterQuizSubmission(completion) {
+  if (!completion || !["completed", "unchanged"].includes(completion.status)) return;
+  if (completion.session_completed) plannerForgetQuizSession(completion.session_id);
+  if (completion.status !== "completed") return;
+  const session = completion.session;
+  const pending = session?.steps?.find((step) => step.status !== "completed");
+  showToast(pending ? `Quiz step done. Finish ${pcalActivity(pending.activity_type)} to complete the session`
+    : "Study session completed. Nice work!");
+  // Never surfaces as a submit error: the attempt and the session are both saved already.
+  try { await plannerRefreshSchedules(); } catch (error) { /* the next Home / Planner load shows it */ }
+}
+
 async function plannerSessionAction(session, kind, button, group) {
   // One request per session at a time: a double click (or the same session in two lists) acts once.
   if (plannerBusySessions.has(session.session_id)) return;
@@ -729,6 +775,7 @@ async function plannerSessionAction(session, kind, button, group) {
     if (kind === "start") {
       Object.assign(session, result.session);
       plannerSessions.forEach((item) => { if (item.session_id === session.session_id) Object.assign(item, result.session); });
+      plannerRememberQuizSession(session);
       if (!indexedDocuments.some((item) => item.id === session.document_id)) {
         showToast("This document is no longer available");
         return;
@@ -742,13 +789,19 @@ async function plannerSessionAction(session, kind, button, group) {
         if (!quizTarget && !result.artifact_available && typeof openQuizCreateDialog === "function") openQuizCreateDialog();
         if (result.prerequisite === "flashcards") showToast("Create Flashcards first, then create the quiz");
       } else await openStudySession(session.document_id, result.tool);
-    } else if (kind === "complete") showToast("Session completed. Nice work!");
+    } else if (kind === "complete") {
+      plannerForgetQuizSession(session.session_id);
+      showToast("Session completed. Nice work!");
+    }
     else if (kind === "step_done") {
       const next = plannerCurrentStep(result.session);
       showToast(result.session_completed ? "Session completed. Nice work!"
         : `${pcalActivity(session.steps[step].activity_type)} done. Next: ${pcalActivity(result.session.steps[next].activity_type)}`);
     }
-    else if (kind === "skip") skipped = { changed: Boolean(result.changed) };
+    else if (kind === "skip") {
+      plannerForgetQuizSession(session.session_id);
+      skipped = { changed: Boolean(result.changed) };
+    }
     else {
       const moved = result.session;
       showToast(`Moved to ${plannerDayLabel(moved.scheduled_start.slice(0, 10))}, ${moved.scheduled_start.slice(11, 16)}`

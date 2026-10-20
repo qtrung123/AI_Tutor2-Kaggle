@@ -1,11 +1,13 @@
 """Quiz attempt routes: completed-attempt history/results/retake and the Quiz Player lifecycle
 (progress autosave, submit, progress reset and answer explanations).
 """
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from backend import study_plan_api_service
 from backend.api.deps import require_current_user
 from backend.flashcard_quiz_service import set_self_check_result
 from backend.quiz_attempt_service import (
@@ -17,6 +19,9 @@ from backend.quiz_attempt_service import (
     submit_quiz_attempt,
     update_quiz_progress,
 )
+from backend.quiz_store import FLASHCARD_WRITTEN_PLANNER_VERSION, get_quiz_by_id
+
+logger = logging.getLogger(__name__)
 
 # Two routers only so main.py can include each group at its original position (history before
 # the quiz generation routes, the Quiz Player routes after them), keeping route order unchanged.
@@ -54,6 +59,9 @@ class QuizSubmitRequest(BaseModel):
     # The Quiz Player's "Submit Anyway": unanswered questions are graded as incorrect/unanswered
     # instead of rejecting the submission. Other callers keep the complete-answer-set rule.
     allow_unanswered: bool = False
+    # The started Study Planner session this quiz was taken for (from Start/Resume). The server
+    # verifies it before completing anything; see study_plan_api_service.complete_quiz_from_attempt.
+    planner_session_id: Optional[str] = Field(default=None, max_length=128)
 
 
 class QuizSelfCheckRequest(BaseModel):
@@ -124,9 +132,10 @@ def quiz_progress(document_id: str, request: QuizProgressRequest, current_user: 
 
 @router.post("/api/quiz/{document_id}/submit")
 def quiz_submit(document_id: str, request: QuizSubmitRequest, current_user: dict = Depends(require_current_user)) -> dict:
-    """Grade one complete set of answers and persist a new immutable attempt."""
+    """Grade one complete set of answers and persist a new immutable attempt. Once it is saved, the
+    quiz part of its Study Planner session is completed (`planner_completion`, None when none applies)."""
     try:
-        return submit_quiz_attempt(
+        attempt = submit_quiz_attempt(
             document_id=document_id,
             difficulty=request.difficulty,
             topic_id=request.topic_id,
@@ -139,6 +148,21 @@ def quiz_submit(document_id: str, request: QuizSubmitRequest, current_user: dict
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Could not submit quiz: {error}") from error
+    return {**attempt, "planner_completion": _complete_planner_quiz(current_user["id"], document_id, attempt,
+                                                                    request.planner_session_id)}
+
+
+def _complete_planner_quiz(owner_id: str, document_id: str, attempt: dict, session_id: str | None) -> dict | None:
+    """The planner side of a saved submission. Any failure here is reported, never raised: the
+    attempt is already persisted and the session can still be completed by hand."""
+    try:
+        quiz = get_quiz_by_id(attempt["quiz_id"], owner_id) if attempt.get("quiz_id") else None
+        practice = str(((quiz or {}).get("assessment_plan") or {}).get("planner_version") or "") == FLASHCARD_WRITTEN_PLANNER_VERSION
+        return study_plan_api_service.complete_quiz_from_attempt(owner_id, document_id, attempt,
+                                                                 session_id=session_id, practice=practice)
+    except Exception as error:   # noqa: BLE001 - see docstring
+        logger.warning("Planner quiz completion failed for attempt %s: %s", attempt.get("attempt_id"), error)
+        return {"status": "error", "session_id": session_id, "message": "The study session could not be updated."}
 
 
 @router.delete("/api/quiz/{document_id}/progress")

@@ -514,6 +514,37 @@ def complete_session(owner_id: str, session_id: str) -> dict:
     return _with_calendar_sync(owner_id, {"session": _saved_session(session, _document_titles(owner_id)), "changed": changed})
 
 
+def complete_quiz_from_attempt(owner_id: str, document_id: str, attempt: dict, *, session_id: str | None = None,
+                               practice: bool = False) -> dict | None:
+    """After a quiz attempt is graded and saved, complete the quiz part of the planned session it was
+    taken for (study_planner_store.complete_quiz_activity: a single quiz session, or the quiz step of
+    a combined session). The session is the one the Quiz Player names (`session_id`, from Start);
+    without one, only a started session that planned exactly this quiz is used, and only when it is
+    the only such session. Returns None when no session applies, else {"status": "completed" |
+    "unchanged" | "not_applied", ...}; it never raises, because the attempt itself is already saved."""
+    if not attempt.get("completed") or not attempt.get("quiz_id") or not attempt.get("attempt_id"):
+        return None
+    if not session_id:
+        candidates = study_planner_store.in_progress_quiz_sessions(owner_id, document_id, attempt["quiz_id"])
+        if len(candidates) != 1:
+            return None
+        session_id = candidates[0]
+    try:
+        session, changed, step_index = study_planner_store.complete_quiz_activity(
+            owner_id, session_id, document_id=document_id, quiz_id=attempt["quiz_id"],
+            attempt_id=attempt["attempt_id"], practice=practice)
+    except study_planner_store.SessionTransitionError as error:
+        return {"status": "not_applied", "session_id": session_id, "code": error.code, "message": str(error)}
+    except ValueError:
+        return {"status": "not_applied", "session_id": session_id, "code": "session_not_found",
+                "message": "Study session not found."}
+    response = {"status": "completed" if changed else "unchanged", "session_id": session_id, "changed": changed,
+                "session": _saved_session(session, _document_titles(owner_id)), "step_index": step_index,
+                "session_completed": session["status"] == "completed"}
+    # Same Google Calendar handling as a manual Complete: a completed session keeps its event.
+    return _with_calendar_sync(owner_id, response) if changed else response
+
+
 def skip_session(owner_id: str, session_id: str) -> dict:
     """scheduled/in_progress -> skipped. The row is kept as history; skipping again is a no-op."""
     session, changed = _transition(owner_id, session_id, "skip")
