@@ -59,6 +59,7 @@ class StreamingTestBase(unittest.TestCase):
             patch.object(auth_store, "DATABASE_PATH", database),
             patch.object(conversation_store, "DATABASE_PATH", database),
             patch.object(rag_service, "ChatOllama", FakeStreamingModel),
+            patch.dict(rag_service._CHAT_MODELS, clear=True),   # a fresh model per test, as instances expects
             patch.object(rag_service, "resolve_generation_model", return_value="qwen-runtime"),
             patch.object(rag_service, "_retrieve_conversation_docs", side_effect=lambda owner, *_: [self.doc_for(owner)]),
             patch("backend.api.conversations.prepare_generation_model", return_value={"ready": True}),

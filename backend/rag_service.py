@@ -259,10 +259,18 @@ def _answer_inputs(owner_id: str, conversation: dict, existing_messages: list[di
     return None, docs, prompt
 
 
+_CHAT_MODELS: dict = {}
+
+
 def _chat_model(model: str):
     # Same context window and residency as the Quiz calls, so Qwen is not reloaded between them.
-    return ChatOllama(model=model, temperature=0, num_ctx=CHAT_NUM_CTX, num_predict=CHAT_MAX_TOKENS,
-                      keep_alive=GENERATION_KEEP_ALIVE)
+    # One client per model per process: building one opens new HTTP clients (~0.5 s), which every
+    # answer otherwise paid before its first token. Keyed by the class too, so a patched one is not mixed in.
+    key = (ChatOllama, model)
+    if key not in _CHAT_MODELS:
+        _CHAT_MODELS[key] = ChatOllama(model=model, temperature=0, num_ctx=CHAT_NUM_CTX,
+                                       num_predict=CHAT_MAX_TOKENS, keep_alive=GENERATION_KEEP_ALIVE)
+    return _CHAT_MODELS[key]
 
 
 def _grounding_status(answer: str) -> str:

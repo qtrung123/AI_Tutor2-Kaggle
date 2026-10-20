@@ -78,9 +78,16 @@ def history_of(prompt):
 
 class PromptInstructionTests(unittest.TestCase):
     def test_default_is_a_direct_answer_of_fitting_length(self):
-        for phrase in ("Start with the answer itself", "No introduction", "no closing summary", "say each thing once",
-                       "2-4 sentences", "about 80-150 words", "Answer in the language of the student's question"):
+        for phrase in ("Answer the question in your first sentence", "No introduction", "no overview of the whole document",
+                       "no unrelated concepts", "no closing summary", "say each thing once",
+                       "A definition or simple fact: 1-3 sentences, about 30-60 words",
+                       "the direct answer, then only the essential reasoning", "A comparison: the key differences",
+                       "A complex or multi-part question: answer every part, as fully as it needs",
+                       "Keep the technical details, formulas and conditions",
+                       "Answer in the language of the student's question"):
             self.assertIn(phrase, TEMPLATE)
+        # Lists are for steps or parallel points, not every answer.
+        self.assertIn("Use a list only for steps or several parallel points", TEMPLATE)
         # Formatting is used when it helps, never as a fixed template.
         self.assertIn('a "### " heading only when the answer has several distinct parts', TEMPLATE)
         self.assertNotIn("FORMAT", TEMPLATE)
@@ -90,12 +97,19 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertIn('"I don\'t know based on the provided documents."', TEMPLATE)   # grounding_status relies on it
         self.assertIn("(source: page)", TEMPLATE)                                  # rendered as citation chips
         self.assertIn("It is never evidence", TEMPLATE)
+        # Partial evidence: answer what is supported, name the gap -- without the full refusal phrase,
+        # which would mark a partly supported answer insufficient_context.
+        self.assertIn("If the context answers only part of the question, answer that part and say briefly which part "
+                      "the documents do not cover.", TEMPLATE)
+        self.assertEqual(TEMPLATE.count("don't know based on the provided documents"), 1)
         self.assertEqual(TEMPLATE.count("{context}") + TEMPLATE.count("{conversation_history}") + TEMPLATE.count("{question}"), 3)
         self.assertLess(TEMPLATE.index("{conversation_history}"), TEMPLATE.index("{context}"))
         self.assertTrue(TEMPLATE.rstrip().endswith("Answer:"))
 
     def test_explicit_requests_for_depth_are_honoured_by_the_prompt_not_cut_by_the_cap(self):
-        self.assertIn('Go into depth only when the student asks for it (details, steps, examples, "explain more"', TEMPLATE)
+        self.assertIn('Go into depth only when the student asks for it (details, steps, examples, "explain more")', TEMPLATE)
+        self.assertIn("To explain more about an earlier answer, go deeper and give an example; do not repeat what was "
+                      "already said.", TEMPLATE)
         for question in ("What is paging?", "Explain paging in detail, step by step, with an example."):
             with self.subTest(question=question):
                 _, options, prompt, _ = ask(question)
@@ -183,6 +197,29 @@ class CompatibilityTests(unittest.TestCase):
     def test_an_uncapped_answer_is_never_trimmed(self):
         FakeModel.reply = "Paging maps pages to frames, and the MMU does it"
         self.assertEqual(ask("What is paging?")[0]["answer"], FakeModel.reply)
+
+    def test_the_chat_client_is_built_once_per_model(self):
+        with patch.dict(rag_service._CHAT_MODELS, clear=True), \
+                patch.object(rag_service, "ChatOllama", side_effect=lambda **options: object()) as chat_class:
+            first, again = rag_service._chat_model("qwen"), rag_service._chat_model("qwen")
+            other = rag_service._chat_model("gemma")
+        self.assertIs(first, again)
+        self.assertIsNot(first, other)
+        self.assertEqual([c.kwargs["model"] for c in chat_class.call_args_list], ["qwen", "gemma"])
+        # Every answer still sends the same options.
+        self.assertEqual(chat_class.call_args_list[0].kwargs, {
+            "model": "qwen", "temperature": 0, "num_ctx": rag_service.CHAT_NUM_CTX,
+            "num_predict": CHAT_MAX_TOKENS, "keep_alive": rag_service.GENERATION_KEEP_ALIVE})
+
+    def test_the_embeddings_client_is_built_once(self):
+        from backend import vector_store
+        vector_store._embeddings.cache_clear()
+        try:
+            with patch("langchain_ollama.OllamaEmbeddings") as embeddings_class:
+                self.assertIs(vector_store._embeddings(), vector_store._embeddings())
+            embeddings_class.assert_called_once_with(model=vector_store.EMBEDDING_MODEL)
+        finally:
+            vector_store._embeddings.cache_clear()
 
     def test_vllm_receives_the_cap_as_max_tokens(self):
         with patch.object(llm_backend, "LLM_BACKEND", "vllm"):

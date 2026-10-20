@@ -11,6 +11,7 @@ results are never lost to post-filtering, and every query is scoped to one user'
 pgvector is required for PostgreSQL; there is no silent fallback to the ephemeral local Chroma.
 """
 
+import functools
 import json
 import re
 import threading
@@ -31,7 +32,10 @@ class VectorStoreUnavailableError(RuntimeError):
     """PostgreSQL is selected but pgvector cannot be used; the message carries the fix."""
 
 
+@functools.lru_cache(maxsize=None)
 def _embeddings():
+    # One client per process: building one opens new HTTP clients (~0.3-0.6 s), which every Chat
+    # request otherwise paid before its retrieval even started.
     from langchain_ollama import OllamaEmbeddings
 
     return OllamaEmbeddings(model=EMBEDDING_MODEL)
