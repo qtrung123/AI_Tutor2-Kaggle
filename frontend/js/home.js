@@ -1,4 +1,4 @@
-// Home: dashboard, Continue studying cards and Today's Study Plan.
+// Home: Continue learning, the materials list and Today's Study Plan.
 // Classic script (shared global scope), loaded by index.html before app.js.
 
 function renderDashboard() {
@@ -54,13 +54,90 @@ function homeDocumentFact(label, value) {
   return row;
 }
 
+// The active plans' sessions as Today's Study Plan last loaded them (full rows: plan, artifact, steps).
+let homePlanSessions = [];
+
+// Continue Learning: the one thing to pick up now, chosen from real state only -- a planned session
+// already in progress, else the soonest planned session, else the document with the most recent quiz,
+// else the first material. A planned session goes through the Planner's own Start/Resume lifecycle
+// (status, steps, the right tool and quiz); anything else just opens the document.
+function homeContinueTarget(materials) {
+  const entries = materials.map((material) => ({ material, progress: homeDocStates.get(material.document_id) }));
+  const next = (entry) => entry.progress?.plan?.next_session || null;
+  const live = entries.find((entry) => next(entry)?.status === "in_progress");
+  if (live) return { ...live, session: next(live), detail: nextSessionText(next(live)), action: "Resume" };
+  const planned = entries.filter((entry) => next(entry)?.status === "scheduled")
+    .sort((a, b) => next(a).scheduled_start.localeCompare(next(b).scheduled_start))[0];
+  if (planned) return { ...planned, session: next(planned), detail: `Next session · ${nextSessionText(next(planned))}`, action: "Start" };
+  const latestQuiz = (entry) => entry.progress?.quiz?.latest?.completed_at || "";
+  const studied = entries.filter(latestQuiz).sort((a, b) => latestQuiz(b).localeCompare(latestQuiz(a)))[0];
+  if (studied) {
+    const latest = studied.progress.quiz.latest;
+    return { ...studied, detail: `Latest quiz ${Math.round(latest.percentage)}% · ${progressDate(latest.completed_at)}`, tab: "overview", action: "Continue" };
+  }
+  return { ...entries[0], detail: "Not started yet", tab: "overview", action: "Start studying" };
+}
+
+function renderHomeContinue(materials) {
+  const panel = document.getElementById("home-continue");
+  if (!panel) return;
+  panel.innerHTML = "";
+  panel.hidden = !materials.length;
+  if (!materials.length) return;
+  const target = homeContinueTarget(materials);
+  const documentId = target.material.document_id;
+  const title = target.material.document_name || target.progress?.title || documentId;
+
+  const copy = document.createElement("div");
+  copy.className = "home-continue-copy";
+  const label = document.createElement("p");
+  label.className = "home-continue-label";
+  label.id = "home-continue-heading";
+  label.textContent = "Continue learning";
+  const name = document.createElement("h3");
+  name.className = "home-continue-title";
+  name.textContent = title;
+  const detail = document.createElement("p");
+  detail.className = "home-continue-detail";
+  detail.textContent = target.detail;
+  copy.append(label, name, detail);
+  if (target.progress?.learning) {
+    const state = document.createElement("span");
+    state.className = `progress-state progress-state--${target.progress.learning.state} home-continue-state`;
+    state.textContent = target.progress.learning.label;
+    name.appendChild(state);
+  }
+
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "primary-button home-continue-open";
+  open.textContent = target.action;
+  open.setAttribute("aria-label", `${target.action}: ${title}`);
+  open.addEventListener("click", async () => {
+    if (!target.session) { openStudySession(documentId, target.tab); return; }
+    // The same session object the Today list acts on, so its busy guard and status stay shared.
+    const session = homePlanSessions.find((item) => item.session_id === target.session.session_id) || target.session;
+    await plannerSessionAction(session, "start", open, panel);
+    target.session.status = session.status;   // e.g. scheduled -> in_progress: the button now says Resume
+    renderHomeContinue(materials);
+  });
+  panel.append(copy, open);
+}
+
 function renderHomeDocumentCards() {
   const materials = dashboardData?.materials || [];
   overviewMaterialsList.innerHTML = "";
+  renderHomeContinue(materials);
   if (!materials.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     empty.textContent = "No study materials yet. Upload a PDF or TXT file to start.";
+    const upload = document.createElement("button");
+    upload.type = "button";
+    upload.className = "secondary-button empty-state-action";
+    upload.textContent = "Upload material";
+    upload.addEventListener("click", () => document.getElementById("upload-source-button")?.click());
+    empty.appendChild(upload);
     overviewMaterialsList.appendChild(empty);
     return;
   }
@@ -128,6 +205,8 @@ async function loadDashboard() {
     renderDashboard();
   } catch (error) {
     dashboardData = null;
+    const continuePanel = document.getElementById("home-continue");
+    if (continuePanel) continuePanel.hidden = true;
     overviewMaterialsList.innerHTML = '<div class="empty-state">Your materials could not be loaded right now.</div>';
   }
 }
@@ -160,7 +239,8 @@ async function loadTodayPlan() {
     const progress = latestPlan
       ? await plannerRequest(`${PLANNER_PLANS_API_URL}/${encodeURIComponent(latestPlan.plan_id)}/progress?utc_offset_minutes=${plannerUtcOffsetMinutes()}`).catch(() => null)
       : null;
-    renderTodayPlan(lists.flat().filter(plannerIsActiveSession), progress);
+    homePlanSessions = lists.flat();
+    renderTodayPlan(homePlanSessions.filter(plannerIsActiveSession), progress);
   } catch (error) {
     renderTodayPlan(null);
   }
