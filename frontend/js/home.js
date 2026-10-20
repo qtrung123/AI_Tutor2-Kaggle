@@ -38,7 +38,7 @@ function studyPackText(pack) {
 
 function nextSessionText(session) {
   if (!session) return "";
-  const activity = PLANNER_ACTIVITY_LABELS[session.activity_type] || session.activity_type;
+  const activity = pcalActivity(session.activity_type, session.steps);
   if (session.status === "in_progress") return `${activity} · in progress`;
   return `${activity} · ${plannerDayLabel(session.scheduled_start.slice(0, 10))}, ${session.scheduled_start.slice(11, 16)}`;
 }

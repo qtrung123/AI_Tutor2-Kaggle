@@ -67,13 +67,13 @@ from backend.flashcard_quiz_service import (
     alternate_types,
     auto_question_count,
     build_document_question_mix,
-    pick_text_multi_blanks,
     usable_flashcards,
 )
 from config import CHAT_MODEL, GENERATION_KEEP_ALIVE
 
 QUIZ_V2_ALLOWED_QUESTION_COUNTS = set(QUIZ_ALLOWED_QUESTION_COUNTS)
-# A generated quiz mixes multiple choice, multi_blank and matching from the PDF and the flashcards
+# A generated quiz mixes multiple choice (from the PDF and the flashcards) with multi_blank and
+# matching (from the flashcards only)
 # (see _generate_quiz_from_units). Stored in the plan; only a quiz of this composition is reused by
 # the cache, so an older multiple-choice-only quiz is never returned for a new request.
 QUIZ_COMPOSITION_VERSION = "unified_mix_v1"
@@ -208,8 +208,8 @@ def _generate_quiz_from_units(
         -> best `question_count` candidates -> quiz
 
     `question_count` is the TOTAL of the mixed quiz (None = AI Auto, auto_question_count); the model
-    writes only the multiple choice questions the flashcards and the document's multi_blank sentences
-    do not cover (build_document_question_mix). It is a target, not a condition of success: the quiz holds
+    writes only the multiple choice questions the flashcards do not cover (build_document_question_mix:
+    matching, multi_blank and some multiple choice, all from the flashcards). It is a target, not a condition of success: the quiz holds
     min(valid candidates, question_count) questions and is "partial" when the calls run out first
     (or the time budget does, or two calls in a row add nothing). Only when there is not a single
     valid candidate does generation fail. No rule is relaxed and nothing is invented to reach the
@@ -244,9 +244,9 @@ def _generate_quiz_from_units(
     )
     language = language_detection["detected_language"]
     print(f"[quiz-units-language] {json.dumps(language_detection)}")
-    # The quiz is a mix: multi_blank questions from these excerpts and matching activities from the
-    # document's flashcards (when it has any) are built first, without the model; the model writes
-    # only the multiple choice questions that remain.
+    # The quiz is a mix: multi_blank (Word Bank) questions and matching activities from the document's
+    # flashcards (when it has any) are built first, without the model; the model writes only the
+    # multiple choice questions that remain, from the document.
     cards = usable_flashcards(owner_id, document["id"])
     count_mode = "auto" if question_count is None else "custom"
     if question_count is None:
@@ -520,7 +520,7 @@ def _generate_quiz_from_units(
     accepted = [question for question in accepted if not _repeats_mixed_question(question, mix)]
 
     # The ONLY failure: not a single valid question.
-    if not accepted and not mixed_questions and not mix["text_multi_blanks"]:
+    if not accepted and not mixed_questions:
         timings["total_ms"] = round((time.perf_counter() - total_started) * 1000)
         timings["total_request_ms"] = timings["total_ms"]
         print(f"[quiz-units-timing] {json.dumps({**timings, 'llm_calls': llm_calls})}")
@@ -537,19 +537,9 @@ def _generate_quiz_from_units(
         )
 
     # final_count = min(valid candidates, requested_count). Short is "partial", never a failure.
-    # Document-sentence multi_blank questions only on sentences no selected model question tests;
-    # when too few are left, more of the model's own questions take their place.
     choices = select_questions(accepted, choice_target)
-    text_blanks = pick_text_multi_blanks(mix, [squash(q["_meta"]["quote"]) for q in choices], mix["text_target"])
-    short = mix["text_target"] - len(text_blanks)
-    if short > 0:
-        blank_keys = [squash(q["explanation"].removeprefix("From the document: ")) for q in text_blanks]
-        spare = [q for q in accepted if q not in choices
-                 and not any(squash(q["_meta"]["quote"]) in key or key in squash(q["_meta"]["quote"]) for key in blank_keys)]
-        choices = select_questions(choices + spare, choice_target + short)
     selected, question_evidence = finalize_questions(choices)
-    selected, question_evidence = _mix_question_types(
-        selected, alternate_types(mixed_questions + text_blanks), question_evidence)
+    selected, question_evidence = _mix_question_types(selected, alternate_types(mixed_questions), question_evidence)
     actual_count = len(selected)
     missing_count = max(0, question_count - actual_count)
     status = "complete" if actual_count >= question_count else "partial"

@@ -1,7 +1,9 @@
-"""multi_blank questions (backend/flashcard_quiz_service.build_multi_blank): 2-4 blanks per grounded
-sentence, accepted variants, 1-3 word-bank distractors, Mixed replacing short answers, SQLite
-storage of the blank spec, autosave/resume, per-blank grading and compatibility with older types.
-No LLM is called anywhere in this flow.
+"""multi_blank (Word Bank) questions (backend/flashcard_quiz_service.build_multi_blank): built from a
+flashcard's own answer sentence only (never a PDF sentence, header, author line or email address),
+2-4 meaningful terms blanked with the card front as context, accepted variants, 1-3 word-bank
+distractors from the other flashcards, Mixed replacing short answers, SQLite storage of the blank
+spec, autosave/resume, per-blank grading and compatibility with older types. No LLM is called
+anywhere in this flow.
 """
 
 import random
@@ -19,10 +21,9 @@ from backend import (
 from backend.main import app
 from backend.quiz_attempt_service import _multi_blank_accepted
 from backend.quiz_units import FILL_BLANK_MARKER, squash
-from test_flashcard_written_quiz import CHUNKS, DOC, TOPICS, save_cards
+from test_flashcard_written_quiz import CARDS, CHUNKS, DOC, TOPICS, save_cards
 
 SENTENCE = "A semaphore guards shared counters so that two threads never update them together."
-VOCABULARY_TEXTS = [chunk["content"] for chunk in CHUNKS]
 
 
 def fill(question: dict, answers: list[str]) -> str:
@@ -32,31 +33,81 @@ def fill(question: dict, answers: list[str]) -> str:
     return text
 
 
-class BuildMultiBlankTests(unittest.TestCase):
-    def build(self, card, sentences, texts=VOCABULARY_TEXTS, seed=1):
-        vocabulary = flashcard_quiz_service.keyword_vocabulary(texts)
-        return flashcard_quiz_service.build_multi_blank(card, sentences, vocabulary, random.Random(seed))
+CARD_TEXTS = [f"{front} {back}" for front, back, _topic, _sources in CARDS]
 
-    def test_document_sentence_gets_two_to_four_distinct_grounded_blanks(self):
-        card = {"front": "What guards shared counters between threads?", "back": "Semaphore", "source_chunk_ids": ["c2"]}
-        built = self.build(card, [{"text": SENTENCE, "chunk_id": "c2"}])
+
+class BuildMultiBlankTests(unittest.TestCase):
+    def build(self, card, texts=CARD_TEXTS, seed=1):
+        vocabulary = flashcard_quiz_service.keyword_vocabulary(texts)
+        return flashcard_quiz_service.build_multi_blank(card, vocabulary, random.Random(seed))
+
+    def test_card_answer_gets_two_to_four_distinct_meaningful_blanks_after_its_front(self):
+        card = {"front": "How does a semaphore protect a counter?",
+                "back": "It lets only one thread at a time enter the section that updates the shared counter value.",
+                "source_chunk_ids": ["c2"]}
+        built = self.build(card)
         self.assertIsNotNone(built)
         answers = [blank["answer"] for blank in built["blanks"]]
         self.assertTrue(2 <= len(answers) <= 4, answers)
+        prefix = f"{card['front']}{flashcard_quiz_service.MULTI_BLANK_CONTEXT_SEPARATOR}"
+        self.assertTrue(built["question"].startswith(prefix))                        # the front gives the context
         self.assertEqual(built["question"].count(FILL_BLANK_MARKER), len(answers))
         self.assertEqual(len({squash(answer) for answer in answers}), len(answers))   # different keywords
-        self.assertEqual(fill(built, answers), SENTENCE)                              # the PDF sentence itself
+        self.assertEqual(fill({"question": built["question"].removeprefix(prefix)}, answers), card["back"])   # the card answer itself
         self.assertEqual(built["source_chunk_ids"], ["c2"])
-        self.assertTrue(built["explanation"].startswith("From the document:"))
+        self.assertEqual(built["explanation"], f"From your flashcard: {card['back']}")
         self.assertNotIn(f"{FILL_BLANK_MARKER} {FILL_BLANK_MARKER}", built["question"])   # never adjacent
+        front_keys = {squash(word) for word in card["front"].replace("?", "").split()}
+        for answer in answers:
+            self.assertNotIn(squash(answer), front_keys | {"it", "time", "value"})     # no giveaway, no everyday word
+            self.assertGreaterEqual(len(answer), 4)
 
         self.assertTrue(1 <= len(built["distractors"]) <= 3)
-        sentence_keys = {squash(word) for word in SENTENCE.split()}
+        sentence_keys = {squash(word) for word in card["back"].split()}
         for distractor in built["distractors"]:
             self.assertNotIn(squash(distractor), sentence_keys)   # a distractor can never be right
+            self.assertIn(squash(distractor), squash(" ".join(CARD_TEXTS)))   # ...and comes from the flashcards
         self.assertEqual(sorted(built["word_bank"]), sorted(answers + built["distractors"]))
         self.assertNotEqual(built["word_bank"][:len(answers)], answers)
-        self.assertTrue(flashcard_quiz_service.multi_blank_is_valid(built, SENTENCE))
+        self.assertTrue(flashcard_quiz_service.multi_blank_is_valid(
+            {**built, "question": built["question"].removeprefix(prefix)}, card["back"]))
+
+    def test_unsuitable_cards_are_skipped(self):
+        for back in (
+            "Contact john.doe@uni.edu for the lecture slides and the weekly notes.",
+            "See https://example.edu/os for the lecture slides and the weekly notes.",
+            "Written by John Smith and Mary Jones for the operating systems course.",
+            "Prof. Alan Turing and colleagues, Department of Computer Science, 2024 edition.",
+            "INTRODUCTION TO OPERATING SYSTEMS AND PROCESS SCHEDULING BASICS",
+            "Chapter Three Process Scheduling And Memory Management Overview",
+            "The key ideas of process scheduling are listed below:",
+        ):
+            card = {"front": "What does the lecture say?", "back": back, "source_chunk_ids": []}
+            self.assertIsNone(flashcard_quiz_service.multi_blank_card_text(card), back)
+            self.assertIsNone(self.build(card), back)
+
+    def test_distractors_are_flashcard_terms_never_metadata_or_everyday_words(self):
+        cards = [{"front": front, "back": back} for front, back, _topic, _sources in CARDS] + [
+            {"front": "Who teaches the course?", "back": "Contact professor.nguyen@university.edu for the lecture recordings."},
+            {"front": "Which words matter?", "back": "Several different values change every time."}]
+        vocabulary = flashcard_quiz_service.card_vocabulary(cards)
+        self.assertFalse({"professor", "university", "nguyen", "lecture", "recordings"} & set(vocabulary))   # metadata card left out
+        card = {"front": "How does a semaphore protect a counter?",
+                "back": "It lets only one thread at a time enter the section that updates the shared counter value."}
+        built = flashcard_quiz_service.build_multi_blank(card, vocabulary, random.Random(1))
+        self.assertIsNotNone(built)
+        for distractor in built["distractors"]:
+            self.assertNotIn(squash(distractor), {"several", "different", "values", "time", "change"})
+            self.assertFalse(any(char.isdigit() for char in distractor))
+
+    def test_names_and_numbers_are_never_blanks(self):
+        card = {"front": "What did the course team build?",
+                "back": "In 2024 the team of Alice Nguyen built a scheduler simulator that visualizes preemption.",
+                "source_chunk_ids": []}
+        built = self.build(card)
+        self.assertIsNotNone(built)
+        answers = {squash(blank["answer"]) for blank in built["blanks"]}
+        self.assertFalse(answers & {"alice", "nguyen", "2024"}, answers)
 
     def test_accepted_alternatives_cover_hyphens_and_missing_diacritics(self):
         self.assertEqual(flashcard_quiz_service._accepted_answers("light-dependent"),
@@ -67,19 +118,10 @@ class BuildMultiBlankTests(unittest.TestCase):
 
     def test_no_sentence_or_no_distractor_means_no_question(self):
         short = {"front": "What guards counters?", "back": "Semaphore", "source_chunk_ids": []}
-        self.assertIsNone(self.build(short, None))   # a term, not a sentence, and no document text
+        self.assertIsNone(self.build(short))   # a term, not a sentence
         # Every key word of the only text is in the sentence itself: no distractor exists.
         card = {"front": "Q?", "back": SENTENCE, "source_chunk_ids": []}
-        self.assertIsNone(self.build(card, None, texts=[SENTENCE]))
-
-    def test_card_sentence_is_used_without_document_sentences(self):
-        card = {"front": "How does a semaphore protect a counter?",
-                "back": "It lets only one thread at a time enter the section that updates the shared counter value.",
-                "source_chunk_ids": ["c2"]}
-        built = self.build(card, None)
-        self.assertIsNotNone(built)
-        self.assertEqual(fill(built, [blank["answer"] for blank in built["blanks"]]), card["back"])
-        self.assertTrue(built["explanation"].startswith("From your flashcard:"))
+        self.assertIsNone(self.build(card, texts=[SENTENCE]))
 
     def test_snapshot_without_spec_grades_against_its_canonical_answers(self):
         self.assertEqual(_multi_blank_accepted({"correct_answers": ["semaphore", "threads"]}), [["semaphore"], ["threads"]])
@@ -132,20 +174,19 @@ class MultiBlankQuizTests(QuizDbTestCase):
     def multi_blanks(self, quiz):
         return [q for q in quiz["questions"] if q["question_type"] == "multi_blank"]
 
-    def test_mixed_replaces_short_answers_with_grounded_multi_blank(self):
+    def test_mixed_replaces_short_answers_with_flashcard_multi_blank(self):
         quiz = self.planner_mixed()
         questions = self.multi_blanks(quiz)
         self.assertTrue(questions)
         self.assertEqual(len(quiz["questions"]), 10)   # one question per card, as before
-        document_text = squash(" ".join(chunk["content"] for chunk in CHUNKS))
+        backs = {back for _front, back, _topic, _sources in CARDS}
         for question in questions:
             self.assertTrue(2 <= len(question["blanks"]) <= 4)
             self.assertEqual(question["correct_answers"], [blank["answer"] for blank in question["blanks"]])
-            self.assertEqual(question["answer_modes"], ["type_answer", "word_bank"])
+            self.assertEqual(question["answer_modes"], ["word_bank"])   # new questions: Word Bank only
             self.assertEqual(question["options"], [])
-            if question["explanation"].startswith("From the document:"):
-                self.assertIn(squash(fill(question, question["correct_answers"])), document_text)
-                self.assertTrue(set(question["source_chunk_ids"]) <= {"c1", "c2"})
+            self.assertTrue(question["explanation"].startswith("From your flashcard:"))   # never a PDF sentence
+            self.assertIn(question["explanation"].removeprefix("From your flashcard: "), backs)
         # Only cards that yield no multi_blank stay short answers.
         self.assertEqual(quiz["assessment_plan"]["type_distribution"].get("multi_blank"), len(questions))
         # Single-type modes are unchanged.
@@ -278,8 +319,8 @@ class AutoPracticeQuizTests(QuizDbTestCase):
 
 
 class DocumentQuestionMixTests(QuizDbTestCase):
-    """Create a Quiz: the parts the model does not write -- matching, multi_blank and multiple choice
-    from the flashcards, multi_blank candidates from the quiz's own excerpts."""
+    """Create a Quiz: the parts the model does not write -- matching, multi_blank and multiple choice,
+    all from the flashcards (nothing from the quiz's own excerpts)."""
 
     def units(self):
         from backend.quiz_units import build_study_units
@@ -300,28 +341,32 @@ class DocumentQuestionMixTests(QuizDbTestCase):
         self.assertEqual(len(concepts), len(set(concepts)))             # one card, one question
         matched = sum(len(q["options"]) for q in mix["questions"] if q["question_type"] == "matching")
         self.assertLessEqual(matched, 4)
-        self.assertEqual(mix["choice_target"], 12 - len(mix["questions"]) - mix["text_target"])
+        self.assertEqual(mix["choice_target"], 12 - len(mix["questions"]))
         for question in mix["questions"]:
             self.assertEqual((question["topic_id"], question["difficulty"]), ("document", "medium"))
-        # Document-sentence candidates are grounded in the excerpts and never repeat a used card answer.
-        document_text = squash(" ".join(chunk["content"] for chunk in CHUNKS))
-        picked = flashcard_quiz_service.pick_text_multi_blanks(mix, [], 10)
-        for question in picked:
-            self.assertIn(squash(fill(question, question["correct_answers"])), document_text)
-            self.assertFalse(any(answer in squash(question["explanation"]) for answer in mix["card_answer_keys"]))
+            self.assertTrue(question["concept_id"].startswith("flashcard:"))
+        for question in mix["questions"]:
+            if question["question_type"] == "multi_blank":
+                self.assertTrue(question["explanation"].startswith("From your flashcard:"))
+                self.assertEqual(question["answer_modes"], ["word_bank"])
 
-    def test_without_flashcards_only_document_multi_blanks_are_offered(self):
+    def test_without_flashcards_no_multi_blank_is_made_from_the_document(self):
         other = auth_store.create_user("No Cards", "no-cards@example.com", "long-password-123")["id"]
         mix = self.mix(other)
         self.assertEqual(mix["questions"], [])
-        self.assertTrue(mix["text_multi_blanks"])
-        self.assertEqual(mix["choice_target"], 12 - mix["text_target"])
+        self.assertEqual(mix["choice_target"], 12)   # the model writes the whole quiz as multiple choice
+        self.assertNotIn("text_multi_blanks", mix)
 
-    def test_a_sentence_a_model_question_tests_is_not_reused(self):
-        mix = self.mix(auth_store.create_user("No Cards", "nc2@example.com", "long-password-123")["id"])
-        first = mix["text_multi_blanks"][0][1]
-        picked = flashcard_quiz_service.pick_text_multi_blanks(mix, [first], 10)
-        self.assertNotIn(first, [squash(question["explanation"].removeprefix("From the document: ")) for question in picked])
+    def test_unsuitable_cards_never_become_multi_blank(self):
+        cards = [{"flashcard_id": f"bad{index}", "set_id": "s", "front": "What does the slide say?", "back": back,
+                  "topic_id": "sync", "source_chunk_ids": []}
+                 for index, back in enumerate(["Contact john.doe@uni.edu for the lecture slides and notes today.",
+                                               "INTRODUCTION TO OPERATING SYSTEMS AND PROCESS SCHEDULING",
+                                               "Written by John Smith and Mary Jones for this course."])]
+        mix = flashcard_quiz_service.build_document_question_mix(
+            self.owner, DOC, self.units(), {"topic_id": "document", "name": "Entire document"}, "medium", 12,
+            random.Random(2), language="english", cards=cards)
+        self.assertNotIn("multi_blank", [question["question_type"] for question in mix["questions"]])
 
     def test_model_questions_repeating_a_card_answer_or_sentence_are_dropped(self):
         from backend.quiz_service import _repeats_mixed_question
@@ -389,10 +434,9 @@ class GeneratedQuizMixTests(unittest.TestCase):
 
         quiz = run_unified([{"questions": candidates(range(15))}], make_chunks(12, 2) + CHUNKS, [], 12)
         types = [q["question_type"] for q in quiz["questions"]]
-        blanks = types.count("multi_blank")
-        self.assertGreater(blanks, 0)
+        self.assertEqual(types.count("multi_blank"), 0)   # never from the PDF: no flashcards, no Word Bank
         self.assertEqual(len(types), 12)
-        self.assertEqual(types.count("single_choice"), 12 - blanks)
+        self.assertEqual(types.count("single_choice"), 12)
         self.assertEqual([q["id"] for q in quiz["questions"]], list(range(1, 13)))
         plan = quiz["assessment_plan"]
         self.assertEqual((plan["requested_count"], plan["status"], plan["count_mode"]), (12, "complete", "custom"))
@@ -401,11 +445,6 @@ class GeneratedQuizMixTests(unittest.TestCase):
         self.assertEqual(evidence_ids, {q["id"] for q in quiz["questions"] if q["question_type"] == "single_choice"
                                         and q["concept_origin"] == "study_unit"})
         self.assertEqual(len(FakeModel.prompts), 1)
-        # No document sentence is tested twice (a multi_blank never reuses a model question's quote).
-        quotes = {squash(record["evidence_quote"]) for record in plan["question_evidence"]}
-        for question in quiz["questions"]:
-            if question["question_type"] == "multi_blank":
-                self.assertNotIn(squash(question["explanation"].removeprefix("From the document: ")), quotes)
 
     def test_custom_total_counts_every_activity_once_across_both_sources(self):
         from quiz_fixtures import candidates, make_chunks
@@ -417,6 +456,11 @@ class GeneratedQuizMixTests(unittest.TestCase):
         self.assertNotIn("short_answer", types)
         origins = {q["concept_origin"] for q in quiz["questions"]}
         self.assertEqual(origins, {"flashcard", "study_unit"})            # flashcards AND the PDF
+        for question in quiz["questions"]:
+            if question["question_type"] in ("multi_blank", "matching"):
+                self.assertEqual(question["concept_origin"], "flashcard")   # Word Bank and Matching: flashcards only
+            if question["concept_origin"] == "study_unit":
+                self.assertEqual(question["question_type"], "single_choice")
         concepts = [q["concept_id"] for q in quiz["questions"]]
         flashcard_concepts = [c for c in concepts if c.startswith("flashcard:")]
         self.assertEqual(len(flashcard_concepts), len(set(flashcard_concepts)))   # each card once

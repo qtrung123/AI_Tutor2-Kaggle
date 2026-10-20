@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
+from backend.study_combined_sessions import activity_key
 from backend.study_planner_store import ACTIVITY_TYPES, SESSION_REASONS, validate_session
 
 if TYPE_CHECKING:
@@ -57,13 +58,19 @@ class SchedulingReason:
 
 @dataclass(frozen=True)
 class CandidateActivity:
-    """One thing the learner could do next for one document, before any time slot is chosen."""
+    """One thing the learner could do next for one document, before any time slot is chosen.
+    `steps` (two of them) make it a combined session; activity_type is then the first step's."""
     document_id: str
     activity_type: str
     reason: SchedulingReason
     artifact_id: str | None = None
     estimated_minutes: int | None = None
     deadline: str | None = None
+    steps: tuple = ()
+
+    @property
+    def key(self) -> str:
+        return activity_key(self.activity_type, self.steps)
 
     def __post_init__(self):
         if self.activity_type not in ACTIVITY_TYPES:
@@ -121,18 +128,26 @@ class ProposedSession:
     reason: SchedulingReason
     artifact_id: str | None = None
     priority_snapshot: float | None = None
+    steps: tuple = ()   # a combined session's two steps (study_combined_sessions.new_steps); () = single
 
     def __post_init__(self):
         validate_session({**self.to_session_record(), "status": "scheduled"})
 
+    @property
+    def key(self) -> str:
+        return activity_key(self.activity_type, self.steps)
+
     def to_session_record(self) -> dict:
         """The dict study_planner_store.create_sessions accepts (reason persisted as its code)."""
-        return {
+        record = {
             "document_id": self.document_id, "activity_type": self.activity_type,
             "artifact_id": self.artifact_id, "scheduled_start": self.scheduled_start,
             "scheduled_end": self.scheduled_end, "duration_minutes": self.duration_minutes,
             "reason": self.reason.code, "priority_snapshot": self.priority_snapshot,
         }
+        if self.steps:
+            record["steps"] = [dict(step) for step in self.steps]
+        return record
 
 
 @dataclass(frozen=True)

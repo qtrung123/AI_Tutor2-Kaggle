@@ -3,8 +3,9 @@ mock): the Flashcards tab no longer creates quizzes (they are made in the Quiz t
 saved earlier still open by quiz_id in the focused Quiz Player, with text input for
 short_answer and fill_blank, autosave + resume of typed answers, Results/Review showing the typed and
 the canonical answer, learner-marked self-check questions, and a matching activity (click-to-pair,
-drag and drop, moving and clearing a pair, per-pair review), and a multi_blank question answered by
-Type Answer and by Word Bank (click, drag, clear; per-blank review). Backend behavior is covered by
+drag and drop, moving and clearing a pair, per-pair review), and a new multi_blank question answered
+from its Word Bank only (click, drag, clear; per-blank review; no Type Answer / Word Bank switch),
+while an older saved multi_blank question keeps typed blanks. Backend behavior is covered by
 tests/test_flashcard_written_quiz.py; the mock mirrors its normalized exact-match grading.
 
 Skipped when Chrome is not installed (set CHROME_PATH to point at it). No backend, no network.
@@ -59,12 +60,12 @@ window.fetch = async (input, init = {}) => {
     const quiz = {quiz_id: "fc-blanks", document_id: "lecture.pdf", title: "Lecture · Flashcard practice (Mixed)", difficulty: "easy",
       topic_id: "document", topic_name: "Entire document", assessment_scope: "document", created_at: "2026-01-04T00:00:00Z",
       assessment_plan: {planner_version: "flashcard_written_v1", source: "flashcards", self_check_question_ids: [], type_distribution: {multi_blank: 1}},
-      questions: [{id: 1, question: "A ____ guards shared ____ so that two threads never collide.", options: [],
+      questions: [{id: 1, question: "What protects shared counters? — A ____ guards shared ____ so that two threads never collide.", options: [],
         question_type: "multi_blank", correct_answer: "semaphore | counters", correct_answers: ["semaphore", "counters"],
         blanks: [{id: 1, answer: "semaphore", accepted_answers: ["semaphore"]}, {id: 2, answer: "counters", accepted_answers: ["counters"]}],
         distractors: ["registers", "scheduler"], word_bank: ["registers", "semaphore", "scheduler", "counters"],
-        answer_modes: ["type_answer", "word_bank"], topic_id: "t1", topic_name: "Topic 1", difficulty: "easy",
-        explanation: "From the document: A semaphore guards shared counters so that two threads never collide.", source_chunk_ids: []}]};
+        answer_modes: ["word_bank"], topic_id: "t1", topic_name: "Topic 1", difficulty: "easy",
+        explanation: "From your flashcard: A semaphore guards shared counters so that two threads never collide.", source_chunk_ids: []}]};
     window.__quizzes["fc-blanks"] = quiz;
     return json(quiz);
   }
@@ -249,24 +250,17 @@ const reviewRows = () => [...document.querySelectorAll("#quiz-review-options .qu
       row.classList.contains("is-correct") ? "correct" : (row.classList.contains("is-wrong") ? "wrong" : "other"))};
   out.matchingOverflow = document.documentElement.scrollWidth > window.innerWidth;
 
-  // multi_blank: Type Answer, then Word Bank (click a word, drag a word, clear a blank), same answer.
+  // multi_blank (new, from a flashcard): Word Bank only -- click a word, clear a blank, drag a word.
   await openSavedPractice();
   await sleep(300);
   const blankInputs = () => [...document.querySelectorAll(".quiz-multi-blank-input")];
   const blankSlots = () => [...document.querySelectorAll(".quiz-multi-blank-slot")];
   const chips = () => [...document.querySelectorAll(".quiz-word-bank-chip")];
-  const modeButtons = () => [...document.querySelectorAll(".quiz-multi-blank-modes .quiz-segmented-option")];
+  const modeButtons = () => [...document.querySelectorAll(".quiz-multi-blank-modes, .quiz-multi-blank .quiz-segmented-option")];
   const sentence = () => document.querySelector(".quiz-multi-blank-sentence")?.textContent;
   out.blanksOpened = {question: $("quiz-player-question").textContent, inputs: blankInputs().length, sentence: sentence(),
-    modes: modeButtons().map((b) => ({label: b.textContent, active: b.classList.contains("active")})),
-    chips: chips().length, types: $("quiz-player-types").textContent};
-  blankInputs()[1].focus(); blankInputs()[1].value = "Counters"; blankInputs()[1].dispatchEvent(new Event("input", {bubbles: true}));
-  out.typedKeepsFocus = document.activeElement === blankInputs()[1];
-  await sleep(700);
-  out.typedAutosave = window.__lastProgressBody.answers;
-  modeButtons()[1].click(); await sleep(20);                       // Word Bank keeps what was typed
-  out.wordBank = {slots: blankSlots().map((slot) => slot.textContent), chips: chips().map((chip) => chip.textContent),
-    used: chips().map((chip) => chip.classList.contains("is-used")), inputs: blankInputs().length};
+    modes: modeButtons().length, slots: blankSlots().map((slot) => slot.textContent),
+    chips: chips().map((chip) => chip.textContent), types: $("quiz-player-types").textContent};
   chips()[0].click(); await sleep(20);                             // "registers" fills the first empty blank
   out.firstPick = blankSlots().map((slot) => slot.textContent);
   blankSlots()[0].click(); await sleep(20);                        // clear it; it becomes the active blank
@@ -275,11 +269,15 @@ const reviewRows = () => [...document.querySelectorAll("#quiz-review-options .qu
   chips()[1].dispatchEvent(new DragEvent("dragstart", {bubbles: true, dataTransfer: drag}));
   blankSlots()[0].dispatchEvent(new DragEvent("dragover", {bubbles: true, cancelable: true, dataTransfer: drag}));
   blankSlots()[0].dispatchEvent(new DragEvent("drop", {bubbles: true, cancelable: true, dataTransfer: drag}));
-  await sleep(700);
+  await sleep(20);
+  chips()[3].click(); await sleep(700);                            // "counters" fills the next empty blank
   out.wordBankAnswer = {slots: blankSlots().map((slot) => slot.textContent), autosave: window.__lastProgressBody.answers,
-    answered: $("quiz-player-answered-count").textContent};
-  modeButtons()[0].click(); await sleep(20);                       // back to Type Answer: the same answer
-  out.backToTyping = blankInputs().map((field) => field.value);
+    used: chips().map((chip) => chip.classList.contains("is-used")), answered: $("quiz-player-answered-count").textContent};
+  // An older saved multi_blank question (both modes stored) keeps typed blanks, with no switch either.
+  const legacy = createMultiBlankBoard({id: 999, question: "A ____ guards shared ____.", answer_modes: ["type_answer", "word_bank"],
+    blanks: [{id: 1, answer: "semaphore"}, {id: 2, answer: "counters"}], word_bank: ["semaphore", "counters", "registers"]}, ["", "x"]);
+  out.legacyBoard = {inputs: legacy.querySelectorAll(".quiz-multi-blank-input").length, values: [...legacy.querySelectorAll(".quiz-multi-blank-input")].map((f) => f.value),
+    chips: legacy.querySelectorAll(".quiz-word-bank-chip").length, modes: legacy.querySelectorAll(".quiz-segmented-option").length};
   $("quiz-player-next").click();   // Finish Quiz
   await sleep(400);
   out.blanksResults = {score: $("quiz-results-score").textContent, submitted: window.__lastSubmitBody.answers};
@@ -352,29 +350,27 @@ class FlashcardPracticeQuizUiTests(unittest.TestCase):
                                            "Correct answerBecause many processes compete for a few CPU cores at once."])
         self.assertEqual(review3["buttons"], [{"label": "I got it right", "disabled": False}, {"label": "I missed it", "disabled": True}])
 
-    def test_multi_blank_type_answer_and_word_bank_give_the_same_answer(self):
+    def test_new_multi_blank_is_answered_from_the_word_bank_without_a_mode_switch(self):
         opened = self.out["blanksOpened"]
         self.assertEqual(opened["question"], "Fill in the blanks.")
-        self.assertEqual(opened["inputs"], 2)
-        self.assertEqual(opened["sentence"], "A  guards shared  so that two threads never collide.")
-        self.assertEqual(opened["modes"], [{"label": "Type Answer", "active": True}, {"label": "Word Bank", "active": False}])
-        self.assertEqual((opened["chips"], opened["types"]), (0, "Fill in the Blanks"))
-        self.assertTrue(self.out["typedKeepsFocus"])
-        self.assertEqual(self.out["typedAutosave"], {"1": ["", "Counters"]})
-        self.assertEqual(self.out["wordBank"], {"slots": ["Blank 1", "Counters"], "chips": ["registers", "semaphore", "scheduler", "counters"],
-                                                "used": [False, False, False, False], "inputs": 0})
-        self.assertEqual(self.out["firstPick"], ["registers", "Counters"])
-        self.assertEqual(self.out["clearedBlank"], {"slots": ["Blank 1", "Counters"], "active": True})
-        self.assertEqual(self.out["wordBankAnswer"], {"slots": ["semaphore", "Counters"], "autosave": {"1": ["semaphore", "Counters"]},
-                                                      "answered": "1 answered"})
-        self.assertEqual(self.out["backToTyping"], ["semaphore", "Counters"])
+        self.assertEqual((opened["inputs"], opened["modes"]), (0, 0))   # no Type Answer, no switch
+        self.assertEqual(opened["sentence"], "What protects shared counters? — A Blank 1 guards shared Blank 2 so that two threads never collide.")
+        self.assertEqual(opened["slots"], ["Blank 1", "Blank 2"])
+        self.assertEqual((opened["chips"], opened["types"]), (["registers", "semaphore", "scheduler", "counters"], "Fill in the Blanks"))
+        self.assertEqual(self.out["firstPick"], ["registers", "Blank 2"])
+        self.assertEqual(self.out["clearedBlank"], {"slots": ["Blank 1", "Blank 2"], "active": True})
+        self.assertEqual(self.out["wordBankAnswer"], {"slots": ["semaphore", "counters"], "autosave": {"1": ["semaphore", "counters"]},
+                                                      "used": [False, True, False, True], "answered": "1 answered"})
+
+    def test_older_saved_multi_blank_keeps_typed_blanks(self):
+        self.assertEqual(self.out["legacyBoard"], {"inputs": 2, "values": ["", "x"], "chips": 0, "modes": 0})
 
     def test_multi_blank_results_review_each_blank(self):
-        self.assertEqual(self.out["blanksResults"], {"score": "1 / 1", "submitted": {"1": ["semaphore", "Counters"]}})
+        self.assertEqual(self.out["blanksResults"], {"score": "1 / 1", "submitted": {"1": ["semaphore", "counters"]}})
         review = self.out["blanksReview"]
         self.assertEqual(review["status"], "Correct")
-        self.assertEqual(review["question"], "A (1) ____ guards shared (2) ____ so that two threads never collide.")
-        self.assertEqual(review["rows"], ["✓(1) semaphoreCorrect", "✓(2) CountersCorrect"])
+        self.assertEqual(review["question"], "What protects shared counters? — A (1) ____ guards shared (2) ____ so that two threads never collide.")
+        self.assertEqual(review["rows"], ["✓(1) semaphoreCorrect", "✓(2) countersCorrect"])
         self.assertFalse(self.out["blanksOverflow"])
 
     def test_matching_board_click_drag_move_and_clear(self):

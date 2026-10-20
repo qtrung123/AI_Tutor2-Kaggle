@@ -11,6 +11,7 @@
 
 import unittest
 from collections import Counter, defaultdict
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -77,7 +78,9 @@ class PreferencesApiTests(PlannerApiCase):
         self.assertEqual(prefs["options"]["daily_target_minutes"], [60, 90, 120, 180])
         self.assertEqual(prefs["options"]["break_minutes"], [5, 10, 15, 20, 30])
         self.assertEqual(prefs["options"]["strategy"], ["balanced", "finish_early", "deadline_priority"])
-        self.assertIs(study_preferences.scheduler_config(self.alice), DEFAULT_CONFIG)   # behaviour unchanged
+        # The planner's standard rules: the scheduler's defaults with combined sessions switched on.
+        self.assertIs(study_preferences.scheduler_config(self.alice), study_preferences.PLANNER_CONFIG)
+        self.assertEqual(replace(study_preferences.PLANNER_CONFIG, combine_sessions=False), DEFAULT_CONFIG)
 
     def test_save_reload_merge_and_reset(self):
         saved = self.put(daily_target_minutes=120, break_minutes=10, strategy="finish_early",
@@ -129,10 +132,18 @@ class PreferencesAppliedTests(PlannerApiCase):
         plan = self.plan(("mkt", "2026-10-02"), ("stats", "2026-10-02"))
         self.put(daily_target_minutes=120, break_minutes=10, durations={"summary": 50, "flashcards": 25, "quiz": 40})
         sessions = self.preview(plan)["sessions"]
-        lengths = {s["activity_type"]: s["duration_minutes"] for s in sessions if s["reason"]["code"] != "final_review"}
-        self.assertEqual((lengths["summary"], lengths["flashcards"], lengths["quiz"]), (50, 25, 40))
+        lengths = {s["activity_type"]: s["duration_minutes"] for s in sessions
+                   if s["reason"]["code"] != "final_review" and not s["steps"]}
+        self.assertEqual(lengths["quiz"], 40)
+        # Summary + flashcards share one combined session of 30-40 minutes (its own split, not the per-activity lengths).
+        combined = [s for s in sessions if s["steps"]]
+        self.assertTrue(combined)
+        for session in combined:
+            self.assertTrue(30 <= session["duration_minutes"] <= 40)
+            self.assertEqual(sum(step["duration_minutes"] for step in session["steps"]), session["duration_minutes"])
         days = self.day_sessions(sessions)
-        self.assertTrue(any(sum(s["duration_minutes"] for s in items) > 90 for items in days.values()))   # 120 a day
+        # Combined sessions need fewer minutes, so no day has to go past 90: the saved 120 is what applies.
+        self.assertEqual(study_preferences.scheduler_config(self.alice).daily_target_minutes, 120)
         for items in days.values():
             self.assertLessEqual(sum(s["duration_minutes"] for s in items), 120)
             gaps = [minute_of(b["scheduled_start"]) - minute_of(a["scheduled_end"]) for a, b in zip(items, items[1:])]
@@ -217,7 +228,7 @@ class ManualEditTests(PlannerApiCase):
         self.assertEqual((resized["scheduled_start"], resized["duration_minutes"], resized["manual_edit"]),
                          ("2026-10-01T20:15:00", 30, True))
         # A plain drag is the learner's choice too.
-        dragged = self.edit(self.sessions[1], target_start="2026-10-03T18:00:00").json()["session"]
+        dragged = self.edit(self.sessions[1], target_start="2026-10-02T18:00:00").json()["session"]
         self.assertEqual((dragged["duration_minutes"], dragged["manual_edit"]), (self.sessions[1]["duration_minutes"], True))
 
     def test_conflicting_changes_are_refused_with_a_clear_reason_and_write_nothing(self):

@@ -4,10 +4,12 @@ Same conventions as flashcard_store.py, quiz_store.py, and conversation_store.py
 backend/db.py connection layer, the same DATABASE_PATH fallback, and additive migrations.
 """
 
+import json
 from datetime import date as date_type, datetime, timezone
 from uuid import uuid4
 
 from backend import db
+from backend import study_combined_sessions as combined
 from backend.auth_store import initialize_auth_store
 from backend.study_time import merge_minute_intervals, subtract_minute_interval, to_hhmm, to_minutes
 from config import DATABASE_PATH
@@ -178,6 +180,9 @@ def _initialize_schema(connection: db.Connection) -> None:
     # Additive migration: 1 = the learner set this session's time/length by hand. Auto Plan and
     # adaptation never move, resize or cancel such a session on their own (study_adaptation).
     _add_column_if_missing(connection, "study_sessions", "manual_edit", "INTEGER NOT NULL DEFAULT 0")
+    # Additive migration: a combined session's two sequential steps with their own minutes and
+    # progress (study_combined_sessions). NULL = a single-activity session (every older row).
+    _add_column_if_missing(connection, "study_sessions", "steps_json", "TEXT")
     # Study Preferences: one row per learner, created on first save. No row = the defaults
     # (study_preferences.DEFAULTS), so existing learners keep exactly today's behaviour.
     connection.executescript(
@@ -783,6 +788,13 @@ def validate_session(session: dict) -> None:
     duration = session.get("duration_minutes")
     if isinstance(duration, bool) or not isinstance(duration, int) or not 0 < duration <= span:
         raise ValueError("duration_minutes must be a positive whole number that fits the scheduled window.")
+    combined.validate_steps(session.get("steps"), duration, session["activity_type"])
+
+
+def _steps_json(session) -> str | None:
+    """steps_json for a new row: the combined session's steps, or NULL for a single activity."""
+    steps = session.get("steps") if isinstance(session, dict) else None
+    return json.dumps(list(steps), ensure_ascii=False) if steps else None
 
 
 def _plan(row) -> dict:
@@ -808,7 +820,7 @@ def _session(row) -> dict:
                     "scheduled_start", "scheduled_end", "duration_minutes", "status", "reason",
                     "priority_snapshot", "started_at", "completed_at", "rescheduled_from", "created_at",
                     "updated_at")
-    } | {"manual_edit": bool(row["manual_edit"])}
+    } | {"manual_edit": bool(row["manual_edit"]), "steps": json.loads(row["steps_json"]) if row["steps_json"] else []}
 
 
 def _update_row(table: str, key_column: str, key: str, owner_id: str, fields: dict, not_found: str) -> None:
@@ -1018,14 +1030,14 @@ def _session_rows(owner_id: str, plan_id: str, sessions: list[dict]) -> list[tup
             str(uuid4()), owner_id, plan_id, session["document_id"], session["activity_type"],
             session.get("artifact_id"), session["scheduled_start"], session["scheduled_end"],
             session["duration_minutes"], session["status"], session.get("reason"),
-            session.get("priority_snapshot"), now, now,
+            session.get("priority_snapshot"), _steps_json(session), now, now,
         ))
     return rows
 
 
 _INSERT_SESSION_SQL = """INSERT INTO study_sessions (session_id, owner_id, plan_id, document_id, activity_type,
     artifact_id, scheduled_start, scheduled_end, duration_minutes, status, reason, priority_snapshot,
-    created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    steps_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 
 def create_sessions(owner_id: str, plan_id: str, sessions: list[dict]) -> list[dict]:
@@ -1167,6 +1179,10 @@ def transition_session(owner_id: str, session_id: str, action: str) -> tuple[dic
                 raise SessionTransitionError(code, f"A {status} session cannot be {verb}.", status)
             if status == "scheduled" and row["plan_status"] != "active":
                 raise SessionTransitionError("plan_not_active", "This session belongs to a plan that is no longer active.", status)
+            pending = combined.current_step_index(json.loads(row["steps_json"]) if row["steps_json"] else [])
+            if action == "complete" and pending is not None:
+                raise SessionTransitionError("session_steps_incomplete",
+                                             "Finish both steps of this combined session before completing it.", status)
             now = utc_now_iso()
             stamps = {"in_progress": ", started_at=COALESCE(started_at, :now)",
                       "completed": ", completed_at=COALESCE(completed_at, :now)"}.get(target, "")
@@ -1188,6 +1204,47 @@ def transition_session(owner_id: str, session_id: str, action: str) -> tuple[dic
 def start_session(owner_id: str, session_id: str) -> tuple[dict, bool]:
     """scheduled -> in_progress (see transition_session); an in_progress session is a resume."""
     return transition_session(owner_id, session_id, "start")
+
+
+def complete_session_step(owner_id: str, session_id: str, step_index: int) -> tuple[dict, bool]:
+    """Mark one step of an in-progress combined session completed. Steps are sequential: only the
+    current (first pending) step can be completed; completing a step that is already done is a
+    no-op. Completing the last step also completes the session (completed_at stamped once). One
+    BEGIN IMMEDIATE transaction. Returns (session, changed)."""
+    initialize_study_planner_store()
+    connection = _connect()
+    try:
+        connection.begin_immediate()
+        row = _locked_session(connection, owner_id, session_id)
+        steps = json.loads(row["steps_json"]) if row["steps_json"] else []
+        if not steps:
+            raise SessionTransitionError("session_not_combined", "This session has a single activity.", row["status"])
+        if not isinstance(step_index, int) or isinstance(step_index, bool) or not 0 <= step_index < len(steps):
+            raise SessionTransitionError("step_not_found", "That step is not part of this session.", row["status"])
+        changed = False
+        if steps[step_index]["status"] != "completed":
+            if row["status"] != "in_progress":
+                raise SessionTransitionError("session_not_started", "Start this session before completing a step.",
+                                             row["status"])
+            if combined.current_step_index(steps) != step_index:
+                raise SessionTransitionError("step_out_of_order", "Finish the previous step first.", row["status"])
+            now = utc_now_iso()
+            steps[step_index] = {**steps[step_index], "status": "completed", "completed_at": now}
+            done = combined.current_step_index(steps) is None
+            connection.execute(
+                "UPDATE study_sessions SET steps_json=?, updated_at=?"
+                + (", status='completed', completed_at=COALESCE(completed_at, ?)" if done else "")
+                + " WHERE session_id=? AND owner_id=? AND status='in_progress'",
+                (json.dumps(steps, ensure_ascii=False), now, *((now,) if done else ()), session_id, owner_id),
+            )
+            changed = True
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    return get_session(owner_id, session_id), changed
 
 
 RESCHEDULABLE_STATUSES = ("scheduled", "missed")
@@ -1235,11 +1292,11 @@ def reschedule_session(owner_id: str, session_id: str, scheduled_start: str, sch
         connection.execute(
             """INSERT INTO study_sessions (session_id, owner_id, plan_id, document_id, activity_type, artifact_id,
                    scheduled_start, scheduled_end, duration_minutes, status, reason, priority_snapshot,
-                   rescheduled_from, manual_edit, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?)""",
+                   rescheduled_from, manual_edit, steps_json, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?)""",
             (new_id, owner_id, row["plan_id"], row["document_id"], row["activity_type"], row["artifact_id"],
              scheduled_start, scheduled_end, duration, row["reason"], row["priority_snapshot"], session_id,
-             manual_edit, now, now),
+             manual_edit, _rescaled_steps_json(row["steps_json"], duration), now, now),
         )
         connection.commit()
     except BaseException:
@@ -1248,6 +1305,19 @@ def reschedule_session(owner_id: str, session_id: str, scheduled_start: str, sch
     finally:
         connection.close()
     return get_session(owner_id, session_id), get_session(owner_id, new_id)
+
+
+def _rescaled_steps_json(steps_json: str | None, duration: int) -> str | None:
+    """A moved combined session keeps its steps; a new length (a learner's edit) is shared out over
+    them in proportion, the second step taking the rounding."""
+    if not steps_json:
+        return None
+    steps = json.loads(steps_json)
+    total = sum(step["duration_minutes"] for step in steps)
+    if total != duration and total:
+        first = max(1, min(duration - 1, round(steps[0]["duration_minutes"] * duration / total)))
+        steps = [{**steps[0], "duration_minutes": first}, {**steps[1], "duration_minutes": duration - first}]
+    return json.dumps(steps, ensure_ascii=False)
 
 
 def plan_sessions_fingerprint(sessions: list[dict]) -> tuple:
@@ -1325,11 +1395,12 @@ def apply_adaptation_changes(owner_id: str, plan_id: str, fingerprint: tuple, no
             connection.execute(
                 """INSERT INTO study_sessions (session_id, owner_id, plan_id, document_id, activity_type, artifact_id,
                        scheduled_start, scheduled_end, duration_minutes, status, reason, priority_snapshot,
-                       rescheduled_from, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?)""",
+                       rescheduled_from, steps_json, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?)""",
                 (new_id, owner_id, plan_id, record["document_id"], record["activity_type"], record.get("artifact_id"),
                  record["scheduled_start"], record["scheduled_end"], record["duration_minutes"], record.get("reason"),
-                 record.get("priority_snapshot"), record.get("rescheduled_from"), now, now),
+                 record.get("priority_snapshot"), record.get("rescheduled_from"),
+                 record.get("steps_json") or _steps_json(record), now, now),
             )
             return new_id
 
@@ -1351,6 +1422,7 @@ def apply_adaptation_changes(owner_id: str, plan_id: str, fingerprint: tuple, no
                 "document_id": row["document_id"], "activity_type": row["activity_type"], "artifact_id": row["artifact_id"],
                 "scheduled_start": start, "scheduled_end": end, "duration_minutes": row["duration_minutes"],
                 "reason": row["reason"], "priority_snapshot": row["priority_snapshot"], "rescheduled_from": session_id,
+                "steps_json": row["steps_json"],
             })
         for session_id in cancelled:
             set_status(session_id, "cancelled", ("scheduled",))

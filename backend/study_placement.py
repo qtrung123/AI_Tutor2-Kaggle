@@ -19,6 +19,7 @@ other study sessions. Durations always come from the server (the proposal or the
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 
+from backend.study_combined_sessions import activity_key, in_flight_activities, keeps_single_sessions
 from backend.study_time import free_minutes_by_date
 from backend.study_scheduler import select_candidates
 from backend.study_scheduler_contracts import ProposedSession
@@ -43,6 +44,7 @@ class PlacementError(ValueError):
 
 
 def candidate_key(document_id: str, activity_type: str, ordinal: int) -> str:
+    """`activity_type` is the activity key: "summary", or "summary+flashcards" for a combined session."""
     return f"{document_id}|{activity_type}|{ordinal}"
 
 
@@ -98,11 +100,12 @@ class _Entry:
     start: str | None       # None: not on the calendar (unscheduled)
     end: str | None
     placed: bool = False
+    steps: tuple = ()       # a combined session's two steps
 
 
 def keyed_candidates(result) -> list[_Entry]:
     """Every activity of one scheduler result -- proposals first, then what did not fit -- with a
-    stable key per (document, activity, n-th occurrence)."""
+    stable key per (document, activity -- both activities for a combined session --, n-th occurrence)."""
     counts: dict = {}
     entries = []
 
@@ -112,12 +115,12 @@ def keyed_candidates(result) -> list[_Entry]:
         return candidate_key(document_id, activity, ordinal)
 
     for p in result.proposals:
-        entries.append(_Entry(key_for(p.document_id, p.activity_type), p.document_id, p.activity_type,
+        entries.append(_Entry(key_for(p.document_id, p.key), p.document_id, p.activity_type,
                               p.duration_minutes, p.reason, p.artifact_id, p.priority_snapshot,
-                              p.scheduled_start, p.scheduled_end))
+                              p.scheduled_start, p.scheduled_end, steps=p.steps))
     for c in result.capacity.unscheduled:
-        entries.append(_Entry(key_for(c.document_id, c.activity_type), c.document_id, c.activity_type,
-                              c.estimated_minutes, c.reason, c.artifact_id, None, None, None))
+        entries.append(_Entry(key_for(c.document_id, c.key), c.document_id, c.activity_type,
+                              c.estimated_minutes, c.reason, c.artifact_id, None, None, None, steps=c.steps))
     return entries
 
 
@@ -159,7 +162,8 @@ def apply_placements(result, placements: list[dict], *, now: datetime, availabil
                 changed = True
     scheduled = sorted((e for e in entries if e.start), key=lambda e: (e.start, e.key))
     proposals = tuple(ProposedSession(e.document_id, e.activity_type, e.start, e.end, e.duration, e.reason,
-                                      artifact_id=e.artifact_id, priority_snapshot=e.priority) for e in scheduled)
+                                      artifact_id=e.artifact_id, priority_snapshot=e.priority, steps=e.steps)
+                      for e in scheduled)
     placed_keys = {e.key for e in entries if e.placed}
     # entries after the proposals are the unscheduled candidates, in the same order
     kept = [candidate for entry, candidate in zip(entries[len(result.proposals):], result.capacity.unscheduled)
@@ -177,22 +181,43 @@ def apply_placements(result, placements: list[dict], *, now: datetime, availabil
 # After confirmation: what the planner still wants done
 # ---------------------------------------------------------------------------
 
+def planning_material(material, document_sessions):
+    """The material as the planner should see it: a summary / flashcards step still to do in a
+    combined session under way counts as done (it is being done there), so it is never suggested
+    or scheduled twice. Learning progress itself (DocumentStudyState) is unchanged."""
+    pending = {activity for activity in in_flight_activities(document_sessions) if activity in ("summary", "flashcards")}
+    if not pending:
+        return material
+    state = replace(material.state, completed_activities=tuple(sorted(set(material.state.completed_activities) | pending)))
+    return replace(material, state=state)
+
+
 def live_candidates(context, plan_sessions: list[dict], config=None) -> list[dict]:
     """The scheduler's current candidate activities for each material of a confirmed plan that no
-    scheduled / in-progress session of that document and activity already covers."""
+    scheduled / in-progress session of that document and activity already covers (a combined
+    session covers a combined candidate of the same two activities)."""
     covered: dict = {}
     for session in plan_sessions:
         if session["status"] in ("scheduled", "in_progress"):
             # An older plan's Written Quiz covers today's flashcard recall practice.
             activity = "flashcards" if session["activity_type"] == "written_quiz" else session["activity_type"]
-            pair = (session["document_id"], activity)
-            covered[pair] = covered.get(pair, 0) + 1
+            keys = [activity_key(activity, session.get("steps"))]
+            if session["status"] == "in_progress" and session.get("steps"):
+                keys = list(in_flight_activities([session]))   # what is left of a combined session under way
+            for key in keys:
+                pair = (session["document_id"], key)
+                covered[pair] = covered.get(pair, 0) + 1
     found = []
     for material in context.materials:
         seen: dict = {}
+        rules = config
+        own = [s for s in plan_sessions if s["document_id"] == material.document_id]
+        if config is not None and keeps_single_sessions(own):
+            rules = replace(config, combine_sessions=False)   # an older plan keeps single-activity suggestions
+        material = planning_material(material, own)
         for candidate in select_candidates(material, context.now, utc_offset=context.utc_offset,
-                                           **({"config": config} if config is not None else {})):
-            pair = (candidate.document_id, candidate.activity_type)
+                                           **({"config": rules} if rules is not None else {})):
+            pair = (candidate.document_id, candidate.key)
             ordinal = seen.get(pair, 0)
             seen[pair] = ordinal + 1
             if ordinal < covered.get(pair, 0):

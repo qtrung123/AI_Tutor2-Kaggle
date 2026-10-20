@@ -28,14 +28,16 @@ Rules
 - Deterministic: same input, same output (sorted iteration, no clock reads, no randomness).
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 
+from backend import study_combined_sessions as combined
 from backend.study_session_duration import at_least_minimum
 from backend.study_time import at_minute, end_minute, free_minutes_by_date, subtract_minute_interval, to_minutes
 from backend.study_scheduler import (
-    DEFAULT_CONFIG, SchedulerConfig, _build_steps, _Step, resolve_clock, spread_end, target_date,
+    DEFAULT_CONFIG, SchedulerConfig, _build_steps, _Step, is_heavy, resolve_clock, spread_end, target_date,
 )
+from backend.study_placement import planning_material
 from backend.study_scheduler_contracts import REASON_FINAL_REVIEW, REASON_RESCHEDULED, MaterialContext
 
 TRIGGER_KINDS = ("quiz_completed", "session_missed", "session_skipped", "availability_changed", "deadline_changed",
@@ -98,6 +100,7 @@ class AddedSession:
     message: str
     artifact_id: str | None = None
     replaces_session_id: str | None = None
+    steps: tuple = ()   # a combined session's two steps
 
 
 @dataclass(frozen=True)
@@ -138,7 +141,8 @@ class AdaptationResult:
 
     def to_dict(self) -> dict:
         def rows(items):
-            return [dict(item.__dict__) for item in items]
+            return [{key: (list(value) if key == "steps" else value) for key, value in item.__dict__.items()}
+                    for item in items]
         return {
             "trigger": {key: value for key, value in self.trigger.__dict__.items() if value is not None},
             "added": rows(self.added), "moved": rows(self.moved), "cancelled": rows(self.cancelled),
@@ -180,9 +184,11 @@ class _Calendar:
         self.sessions.pop(session_id, None)
 
     def occupy(self, document_id: str, activity: str, start: str, end: str, duration: int) -> None:
+        """`activity` is the activity key ("summary+flashcards" for a combined session)."""
         self._placed += 1
         self.sessions[f"__proposed_{self._placed}"] = {
-            "session_id": f"__proposed_{self._placed}", "document_id": document_id, "activity_type": activity,
+            "session_id": f"__proposed_{self._placed}", "document_id": document_id,
+            "activity_type": activity.split("+")[0], "activities": tuple(activity.split("+")),
             "scheduled_start": start, "scheduled_end": end, "duration_minutes": duration,
         }
 
@@ -208,14 +214,14 @@ class _Calendar:
         config, sessions = self.config, self._on(day)
         if sum(s["duration_minutes"] for s in sessions) + duration > config.daily_target_minutes:
             return None
-        heavy = activity in config.heavy_activities
-        if heavy and sum(s["activity_type"] in config.heavy_activities for s in sessions) >= config.max_heavy_sessions_per_day:
+        heavy = is_heavy(activity.split("+"), config)
+        if heavy and sum(_heavy_session(s, config) for s in sessions) >= config.max_heavy_sessions_per_day:
             return None
         if sum(s["document_id"] == document_id for s in sessions) >= config.max_sessions_per_document_per_day:
             return None
         free = free_minutes_by_date(day, day, self.availability, [], now=self.now if day == self.now.date() else None)[day]
         for s in sessions:
-            gap = config.heavy_gap_minutes if heavy and s["activity_type"] in config.heavy_activities else config.session_gap_minutes
+            gap = config.heavy_gap_minutes if heavy and _heavy_session(s, config) else config.session_gap_minutes
             free = subtract_minute_interval(free, _minute(s["scheduled_start"]) - gap,
                                            end_minute(s["scheduled_start"], s["scheduled_end"]) + gap)
         if not_before is not None and _day(not_before) == day:
@@ -241,11 +247,19 @@ class _Outcome:
     reasons: list = field(default_factory=list)
 
 
+def _heavy_session(session: dict, config: SchedulerConfig) -> bool:
+    activities = session.get("activities") or combined.activity_types(session["activity_type"], session.get("steps"))
+    return is_heavy(activities, config)
+
+
 def _label(activity: str) -> str:
-    return _ACTIVITY_NAMES.get(activity, activity)
+    return " + ".join(_ACTIVITY_NAMES.get(part, part) for part in activity.split("+"))
 
 
 def _matches(step: _Step, session: dict) -> bool:
+    if step.parts or session.get("steps"):
+        # A combined session is the step of the same two activities, and only that step.
+        return step.key == combined.activity_key(session["activity_type"], session.get("steps"))
     if step.activity_type == "review" and step.kind == "review" and session["activity_type"] == "flashcards":
         # Flashcard practice already planned is a valid weak-topic / spaced review: keep it.
         return session.get("reason") != REASON_FINAL_REVIEW
@@ -333,12 +347,12 @@ def _reconcile_document(material: MaterialContext, steps: list[_Step], future: l
                 last_date, last_end = day, match["scheduled_end"]
                 continue
             calendar.release(match["session_id"])
-            slot = _place(calendar, material.document_id, step.activity_type, match["duration_minutes"], ready, latest,
+            slot = _place(calendar, material.document_id, step.key, match["duration_minutes"], ready, latest,
                           day if prefer_same_day else None, last_end, soft_from(step, ready, latest), avoid_same_day,
                           next_existing())
             touched.add(match["session_id"])
             if slot is None:
-                message = (f'The {_label(step.activity_type)} session for "{title}" on {match["scheduled_start"][:16].replace("T", " ")} '
+                message = (f'The {_label(step.key)} session for "{title}" on {match["scheduled_start"][:16].replace("T", " ")} '
                            f"no longer fits" + (f" before {deadline.isoformat()}" if deadline else "") + ".")
                 outcome.cancelled.append(CancelledSession(match["session_id"], material.document_id, step.activity_type,
                                                           match["scheduled_start"], message))
@@ -346,41 +360,42 @@ def _reconcile_document(material: MaterialContext, steps: list[_Step], future: l
                                          "document_id": material.document_id, "activity_type": step.activity_type})
                 outcome.reasons.append(message)
                 continue
-            message = f'Move the {_label(step.activity_type)} session for "{title}" to {slot[0][:16].replace("T", " ")}: {why}.'
+            message = f'Move the {_label(step.key)} session for "{title}" to {slot[0][:16].replace("T", " ")}: {why}.'
             outcome.moved.append(MovedSession(match["session_id"], material.document_id, step.activity_type,
                                               match["scheduled_start"], match["scheduled_end"], slot[0], slot[1], message))
             outcome.reasons.append(message)
-            calendar.occupy(material.document_id, step.activity_type, *slot, match["duration_minutes"])
+            calendar.occupy(material.document_id, step.key, *slot, match["duration_minutes"])
             last_date, last_end = _day(slot[0]), slot[1]
             continue
         if not can_add(step):
             continue
         # A new session (a replacement included) is never shorter than the minimum; moves keep their length.
         minutes = at_least_minimum(step.duration)
-        slot = _place(calendar, material.document_id, step.activity_type, minutes, ready, latest, None, last_end,
+        slot = _place(calendar, material.document_id, step.key, minutes, ready, latest, None, last_end,
                       soft_from(step, ready, latest), avoid_same_day, next_existing())
         if slot is None:
             outcome.warnings.append({"code": "no_slot_before_deadline" if deadline else "no_available_slot",
                                      "document_id": material.document_id, "activity_type": step.activity_type})
-            outcome.reasons.append(f'No time left to add a {_label(step.activity_type)} session for "{title}"'
+            outcome.reasons.append(f'No time left to add a {_label(step.key)} session for "{title}"'
                                    + (f" before {deadline.isoformat()}" if deadline else "") + ".")
             continue
-        replaced = replaces if replaces and replaces["activity_type"] == step.activity_type else None
+        replaced = (replaces if replaces and combined.activity_key(replaces["activity_type"], replaces.get("steps")) == step.key
+                    else None)
         reason_code = REASON_RESCHEDULED if replaced else step.reason_code
         message = (f'Replace the {"skipped" if replaced and replaced.get("status") == "skipped" else "missed"} '
-                   f'{_label(step.activity_type)} session for "{title}".' if replaced else step.message)
+                   f'{_label(step.key)} session for "{title}".' if replaced else step.message)
         outcome.added.append(AddedSession(material.document_id, step.activity_type, slot[0], slot[1], minutes,
                                           reason_code, message, step.artifact_id,
-                                          replaced["session_id"] if replaced else None))
+                                          replaced["session_id"] if replaced else None, steps=step.steps()))
         outcome.reasons.append(f"Add: {message}")
-        calendar.occupy(material.document_id, step.activity_type, *slot, minutes)
+        calendar.occupy(material.document_id, step.key, *slot, minutes)
         last_date, last_end = _day(slot[0]), slot[1]
 
     for session in unused:
         if cancel_unmatched and not session.get("manual_edit"):
             calendar.release(session["session_id"])
             touched.add(session["session_id"])
-            message = f'Cancel the {_label(session["activity_type"])} session for "{title}": {why}, it is no longer needed.'
+            message = f'Cancel the {_label(_session_key(session))} session for "{title}": {why}, it is no longer needed.'
             outcome.cancelled.append(CancelledSession(session["session_id"], material.document_id,
                                                       session["activity_type"], session["scheduled_start"], message))
             outcome.reasons.append(message)
@@ -425,8 +440,14 @@ def _place(calendar: _Calendar, document_id: str, activity: str, duration: int, 
 
 def _session_as_step(session: dict, deadline: date | None, horizon_end: date, today: date) -> _Step:
     latest = max(today, deadline - timedelta(days=1)) if deadline else max(horizon_end, _day(session["scheduled_start"]))
+    parts = tuple((step["activity_type"], step["duration_minutes"], step.get("artifact_id"))
+                  for step in session.get("steps") or ())
     return _Step(session["activity_type"], session.get("reason") or "", "", session["duration_minutes"],
-                 "final" if session.get("reason") == REASON_FINAL_REVIEW else "planned", today, latest)
+                 "final" if session.get("reason") == REASON_FINAL_REVIEW else "planned", today, latest, parts=parts)
+
+
+def _session_key(session: dict) -> str:
+    return combined.activity_key(session["activity_type"], session.get("steps"))
 
 
 # ---------------------------------------------------------------------------
@@ -453,8 +474,16 @@ def propose_adaptation(context: AdaptationContext, config: AdaptationConfig = DE
     touched: set = set()
 
     def steps_for(material: MaterialContext) -> list[_Step]:
-        return _build_steps(material, today, min(horizon_end, today + timedelta(days=scheduler.max_horizon_days)),
-                            utc_offset, scheduler)
+        own = [s for s in context.plan_sessions if s["document_id"] == material.document_id]
+        rules = replace(scheduler, combine_sessions=False) if combined.keeps_single_sessions(own) else scheduler
+        steps = _build_steps(planning_material(material, own), today,
+                             min(horizon_end, today + timedelta(days=scheduler.max_horizon_days)), utc_offset, rules)
+        # A quiz step still to do in a combined session under way is not planned a second time.
+        for activity in combined.in_flight_activities(own):
+            match = next((step for step in steps if step.key == activity), None)
+            if match is not None and activity not in ("summary", "flashcards"):
+                steps.remove(match)
+        return steps
 
     def balanced(material: MaterialContext) -> bool:
         """Study Preferences strategy: Finish Early never balances; Deadline Priority balances only
@@ -501,16 +530,16 @@ def propose_adaptation(context: AdaptationContext, config: AdaptationConfig = DE
         steps = [] if already_replaced else steps_for(material)
         label = "skipped" if trigger.kind == "session_skipped" else "missed"
         if already_replaced:
-            outcome.reasons.append(f'The missed {_label(session["activity_type"])} session of "{material.state.title}" '
+            outcome.reasons.append(f'The missed {_label(_session_key(session))} session of "{material.state.title}" '
                                    "was already rescheduled.")
-        elif not any(step.activity_type == session["activity_type"] for step in steps):
-            outcome.reasons.append(f'No replacement for the {label} {_label(session["activity_type"])} session of '
+        elif not any(step.key == _session_key(session) for step in steps):
+            outcome.reasons.append(f'No replacement for the {label} {_label(_session_key(session))} session of '
                                    f'"{material.state.title}": it is no longer needed.')
         else:
             added_once = []
 
-            def can_add(step, activity=session["activity_type"]):
-                if step.activity_type != activity or added_once:
+            def can_add(step, activity=_session_key(session)):
+                if step.key != activity or added_once:
                     return False
                 added_once.append(step)
                 return True
@@ -522,7 +551,7 @@ def propose_adaptation(context: AdaptationContext, config: AdaptationConfig = DE
                                              avoid_same_day=balanced(material))
             touched |= changed
             if not added_once:
-                outcome.reasons.append(f'The {label} {_label(session["activity_type"])} session of "{material.state.title}" '
+                outcome.reasons.append(f'The {label} {_label(_session_key(session))} session of "{material.state.title}" '
                                        "is already covered by a later session.")
 
     elif trigger.kind == "deadline_changed":

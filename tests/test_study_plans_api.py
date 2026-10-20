@@ -216,7 +216,7 @@ class StudyPlanApiTests(PlannerDatabaseMixin, unittest.TestCase):
         self.assertGreater(capacity["available_minutes"], 0)
         unscheduled = capacity["unscheduled"][0]
         self.assertEqual(set(unscheduled), {"document_id", "document_title", "activity_type", "estimated_minutes",
-                                            "deadline", "reason", "artifact_id", "candidate_key"})
+                                            "deadline", "reason", "artifact_id", "candidate_key", "steps"})
         # One clear warning per material that cannot be finished before its deadline.
         risks = [w for w in body["warnings"] if w["code"] == "deadline_at_risk"]
         self.assertEqual(len(risks), len(body["warnings"]))
@@ -267,7 +267,7 @@ class StudyPlanApiTests(PlannerDatabaseMixin, unittest.TestCase):
         self.assertLess(body["capacity"]["scheduled_minutes"], body["capacity"]["available_minutes"] / 3)
         self.assertEqual(set(sessions[0]), {"document_id", "document_title", "activity_type", "scheduled_start",
                                             "scheduled_end", "duration_minutes", "reason", "artifact_id",
-                                            "candidate_key", "placed"})
+                                            "candidate_key", "placed", "steps"})
         self.assertEqual((sessions[0]["document_id"], sessions[0]["document_title"], sessions[0]["scheduled_start"]),
                          ("mkt", "Marketing", "2026-09-28T18:00:00"))
         self.assertEqual({s["document_id"] for s in sessions}, {"mkt", "stats", "pbi"})
@@ -312,7 +312,7 @@ class StudyPlanApiTests(PlannerDatabaseMixin, unittest.TestCase):
         first = body["sessions"][0]
         self.assertEqual(set(first), {"session_id", "document_id", "document_title", "activity_type", "scheduled_start",
                                       "scheduled_end", "duration_minutes", "status", "reason", "artifact_id", "started_at",
-                                      "completed_at", "rescheduled_from", "manual_edit"})
+                                      "completed_at", "rescheduled_from", "manual_edit", "steps", "current_step"})
         self.assertFalse(first["manual_edit"])   # Auto Plan sessions are not hand-edited
         self.assertEqual((first["status"], first["document_title"]), ("scheduled", "Marketing"))
         self.assertEqual(first["reason"], {"code": "deadline_approaching", "message": "Deadline is coming up"})

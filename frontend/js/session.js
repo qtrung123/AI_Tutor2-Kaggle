@@ -709,7 +709,7 @@ function renderDocumentProgress(progress) {
   progressLine(sessionProgressPlan, `${plan.completed_sessions} of ${plan.planned_sessions} session${plan.planned_sessions === 1 ? "" : "s"} done`, "progress-figure progress-figure--small");
   progressLine(sessionProgressPlan, `${plannerFormatDuration(plan.completed_minutes)} studied · ${plannerFormatDuration(plan.remaining_minutes)} still planned`, "progress-note");
   progressLine(sessionProgressPlan, plan.next_session
-    ? `Next: ${PLANNER_ACTIVITY_LABELS[plan.next_session.activity_type] || plan.next_session.activity_type} · ${plannerDayLabel(plan.next_session.scheduled_start.slice(0, 10))}, ${plan.next_session.scheduled_start.slice(11, 16)}${plan.next_session.status === "in_progress" ? " (in progress)" : ""}`
+    ? `Next: ${pcalActivity(plan.next_session.activity_type, plan.next_session.steps)} · ${plannerDayLabel(plan.next_session.scheduled_start.slice(0, 10))}, ${plan.next_session.scheduled_start.slice(11, 16)}${plan.next_session.status === "in_progress" ? " (in progress)" : ""}`
     : "No upcoming session for this document.", "progress-note");
   if (plan.deadline) progressLine(sessionProgressPlan, `Deadline: ${plannerDayLabel(plan.deadline)}`, "progress-note");
 }

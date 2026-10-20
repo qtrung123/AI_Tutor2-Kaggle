@@ -2,9 +2,10 @@
 table study_preferences) and turned into the SchedulerConfig that Auto Plan, adaptation, live
 candidates and rescheduling actually run with.
 
-No saved row = the defaults below, which are exactly study_scheduler.DEFAULT_CONFIG -- so a learner
-who never opens the settings keeps today's behaviour. Only choices the learner makes are stored;
-nothing here ever changes an existing session.
+No saved row = the defaults below, which are exactly PLANNER_CONFIG: study_scheduler.DEFAULT_CONFIG
+with combined sessions switched on (study_combined_sessions) -- so a learner who never opens the
+settings gets the planner's standard behaviour. Only choices the learner makes are stored; nothing
+here ever changes an existing session.
 """
 
 import json
@@ -21,6 +22,9 @@ MAX_SESSION_MINUTES = 180
 DURATION_STEP_MINUTES = 5
 # Every per-activity length the scheduler uses for NEW sessions (SchedulerConfig.durations).
 DURATION_KEYS = tuple(DEFAULT_CONFIG.durations)
+# What the Study Planner runs with: the scheduler's rules plus combined sessions (two sequential
+# activities in one 30-40 minute session, interleaved with single-activity sessions).
+PLANNER_CONFIG = replace(DEFAULT_CONFIG, combine_sessions=True)
 
 DEFAULTS = {
     "daily_target_minutes": DEFAULT_CONFIG.daily_target_minutes,   # 90
@@ -119,7 +123,7 @@ def reset_preferences(owner_id: str) -> dict:
 def config_from(preferences: dict) -> SchedulerConfig:
     """The scheduler configuration for these preferences. The learner's break applies between every
     pair of sessions (heavy ones included) -- the choice is theirs, so it is never silently raised."""
-    return replace(DEFAULT_CONFIG, daily_target_minutes=preferences["daily_target_minutes"],
+    return replace(PLANNER_CONFIG, daily_target_minutes=preferences["daily_target_minutes"],
                    session_gap_minutes=preferences["break_minutes"], heavy_gap_minutes=preferences["break_minutes"],
                    durations={**DEFAULT_CONFIG.durations, **preferences["durations"]},
                    **_STRATEGY_CONFIG[preferences["strategy"]])
@@ -127,9 +131,9 @@ def config_from(preferences: dict) -> SchedulerConfig:
 
 def scheduler_config(owner_id: str) -> SchedulerConfig:
     """What Auto Plan, adaptation, candidates and rescheduling run with for this learner:
-    DEFAULT_CONFIG itself when nothing was ever saved."""
+    PLANNER_CONFIG itself when nothing was ever saved."""
     preferences = get_preferences(owner_id)
-    return config_from(preferences) if preferences["saved"] else DEFAULT_CONFIG
+    return config_from(preferences) if preferences["saved"] else PLANNER_CONFIG
 
 
 def options() -> dict:

@@ -284,7 +284,7 @@ const FLASHCARD_LANGUAGE_LABELS = { auto: "Auto", english: "English", vietnamese
 
 const plannerView = document.getElementById("planner-view");
 if (plannerView) {
-  plannerView.innerHTML = `<div class="planner-shell">
+  plannerView.innerHTML = `<div class="planner-shell" hidden>
   <div class="planner-toolbar"><div><p class="eyebrow">Study Planner</p><h2>Plan your study time</h2><p class="planner-lead">Choose documents, add a deadline if there is one, and mark when you could study. We’ll suggest a balanced plan.</p></div><div class="planner-gcal-cta" id="planner-gcal-cta" hidden></div></div>
   <ol class="planner-steps" aria-label="Planner steps"><li data-step-indicator="materials"><span>1</span>Materials</li><li data-step-indicator="availability"><span>2</span>Availability</li><li data-step-indicator="preview"><span>3</span>Preview</li><li data-step-indicator="plan"><span>4</span>Plan</li></ol>
   <section class="panel planner-step" data-planner-step="materials">
@@ -531,7 +531,7 @@ function setPage(page) {
   views.forEach((view) => view.classList.toggle("active", view.id === `${page}-view`));
   pageTitle.textContent = pageTitles[page];
   if (pageTitles[page]) showToast(`Opened ${pageTitles[page]}`);
-  if (page === "planner") loadPlannerData();
+  if (page === "planner") plannerOpen();   // the current layout at once, never the bare step-by-step markup
   if (page === "overview") loadTodayPlan();
 }
 
@@ -1376,6 +1376,8 @@ let plannerPreviewFailure = null; // the last preview error (e.g. a deadline alr
 let plannerPreviewTimer = null;
 let plannerPreviewSeq = 0;        // only the newest preview response is shown
 let plannerLoadSeq = 0;           // only the newest planner reload is applied
+let plannerLoaded = false;        // the first planner load finished (until then: a loading notice)
+let plannerLoadFailed = false;    // the last planner load failed (a retry is offered)
 let plannerNewMaterialSeq = 0;    // only the newest "sessions for new material" proposal is shown
 let plannerNewMaterialFailure = null; // {planId}: that proposal could not be computed (retry offered)
 let plannerAvailabilityTimer = null;

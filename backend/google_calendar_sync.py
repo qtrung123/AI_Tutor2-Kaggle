@@ -256,8 +256,10 @@ def event_id_for(owner_id: str, session_id: str) -> str:
     return "aitutor" + hashlib.sha256(f"{owner_id}:{session_id}".encode("utf-8")).hexdigest()[:40]
 
 
-def event_title(document_title: str, activity_type: str) -> str:
-    return f"{document_title} · {ACTIVITY_LABELS.get(activity_type, activity_type)}"
+def event_title(document_title: str, activity_type: str, steps=None) -> str:
+    """"<document> · Summary", or "<document> · Summary + Flashcards" for a combined session (one event)."""
+    activities = [step["activity_type"] for step in steps] if steps else [activity_type]
+    return f"{document_title} · {' + '.join(ACTIVITY_LABELS.get(activity, activity) for activity in activities)}"
 
 
 def _with_offset(naive_iso: str, offset: timedelta) -> str:
@@ -270,7 +272,7 @@ def event_body(session: dict, document_title: str, offset: timedelta) -> dict:
     reason = REASON_LABELS.get(session.get("reason") or "", "")
     description = "\n\n".join(part for part in (reason, "Created by AI Tutor Study Planner") if part)
     return {
-        "summary": event_title(document_title, session["activity_type"]),
+        "summary": event_title(document_title, session["activity_type"], session.get("steps")),
         "description": description,
         "start": {"dateTime": _with_offset(session["scheduled_start"], offset)},
         "end": {"dateTime": _with_offset(session["scheduled_end"], offset)},

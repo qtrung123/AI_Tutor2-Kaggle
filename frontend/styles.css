@@ -3088,8 +3088,6 @@ body[data-page="session"] [data-session-pane="quiz"].quiz-player-open #quiz-play
 .quiz-question-count-hint { display: block; margin-top: 6px; font-size: 12px; color: var(--muted); }
 /* Multi-blank fill-in-the-blank: the sentence with one field (Type Answer) or one slot (Word Bank) per blank. */
 .quiz-multi-blank { display: grid; gap: 14px; }
-.quiz-multi-blank-modes { justify-self: start; display: inline-flex; gap: 4px; padding: 4px; border-radius: 13px; background: var(--session-wash, #f2f3ff); }
-.quiz-multi-blank-modes .quiz-segmented-option { flex: none; padding: 8px 14px; font-size: 13px; }
 .quiz-multi-blank-sentence { margin: 0; font-size: 17px; line-height: 2.4; color: #202b48; }
 .quiz-multi-blank-input {
   width: 9.5em; padding: 6px 10px; margin: 0 2px; border: 1.5px solid var(--session-line, #e2e4f3); border-radius: 10px;
@@ -3713,6 +3711,14 @@ body[data-page="session"] .session-header h2, body[data-page="session"] .breadcr
 .pcal-popover-caption{display:block;font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#9aa1ad;margin-bottom:1px}
 .pcal-popover-reason{margin:4px 0 0}
 .pcal-popover-note{margin:2px 0 0;font-size:11.5px;color:var(--muted)}
+/* Combined session: its two sequential steps with minutes and progress (popover and agenda card). */
+.pcal-steps{list-style:none;margin:8px 0 2px;padding:0;display:grid;gap:4px}
+.pcal-step{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:5px 8px;border-radius:8px;background:var(--session-wash,#f2f3ff);font-size:12px}
+.pcal-step-name{font-weight:600}
+.pcal-step-minutes,.pcal-step-state{color:var(--muted)}
+.pcal-step.is-current .pcal-step-state{color:inherit;font-weight:600}
+.pcal-step.is-done .pcal-step-name{text-decoration:line-through;color:var(--muted)}
+.pcal-event--combined{border-left-style:double}
 .pcal-session-actions{justify-content:flex-start;align-items:center;flex-wrap:wrap;gap:4px 12px;padding-top:4px;border-top:1px solid var(--pcal-line-soft)}
 .pcal-session-actions .primary-button{margin-right:4px}
 .pcal-text-action{border:0;background:transparent;padding:4px 0;font:inherit;font-size:12.5px;font-weight:600;color:var(--pcal-ink-2);cursor:pointer;border-radius:4px}

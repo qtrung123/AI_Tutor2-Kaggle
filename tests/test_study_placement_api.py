@@ -228,7 +228,7 @@ class PlacementApiTests(PlannerDatabaseMixin, unittest.TestCase):
         self.assertTrue(candidates)
         wanted = candidates[0]
         self.assertEqual(set(wanted), {"candidate_key", "document_id", "document_title", "activity_type",
-                                       "estimated_minutes", "deadline", "reason", "artifact_id"})
+                                       "estimated_minutes", "deadline", "reason", "artifact_id", "steps"})
         target = self.free_start(self.sessions(), "2026-09-30", wanted["estimated_minutes"])
         place = lambda start, key=wanted["candidate_key"], client=None: (client or self.client).post(
             f"{self.base}/candidates/place", json={**BODY, "candidate_key": key, "scheduled_start": start})

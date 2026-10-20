@@ -144,13 +144,16 @@ class PlannerMaterialSelectionTests(PlannerDatabaseMixin, unittest.TestCase):
         self.assertEqual({s["document_id"] for s in self.preview(plan_id)["sessions"]}, {"a.pdf"})
 
     def test_a_flexible_document_gets_a_meaningful_week(self):
-        # Summary -> Flashcards -> Quiz -> Review on different days, not one lone quiz.
+        # Summary -> Flashcards -> Quiz -> Review on different days, not one lone quiz. Reading the
+        # summary and practising the flashcards share one combined session.
         self.upload("a.pdf")
         plan_id = self.create_plan()
         self.add_material(plan_id, "a.pdf")
         sessions = sorted(self.preview(plan_id)["sessions"], key=lambda s: s["scheduled_start"])
-        self.assertEqual([s["activity_type"] for s in sessions], ["summary", "flashcards", "quiz", "review"])
-        self.assertEqual(len({s["scheduled_start"][:10] for s in sessions}), 4)
+        activities = [step["activity_type"] for s in sessions for step in (s["steps"] or [s])]
+        self.assertEqual(activities, ["summary", "flashcards", "quiz", "review"])
+        self.assertEqual([len(s["steps"]) for s in sessions], [2, 0, 0])
+        self.assertEqual(len({s["scheduled_start"][:10] for s in sessions}), 3)
         self.assertLessEqual(sessions[-1]["scheduled_start"][:10], "2026-10-04")   # within the week
         self.assertNotIn("written_quiz", {s["activity_type"] for s in sessions})
 

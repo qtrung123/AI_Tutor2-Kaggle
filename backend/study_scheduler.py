@@ -14,6 +14,10 @@ Pure and LLM-free. Same input, same output. Flow:
   4. report whatever did not fit as a capacity shortfall instead of packing time harder. Should
      pacing ever leave more unscheduled than earliest-first placement, the latter is returned.
 
+Consecutive steps of a document may form ONE combined 30-40 minute session of two sequential
+activities (Summary + Flashcards, Summary + Quiz, Flashcards + Quiz) -- see study_combined_sessions
+for when and how long. A combined step is placed like any other step.
+
 Every tunable number lives in SchedulerConfig.
 """
 
@@ -21,6 +25,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
+from backend import study_combined_sessions as combined
 from backend.study_session_duration import MIN_SESSION_MINUTES, at_least_minimum
 from backend.study_time import at_minute, end_minute, free_minutes_by_date, subtract_minute_interval, to_minutes
 from backend.study_scheduler_contracts import (
@@ -113,6 +118,10 @@ class SchedulerConfig:
     flexible_spread_days: int = 7
     # A target completion date (soft) adds this share of deadline-style urgency as it approaches.
     target_urgency_weight: float = 0.5
+    # Combined sessions (study_combined_sessions): two sequential activities in one 30-40 minute
+    # session, alternating with single-activity sessions. The engine's base rules are single-activity
+    # (False); the Study Planner itself runs with it switched on (study_preferences.PLANNER_CONFIG).
+    combine_sessions: bool = False
     # When the final review window has no usable day at all, it moves to the last usable day
     # before it, if that day is at most this many days before the deadline (never on/after it).
     final_review_fallback_days: int = 4
@@ -139,6 +148,21 @@ class _Step:
     gap_days: int = 0         # minimum days after the previous placed step of the same document
     artifact_id: str | None = None
     metadata: dict = field(default_factory=dict)   # facts behind the step (score, weak topics, preparation)
+    # A combined step: its two activities in order, as (activity_type, minutes, artifact_id); () = single.
+    parts: tuple = ()
+
+    @property
+    def activities(self) -> tuple[str, ...]:
+        return tuple(part[0] for part in self.parts) or (self.activity_type,)
+
+    @property
+    def key(self) -> str:
+        """What the step is, for matching sessions and candidates ("summary+flashcards" when combined)."""
+        return "+".join(self.activities)
+
+    def steps(self) -> tuple:
+        """The persisted steps of a combined session made from this step (() when single)."""
+        return tuple(combined.new_steps(self.parts)) if self.parts else ()
 
 
 @dataclass
@@ -420,7 +444,51 @@ def _build_steps(material: MaterialContext, today: date, horizon_end: date, utc_
     if deadline is not None:
         steps.append(_Step("review", REASON_FINAL_REVIEW, f'Final review of "{title}" before {deadline.isoformat()}.',
                            estimate_duration("review", state, config, final=True), "final", final_start, latest))
-    return steps
+    return _combine_steps(steps, state, today, deadline, horizon_end, config)
+
+
+def _combine_steps(steps: list[_Step], state, today: date, deadline: date | None, horizon_end: date,
+                   config: SchedulerConfig) -> list[_Step]:
+    """Turn suitable pairs of consecutive steps into combined steps (study_combined_sessions): back
+    to back pairs always, pairs across a day gap only when the material is short of days (the days
+    up to the day before its deadline, or its flexible spread window, per step still needed) or its
+    deadline is close. The rest stay single steps, so the two kinds alternate."""
+    if not config.combine_sessions or len(steps) < 2:
+        return steps
+    end = deadline - timedelta(days=1) if deadline else min(horizon_end, today + timedelta(days=config.flexible_spread_days - 1))
+    days = max(1, (end - today).days + 1)
+    close = deadline is not None and (deadline - today).days <= config.deadline_approaching_days
+    tight = combined.under_time_pressure(days, len(steps), close)
+    latest = state.quiz.latest_completed
+    percentage = latest.percentage if latest is not None else None
+    result = []
+    for index, partner in combined.combine_pairs(steps, tight=tight, may_pair=lambda first, second: True):
+        first = steps[index]
+        if partner is None:
+            result.append(first)
+            continue
+        second = steps[partner]
+        first_minutes, second_minutes = combined.combined_minutes(
+            first.activity_type, second.activity_type, daily_target_minutes=config.daily_target_minutes,
+            latest_percentage=percentage)
+        then = _ACTIVITY_LABELS[second.activity_type]
+        if second.metadata.get("preparation") == "create_quiz":
+            then = "create a quiz in the Quiz tab and take it"
+        metadata = {**second.metadata, **first.metadata, "combined": True,
+                    "step_preparations": [first.metadata.get("preparation"), second.metadata.get("preparation")]}
+        result.append(_Step(
+            first.activity_type, first.reason_code, f"{first.message.rstrip('.')}, then {then}.",
+            first_minutes + second_minutes, first.kind, max(first.earliest, second.earliest),
+            min(first.latest, second.latest), first.gap_days, second.artifact_id or first.artifact_id, metadata,
+            parts=((first.activity_type, first_minutes, first.artifact_id),
+                   (second.activity_type, second_minutes, second.artifact_id)),
+        ))
+    return result
+
+
+def is_heavy(activities, config: SchedulerConfig = DEFAULT_CONFIG) -> bool:
+    """A heavy session: any of its activities (both, when combined) is a heavy one."""
+    return any(activity in config.heavy_activities for activity in activities)
 
 
 def _horizon_end(context: SchedulingContext, today: date, config: SchedulerConfig) -> date:
@@ -445,7 +513,7 @@ def select_candidates(material: MaterialContext, now: datetime, config: Schedule
     steps = _build_steps(material, today, today + timedelta(days=config.default_horizon_days), utc_offset, config)
     return [
         CandidateActivity(material.document_id, s.activity_type, _reason(s), artifact_id=s.artifact_id,
-                          estimated_minutes=s.duration, deadline=material.deadline)
+                          estimated_minutes=s.duration, deadline=material.deadline, steps=s.steps())
         for s in steps
     ]
 
@@ -760,12 +828,12 @@ def _allocate(context: SchedulingContext, config: SchedulerConfig, spread: bool)
             placed = False
             for score, plan in scored:
                 step = plan.current
-                is_heavy = step.activity_type in config.heavy_activities
+                heavy = is_heavy(step.activities, config)
                 if used + step.duration > config.daily_target_minutes:
                     continue
-                if is_heavy and heavy_count >= config.max_heavy_sessions_per_day:
+                if heavy and heavy_count >= config.max_heavy_sessions_per_day:
                     continue
-                gap = config.heavy_gap_minutes if (is_heavy and last_heavy) else config.session_gap_minutes
+                gap = config.heavy_gap_minutes if (heavy and last_heavy) else config.session_gap_minutes
                 start = _find_slot(free.get(day, []), 0 if cursor is None else cursor + gap,
                                    step.duration, config.slot_alignment_minutes)
                 if start is None:
@@ -773,11 +841,12 @@ def _allocate(context: SchedulingContext, config: SchedulerConfig, spread: bool)
                 proposals.append(ProposedSession(
                     plan.context.document_id, step.activity_type, _at(day, start), _at(day, start + step.duration),
                     step.duration, _reason(step), artifact_id=step.artifact_id, priority_snapshot=round(score, 4),
+                    steps=step.steps(),
                 ))
-                cursor, used, last_heavy = start + step.duration, used + step.duration, is_heavy
-                heavy_count += int(is_heavy)
+                cursor, used, last_heavy = start + step.duration, used + step.duration, heavy
+                heavy_count += int(heavy)
                 plan.sessions_by_day[day] = plan.sessions_by_day.get(day, 0) + 1
-                plan.last_date, plan.last_activity = day, step.activity_type
+                plan.last_date, plan.last_activity = day, step.activities[-1]
                 plan.index += 1
                 placed = True
                 break
@@ -800,7 +869,7 @@ def _allocate(context: SchedulingContext, config: SchedulerConfig, spread: bool)
         unscheduled=tuple(
             CandidateActivity(plan.context.document_id, step.activity_type, _reason(step),
                               artifact_id=step.artifact_id, estimated_minutes=step.duration,
-                              deadline=plan.context.deadline)
+                              deadline=plan.context.deadline, steps=step.steps())
             for plan, step in unscheduled
         ),
     )

@@ -145,6 +145,8 @@ async function loadPlannerData({ keepWeek = false } = {}) {
     if (!keepWeek) plannerCalWeekStart = null;
     if (plannerPlacements.length && plannerPlacementsPlanId !== plannerPlan?.plan_id) plannerPlacements = [];
     plannerPlacementsPlanId = plannerPlan?.plan_id || null;
+    plannerLoaded = true;
+    plannerLoadFailed = false;
     renderPlanner();
     if (plannerIsDesktop()) {
       plannerQueueAutoPreview(0);
@@ -154,7 +156,10 @@ async function loadPlannerData({ keepWeek = false } = {}) {
     }
     plannerLoadGoogleCalendar();   // every layout: the toolbar Connect control must not need the desktop calendar
   } catch (error) {
-    if (seq === plannerLoadSeq) showToast(error.message || "Could not load Study Planner data");
+    if (seq !== plannerLoadSeq) return;
+    plannerLoadFailed = true;
+    showToast(error.message || "Could not load Study Planner data");
+    renderPlanner();   // the current interface says so (with a retry) instead of leaving an empty page
   }
 }
 
@@ -190,6 +195,14 @@ async function plannerProposeNewMaterials(planId) {
   else plannerShowAdaptationReview(planId, trigger, proposal);
 }
 
+function plannerOpen() {
+  // Opening the Planner tab: the current layout renders at once -- the last loaded plan, or the
+  // calendar with a loading notice on the very first open -- then the plan is (re)loaded.
+  plannerLoadFailed = false;
+  renderPlanner();
+  return loadPlannerData();
+}
+
 function plannerSetStep(step) {
   plannerStep = step;
   renderPlanner();
@@ -198,6 +211,8 @@ function plannerSetStep(step) {
 function renderPlanner() {
   if (!plannerView) return;
   // Desktop (>=1024px) plans on one calendar workspace; smaller screens keep the step-by-step flow.
+  // Both start hidden in the markup: this is the only place that shows one of them, and it runs as
+  // soon as the Planner opens (setPage), before any data has loaded.
   const desktop = plannerIsDesktop();
   if (plannerShell) plannerShell.hidden = desktop;
   if (plannerWorkspace) plannerWorkspace.hidden = !desktop;
@@ -520,7 +535,7 @@ function renderPlannerCalendar() {
       if (session) {
         // A saved session: shown on the calendar, not paintable.
         cell.classList.add("block-confirmed");
-        cell.title = `${session.document_title || session.document_id} · ${PLANNER_ACTIVITY_LABELS[session.activity_type] || session.activity_type}`;
+        cell.title = `${session.document_title || session.document_id} · ${pcalActivity(session.activity_type, session.steps)}`;
         if (plannerSessionAt(dateKey, minute - PLANNER_CELL_MINUTES) !== session) {  // first cell of the session
           const label = document.createElement("span");
           label.className = "planner-cell-block-label";
@@ -594,7 +609,7 @@ function plannerGroupByDay(sessions) {
 function plannerSessionItem(session, tag = "li", { action = false } = {}) {
   // Narrow screens list sessions as agenda cards grouped by day (renderPlannerSessionList).
   const item = document.createElement(tag);
-  item.className = `planner-session planner-session--${session.activity_type} planner-session--status-${session.status || "suggested"}`;
+  item.className = `planner-session planner-session--${session.activity_type} planner-session--status-${session.status || "suggested"}${session.steps?.length ? " planner-session--combined" : ""}`;
   const time = document.createElement("span");
   time.className = "planner-session-time";
   time.textContent = `${session.scheduled_start.slice(11, 16)}–${session.scheduled_end.slice(11, 16)}`;
@@ -608,7 +623,7 @@ function plannerSessionItem(session, tag = "li", { action = false } = {}) {
   meta.className = "planner-session-meta";
   const chip = document.createElement("span");
   chip.className = "planner-activity-chip";
-  chip.textContent = PLANNER_ACTIVITY_LABELS[session.activity_type] || session.activity_type;
+  chip.textContent = pcalActivity(session.activity_type, session.steps);
   if (session.activity_type === "written_quiz") chip.textContent += " · Retrieval practice";
   const duration = document.createElement("span");
   duration.textContent = plannerFormatDuration(session.duration_minutes);
@@ -638,7 +653,10 @@ function plannerAddSessionActions(item, content, session, name) {
     return;
   }
   let actions = [];
-  if (session.status === "in_progress") actions = [["complete", "Complete", true], ["start", "Resume", false]];
+  if (session.status === "in_progress") {
+    actions = plannerCurrentStep(session) === null ? [["complete", "Complete", true], ["start", "Resume", false]]
+      : plannerSessionActions("active", session);
+  }
   else if (plannerIsOverdue(session)) {
     const note = document.createElement("small");
     note.className = "planner-session-note";
@@ -702,7 +720,10 @@ async function plannerSessionAction(session, kind, button, group) {
       refresh = false;   // the adaptation already refreshed Home + week (or is waiting for the learner's review)
       return;
     }
-    const url = `${PLANNER_SESSIONS_API_URL}/${encodeURIComponent(session.session_id)}/${kind}`;
+    const step = kind === "step_done" ? plannerCurrentStep(session) : null;
+    const url = kind === "step_done"
+      ? `${PLANNER_SESSIONS_API_URL}/${encodeURIComponent(session.session_id)}/steps/${step}/complete`
+      : `${PLANNER_SESSIONS_API_URL}/${encodeURIComponent(session.session_id)}/${kind}`;
     const body = kind === "reschedule" || kind === "start" ? { utc_offset_minutes: plannerUtcOffsetMinutes() } : undefined;
     const result = await plannerRequest(url, { method: "POST", body });
     if (kind === "start") {
@@ -722,6 +743,11 @@ async function plannerSessionAction(session, kind, button, group) {
         if (result.prerequisite === "flashcards") showToast("Create Flashcards first, then create the quiz");
       } else await openStudySession(session.document_id, result.tool);
     } else if (kind === "complete") showToast("Session completed. Nice work!");
+    else if (kind === "step_done") {
+      const next = plannerCurrentStep(result.session);
+      showToast(result.session_completed ? "Session completed. Nice work!"
+        : `${pcalActivity(session.steps[step].activity_type)} done. Next: ${pcalActivity(result.session.steps[next].activity_type)}`);
+    }
     else if (kind === "skip") skipped = { changed: Boolean(result.changed) };
     else {
       const moved = result.session;
@@ -748,8 +774,8 @@ function plannerDocumentTitle(documentId) {
   return indexedDocuments.find((item) => item.id === documentId)?.title || documentId;
 }
 
-function plannerActivityWord(activity) {
-  return (PLANNER_ACTIVITY_LABELS[activity] || activity).toLowerCase();
+function plannerActivityWord(activity, steps = null) {
+  return pcalActivity(activity, steps).toLowerCase();
 }
 
 function plannerShortWhen(iso) {
@@ -763,9 +789,9 @@ function plannerLongWhen(iso) {
 
 function plannerAdaptationSummary(result) {
   const parts = [
-    ...result.moved.map((item) => `${plannerActivityWord(item.activity_type)} moved to ${plannerShortWhen(item.to_start)}`),
-    ...result.added.map((item) => `${plannerActivityWord(item.activity_type)} added ${plannerShortWhen(item.scheduled_start)}`),
-    ...result.cancelled.map((item) => `${plannerActivityWord(item.activity_type)} no longer needed`),
+    ...result.moved.map((item) => `${plannerActivityWord(item.activity_type, item.steps)} moved to ${plannerShortWhen(item.to_start)}`),
+    ...result.added.map((item) => `${plannerActivityWord(item.activity_type, item.steps)} added ${plannerShortWhen(item.scheduled_start)}`),
+    ...result.cancelled.map((item) => `${plannerActivityWord(item.activity_type, item.steps)} no longer needed`),
   ];
   const shown = parts.slice(0, 3).join(", ") + (parts.length > 3 ? `, +${parts.length - 3} more` : "");
   return `Plan adjusted: ${shown}.`;
@@ -879,7 +905,7 @@ function plannerShowAdaptationReview(planId, trigger, proposal) {
       const row = document.createElement("li");
       row.className = "adapt-item";
       const name = document.createElement("strong");
-      name.textContent = `${PLANNER_ACTIVITY_LABELS[item.activity_type] || item.activity_type} · ${plannerDocumentTitle(item.document_id)}`;
+      name.textContent = `${pcalActivity(item.activity_type, item.steps)} · ${plannerDocumentTitle(item.document_id)}`;
       const time = document.createElement("span");
       time.className = "adapt-when";
       time.textContent = when;
@@ -1106,7 +1132,7 @@ function plannerChangeWhy(type, item) {
   const message = item.message || "";
   if (type === "added") {
     const replaced = message.match(/^Replace the (missed|skipped) /);
-    if (replaced) return `Replaces the ${replaced[1]} ${plannerActivityWord(item.activity_type)} session.`;
+    if (replaced) return `Replaces the ${replaced[1]} ${plannerActivityWord(item.activity_type, item.steps)} session.`;
     return PCAL_REASON_TEXT[item.reason_code] || plannerAdaptationReason(message);
   }
   if (/ no longer fits/.test(message)) {
@@ -1134,11 +1160,11 @@ function pcalDocumentTitle(documentId) {
 function pcalOpenChangePopover(change, session, block) {
   const { type, item } = change;
   const title = session.document_title || pcalDocumentTitle(session.document_id);
-  pcalShowPopover(block, `${PCAL_CHANGE_KIND_LABELS[type]}: ${pcalActivity(session.activity_type)} · ${title}`, (popover) => {
+  pcalShowPopover(block, `${PCAL_CHANGE_KIND_LABELS[type]}: ${pcalActivity(session.activity_type, session.steps)} · ${title}`, (popover) => {
     const content = pcalEl("div", "pcal-popover-body");
     content.append(pcalEl("span", `pcal-kind pcal-kind--change-${type}`, PCAL_CHANGE_KIND_LABELS[type]),
       pcalEl("h4", "pcal-popover-title", title),
-      pcalEl("p", "pcal-popover-activity", `${pcalActivity(session.activity_type)} · ${plannerFormatDuration(session.duration_minutes)}`));
+      pcalEl("p", "pcal-popover-activity", `${pcalActivity(session.activity_type, session.steps)} · ${plannerFormatDuration(session.duration_minutes)}`));
     const line = (caption, text) => {
       const row = pcalEl("p", "pcal-popover-when");
       row.append(pcalEl("span", "pcal-popover-caption", caption), document.createTextNode(text));
@@ -1451,8 +1477,45 @@ function pcalShortDay(dateKey) {
   return `${date.toLocaleDateString(undefined, { weekday: "short" })} ${day}`;
 }
 
-function pcalActivity(activity) {
+function pcalActivity(activity, steps = null) {
+  // A combined session (two sequential steps) reads "Summary + Flashcards".
+  if (steps?.length) return steps.map((step) => PLANNER_ACTIVITY_LABELS[step.activity_type] || step.activity_type).join(" + ");
   return PLANNER_ACTIVITY_LABELS[activity] || activity;
+}
+
+function plannerCurrentStep(session) {
+  // The index of a combined session's first step not done yet; null when done or single-activity.
+  if (!session?.steps?.length) return null;
+  const index = session.steps.findIndex((step) => step.status !== "completed");
+  return index < 0 ? null : index;
+}
+
+function plannerSessionActions(kind, session) {
+  // The lifecycle buttons of a saved session. A combined session in progress opens its current
+  // step's tool and marks that step done; the session completes with its last step.
+  const actions = PCAL_SESSION_ACTIONS[kind] || [];
+  const current = plannerCurrentStep(session);
+  if (kind !== "active" || current === null) return actions;
+  const step = pcalActivity(session.steps[current].activity_type);
+  return [["start", `Open ${step}`, true], ["step_done", `${step} done`, false],
+    ...actions.filter(([action]) => action !== "start" && action !== "complete")];
+}
+
+function pcalStepList(session) {
+  // A combined session's two steps, in order, with their minutes and progress.
+  const current = plannerCurrentStep(session);
+  const list = pcalEl("ol", "pcal-steps");
+  list.setAttribute("aria-label", "Session steps");
+  session.steps.forEach((step, index) => {
+    const done = step.status === "completed";
+    const state = done ? "Done" : index === current && session.status === "in_progress" ? "Now" : index === current ? "First" : "Next";
+    const item = pcalEl("li", `pcal-step${done ? " is-done" : ""}${index === current ? " is-current" : ""}`);
+    item.append(pcalEl("span", "pcal-step-name", `${index + 1}. ${pcalActivity(step.activity_type)}`),
+      pcalEl("span", "pcal-step-minutes", plannerFormatDuration(step.duration_minutes)),
+      pcalEl("span", "pcal-step-state", state));
+    list.appendChild(item);
+  });
+  return list;
 }
 
 function pcalMaterialTitle(material) {
@@ -1905,7 +1968,19 @@ function pcalRenderNotice() {
   notice.innerHTML = "";
   notice.dataset.tone = "";
   let text = "";
-  if (plannerNewMaterialFailure && plannerNewMaterialFailure.planId === plannerPlan?.plan_id) {
+  if (plannerLoadFailed) {
+    text = "Could not load your study plan.";
+    notice.dataset.tone = "warn";
+    const action = pcalEl("button", "pcal-notice-action", "Try again");
+    action.type = "button";
+    action.id = "pcal-load-retry";
+    action.addEventListener("click", () => { action.disabled = true; plannerOpen(); });
+    notice.append(pcalEl("span", "", text), action);
+  } else if (!plannerLoaded) {
+    text = "Loading your study plan…";
+    notice.dataset.tone = "busy";
+    notice.appendChild(pcalEl("span", "", text));
+  } else if (plannerNewMaterialFailure && plannerNewMaterialFailure.planId === plannerPlan?.plan_id) {
     text = "Could not suggest sessions for your new material. Your accepted plan is unchanged.";
     notice.dataset.tone = "warn";
     const action = pcalEl("button", "pcal-notice-action", "Try again");
@@ -2135,7 +2210,7 @@ function pcalEventBlock({ kind, session, change = null }, { lane = 0, lanes = 1 
   // compact = one row, title + start. The full details stay in the tooltip, aria-label and popover.
   const start = plannerToMinutes(session.scheduled_start.slice(11, 16));
   const end = plannerEndMinutes(session);
-  const block = pcalEl("button", `pcal-event pcal-event--${kind} pcal-activity--${session.activity_type}`);
+  const block = pcalEl("button", `pcal-event pcal-event--${kind} pcal-activity--${session.activity_type}${session.steps?.length ? " pcal-event--combined" : ""}`);
   block.type = "button";
   block.dataset.kind = kind;
   block.dataset.start = session.scheduled_start;
@@ -2144,7 +2219,7 @@ function pcalEventBlock({ kind, session, change = null }, { lane = 0, lanes = 1 
   const title = plannerDisplayTitle(fullTitle);
   const label = change ? PCAL_CHANGE_KIND_LABELS[change.type] : PCAL_KIND_LABELS[kind];
   const duration = plannerFormatDuration(session.duration_minutes || end - start);
-  block.setAttribute("aria-label", `${label}: ${pcalActivity(session.activity_type)} · ${fullTitle}, ${pcalShortDay(session.scheduled_start.slice(0, 10))} ${pcalSessionTimes(session)}`);
+  block.setAttribute("aria-label", `${label}: ${pcalActivity(session.activity_type, session.steps)} · ${fullTitle}, ${pcalShortDay(session.scheduled_start.slice(0, 10))} ${pcalSessionTimes(session)}`);
   pcalPlace(block, start, end);
   if (lanes > 1) {
     // Overlapping events share the column side by side; neither covers the other.
@@ -2172,13 +2247,13 @@ function pcalEventBlock({ kind, session, change = null }, { lane = 0, lanes = 1 
       : change.type === "added" ? `+ ${PCAL_CHANGE_LABELS.added}` : PCAL_CHANGE_LABELS[change.type];
     if (tag) block.appendChild(pcalEl("span", "pcal-event-tag", tag));
   } else {
-    block.title = `${fullTitle}\n${pcalActivity(session.activity_type)} · ${pcalSessionTimes(session)} (${duration})\n${label}`;
+    block.title = `${fullTitle}\n${pcalActivity(session.activity_type, session.steps)} · ${pcalSessionTimes(session)} (${duration})\n${label}`;
   }
   const meta = pcalEl("span", "pcal-event-meta");   // its text stays "Activity · 15:30–16:00"
   // The end time is its own span so a one-row or narrow block can show only the start.
   const time = pcalEl("span", "pcal-event-time", session.scheduled_start.slice(11, 16));
   time.appendChild(pcalEl("span", "pcal-event-end", `–${session.scheduled_end.slice(11, 16)}`));
-  meta.append(pcalEl("span", "pcal-event-activity", pcalActivity(session.activity_type)),
+  meta.append(pcalEl("span", "pcal-event-activity", pcalActivity(session.activity_type, session.steps)),
     pcalEl("span", "pcal-event-sep", " · "), time);
   const extra = pcalEl("span", "pcal-event-extra");
   extra.append(pcalEl("span", "pcal-event-duration", duration), pcalEl("span", "pcal-event-break"),
@@ -2399,13 +2474,13 @@ function pcalWhen(iso) {
 
 function pcalOpenSessionPopover(kind, session, block) {
   const title = session.document_title || plannerDocumentTitle(session.document_id);
-  const name = `${title} (${pcalActivity(session.activity_type)})`;
-  pcalShowPopover(block, `${pcalActivity(session.activity_type)} · ${title}`, (popover) => {
+  const name = `${title} (${pcalActivity(session.activity_type, session.steps)})`;
+  pcalShowPopover(block, `${pcalActivity(session.activity_type, session.steps)} · ${title}`, (popover) => {
     const holder = pcalEl("div", "pcal-popover-session");
     const content = pcalEl("div", "pcal-popover-body");
     content.append(pcalEl("span", `pcal-kind pcal-kind--${kind}`, PCAL_KIND_LABELS[kind]),
       pcalEl("h4", "pcal-popover-title", title),
-      pcalEl("p", "pcal-popover-activity", pcalActivity(session.activity_type)),
+      pcalEl("p", "pcal-popover-activity", pcalActivity(session.activity_type, session.steps)),
       pcalEl("p", "pcal-popover-when", `${plannerDayLabel(session.scheduled_start.slice(0, 10))} · ${pcalSessionTimes(session)} · ${plannerFormatDuration(session.duration_minutes)}`));
     const reason = pcalReasonText(session.reason);
     if (reason) {
@@ -2422,13 +2497,14 @@ function pcalOpenSessionPopover(kind, session, block) {
     if (session.manual_edit && !PLANNER_HISTORY_SESSION_STATUSES.includes(session.status)) {
       content.appendChild(pcalEl("p", "pcal-popover-note pcal-popover-manual", "Set by you. Auto Plan and suggestions keep this time and length."));
     }
+    if (session.steps?.length) content.appendChild(pcalStepList(session));
     if (kind === "completed" && session.completed_at) {
       content.appendChild(pcalEl("p", "pcal-popover-note", `Completed ${new Date(session.completed_at).toLocaleString(undefined,
         { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`));
     }
     holder.appendChild(content);
     if (kind === "suggested") content.appendChild(pcalEl("p", "pcal-popover-hint", "Suggested. Accept plan to save it."));
-    const actions = session.session_id ? PCAL_SESSION_ACTIONS[kind] || [] : [];
+    const actions = session.session_id ? plannerSessionActions(kind, session) : [];
     if (actions.length) {
       const group = pcalEl("div", "pcal-popover-actions pcal-session-actions");
       actions.forEach(([action, label, primary]) => {
@@ -2615,7 +2691,7 @@ function pcalOpenSessionEditor(session, anchor) {
   const options = plannerPreferences?.options;
   // Opened from the session's own popover (which is replaced): anchor to its calendar block.
   const block = plannerWorkspace?.querySelector(`.pcal-event[data-session-id="${CSS.escape(session.session_id)}"]`);
-  pcalShowPopover(block || anchor, `Edit ${pcalActivity(session.activity_type)} · ${title}`, (popover) => {
+  pcalShowPopover(block || anchor, `Edit ${pcalActivity(session.activity_type, session.steps)} · ${title}`, (popover) => {
     const form = pcalEl("form", "pcal-edit-form");
     form.noValidate = true;
     const field = (label, input) => {
@@ -2651,7 +2727,7 @@ function pcalOpenSessionEditor(session, anchor) {
     const actions = pcalEl("div", "pcal-popover-actions");
     actions.append(save, cancel);
     form.append(pcalEl("h4", "pcal-popover-title", "Edit session"),
-      pcalEl("p", "pcal-popover-activity", `${pcalActivity(session.activity_type)} · ${title}`),
+      pcalEl("p", "pcal-popover-activity", `${pcalActivity(session.activity_type, session.steps)} · ${title}`),
       field("Date", date), field("Start time", time), field("Length (minutes)", length),
       pcalEl("p", "pcal-popover-note", "Your change is kept: Auto Plan and suggestions won't move or resize this session."),
       error, actions);
@@ -2776,7 +2852,7 @@ function pcalQueueItem(entry, kind) {
   const title = entry.document_title || plannerDocumentTitle(entry.document_id);
   const item = pcalEl("li", "pcal-queue-item pcal-queue-item--unscheduled");
   item.append(pcalEl("strong", "pcal-queue-title", title),
-    pcalEl("span", "pcal-queue-meta", `${pcalActivity(entry.activity_type)} · ${plannerFormatDuration(entry.estimated_minutes || 0)}`));
+    pcalEl("span", "pcal-queue-meta", `${pcalActivity(entry.activity_type, entry.steps)} · ${plannerFormatDuration(entry.estimated_minutes || 0)}`));
   if (entry.reason?.message) item.appendChild(pcalEl("small", "pcal-queue-reason", entry.reason.message));
   const due = entry.deadline
     ? `Due ${new Date(`${entry.deadline}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })} · ` : "";
@@ -2784,7 +2860,7 @@ function pcalQueueItem(entry, kind) {
   if (entry.candidate_key && entry.estimated_minutes) {
     item.classList.add("is-draggable");
     item.dataset.candidateKey = entry.candidate_key;
-    item.setAttribute("aria-label", `${pcalActivity(entry.activity_type)} · ${title}, needs a time slot`);
+    item.setAttribute("aria-label", `${pcalActivity(entry.activity_type, entry.steps)} · ${title}, needs a time slot`);
     item.addEventListener("pointerdown", (event) => pcalBeginMove(event, {
       kind: kind === "live" ? "candidate" : "unscheduled", key: entry.candidate_key, element: item,
       documentId: entry.document_id, duration: entry.estimated_minutes, deadline: entry.deadline,
@@ -3500,8 +3576,8 @@ function pcalRenderAgenda() {
 function pcalAgendaCard({ kind, session, change = null }) {
   const fullTitle = plannerSessionTitle(session);
   const title = plannerDisplayTitle(fullTitle);
-  const activity = pcalActivity(session.activity_type);
-  const card = pcalEl("li", `pcal-agenda-card pcal-agenda-card--${kind} pcal-activity--${session.activity_type}`);
+  const activity = pcalActivity(session.activity_type, session.steps);
+  const card = pcalEl("li", `pcal-agenda-card pcal-agenda-card--${kind} pcal-activity--${session.activity_type}${session.steps?.length ? " pcal-agenda-card--combined" : ""}`);
   card.dataset.kind = kind;
   card.dataset.start = session.scheduled_start;
   if (session.session_id) card.dataset.sessionId = session.session_id;
@@ -3533,7 +3609,8 @@ function pcalAgendaCard({ kind, session, change = null }) {
 
   const actions = pcalEl("div", "pcal-agenda-actions pcal-session-actions");
   const name = `${fullTitle} (${activity})`;
-  (session.session_id && !change ? PCAL_SESSION_ACTIONS[kind] || [] : []).forEach(([action, label, primary]) => {
+  if (session.steps?.length && !change) body.appendChild(pcalStepList(session));
+  (session.session_id && !change ? plannerSessionActions(kind, session) : []).forEach(([action, label, primary]) => {
     const button = pcalEl("button", `${primary ? "primary-button" : "pcal-text-action"} planner-session-action planner-session-${action}`, label);
     button.type = "button";
     button.dataset.sessionAction = action;

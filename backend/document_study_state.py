@@ -221,6 +221,19 @@ def derive_learning_state(summary: SummaryState, flashcards: FlashcardState, qui
     return "new", StateReason(STATE_REASON_NO_STUDY_ACTIVITY, "Not studied yet.")
 
 
+def _completed_steps(sessions: list[dict]) -> list[dict]:
+    """The completed steps of combined sessions in any status: a step done in a session that is
+    still in progress (or was skipped afterwards) stays done."""
+    return [step for session in sessions for step in session.get("steps") or () if step.get("status") == "completed"]
+
+
+def _completed_activities(completed_sessions: list[dict], sessions: list[dict]) -> tuple[str, ...]:
+    """Every activity studied in the planner, each counted once: completed single-activity
+    sessions, and every completed step of a combined session."""
+    return tuple(sorted({session["activity_type"] for session in completed_sessions if not session.get("steps")}
+                        | {step["activity_type"] for step in _completed_steps(sessions)}))
+
+
 def get_document_study_state(owner_id: str, document_id: str, plan_id: str | None = None) -> DocumentStudyState | None:
     """Snapshot for one of the owner's documents, or None when the owner has no such document.
     With `plan_id`, also reads that plan's stored learning_state for the document (None when the
@@ -246,14 +259,18 @@ def get_document_study_state(owner_id: str, document_id: str, plan_id: str | Non
 
     quiz = _quiz_state(owner_id, document_id)
 
-    completed_sessions = study_planner_store.list_sessions(owner_id, document_id=document_id, statuses=("completed",))
-    last_session_at = _latest_timestamp(*(session["completed_at"] for session in completed_sessions))
+    sessions = study_planner_store.list_sessions(owner_id, document_id=document_id)
+    completed_sessions = [session for session in sessions if session["status"] == "completed"]
+    # A combined session part-way through: its finished step is study activity too (never twice).
+    partly_done = sum(1 for session in sessions if session["status"] != "completed" and _completed_steps([session]))
+    last_session_at = _latest_timestamp(*(session["completed_at"] for session in completed_sessions),
+                                        *(step.get("completed_at") for step in _completed_steps(sessions)))
 
     material = study_planner_store.get_plan_material(owner_id, plan_id, document_id) if plan_id else None
     planner_learning_state = material["learning_state"] if material else None
 
     learning_state, state_reason = derive_learning_state(
-        summary, flashcards, quiz, len(completed_sessions), planner_learning_state,
+        summary, flashcards, quiz, len(completed_sessions) + partly_done, planner_learning_state,
     )
     weak_topics = tuple(
         WeakTopic(gap["topic_id"], gap["topic_name"], gap["severity"], gap["mastery_score"])
@@ -267,5 +284,5 @@ def get_document_study_state(owner_id: str, document_id: str, plan_id: str | Non
         last_activity_at=_latest_timestamp(last_session_at, quiz.last_activity_at),
         plan_id=plan_id if material else None, planner_learning_state=planner_learning_state,
         learning_state=learning_state, state_reason=state_reason, weak_topics=weak_topics,
-        completed_activities=tuple(sorted({session["activity_type"] for session in completed_sessions})),
+        completed_activities=_completed_activities(completed_sessions, sessions),
     )

@@ -147,8 +147,9 @@ class DeadlineTests(ScheduleAssertions, unittest.TestCase):
     def test_deadline_priority_still_front_loads_deadlined_materials(self):
         materials = [material(make_state("a"), "2026-10-09"), material(make_state("b"))]
         result = plan_schedule(context(materials, EVENINGS), config_from({**DEFAULTS, "strategy": "deadline_priority"}))
-        # As soon as possible (unchanged): learning done Mon-Tue, final review just before Oct 9.
-        self.assertEqual(days_of(result, "a"), [date(2026, 9, 28), date(2026, 9, 28), date(2026, 9, 29), date(2026, 10, 7)])
+        # As soon as possible (unchanged): learning done Mon-Tue (summary + flashcards in one combined
+        # session on Monday), final review just before Oct 9.
+        self.assertEqual(days_of(result, "a"), [date(2026, 9, 28), date(2026, 9, 29), date(2026, 10, 7)])
 
 
 if __name__ == "__main__":

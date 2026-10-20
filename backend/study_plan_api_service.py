@@ -7,8 +7,8 @@ result without persisting anything; confirm recomputes the same schedule server-
 
 from datetime import date, datetime, timedelta, timezone
 
-from backend import (google_calendar_sync, study_adaptation, study_placement, study_planner_service,
-                     study_planner_store, study_progress)
+from backend import (google_calendar_sync, study_adaptation, study_combined_sessions, study_placement,
+                     study_planner_service, study_planner_store, study_progress)
 from backend.document_study_state import get_document_study_state
 from backend.flashcard_quiz_service import is_flashcard_quiz
 from backend.quiz_store import get_quiz_by_id
@@ -274,6 +274,7 @@ def _capacity(capacity, titles: dict, keys: list[str] | None = None) -> dict:
                 "document_id": c.document_id, "document_title": titles.get(c.document_id),
                 "activity_type": c.activity_type, "estimated_minutes": c.estimated_minutes,
                 "deadline": c.deadline, "reason": _reason(c.reason), "artifact_id": c.artifact_id,
+                "steps": [dict(step) for step in c.steps],
                 **({"candidate_key": keys[index]} if keys else {}),
             }
             for index, c in enumerate(capacity.unscheduled)
@@ -282,8 +283,11 @@ def _capacity(capacity, titles: dict, keys: list[str] | None = None) -> dict:
 
 
 def _saved_session(session: dict, titles: dict) -> dict:
-    """A persisted study session for the UI (reason code + its label; never the priority score)."""
+    """A persisted study session for the UI (reason code + its label; never the priority score).
+    A combined session lists its two `steps` with their progress; `current_step` is the index of the
+    first step not done yet (None when done, or for a single-activity session, whose steps are [])."""
     code = session["reason"]
+    steps = session.get("steps") or []
     return {
         "session_id": session["session_id"], "document_id": session["document_id"],
         "document_title": titles.get(session["document_id"]), "activity_type": session["activity_type"],
@@ -293,6 +297,7 @@ def _saved_session(session: dict, titles: dict) -> dict:
         "artifact_id": session["artifact_id"], "started_at": session["started_at"],
         "completed_at": session["completed_at"], "rescheduled_from": session["rescheduled_from"],
         "manual_edit": bool(session.get("manual_edit")),
+        "steps": steps, "current_step": study_combined_sessions.current_step_index(steps),
     }
 
 
@@ -323,6 +328,7 @@ def preview_plan(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now
                 "activity_type": p.activity_type, "scheduled_start": p.scheduled_start,
                 "scheduled_end": p.scheduled_end, "duration_minutes": p.duration_minutes,
                 "reason": _reason(p.reason), "artifact_id": p.artifact_id,
+                "steps": [dict(step) for step in p.steps],
                 "candidate_key": key, "placed": key in applied,
             }
             for p, key in zip(result.proposals, session_keys)
@@ -445,11 +451,25 @@ def _transition(owner_id: str, session_id: str, action: str) -> tuple[dict, bool
         raise PlanNotFoundError(str(error)) from error
 
 
+def _current_step_session(session: dict) -> tuple[dict, int | None]:
+    """(the session as its current step, that step's index). A combined session opens the tool of
+    its first step not done yet (the last one once both are done); a single session is itself."""
+    steps = session.get("steps") or []
+    if not steps:
+        return session, None
+    index = study_combined_sessions.current_step_index(steps)
+    index = len(steps) - 1 if index is None else index
+    step = steps[index]
+    return {**session, "activity_type": step["activity_type"],
+            "artifact_id": step.get("artifact_id") or (session["artifact_id"] if step["activity_type"] in ("quiz", "quiz_retry") else None)}, index
+
+
 def start_session(owner_id: str, session_id: str, utc_offset_minutes: int, local_now: str | None = None) -> dict:
     """Start (or resume) one session and say which tool to open for it. A scheduled session whose
     time is over on the learner's clock (scheduled_end <= local now -- the same boundary the page
     uses for "Session not completed") is missed: it can be rescheduled or skipped, not started.
-    Resuming an in-progress session is unaffected."""
+    Resuming an in-progress session is unaffected. A combined session opens the existing tool of its
+    current step (`current_step`); nothing is ever generated here."""
     now = _parse_local_now(local_now, _validate_utc_offset(utc_offset_minutes))
     current = study_planner_store.get_session(owner_id, session_id)
     if current and current["status"] == "scheduled" and current["scheduled_end"] <= now.isoformat():
@@ -457,17 +477,34 @@ def start_session(owner_id: str, session_id: str, utc_offset_minutes: int, local
                                    status=current["status"])
     session, started = _transition(owner_id, session_id, "start")
     prerequisite = None
-    if session["activity_type"] == "written_quiz":
+    current, step_index = _current_step_session(session)
+    if current["activity_type"] == "written_quiz":
         # An older session: its saved practice quiz, else recall practice in Flashcards.
-        if _written_quiz_artifact(owner_id, session):
+        if _written_quiz_artifact(owner_id, current):
             tool, artifact_available = "quiz", True
         else:
-            tool, artifact_available, _ = _session_tool(owner_id, {**session, "activity_type": "flashcards"})
+            tool, artifact_available, _ = _session_tool(owner_id, {**current, "activity_type": "flashcards"})
     else:
-        tool, artifact_available, prerequisite = _session_tool(owner_id, session)
+        tool, artifact_available, prerequisite = _session_tool(owner_id, current)
     return _with_calendar_sync(owner_id, {"session": _saved_session(session, _document_titles(owner_id)), "started": started,
                                           "tool": tool, "artifact_available": artifact_available,
-                                          "prerequisite": prerequisite}, utc_offset_minutes)
+                                          "prerequisite": prerequisite, "current_step": step_index,
+                                          "step_activity_type": current["activity_type"] if step_index is not None else None,
+                                          "step_artifact_id": current["artifact_id"] if step_index is not None else None},
+                               utc_offset_minutes)
+
+
+def complete_session_step(owner_id: str, session_id: str, step_index: int) -> dict:
+    """Mark the current step of an in-progress combined session done; the last step completes the
+    session itself. Repeating it is a no-op. Steps must be done in order."""
+    try:
+        session, changed = study_planner_store.complete_session_step(owner_id, session_id, step_index)
+    except study_planner_store.SessionTransitionError as error:
+        raise SessionConflictError(error.code, str(error), status=error.status) from error
+    except ValueError as error:
+        raise PlanNotFoundError(str(error)) from error
+    return _with_calendar_sync(owner_id, {"session": _saved_session(session, _document_titles(owner_id)), "changed": changed,
+                                          "session_completed": session["status"] == "completed"})
 
 
 def complete_session(owner_id: str, session_id: str) -> dict:
@@ -595,7 +632,8 @@ def list_live_candidates(owner_id: str, plan_id: str, utc_offset_minutes: int, l
         found.append({"candidate_key": item["candidate_key"], "document_id": candidate.document_id,
                       "document_title": item["title"], "activity_type": candidate.activity_type,
                       "estimated_minutes": candidate.estimated_minutes, "deadline": candidate.deadline,
-                      "reason": _reason(candidate.reason), "artifact_id": candidate.artifact_id})
+                      "reason": _reason(candidate.reason), "artifact_id": candidate.artifact_id,
+                      "steps": [dict(step) for step in candidate.steps]})
     return found
 
 
@@ -621,6 +659,8 @@ def place_live_candidate(owner_id: str, plan_id: str, key: str, target_start: st
     record = {"document_id": candidate.document_id, "activity_type": candidate.activity_type,
               "scheduled_start": start, "scheduled_end": end, "duration_minutes": candidate.estimated_minutes,
               "reason": candidate.reason.code, "artifact_id": candidate.artifact_id}
+    if candidate.steps:
+        record["steps"] = [dict(step) for step in candidate.steps]
     _require_new_session_lengths([record])
     try:
         written = study_planner_store.apply_adaptation_changes(
@@ -688,7 +728,8 @@ def apply_adaptation(owner_id: str, plan_id: str, trigger: dict, utc_offset_minu
     by_id = {s["session_id"]: s for s in plan_sessions}
     added = [{"document_id": a.document_id, "activity_type": a.activity_type, "scheduled_start": a.scheduled_start,
               "scheduled_end": a.scheduled_end, "duration_minutes": a.duration_minutes, "reason": a.reason_code,
-              "artifact_id": a.artifact_id, "rescheduled_from": a.replaces_session_id} for a in result.added]
+              "artifact_id": a.artifact_id, "rescheduled_from": a.replaces_session_id,
+              **({"steps": [dict(step) for step in a.steps]} if a.steps else {})} for a in result.added]
     _require_new_session_lengths(added)
     replaced = sorted({a.replaces_session_id for a in result.added if a.replaces_session_id
                        and by_id[a.replaces_session_id]["status"] in ("scheduled", "missed")})

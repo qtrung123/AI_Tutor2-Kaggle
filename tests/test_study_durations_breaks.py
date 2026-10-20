@@ -192,8 +192,10 @@ class AcceptedSessionPreservationTests(PlannerDatabaseMixin, unittest.TestCase):
                 gap_after = minute_of(session["scheduled_start"]) - minute_of(old["scheduled_end"])
                 gap_before = minute_of(old["scheduled_start"]) - minute_of(session["scheduled_end"])
                 self.assertTrue(gap_after >= 20 or gap_before >= 20, (session, old))
-        self.assertEqual({s["activity_type"]: s["duration_minutes"] for s in new if s["activity_type"] != "review"},
-                         {"summary": 45, "flashcards": 20, "quiz": 35})
+        # New sessions use the current lengths: summary + flashcards as one 35-minute combined session.
+        self.assertEqual({"+".join(step["activity_type"] for step in s["steps"]) or s["activity_type"]: s["duration_minutes"]
+                          for s in new if s["activity_type"] != "review"},
+                         {"summary+flashcards": 35, "quiz": 35})
         # Moving an accepted session keeps its own length.
         moved = self.client.post(f"/api/planner/sessions/{accepted[1]['session_id']}/reschedule",
                                  json={"target_start": "2026-10-02T20:00:00", "utc_offset_minutes": 0,

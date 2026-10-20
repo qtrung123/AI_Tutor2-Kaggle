@@ -2035,11 +2035,12 @@ function matchingReviewRows(item) {
 
 // ---- Multi-blank fill-in-the-blank ---------------------------------------------------------------
 // One sentence with 2-4 "____" blanks. The answer is one text per blank, in blank order ("" = still
-// empty). Type Answer types each blank; Word Bank fills the chosen (or first empty) blank by clicking
-// or dragging a word. The mode is only a way of answering: both save the same answer, graded the same.
+// empty). New questions (answer_modes ["word_bank"], built from the flashcards) are answered from
+// their Word Bank: clicking or dragging a word fills the chosen (or first empty) blank. Older saved
+// questions (["type_answer", "word_bank"]) keep typing each blank. There is no mode switch: both
+// save the same answer, graded the same.
 
 const MULTI_BLANK_MARKER = "____";
-const quizMultiBlankModes = {};   // question id -> "type_answer" | "word_bank" (kept while the page is open)
 let quizMultiBlankActive = null;  // {questionId, index}: the blank the next Word Bank word fills
 
 function isMultiBlankQuestionType(questionType) {
@@ -2065,12 +2066,15 @@ function numberedBlankText(text) {
 }
 
 // `onAnswer` runs after every change of the answer (autosave, counts); `onRender` re-renders the
-// question (mode switch, Word Bank moves). Typing never re-renders, so focus and caret stay put.
+// question (Word Bank moves). Typing never re-renders, so focus and caret stay put.
+function multiBlankMode(question) {
+  return question.answer_modes?.[0] === "word_bank" ? "word_bank" : "type_answer";
+}
+
 function createMultiBlankBoard(question, value, { onAnswer = () => {}, onRender = () => {}, readOnly = false } = {}) {
   const key = String(question.id);
   const values = multiBlankValues(question, value);
-  const modes = question.answer_modes?.length ? question.answer_modes : ["type_answer", "word_bank"];
-  const mode = modes.includes(quizMultiBlankModes[key]) ? quizMultiBlankModes[key] : modes[0];
+  const mode = multiBlankMode(question);
   const active = quizMultiBlankActive?.questionId === key ? quizMultiBlankActive.index : null;
   const commit = (next) => {
     if (next.some((item) => item.trim())) quizAnswers[key] = next;
@@ -2081,30 +2085,6 @@ function createMultiBlankBoard(question, value, { onAnswer = () => {}, onRender 
   const board = document.createElement("div");
   board.className = "quiz-multi-blank";
   board.dataset.mode = mode;
-  if (modes.length > 1 && !readOnly) {
-    const switcher = document.createElement("div");
-    switcher.className = "quiz-multi-blank-modes";
-    switcher.setAttribute("role", "radiogroup");
-    switcher.setAttribute("aria-label", "How to answer");
-    [["type_answer", "Type Answer"], ["word_bank", "Word Bank"]].filter(([option]) => modes.includes(option)).forEach(([option, label]) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = `quiz-segmented-option${option === mode ? " active" : ""}`;
-      button.dataset.mode = option;
-      button.textContent = label;
-      button.setAttribute("role", "radio");
-      button.setAttribute("aria-checked", String(option === mode));
-      button.addEventListener("click", () => {
-        if (option === mode) return;
-        quizMultiBlankModes[key] = option;
-        quizMultiBlankActive = null;
-        onRender();
-      });
-      switcher.appendChild(button);
-    });
-    board.appendChild(switcher);
-  }
-
   const place = (index, word) => {
     const next = values.map((current, position) => (position === index ? word : (current === word ? "" : current)));
     const empty = next.findIndex((item, position) => position > index && !item);

@@ -268,6 +268,13 @@ def planner_v2_complete_session(session_id: str, current_user: dict = Depends(re
     return _session_action(study_plan_api_service.complete_session, current_user["id"], session_id)
 
 
+@router.post("/api/planner/sessions/{session_id}/steps/{step_index}/complete")
+def planner_v2_complete_session_step(session_id: str, step_index: int,
+                                     current_user: dict = Depends(require_current_user)) -> dict:
+    # A combined session: its current step is done (the last step also completes the session).
+    return _session_action(study_plan_api_service.complete_session_step, current_user["id"], session_id, step_index)
+
+
 @router.post("/api/planner/sessions/{session_id}/skip")
 def planner_v2_skip_session(session_id: str, current_user: dict = Depends(require_current_user)) -> dict:
     return _session_action(study_plan_api_service.skip_session, current_user["id"], session_id)
