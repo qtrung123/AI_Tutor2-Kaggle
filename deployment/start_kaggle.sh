@@ -65,7 +65,16 @@ mkdir -p "$LOG_DIR" "$RUNTIME_DIR" "$AI_TUTOR_DATA_DIR" "$AI_TUTOR_VECTORSTORE_D
 
 log() { printf '[ai-tutor] %s\n' "$*"; }
 tail_log() { [[ -f "$1" ]] && tail -n 80 "$1" >&2 || true; }
-fail() { log "ERROR: $1"; [[ $# -lt 2 ]] || tail_log "$2"; exit 1; }
+# PID of the background chat warmup (see start_model_warmup); every failure path stops it, so no
+# request outlives a failed startup.
+CHAT_WARMUP_PID=""
+stop_chat_warmup() {
+  [[ -n "$CHAT_WARMUP_PID" ]] || return 0
+  pkill -TERM -P "$CHAT_WARMUP_PID" 2>/dev/null || true
+  kill "$CHAT_WARMUP_PID" 2>/dev/null || true
+  CHAT_WARMUP_PID=""
+}
+fail() { log "ERROR: $1"; [[ $# -lt 2 ]] || tail_log "$2"; stop_chat_warmup; exit 1; }
 # "[timing] <stage>: <seconds>s" lines are parsed by the notebook into its startup timing table.
 now() { date +%s.%N; }
 log_timing() { awk -v stage="$1" -v start="$2" -v end="$(now)" 'BEGIN { printf "[timing] %s: %.1fs\n", stage, end - start }'; }
@@ -126,6 +135,7 @@ on_error() {
   local exit_code=$?
   log "Command failed at line $1 (exit $exit_code)."
   for file in ollama vllm backend frontend nginx; do tail_log "$LOG_DIR/$file.log"; done
+  stop_chat_warmup
   exit "$exit_code"
 }
 trap 'on_error $LINENO' ERR
@@ -250,40 +260,95 @@ PY
   fi
 }
 
-warm_models_once() {
-  local key marker started
-  # Only the startup default (Qwen) and the embedding model are warmed here: Gemma is lazy (see
-  # /api/models/{id}/prepare) and is never pulled or warmed at startup.
+# Ollama's own breakdown of one warmup response (nanoseconds in the JSON): load vs prompt vs generation,
+# so a slow warmup in the log can be attributed to the model load itself or to inference.
+log_ollama_durations() {
+  python - "$1" "$2" <<'PY' || true
+import json, sys
+label, path = sys.argv[1], sys.argv[2]
+data = json.load(open(path))
+parts = [f"{key}={data[key] / 1e9:.1f}s" for key in ("load_duration", "prompt_eval_duration", "eval_duration", "total_duration") if key in data]
+parts += [f"{key}={data[key]}" for key in ("prompt_eval_count", "eval_count") if key in data]
+print(f"[ai-tutor] Ollama {label} warmup: {' '.join(parts)}")
+PY
+}
+
+CHAT_WARMUP_LOG="$LOG_DIR/warmup-chat.log"
+CHAT_WARMUP_RESPONSE="$RUNTIME_DIR/warmup-chat.json"
+MODELS_WARMED_MARKER=""
+WARMUP_STARTED=""
+
+# Phase 1 of the once-per-runtime warmup. Only the startup default (Qwen) and the embedding model are
+# warmed: Gemma is lazy (see /api/models/{id}/prepare) and is never pulled or warmed at startup.
+# The embedding request is sent first and awaited here (indexing needs it); the chat request runs in the
+# background meanwhile, so its load overlaps the embedding warmup, the Chroma check, indexing and the
+# FastAPI/frontend/nginx startup. finish_model_warmup awaits it before startup reports success, so the
+# first Chat/Quiz request still finds Qwen loaded with the Chat num_ctx and keep_alive. Both models fit
+# in VRAM together (see the residency note above); if Ollama serializes the two loads, nothing is lost.
+start_model_warmup() {
+  local key started embedding_request chat_request
   key="$(printf '%s\n%s\n%s\n%s\n' "$OLLAMA_CHAT_MODEL" "$OLLAMA_EMBEDDING_MODEL" "$AI_TUTOR_CHAT_NUM_CTX" \
     "$AI_TUTOR_GENERATION_KEEP_ALIVE" | sha256sum | awk '{print $1}')"
-  marker="$RUNTIME_DIR/models-warmed-$key"
-  if [[ -f "$marker" ]]; then
+  MODELS_WARMED_MARKER="$RUNTIME_DIR/models-warmed-$key"
+  if [[ -f "$MODELS_WARMED_MARKER" ]]; then
     log "Model warmup already completed in this runtime"
+    MODELS_WARMED_MARKER=""
     return
   fi
+  WARMUP_STARTED="$(now)"
+  embedding_request="$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_EMBEDDING_MODEL"], "input": "AI Tutor embedding health check.", "keep_alive": os.environ["AI_TUTOR_GENERATION_KEEP_ALIVE"]}))')"
+  log "Warming embedding model"
+  started="$(now)"
+  # Sent before the chat request so that, if Ollama loads one model at a time, the embedding model
+  # (needed by indexing) goes first and the app startup overlaps the longer Qwen load.
+  curl --fail --silent --show-error --max-time 180 -o "$RUNTIME_DIR/warmup-embedding.json" \
+    -H 'Content-Type: application/json' "$OLLAMA_HOST/api/embed" -d "$embedding_request" &
+  local embedding_pid=$!
   if [[ "$LLM_BACKEND" == "vllm" ]]; then
     log "Chat model is served by vLLM (loaded at its startup); skipping the Ollama chat warmup"
   else
-    log "Warming chat model (num_ctx=$AI_TUTOR_CHAT_NUM_CTX keep_alive=$AI_TUTOR_GENERATION_KEEP_ALIVE)"
-    started="$(now)"
-    curl --fail --silent --show-error --max-time 600 \
-      -H 'Content-Type: application/json' "$OLLAMA_HOST/api/generate" \
-      -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_CHAT_MODEL"], "prompt": "Reply with OK.", "stream": False, "keep_alive": os.environ["AI_TUTOR_GENERATION_KEEP_ALIVE"], "options": {"num_ctx": int(os.environ["AI_TUTOR_CHAT_NUM_CTX"])}}))')" >/dev/null
-    log_timing "warmup chat model" "$started"
+    chat_request="$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_CHAT_MODEL"], "prompt": "Reply with OK.", "stream": False, "keep_alive": os.environ["AI_TUTOR_GENERATION_KEEP_ALIVE"], "options": {"num_ctx": int(os.environ["AI_TUTOR_CHAT_NUM_CTX"])}}))')"
+    log "Warming chat model in the background (num_ctx=$AI_TUTOR_CHAT_NUM_CTX keep_alive=$AI_TUTOR_GENERATION_KEEP_ALIVE; log: $CHAT_WARMUP_LOG)"
+    # Own log, not the notebook's pipe; no ERR trap inside (its status is checked by finish_model_warmup).
+    (
+      trap - ERR
+      chat_started="$(now)"
+      curl --fail --silent --show-error --max-time 600 -o "$CHAT_WARMUP_RESPONSE" \
+        -H 'Content-Type: application/json' "$OLLAMA_HOST/api/generate" -d "$chat_request"
+      log_timing "warmup chat model" "$chat_started"
+    ) >"$CHAT_WARMUP_LOG" 2>&1 &
+    CHAT_WARMUP_PID=$!
   fi
-  log "Warming embedding model"
-  started="$(now)"
-  curl --fail --silent --show-error --max-time 180 \
-    -H 'Content-Type: application/json' "$OLLAMA_HOST/api/embed" \
-    -d "$(python -c 'import json, os; print(json.dumps({"model": os.environ["OLLAMA_EMBEDDING_MODEL"], "input": "AI Tutor embedding health check.", "keep_alive": os.environ["AI_TUTOR_GENERATION_KEEP_ALIVE"]}))')" \
-    | python -c 'import json, sys; data=json.load(sys.stdin); assert data.get("embeddings"), "Embedding warmup returned no vector"'
+  local embedding_status=0
+  wait "$embedding_pid" || embedding_status=$?
+  (( embedding_status == 0 )) || fail "Embedding model warmup failed (exit $embedding_status): $OLLAMA_EMBEDDING_MODEL" "$LOG_DIR/ollama.log"
+  python -c 'import json, sys; data=json.load(open(sys.argv[1])); assert data.get("embeddings"), "Embedding warmup returned no vector"' \
+    "$RUNTIME_DIR/warmup-embedding.json"
   log_timing "warmup embedding model" "$started"
+  log_ollama_durations embedding "$RUNTIME_DIR/warmup-embedding.json"
+}
+
+# Phase 2: awaits the background chat warmup (a failure stops startup like before), then records the
+# residency evidence and the once-per-runtime marker.
+finish_model_warmup() {
+  [[ -n "$MODELS_WARMED_MARKER" ]] || return 0
+  local started status=0
+  started="$(now)"
+  if [[ -n "$CHAT_WARMUP_PID" ]]; then
+    wait "$CHAT_WARMUP_PID" || status=$?
+    CHAT_WARMUP_PID=""
+    cat "$CHAT_WARMUP_LOG"
+    (( status == 0 )) || fail "Chat model warmup failed (exit $status): $OLLAMA_CHAT_MODEL" "$CHAT_WARMUP_LOG"
+    log_ollama_durations chat "$CHAT_WARMUP_RESPONSE"
+  fi
+  log_timing "wait for chat warmup" "$started"
+  log_timing "model warmup (total)" "$WARMUP_STARTED"
   # Evidence for the log: the chat model (Ollama backend) and the embedding model stay resident;
   # `ollama ps` shows their size, CONTEXT and GPU/CPU split, and nvidia-smi the VRAM actually used.
   log "Models resident after warmup (expected: $OLLAMA_CHAT_MODEL with context $AI_TUTOR_CHAT_NUM_CTX, and $OLLAMA_EMBEDDING_MODEL):"
   ollama ps || true
   nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv || true
-  touch "$marker"
+  touch "$MODELS_WARMED_MARKER"
 }
 
 assert_health_models() {
@@ -356,9 +421,7 @@ else
 fi
 log_timing "model pulls (total)" "$models_started"
 
-stage_started="$(now)"
-warm_models_once
-log_timing "model warmup (total)" "$stage_started"
+start_model_warmup
 
 stage_started="$(now)"
 prepare_kaggle_chroma
@@ -399,6 +462,9 @@ wait_http "Proxied health endpoint" "http://127.0.0.1:$PUBLIC_PORT/api/health" 3
 log "Proxied health:"
 assert_health_models "http://127.0.0.1:$PUBLIC_PORT/api/health"
 log_timing "nginx ready" "$stage_started"
+
+# Startup is only reported successful once the background Qwen warmup has finished.
+finish_model_warmup
 
 log "All services are running"
 for service in ollama vllm backend frontend nginx; do

@@ -132,7 +132,7 @@ class TimingLogTests(unittest.TestCase):
 
 class KaggleStartupTests(unittest.TestCase):
     def warmup(self):
-        return STARTUP[STARTUP.index("warm_models_once() {"):STARTUP.index("assert_health_models() {")]
+        return STARTUP[STARTUP.index("start_model_warmup() {"):STARTUP.index("assert_health_models() {")]
 
     def test_startup_defaults_mirror_config(self):
         defaults = config_defaults()

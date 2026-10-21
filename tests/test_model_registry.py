@@ -210,10 +210,11 @@ class ModelRegistryTests(unittest.TestCase):
         resident for AI_TUTOR_GENERATION_KEEP_ALIVE (Qwen with the Chat num_ctx); DeepSeek/Gemma/GLM
         are never pulled or warmed here."""
         startup = (ROOT / "deployment" / "start_kaggle.sh").read_text(encoding="utf-8")
-        body = startup[startup.index("warm_models_once() {"):startup.index("assert_health_models() {")]
+        body = startup[startup.index("start_model_warmup() {"):startup.index("assert_health_models() {")]
         requests = [line for line in body.splitlines() if '"model": os.environ[' in line]
         self.assertEqual(len(requests), 2)
-        qwen, embedding = requests
+        # The embedding request is built and sent first (indexing needs it); Qwen's follows.
+        embedding, qwen = requests
         self.assertIn('OLLAMA_CHAT_MODEL', qwen)
         self.assertIn('"keep_alive": os.environ["AI_TUTOR_GENERATION_KEEP_ALIVE"]', qwen)
         self.assertIn('"num_ctx": int(os.environ["AI_TUTOR_CHAT_NUM_CTX"])', qwen)
@@ -222,7 +223,10 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertNotIn("OLLAMA_DEEPSEEK_R1_14B_MODEL", body)
         self.assertNotIn("OLLAMA_GEMMA3_12B_MODEL", body)
         self.assertNotIn("OLLAMA_GLM4_9B_MODEL", body)
-        self.assertNotIn("&", body)  # no background job: the requests run one after the other
+        # The two requests overlap (both fit in VRAM), but each background job is awaited and its status
+        # checked before startup reports success (see tests/test_kaggle_startup_perf.py).
+        self.assertIn('wait "$embedding_pid" || embedding_status=$?', body)
+        self.assertIn('wait "$CHAT_WARMUP_PID" || status=$?', body)
         self.assertNotIn("PRELOAD", body)
         # the optional preload loop only pulls files: `ollama pull` never loads a model into VRAM
         preload = startup[startup.index('if [[ "$PRELOAD_ALL_MODELS"'):startup.index("Optional generation models are lazy")]
