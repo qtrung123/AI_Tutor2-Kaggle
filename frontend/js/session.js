@@ -11,6 +11,8 @@ function setSessionTab(tab) {
   if (tab === "flashcards") showFlashcardsState();
   if (tab === "quiz") renderQuizHistory();
   if (tab === "overview") loadSessionOverview();
+  // "Open Summary" only when the step's tool is not the open tab (planner.js may be absent in tests).
+  if (typeof plannerRenderSessionStepBar === "function") plannerRenderSessionStepBar();
 }
 
 // ---- Study Session Overview ---------------------------------------------------------------------
@@ -700,6 +702,8 @@ function renderDocumentProgress(progress) {
 
   sessionProgressPlan.innerHTML = "";
   const plan = progress.plan;
+  // An in-progress combined session for this document gets the step bar above the tabs' content.
+  if (typeof plannerSetSessionStepBar === "function") plannerSetSessionStepBar(activeDocumentId, plan?.next_session || null);
   // Planner progress is shown only when this document is in an active study plan.
   if (sessionProgressPlanPanel) sessionProgressPlanPanel.hidden = !plan;
   if (!plan) {

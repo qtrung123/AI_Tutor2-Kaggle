@@ -397,9 +397,10 @@ class FlashcardPracticeQuizUiTests(unittest.TestCase):
         self.assertEqual(review["status"], "Incorrect")
         self.assertEqual(review["question"], "Match each card with its answer.")
         self.assertEqual(review["classes"], ["wrong", "correct", "wrong"])
-        self.assertEqual(review["rows"][1], "✓2. What guards counters? → A. semaphoreCorrect pair")
-        self.assertEqual(review["rows"][0], "✕1. Which component orders processes? → B. Because many processes compete for a few CPU cores at once."
-                                            "Correct: C. The scheduler")
+        # One card per pair: the front, the learner's answer and (when wrong) the correct answer, then the status.
+        self.assertEqual(review["rows"][1], "✓2. What guards counters?Your answerA. semaphoreCorrect")
+        self.assertEqual(review["rows"][0], "✕1. Which component orders processes?Your answerB. Because many processes compete for a few CPU cores at once."
+                                            "Correct answerC. The schedulerIncorrect")
         self.assertFalse(self.out["matchingOverflow"])
 
     def test_learner_can_mark_a_self_check_answer(self):

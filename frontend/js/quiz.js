@@ -767,6 +767,7 @@ async function showQuizHistoryDetail(attemptId) {
       id: result.question_id,
       question: result.question || `Question ${result.question_id}`,
       options: result.options || [],
+      question_type: result.question_type,   // matching / blanks / written answers render by their type
       explanation: result.explanation || "",
     }));
     renderCompletedQuizReview(quizHistoryDetail, attempt, questions, {
@@ -1115,6 +1116,8 @@ function moveQuizQuestion(direction) {
 }
 
 function createAssessmentReviewCard(question, result, index, total) {
+  // A saved result knows its question type even when the question object was rebuilt without it.
+  if (!question.question_type && result.question_type) question = { ...question, question_type: result.question_type };
   const card = document.createElement("article");
   card.className = `quiz-question-card quiz-review-card ${result.is_correct ? "correct" : "incorrect"}`;
   const heading = document.createElement("div");
@@ -1123,14 +1126,16 @@ function createAssessmentReviewCard(question, result, index, total) {
   number.textContent = `Question ${index + 1}/${total}`;
   heading.appendChild(number);
   const questionText = document.createElement("h3");
-  questionText.textContent = isMultiBlankQuestion(question) ? numberedBlankText(question.question) : question.question;
+  questionText.textContent = isMultiBlankQuestion(question) ? numberedBlankText(question.question)
+    : (isMatchingQuestion(question) ? matchingParts(question).instruction : question.question);
   const options = document.createElement("div");
   options.className = "review-answer-list";
   if (isWrittenQuestion(question)) {
     options.append(...fillBlankReviewRows(result.selected_answer || "", result.correct_answers || [result.correct_answer], result.is_correct, "review-answer-option"));
   }
   if (isMultiBlankQuestion(question)) options.append(...multiBlankAnswerRows(result, question.blanks));
-  (isWrittenQuestion(question) || isMultiBlankQuestion(question) ? [] : question.options).forEach((option) => {
+  if (isMatchingQuestion(question)) options.append(...matchingReviewRows(matchingReviewItem(question, result)));
+  (isWrittenQuestion(question) || isMultiBlankQuestion(question) || isMatchingQuestion(question) ? [] : question.options).forEach((option) => {
     const letter = option.trim().charAt(0).toUpperCase();
     const row = document.createElement("div");
     row.className = "review-answer-option";
@@ -2010,29 +2015,60 @@ function createMatchingBoard(question, value, onChange, { readOnly = false } = {
   return board;
 }
 
-// Review rows for a matching result: each card with the learner's answer, marked right or wrong, and
-// the correct answer when it was missed.
+// Review rows for a matching result: one card per pair -- the card front, then the learner's answer
+// and, when it is wrong or missing, the correct answer on its own labelled line (long card backs wrap
+// inside the card instead of squeezing it). `item` needs question, options and the selected/correct
+// letters in prompt order (matchingResultLetters), so saved attempts of any age render the same way.
 function matchingReviewRows(item) {
   const { prompts } = matchingParts(item);
+  const answerLine = (kind, caption, text) => {
+    const line = document.createElement("div");
+    line.className = `quiz-matching-review-line is-${kind}`;
+    const label = document.createElement("span");
+    label.className = "quiz-matching-review-caption";
+    label.textContent = caption;
+    const value = document.createElement("span");
+    value.className = "quiz-matching-review-value";
+    value.textContent = text;
+    line.append(label, value);
+    return line;
+  };
   return prompts.map((prompt, index) => {
     const selected = item.selected[index] || "";
     const correct = item.correct[index] || "";
     const isCorrect = Boolean(selected) && selected === correct;
+    const state = isCorrect ? "is-correct" : (selected ? "is-wrong" : "is-unpaired");
     const row = document.createElement("div");
-    row.className = `quiz-review-option is-matching ${isCorrect ? "is-correct" : (selected ? "is-wrong" : "is-unpaired")}`;
+    row.className = `quiz-review-option is-matching ${state}`;
+    row.dataset.pair = String(index + 1);
     const indicator = document.createElement("span");
     indicator.className = "quiz-review-option-indicator";
     indicator.setAttribute("aria-hidden", "true");
     indicator.textContent = isCorrect ? "✓" : (selected ? "✕" : "");
-    const label = document.createElement("span");
-    label.className = "quiz-review-option-label";
-    label.textContent = `${index + 1}. ${prompt} → ${selected ? matchingOptionText(item.options, selected) : "Not paired"}`;
+    const body = document.createElement("div");
+    body.className = "quiz-matching-review-body";
+    const front = document.createElement("p");
+    front.className = "quiz-matching-review-prompt";
+    front.textContent = `${index + 1}. ${prompt}`;
+    body.append(front, answerLine(isCorrect ? "correct" : (selected ? "wrong" : "unpaired"), "Your answer",
+      selected ? (matchingOptionText(item.options, selected) || selected) : "Not paired"));
+    if (!isCorrect && correct) body.appendChild(answerLine("expected", "Correct answer", matchingOptionText(item.options, correct) || correct));
     const tag = document.createElement("span");
     tag.className = "quiz-review-option-tag";
-    tag.textContent = isCorrect ? "Correct pair" : `Correct: ${matchingOptionText(item.options, correct)}`;
-    row.append(indicator, label, tag);
+    tag.textContent = isCorrect ? "Correct" : (selected ? "Incorrect" : "Not paired");
+    row.append(indicator, body, tag);
     return row;
   });
+}
+
+// A saved question result (attempt history, assessment review) as matchingReviewRows input.
+function matchingReviewItem(question, result) {
+  return {
+    question: result.question || question?.question || "",
+    options: result.options?.length ? result.options : (question?.options || []),
+    selected: matchingResultLetters(result.selected_answers, result.selected_answer),
+    correct: matchingResultLetters(result.correct_answers, result.correct_answer),
+  };
 }
 
 // ---- Multi-blank fill-in-the-blank ---------------------------------------------------------------

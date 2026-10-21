@@ -153,7 +153,7 @@ class PlannerFirstOpenAndCombinedSessionTests(unittest.TestCase):
         self.assertEqual(after["calls"], ["/api/planner/sessions/s0/steps/0/complete"])
         self.assertEqual(after["toast"], "Summary done. Next: Flashcards")
         self.assertEqual(after["steps"], ["1. Summary20mDone", "2. Flashcards15mNow"])
-        self.assertEqual(after["buttons"], ["Open Flashcards", "Flashcards done", "Skip"])
+        self.assertEqual(after["buttons"], ["Continue to Flashcards", "Flashcards done", "Skip"])
 
 
 if __name__ == "__main__":

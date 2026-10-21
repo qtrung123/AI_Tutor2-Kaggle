@@ -171,6 +171,23 @@ class PlannerQuizAutoCompleteTests(PlannerDatabaseMixin, unittest.TestCase):
         self.assertEqual(self.submit(second).json()["planner_completion"]["session_id"], second)
         self.assertEqual((self.stored(first)["status"], self.stored(second)["status"]), ("in_progress", "completed"))
 
+    def test_the_active_combined_session_completes_only_its_own_quiz_step(self):
+        # The Study Session page's step bar names the active combined session; two other started sessions
+        # for the same document (another combined one, a single quiz) must stay exactly as they were.
+        active = self.session("summary", steps=(("summary", 15, None), ("quiz", 20, None)), hour=18)
+        other = self.session("flashcards", steps=(("flashcards", 15, None), ("quiz", 20, None)), hour=19)
+        single = self.session("quiz", hour=20)
+        for sid in (active, other, single):
+            self.start(sid)
+        self.client.post(f"/api/planner/sessions/{active}/steps/0/complete")
+        completion = self.submit(active).json()["planner_completion"]
+        self.assertEqual((completion["session_id"], completion["step_index"], completion["session_completed"]), (active, 1, True))
+        self.assertEqual([step["status"] for step in self.stored(active)["steps"]], ["completed", "completed"])
+        self.assertEqual(self.stored(active)["status"], "completed")
+        self.assertEqual(([step["status"] for step in self.stored(other)["steps"]], self.stored(other)["status"]),
+                         (["pending", "pending"], "in_progress"))
+        self.assertEqual(self.stored(single)["status"], "in_progress")
+
     def test_without_a_session_link_a_document_match_alone_completes_nothing(self):
         sid = self.session("quiz")                                              # no planned quiz (artifact_id None)
         self.start(sid)

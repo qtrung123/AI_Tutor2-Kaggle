@@ -745,6 +745,71 @@ async function plannerAfterQuizSubmission(completion) {
     : "Study session completed. Nice work!");
   // Never surfaces as a submit error: the attempt and the session are both saved already.
   try { await plannerRefreshSchedules(); } catch (error) { /* the next Home / Planner load shows it */ }
+  // The Study Session page's step bar follows the server: the next step, or gone once all are done.
+  if (session?.document_id && session.document_id === activeDocumentId) loadDocumentProgress(session.document_id);
+}
+
+// ---- The planned session on the Study Session page ------------------------------------------------
+// While a combined planned session (e.g. Summary + Quiz) for the open document is in progress, the page
+// shows its steps and the next action. A step is only ever completed by the learner ("Summary done")
+// or, for the quiz step, by submitting the quiz -- opening a tool never completes anything. The session
+// comes from the document's progress (plan.next_session, in-progress first), so a refresh restores it.
+const PLANNER_STEP_TABS = { summary: "summary", flashcards: "flashcards", quiz: "quiz", quiz_retry: "quiz" };
+const PLANNER_QUIZ_STEP_ACTIVITIES = ["quiz", "quiz_retry"];
+let plannerStepBarSession = null;
+
+function plannerSetSessionStepBar(documentId, session) {
+  plannerStepBarSession = session && session.document_id === documentId && session.status === "in_progress"
+    && session.steps?.length && plannerCurrentStep(session) !== null ? session : null;
+  // After a refresh or in a new tab, the quiz step's submission still names this session (the server
+  // checks the session, its document and its quiz before completing anything). An existing link for
+  // this document is kept; a session without a quiz step never touches the stored link.
+  if (plannerStepBarSession && plannerHasQuizActivity(plannerStepBarSession) && !plannerQuizSessionFor(documentId)) {
+    plannerRememberQuizSession(plannerStepBarSession);
+  }
+  plannerRenderSessionStepBar();
+}
+
+function plannerRenderSessionStepBar() {
+  const bar = document.getElementById("planner-step-bar");
+  if (!bar) return;
+  const session = plannerStepBarSession;
+  bar.innerHTML = "";
+  bar.hidden = !session || session.document_id !== activeDocumentId;
+  if (bar.hidden) return;
+  const current = plannerCurrentStep(session);
+  const step = session.steps[current];
+  const name = pcalActivity(step.activity_type);
+  const isQuizStep = PLANNER_QUIZ_STEP_ACTIVITIES.includes(step.activity_type);
+  const onItsTab = document.body.dataset.sessionTab === PLANNER_STEP_TABS[step.activity_type];
+  const continuing = session.steps.some((item) => item.status === "completed");
+  const copy = pcalEl("div", "planner-step-bar-copy");
+  copy.append(
+    pcalEl("p", "planner-step-bar-eyebrow", `Planned session · ${pcalActivity(session.activity_type, session.steps)}`),
+    pcalEl("p", "planner-step-bar-status", `Step ${current + 1} of ${session.steps.length}: ${name}`
+      + (isQuizStep ? " — submitting the quiz completes this step." : " — mark it done when you finish.")),
+  );
+  const actions = pcalEl("div", "planner-step-bar-actions");
+  const button = (label, className, kind) => {
+    const element = pcalEl("button", className, label);
+    element.type = "button";
+    element.dataset.stepBarAction = kind;
+    element.addEventListener("click", () => plannerStepBarAction(kind, element, actions));
+    actions.appendChild(element);
+  };
+  // "Continue to Quiz" once an earlier step is done; it starts/resumes the session, which opens the
+  // step's tool (and, with no quiz yet, the Create Quiz flow).
+  if (!onItsTab) button(`${continuing ? "Continue to" : "Open"} ${name}`, "primary-button planner-step-bar-open", "start");
+  if (!isQuizStep) button(`${name} done`, `${onItsTab ? "primary-button" : "secondary-button"} planner-step-bar-done`, "step_done");
+  bar.append(copy, pcalStepList(session), actions);
+}
+
+async function plannerStepBarAction(kind, button, group) {
+  const session = plannerStepBarSession;
+  if (!session) return;
+  await plannerSessionAction(session, kind, button, group);
+  // The server's view of the session decides what comes next (the next step, or done).
+  if (activeDocumentId === session.document_id) await loadDocumentProgress(session.document_id);
 }
 
 async function plannerSessionAction(session, kind, button, group) {
@@ -782,7 +847,12 @@ async function plannerSessionAction(session, kind, button, group) {
       }
       // A missing artifact is fine: the tool's own empty state offers to generate/create it.
       if (result.tool === "quiz") {
-        const quizTarget = await plannerQuizTarget(session);
+        // A combined session opens its current step's own quiz: the row's artifact_id can be the
+        // other step's (e.g. the flashcard set, when the quiz did not exist yet at planning time).
+        const quizSession = Number.isInteger(result.current_step)
+          ? { ...session, activity_type: result.step_activity_type, artifact_id: result.step_artifact_id || null }
+          : session;
+        const quizTarget = await plannerQuizTarget(quizSession);
         await openStudySession(session.document_id, "quiz", "", { quizTarget });
         // No quiz yet: the Quiz tab's unified Create Quiz sheet (nothing is generated until the
         // learner asks). Without flashcards it shows "Create Flashcards first" with a link to them.
@@ -1550,7 +1620,9 @@ function plannerSessionActions(kind, session) {
   const current = plannerCurrentStep(session);
   if (kind !== "active" || current === null) return actions;
   const step = pcalActivity(session.steps[current].activity_type);
-  return [["start", `Open ${step}`, true], ["step_done", `${step} done`, false],
+  // Once an earlier step is done, the primary action continues to the next step's tool.
+  const open = session.steps.some((item) => item.status === "completed") ? `Continue to ${step}` : `Open ${step}`;
+  return [["start", open, true], ["step_done", `${step} done`, false],
     ...actions.filter(([action]) => action !== "start" && action !== "complete")];
 }
 

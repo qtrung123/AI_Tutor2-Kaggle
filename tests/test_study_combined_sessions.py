@@ -230,6 +230,44 @@ class CombinedSessionApiTests(PlannerDatabaseMixin, unittest.TestCase):
         quiz_step = self.start(session["session_id"]).json()
         self.assertEqual((quiz_step["tool"], quiz_step["artifact_available"], quiz_step["prerequisite"]), ("quiz", False, None))
 
+    def combined_record(self, first, row_artifact, first_artifact, quiz_artifact):
+        return {"document_id": "mkt", "activity_type": first, "artifact_id": row_artifact,
+                "scheduled_start": "2026-09-28T18:00:00", "scheduled_end": "2026-09-28T18:35:00", "duration_minutes": 35,
+                "reason": "retrieval_practice",
+                "steps": combined.new_steps(((first, 15, first_artifact), ("quiz", 20, quiz_artifact)))}
+
+    def test_the_quiz_step_never_opens_the_other_steps_artifact_as_its_quiz(self):
+        # Planned before the quiz existed: the row's artifact_id is the flashcard set's, the quiz step has none.
+        record = self.combined_record("flashcards", "cards-set-1", "cards-set-1", None)
+        session = study_planner_store.create_session(self.alice, self.plan["plan_id"], record)
+        sid = session["session_id"]
+        first = self.start(sid).json()
+        self.assertEqual((first["step_activity_type"], first["step_artifact_id"]), ("flashcards", "cards-set-1"))
+        self.step_done(sid, 0)
+        quiz_step = self.start(sid).json()
+        self.assertEqual((quiz_step["tool"], quiz_step["current_step"], quiz_step["step_activity_type"]), ("quiz", 1, "quiz"))
+        self.assertIsNone(quiz_step["step_artifact_id"])
+        self.assertEqual(quiz_step["session"]["status"], "in_progress")   # opening the quiz completes nothing
+
+    def test_the_quiz_step_keeps_its_own_planned_quiz(self):
+        record = self.combined_record("summary", "quiz-1", None, "quiz-1")
+        session = study_planner_store.create_session(self.alice, self.plan["plan_id"], record)
+        self.start(session["session_id"])
+        self.step_done(session["session_id"], 0)
+        self.assertEqual(self.start(session["session_id"]).json()["step_artifact_id"], "quiz-1")
+
+    def test_document_progress_reports_the_running_sessions_steps(self):
+        # The Study Session page restores the current step after a refresh from this row.
+        record = self.combined_record("summary", None, None, None)
+        session = study_planner_store.create_session(self.alice, self.plan["plan_id"], record)
+        self.start(session["session_id"])
+        self.step_done(session["session_id"], 0)
+        progress = self.client.get("/api/progress/documents/mkt?utc_offset_minutes=0&local_now=2026-09-28T18:10:00").json()
+        running = progress["plan"]["next_session"]
+        self.assertEqual((running["session_id"], running["status"]), (session["session_id"], "in_progress"))
+        self.assertEqual([(step["activity_type"], step["status"]) for step in running["steps"]],
+                         [("summary", "completed"), ("quiz", "pending")])
+
     def test_single_sessions_keep_the_old_lifecycle(self):
         record = {"document_id": "mkt", "activity_type": "summary", "scheduled_start": "2026-09-28T18:00:00",
                   "scheduled_end": "2026-09-28T18:45:00", "duration_minutes": 45, "reason": "new_material"}

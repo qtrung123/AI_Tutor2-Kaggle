@@ -75,8 +75,10 @@ def latest_quiz_percentages(owner_id: str, document_ids: list[str]) -> dict[str,
 
 
 def _session_row(session: dict) -> dict:
+    # `steps` (a combined session's two steps with their progress; [] for a single activity) lets the
+    # Study Session page show the in-progress session's current step after a refresh.
     return {key: session[key] for key in ("session_id", "document_id", "activity_type", "scheduled_start",
-                                          "scheduled_end", "duration_minutes", "status")}
+                                          "scheduled_end", "duration_minutes", "status")} | {"steps": session.get("steps") or []}
 
 
 def _session_totals(sessions: list[dict], now_local: str) -> dict:

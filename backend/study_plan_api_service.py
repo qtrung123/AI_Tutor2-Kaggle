@@ -460,8 +460,13 @@ def _current_step_session(session: dict) -> tuple[dict, int | None]:
     index = study_combined_sessions.current_step_index(steps)
     index = len(steps) - 1 if index is None else index
     step = steps[index]
-    return {**session, "activity_type": step["activity_type"],
-            "artifact_id": step.get("artifact_id") or (session["artifact_id"] if step["activity_type"] in ("quiz", "quiz_retry") else None)}, index
+    artifact = step.get("artifact_id")
+    # The row's artifact_id is the quiz's when it existed at planning time, else the other step's (a
+    # flashcard set or summary) -- never use that one as the quiz step's quiz.
+    if (not artifact and step["activity_type"] in ("quiz", "quiz_retry")
+            and session["artifact_id"] not in {other.get("artifact_id") for other in steps if other is not step}):
+        artifact = session["artifact_id"]
+    return {**session, "activity_type": step["activity_type"], "artifact_id": artifact}, index
 
 
 def start_session(owner_id: str, session_id: str, utc_offset_minutes: int, local_now: str | None = None) -> dict:
