@@ -18,7 +18,7 @@ from config import DATABASE_PATH
 APP_TABLES = (
     "users", "auth_sessions",
     "conversations", "conversation_sources", "messages", "message_citations",
-    "indexed_documents", "index_registry_migrations", "document_chunks",
+    "indexed_documents", "index_registry_migrations", "document_chunks", "subjects",
     "document_summaries", "summary_jobs",
     "flashcard_sets", "flashcards",
     "app_metadata", "quizzes", "quiz_questions", "quiz_options", "quiz_attempts", "quiz_attempt_answers",
@@ -32,11 +32,13 @@ _API_ROLES = ("anon", "authenticated")
 
 def initialize_all_stores() -> None:
     from backend import (auth_store, conversation_store, flashcard_store, google_calendar_store,
-                         indexed_document_store, quiz_store, study_planner_store, summary_jobs, summary_store)
+                         indexed_document_store, quiz_store, study_planner_store, subject_store, summary_jobs,
+                         summary_store)
 
     auth_store.initialize_auth_store()
     conversation_store.initialize_conversation_store()
     indexed_document_store.initialize_indexed_document_store()
+    subject_store.initialize_subject_store()   # created at startup, so lock_down_api_roles covers it
     summary_store.initialize_summary_store()
     summary_jobs.initialize_summary_job_store()
     flashcard_store.initialize_flashcard_store()
