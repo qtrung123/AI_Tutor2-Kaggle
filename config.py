@@ -75,8 +75,11 @@ QUIZ_VALIDATION_MODEL = os.getenv("QUIZ_VALIDATION_MODEL", CHAT_MODEL)
 # asks for a different num_ctx than the loaded one, and unloads it after keep_alive idle time.
 # - CHAT_NUM_CTX matches the live Quiz window (backend/quiz_units.QUIZ_NUM_CTX) and the first
 #   Flashcards tier, so moving between Chat, Quiz and Flashcards keeps Qwen loaded.
-# - GENERATION_KEEP_ALIVE is sent by Chat and Quiz; deployment/start_kaggle.sh also makes it Ollama's
+# - GENERATION_KEEP_ALIVE is sent by Chat, Quiz, Summary, Flashcards and topic refinement (so it
+#   holds without the Kaggle server default too); deployment/start_kaggle.sh also makes it Ollama's
 #   server default (OLLAMA_KEEP_ALIVE) for calls that set none, and warms Qwen with both values.
+# - Summary (32768) and a large Flashcards prompt (32768 tier) deliberately use a bigger window than
+#   Chat/Quiz (16384), so they reload Qwen once at that size; nothing on a live path uses keep_alive=0.
 #   Residency never blocks another model: Ollama evicts an idle model when a new one needs the VRAM.
 # Both are ignored by the vLLM backend (fixed context, model loaded once at server startup).
 CHAT_NUM_CTX = int(os.getenv("AI_TUTOR_CHAT_NUM_CTX", "16384"))

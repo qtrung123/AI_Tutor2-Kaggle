@@ -285,9 +285,13 @@ def ollama_heading_refiner(model: str):
         import time
 
         from backend.perf_timing import log_llm_call
+        from config import CHAT_NUM_CTX, GENERATION_KEEP_ALIVE
 
         started = time.perf_counter()
-        response = ChatOllama(model=model, temperature=0, num_predict=500, format="json").invoke(prompt)
+        # The same window and residency as Chat/Quiz: without num_ctx Ollama would reload Qwen with
+        # its default (4096) context on every upload, and reload it again for the next Chat or Quiz.
+        response = ChatOllama(model=model, temperature=0, num_predict=500, format="json",
+                              num_ctx=CHAT_NUM_CTX, keep_alive=GENERATION_KEEP_ALIVE).invoke(prompt)
         # [llm] call=topic_refine: load_ms shows a model reload, done_reason=length a capped reply.
         log_llm_call("topic_refine", response, time.perf_counter() - started)
         text = str(response.content).strip()

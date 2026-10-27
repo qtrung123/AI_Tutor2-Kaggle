@@ -12,7 +12,7 @@ from backend.llm_json import parse_json_object
 from backend.model_registry import resolve_generation_model
 from backend.document_retrieval import get_schema_topic_evidence, get_topic_chunks
 from backend.summary_store import get_compatible_summary, save_summary
-from config import DEFAULT_GENERATION_MODEL
+from config import DEFAULT_GENERATION_MODEL, GENERATION_KEEP_ALIVE
 
 SUMMARY_VERSION = "full_document_summary_v4_derived_sections_for_unstructured_documents"
 # Earlier formats a saved summary is still served in. v4 changed the notes only for documents with no
@@ -518,6 +518,7 @@ def generate_document_summary(owner_id: str, document_id: str, model_id: str | N
     retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000)
 
     llm = ChatOllama(model=runtime_model, temperature=0, format="json", num_ctx=SUMMARY_NUM_CTX,
+                     keep_alive=GENERATION_KEEP_ALIVE,
                      num_predict=SUMMARY_TOPICS_PER_CALL * SUMMARY_OUTPUT_TOKENS_PER_TOPIC)
     topic_started = time.perf_counter()
     topic_summaries, topic_metrics = _generate_topic_summaries(llm, document_id, topics, evidence)

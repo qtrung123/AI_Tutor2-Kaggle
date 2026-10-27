@@ -11,7 +11,9 @@ from backend.llm_json import parse_json_object
 from backend.model_registry import resolve_generation_model
 # Generic (non-document-specific) text-quality helpers shared with the Quiz pipeline.
 from backend.text_safety import _clean_inline_text, _reject_unsafe_final_text
-from config import DEFAULT_GENERATION_MODEL, FLASHCARD_GENERATION_RETRY_LIMIT, FLASHCARD_MAX_CARDS_PER_TOPIC
+from config import (
+    DEFAULT_GENERATION_MODEL, FLASHCARD_GENERATION_RETRY_LIMIT, FLASHCARD_MAX_CARDS_PER_TOPIC, GENERATION_KEEP_ALIVE,
+)
 
 # v2: fixes the English-front/Vietnamese-back bilingual bug, the whitespace-corruption bug, and
 # adds language-aware generation -- bumped so any pre-existing v1 cache (including malformed
@@ -361,7 +363,8 @@ def generate_flashcards(owner_id: str, document_id: str, topic_ids: list[str] | 
         num_ctx = _num_ctx_for(prompt, len(pending))
         try:
             response = ChatOllama(
-                model=runtime_model, format="json", num_ctx=num_ctx, **_generation_kwargs(attempt_index),
+                model=runtime_model, format="json", num_ctx=num_ctx, keep_alive=GENERATION_KEEP_ALIVE,
+                **_generation_kwargs(attempt_index),
             ).invoke(prompt)
             raw_topics = parse_json_object(response.content, "Flashcard").get("topics")
         except Exception as error:  # malformed output or a raised model/runtime failure
