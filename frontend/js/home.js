@@ -1,11 +1,14 @@
-// Home: Continue learning, the materials list and Today's Study Plan.
+// Home: Continue learning, My Subjects (js/subjects.js), the materials list and Today's Study Plan.
 // Classic script (shared global scope), loaded by index.html before app.js.
 
 function renderDashboard() {
   if (!dashboardData) return;
   const materials = dashboardData.materials || [];
+  setUserSubjects(dashboardData.user_subjects);
   renderSidebarRecentDocuments(materials);
-  if (homeMaterialSearch) homeMaterialSearch.hidden = materials.length < HOME_SEARCH_MIN_MATERIALS;
+  // Search helps once the library is large, or once it is organized into subjects (it matches subject names too).
+  if (homeMaterialSearch) homeMaterialSearch.hidden = materials.length < HOME_SEARCH_MIN_MATERIALS && !userSubjects.length;
+  renderHomeSubjects();
   renderHomeDocumentCards();
   loadHomeDocumentStates(materials.map((material) => material.document_id));
 }
@@ -125,9 +128,23 @@ function renderHomeContinue(materials) {
 }
 
 function renderHomeDocumentCards() {
-  const materials = dashboardData?.materials || [];
+  const allMaterials = dashboardData?.materials || [];
   overviewMaterialsList.innerHTML = "";
-  renderHomeContinue(materials);
+  renderHomeContinue(allMaterials);
+  const heading = document.getElementById("home-materials-title");
+  if (heading) heading.textContent = homeMaterialsHeading();
+  // Home's subject filter (My Subjects): All, one subject, or Unassigned.
+  const materials = allMaterials.filter((material) => subjectFilterMatches(homeSubjectFilter, material.document_id));
+  renderHomeBulkBar();
+  if (allMaterials.length && !materials.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = homeSubjectFilter === SUBJECT_UNASSIGNED
+      ? "Every document is in a subject."
+      : "No documents in this subject yet. Move one here with its Subject menu, or upload new files into it.";
+    overviewMaterialsList.appendChild(empty);
+    return;
+  }
   if (!materials.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
@@ -152,12 +169,16 @@ function renderHomeDocumentCards() {
     card.className = "home-doc-card";
     card.dataset.documentId = documentId;
     card.dataset.title = (material.document_name || documentId).toLowerCase();
+    const subject = subjectOfDocument(documentId);
+    card.dataset.subject = (subject?.name || "").toLowerCase();
+    if (subject) card.style.setProperty("--subject-color", subject.color);
 
     const header = document.createElement("div");
     header.className = "home-doc-header";
     const title = document.createElement("h3");
     title.textContent = material.document_name || progress?.title || documentId;
-    header.appendChild(title);
+    const subjectControls = homeDocumentSubjectControls(documentId, title.textContent);
+    header.append(subjectControls.pick, title);
     if (progress) {
       const state = document.createElement("span");
       state.className = `progress-state progress-state--${progress.learning.state} home-doc-state`;
@@ -189,7 +210,7 @@ function renderHomeDocumentCards() {
     remove.textContent = "Delete";
     remove.setAttribute("aria-label", `Delete ${title.textContent}`);
     remove.addEventListener("click", () => deleteUploadedSource({ title: documentId }, remove));
-    actions.append(open, remove);
+    actions.append(subjectControls.select, open, remove);
 
     card.append(header);
     if (facts.children.length) card.append(facts);

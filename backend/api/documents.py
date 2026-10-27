@@ -7,14 +7,14 @@ and chat sources) through each feature's own store.
 import shutil
 import threading
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from backend import document_storage, google_calendar_sync, perf_timing, study_planner_store
+from backend import document_storage, google_calendar_sync, perf_timing, study_planner_store, subject_store
 from backend.api.deps import require_current_user
 from backend.conversation_store import remove_source_from_conversations
 from backend.flashcard_store import delete_document_flashcards
@@ -53,6 +53,10 @@ class UploadResponse(BaseModel):
     skipped_files: list[str]
     total_indexed_files: int
     sources: list[SourceSummary]
+    # Only when the upload chose a subject: it and the uploaded documents now in it.
+    subject_id: Optional[str] = None
+    subject_document_ids: Optional[list[str]] = None
+    subject_kept_document_ids: Optional[list[str]] = None   # already in a subject: left where they are
 
 
 class DeleteSourceResponse(BaseModel):
@@ -135,11 +139,15 @@ def source_content(document_id: str, current_user: dict = Depends(require_curren
 _INDEXING_LOCK = threading.Lock()
 
 
-def _store_and_index_uploads(owner_id: str, uploads: list[tuple[str, BinaryIO]]):
+def _store_and_index_uploads(owner_id: str, uploads: list[tuple[str, BinaryIO]], subject: Optional[dict] = None):
     """The blocking part of an upload (runs in a worker thread): save, index, list sources. An
     upload never touches the Study Planner: a document joins a plan only through Add Material.
     `uploads` holds the multipart files Starlette already spooled, copied to disk here in chunks so a waiting upload never keeps its bytes in memory. Stage timing reaches the
-    request's [upload] line through the copied context."""
+    request's [upload] line through the copied context.
+
+    `subject` ({"subject_id"} or {"new_name"}, already validated) groups the uploaded files once
+    they are indexed -- the new ones and those already in the library alike. A new subject is only
+    created after indexing succeeded, so a failed upload leaves no empty subject behind."""
     with perf_timing.stage("lock_wait"):
         _INDEXING_LOCK.acquire()
     try:
@@ -161,6 +169,21 @@ def _store_and_index_uploads(owner_id: str, uploads: list[tuple[str, BinaryIO]])
             result = index_files(saved_paths, owner_id)
         perf_timing.count(new_files=result["new_files"], new_chunks=result["new_chunks"],
                           skipped_files=len(result["skipped_files"]))
+        if subject:
+            # Under the indexing lock, so a delete of the same document cannot slip in between.
+            # A file already filed in a subject keeps it (reported back, never silently moved).
+            names = [path.name for path in saved_paths]
+            subject_id = subject.get("subject_id") or subject_store.get_or_create_subject(owner_id, subject["new_name"])["subject_id"]
+            try:
+                assigned = subject_store.assign_documents(owner_id, names, subject_id, ignore_missing=True, only_unassigned=True)
+            except subject_store.SubjectNotFound:
+                # The subject was deleted while this upload was indexing: the files are stored and
+                # indexed, so the upload succeeds and they stay Unassigned.
+                subject_id, assigned = None, []
+            registered = set(subject_store.subject_ids_by_document(owner_id)) if subject_id else set()
+            kept = [name for name in dict.fromkeys(names) if name not in assigned and name in registered]
+            result = {**result, "subject_id": subject_id, "subject_document_ids": assigned,
+                      "subject_kept_document_ids": kept}
     finally:
         _INDEXING_LOCK.release()
     with perf_timing.stage("sources"):
@@ -168,8 +191,13 @@ def _store_and_index_uploads(owner_id: str, uploads: list[tuple[str, BinaryIO]])
     return result, sources_result
 
 
-@router.post("/api/sources/upload", response_model=UploadResponse)
-async def upload_sources(files: list[UploadFile] = File(...), current_user: dict = Depends(require_current_user)) -> UploadResponse:
+@router.post("/api/sources/upload", response_model=UploadResponse, response_model_exclude_none=True)
+async def upload_sources(
+    files: list[UploadFile] = File(...),
+    subject_id: Optional[str] = Form(None),
+    new_subject_name: Optional[str] = Form(None),
+    current_user: dict = Depends(require_current_user),
+) -> UploadResponse:
     """
     Upload PDF/TXT files and index them into the vectorstore.
 
@@ -180,6 +208,10 @@ async def upload_sources(files: list[UploadFile] = File(...), current_user: dict
     4. Call backend.ingest.index_files() to store the original durably (Supabase Storage on
        PostgreSQL deployments) and chunk/embed/store it in the vector store.
     5. Return indexing stats and refreshed source list -- only after everything is stored.
+
+    Optional: `subject_id` (an existing subject of the user) or `new_subject_name` (reused when
+    the user already has a subject with that name) puts the uploaded files in that subject.
+    Parsing, topic extraction and indexing are the same with or without one.
     """
     if not files:
         raise HTTPException(status_code=400, detail="Upload at least one PDF or TXT file.")
@@ -208,11 +240,12 @@ async def upload_sources(files: list[UploadFile] = File(...), current_user: dict
 
                 uploads.append((file_name, uploaded_file.file))
             perf_timing.count(files=len(uploads))
+            subject = _upload_subject(owner_id, subject_id, new_subject_name)   # checked before anything is written
 
             # Everything after this point is blocking (disk, Storage, PDF parsing, Ollama, database):
             # it runs in the threadpool so the event loop keeps serving Chat streams and other
             # requests. The response still waits for it, so success means it is all stored.
-            result, sources_result = await run_in_threadpool(_store_and_index_uploads, owner_id, uploads)
+            result, sources_result = await run_in_threadpool(_store_and_index_uploads, owner_id, uploads, subject)
             perf_timing.outcome("ok")
 
             return UploadResponse(
@@ -221,6 +254,9 @@ async def upload_sources(files: list[UploadFile] = File(...), current_user: dict
                 skipped_files=result["skipped_files"],
                 total_indexed_files=result["total_indexed_files"],
                 sources=sources_result,
+                subject_id=result.get("subject_id"),
+                subject_document_ids=result.get("subject_document_ids"),
+                subject_kept_document_ids=result.get("subject_kept_document_ids"),
             )
         except HTTPException:
             raise
@@ -241,6 +277,24 @@ async def upload_sources(files: list[UploadFile] = File(...), current_user: dict
         finally:
             if timer is not None:
                 timer.emit()
+
+
+def _upload_subject(owner_id: str, subject_id: Optional[str], new_subject_name: Optional[str]) -> Optional[dict]:
+    """The validated subject choice of an upload, or None for no subject (Unassigned)."""
+    subject_id = (subject_id or "").strip()
+    new_subject_name = (new_subject_name or "").strip()
+    if subject_id and new_subject_name:
+        raise HTTPException(status_code=400, detail="Choose an existing subject or a new subject name, not both.")
+    if subject_id:
+        if not subject_store.subject_exists(owner_id, subject_id):
+            raise HTTPException(status_code=404, detail="Subject not found.")
+        return {"subject_id": subject_id}
+    if new_subject_name:
+        try:
+            return {"new_name": subject_store.normalize_subject_name(new_subject_name)}
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+    return None
 
 
 @router.delete("/api/sources/{document_id}", response_model=DeleteSourceResponse)

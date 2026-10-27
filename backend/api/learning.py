@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from backend import study_progress
+from backend import study_progress, subject_store
 from backend.api.deps import require_current_user
 from backend.knowledge_gap_service import detect_knowledge_gaps
 from backend.mastery_service import recompute_all_mastery, recompute_topic_mastery
@@ -35,10 +35,16 @@ def topic_mastery(
 def learning_dashboard(current_user: dict = Depends(require_current_user)) -> dict:
     """Return the real project state used by the Overview and mastery UI. Adds a subject-grouped
     view of the existing "materials" rows for the Overview's subject cards -- a pure, read-only
-    aggregation; build_learning_dashboard's own quiz/mastery computation is untouched."""
+    aggregation; build_learning_dashboard's own quiz/mastery computation is untouched -- plus the
+    user's persisted subjects ("user_subjects") and each material's subject_id."""
     try:
         dashboard = build_learning_dashboard(current_user["id"])
         dashboard["subjects"] = group_documents_into_subjects(dashboard.get("materials") or [])
+        # The user's own subjects (Home's My Subjects) and each material's subject (None = Unassigned).
+        dashboard["user_subjects"] = subject_store.list_subjects(current_user["id"])
+        subject_of = subject_store.subject_ids_by_document(current_user["id"])
+        for material in dashboard.get("materials") or []:
+            material["subject_id"] = subject_of.get(material["document_id"])
         # Current quiz performance: latest completed quiz per assessed document (unassessed ones left out).
         dashboard["metrics"]["current_quiz_performance"] = study_progress.current_quiz_performance(
             study_progress.latest_quiz_percentages(

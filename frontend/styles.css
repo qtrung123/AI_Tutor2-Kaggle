@@ -4577,3 +4577,87 @@ body[data-page="session"] .persistent-tutor .chat-form input:disabled,
 }
 :where(select, textarea, input):disabled { background-color: var(--ds-surface-2); color: var(--ds-text-3); cursor: not-allowed; }
 .pcal-prefs-length input[aria-invalid="true"], .pcal-edit-field input[aria-invalid="true"] { border-color: var(--ds-danger); }
+
+/* -- Subjects (js/subjects.js): My Subjects on Home, subject badges, the subject dialog, the
+   Planner's display-only subject filter. A subject's color only ever marks (dot, edge); text
+   stays on the neutral tokens so every pair keeps its contrast. -- */
+.home-subjects { display: grid; gap: var(--ds-space-3); min-width: 0; }
+.home-subjects[hidden] { display: none; }
+.home-subjects-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--ds-space-3); }
+.home-subjects-heading h2 { margin: 0; font-size: var(--ds-text-lg); font-weight: var(--ds-weight-semibold); }
+.home-subjects-add { font-size: var(--ds-text-sm); font-weight: var(--ds-weight-semibold); color: var(--ds-accent-text); }
+.home-subjects-hint { margin: 0; color: var(--ds-text-3); font-size: var(--ds-text-sm); }
+.subjects-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: var(--ds-space-3); min-width: 0; }
+.subject-card { --subject-color: var(--ds-text-3); display: grid; gap: 2px; min-width: 0; padding: var(--ds-space-3);
+  border: 1px solid var(--ds-border); border-radius: var(--ds-radius-lg); background: var(--ds-surface); box-shadow: inset 3px 0 0 var(--subject-color); }
+.subject-card--all { --subject-color: var(--ds-accent); }
+.subject-card--unassigned { --subject-color: var(--ds-border-strong); }
+.subject-card:hover { background: var(--ds-surface-2); }
+.subject-card.is-active { border-color: var(--ds-accent-border); background: var(--ds-accent-soft); }
+.subject-card-main { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--ds-space-2); row-gap: 2px;
+  width: 100%; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.subject-card-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--subject-color); }
+.subject-card-name { min-width: 0; font-size: var(--ds-text-md); font-weight: var(--ds-weight-semibold); color: var(--ds-text); overflow-wrap: anywhere; }
+.subject-card-count { grid-column: 2; color: var(--ds-text-3); font-size: var(--ds-text-sm); }
+.subject-card-actions { display: flex; gap: var(--ds-space-3); padding-left: 18px; }
+.subject-card-actions .text-button { padding: 2px 0; font-size: var(--ds-text-xs); font-weight: var(--ds-weight-medium); color: var(--ds-text-3); }
+.subject-card-actions .text-button:hover:not(:disabled) { color: var(--ds-text); }
+.subject-card-actions .danger-button:hover:not(:disabled) { color: var(--ds-danger); }
+
+.subject-badge { --subject-color: var(--ds-text-3); display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0;
+  color: var(--ds-text-2); font-size: var(--ds-text-xs); font-weight: var(--ds-weight-medium); overflow-wrap: anywhere; }
+.subject-badge::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--subject-color); }
+.subject-badge--none { --subject-color: var(--ds-border-strong); color: var(--ds-text-3); }
+
+/* Home rows: tick box (bulk move) and the Subject menu next to Open / Delete. */
+.home-doc-card { box-shadow: inset 3px 0 0 var(--subject-color, transparent); }
+.home-doc-select { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--ds-accent); }
+.home-doc-actions .home-doc-subject { width: 150px; max-width: 100%; min-height: var(--ds-control-sm); font-size: var(--ds-text-sm); }
+.home-bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--ds-space-2) var(--ds-space-3); margin: 0 0 var(--ds-space-3);
+  padding: var(--ds-space-2) var(--ds-space-3); border: 1px solid var(--ds-accent-border); border-radius: var(--ds-radius-lg); background: var(--ds-accent-soft); }
+.home-bulk-bar[hidden] { display: none; }
+.home-bulk-count { font-weight: var(--ds-weight-semibold); }
+.home-bulk-label { color: var(--ds-text-2); font-size: var(--ds-text-sm); }
+.home-bulk-bar .subject-select { min-width: 150px; min-height: var(--ds-control-sm); }
+.session-shell .home-bulk-bar .primary-button { width: auto; min-height: var(--ds-control-sm); padding: 5px 14px; }
+.home-bulk-clear { font-size: var(--ds-text-sm); }
+
+/* The subject dialog (new / edit subject, and the optional subject of an upload). */
+.subject-dialog { width: min(420px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--ds-border); border-radius: var(--ds-radius-lg);
+  background: var(--ds-surface); color: var(--ds-text); box-shadow: var(--ds-shadow-pop); }
+.subject-dialog::backdrop { background: rgba(20, 21, 35, 0.4); }
+.subject-dialog-form { display: grid; gap: var(--ds-space-4); padding: var(--ds-space-5); }
+.subject-dialog-title { margin: 0; font-size: var(--ds-text-lg); font-weight: var(--ds-weight-semibold); }
+.subject-dialog-files { margin: -8px 0 0; color: var(--ds-text-3); font-size: var(--ds-text-sm); overflow-wrap: anywhere; }
+.subject-dialog-field { display: grid; gap: 6px; font-size: var(--ds-text-sm); font-weight: var(--ds-weight-medium); }
+.subject-dialog-field[hidden] { display: none; }
+.subject-dialog-field input, .subject-dialog-field select { width: 100%; min-height: var(--ds-control-lg); padding: 0 12px; font-size: var(--ds-text-md); font-weight: var(--ds-weight-regular); }
+.subject-dialog-colors { display: flex; flex-wrap: wrap; gap: var(--ds-space-2); margin: 0; padding: 0; border: 0; }
+.subject-dialog-colors legend { margin-bottom: 6px; padding: 0; font-size: var(--ds-text-sm); font-weight: var(--ds-weight-medium); }
+.subject-swatch { position: relative; display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--subject-color); cursor: pointer; }
+.subject-swatch input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+.subject-swatch:has(input:checked) { box-shadow: 0 0 0 2px var(--ds-surface), 0 0 0 4px var(--ds-text); }
+.subject-swatch:has(input:focus-visible) { outline: 2px solid var(--ds-accent); outline-offset: 4px; }
+.subject-dialog-error { margin: 0; color: var(--ds-danger); font-size: var(--ds-text-sm); }
+.subject-dialog-actions { display: flex; justify-content: flex-end; align-items: center; gap: var(--ds-space-3); }
+.subject-dialog .primary-button { width: auto; min-height: var(--ds-control); padding: 6px 16px; border-radius: var(--ds-radius); background: var(--ds-accent); color: #fff; }
+
+/* Planner: a filtered-out subject stays where it is in the calendar, only faded. */
+.pcal-subject-filter[hidden], .planner-subject-filter[hidden] { display: none; }
+.pcal-subject-filter, .planner-subject-filter { display: inline-flex; align-items: center; gap: var(--ds-space-2); margin-right: var(--ds-space-3); }
+.planner-subject-caption { color: var(--ds-text-3); font-size: var(--ds-text-sm); font-weight: var(--ds-weight-medium); }
+.pcal-subject-filter .planner-subject-select { max-width: 180px; min-height: 28px; padding: 2px 8px; font-size: var(--ds-text-sm); }
+.planner-subject-filter { display: flex; margin: 0 0 var(--ds-space-3); }
+.planner-subject-filter .planner-subject-select { flex: 1; min-width: 0; min-height: var(--ds-control); }
+.pcal-event.is-subject-muted, .pcal-agenda-card.is-subject-muted, .planner-session.is-subject-muted { opacity: 0.35; }
+.pcal-event.is-subject-muted:hover, .pcal-event.is-subject-muted:focus-visible { opacity: 0.8; }
+.pcal-material-subject, .pcal-sheet-subject, .planner-material-subject, .pcal-popover-subject { margin-right: var(--ds-space-2); }
+.planner-material-pick .planner-material-subject { margin-left: var(--ds-space-2); }
+
+@media (max-width: 720px) {
+  .subjects-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--ds-space-2); }
+  .subject-card-actions { padding-left: 0; }
+  .home-doc-actions { flex-wrap: wrap; }
+  .home-doc-actions .home-doc-subject { flex: 1 1 140px; width: auto; }
+}
+@media (prefers-reduced-motion: reduce) { .pcal-event.is-subject-muted { transition: none; } }

@@ -845,17 +845,24 @@ function uploadResultText(data) {
   if (data.new_files) parts.push(`${data.new_files} file${data.new_files === 1 ? "" : "s"} indexed (${data.new_chunks} chunk${data.new_chunks === 1 ? "" : "s"})`);
   const skipped = data.skipped_files || [];
   if (skipped.length) parts.push(`already in your library: ${skipped.join(", ")}`);
+  // A re-uploaded file that already has a subject is never moved by an upload.
+  const kept = data.subject_kept_document_ids || [];
+  if (kept.length) parts.push(`kept in their current subject: ${kept.join(", ")} (use its Subject menu on Home to move it)`);
   const text = parts.join("; ") || "No new content was indexed";
   return text.charAt(0).toUpperCase() + text.slice(1) + ".";
 }
 
-async function uploadSourceFiles(files) {
+// `subject` (optional, from chooseUploadSubject): {subject_id} or {new_subject_name} groups every
+// uploaded file in that subject; without one the files stay Unassigned.
+async function uploadSourceFiles(files, subject = null) {
   if (!files.length) {
     return;
   }
 
   const formData = new FormData();
   Array.from(files).forEach((file) => formData.append("files", file));
+  if (subject?.subject_id) formData.append("subject_id", subject.subject_id);
+  if (subject?.new_subject_name) formData.append("new_subject_name", subject.new_subject_name);
 
   uploadSourceButton.disabled = true;
   uploadSourceButton.setAttribute("aria-busy", "true");

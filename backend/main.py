@@ -19,6 +19,7 @@ from backend.api.quiz_attempts import router as quiz_attempts_router
 from backend.api.quiz_generation import regenerate_router as quiz_regenerate_router
 from backend.api.quiz_generation import router as quiz_generation_router
 from backend.api.quiz_library import router as quiz_library_router
+from backend.api.subjects import router as subjects_router
 from backend.api.summary import router as summary_router
 from backend.api.deps import require_admin_user, require_current_user
 from backend import perf_timing
@@ -188,6 +189,9 @@ def prepare_model(model_id: str, current_user: dict = Depends(require_current_us
 
 
 app.include_router(documents_router)
+
+
+app.include_router(subjects_router)
 
 
 app.include_router(quiz_library_router)

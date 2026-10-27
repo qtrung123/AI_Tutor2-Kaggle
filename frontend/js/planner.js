@@ -247,11 +247,14 @@ function renderPlannerMaterials() {
   if (!plannerMaterialList) return;
   plannerMaterialList.innerHTML = "";
   plannerMaterialEmpty.hidden = indexedDocuments.length > 0;
+  plannerRenderStepSubjectFilter("planner-subject-filter", renderPlannerMaterials);
   const today = plannerDateKey(new Date());
   indexedDocuments.forEach((doc) => {
     const material = plannerMaterialFor(doc.id);
     const row = document.createElement("div");
     row.className = "planner-material-row";
+    // The subject filter only hides rows; a hidden material stays in the plan exactly as it is.
+    row.hidden = !plannerSubjectMatches(doc.id);
     row.classList.toggle("selected", Boolean(material));
     const pick = document.createElement("label");
     pick.className = "planner-material-pick";
@@ -263,6 +266,8 @@ function renderPlannerMaterials() {
     const name = document.createElement("span");
     name.textContent = doc.title;
     pick.append(checkbox, name);
+    const subject = subjectOfDocument(doc.id);
+    if (subject) pick.appendChild(subjectBadge(subject, "planner-material-subject"));
     row.appendChild(pick);
     if (material) {
       const goal = document.createElement("div");
@@ -1336,7 +1341,10 @@ function renderPlannerSessionList(container, sessions, emptyText, options = {}) 
     day.appendChild(heading);
     const list = document.createElement("ol");
     list.className = "planner-session-list";
-    daySessions.forEach((session) => list.appendChild(plannerSessionItem(session, "li", options)));
+    daySessions.forEach((session) => {
+      const item = plannerSessionItem(session, "li", options);
+      list.appendChild(options.subjectFilter ? plannerMarkSubject(item, session.document_id) : item);
+    });
     day.appendChild(list);
     container.appendChild(day);
   });
@@ -1512,7 +1520,8 @@ function renderPlannerPlan() {
   const weekSessions = [...plannerSessions, ...plannerHistorySessions].filter(inWeek)
     .sort((left, right) => left.scheduled_start.localeCompare(right.scheduled_start));
   const anySaved = plannerSessions.length || plannerHistorySessions.length;
-  renderPlannerSessionList(plannerPlanSessions, weekSessions, anySaved ? emptyText : "No sessions saved yet.", { action: true });
+  plannerRenderStepSubjectFilter("planner-plan-subject-filter", renderPlannerPlan);
+  renderPlannerSessionList(plannerPlanSessions, weekSessions, anySaved ? emptyText : "No sessions saved yet.", { action: true, subjectFilter: true });
 }
 
 async function loadPlannerPlanProgress(planId) {
@@ -1851,6 +1860,7 @@ function renderPlannerWorkspace() {
   pcalApplyView();
   pcalReviewJump();
   pcalClosePopover();
+  pcalRenderSubjectFilter();
   pcalRenderMaterials();
   pcalRenderToolbar();
   pcalRenderGrid();
@@ -1901,8 +1911,9 @@ function pcalRenderMaterials() {
   const today = plannerDateKey(plannerNow());
   plannerMaterials.forEach((material) => {
     const title = pcalMaterialTitle(material);
-    const item = pcalEl("li", "pcal-material");
+    const item = plannerMarkSubject(pcalEl("li", "pcal-material"), material.document_id);
     item.dataset.documentId = material.document_id;
+    if (item.classList.contains("is-subject-muted")) item.hidden = true;   // filtered out of the list only
     const top = pcalEl("div", "pcal-material-top");
     const name = pcalEl("strong", "pcal-material-title", title);
     name.title = title;
@@ -1928,6 +1939,8 @@ function pcalRenderMaterials() {
       pcal.materials.querySelector(".pcal-goal-editor input")?.focus();
     });
     meta.append(summary, edit);
+    const subject = subjectOfDocument(material.document_id);
+    if (subject) meta.prepend(subjectBadge(subject, "pcal-material-subject"));
     item.append(top, meta);
     if (editing) item.appendChild(pcalGoalEditorFor(material, title, today));
     const pack = pcalStudyPackText(material.document_id, { compact: true });
@@ -2336,6 +2349,7 @@ function pcalEventBlock({ kind, session, change = null }, { lane = 0, lanes = 1 
   const start = plannerToMinutes(session.scheduled_start.slice(11, 16));
   const end = plannerEndMinutes(session);
   const block = pcalEl("button", `pcal-event pcal-event--${kind} pcal-activity--${session.activity_type}${session.steps?.length ? " pcal-event--combined" : ""}`);
+  plannerMarkSubject(block, session.document_id);
   block.type = "button";
   block.dataset.kind = kind;
   block.dataset.start = session.scheduled_start;
@@ -2607,6 +2621,8 @@ function pcalOpenSessionPopover(kind, session, block) {
       pcalEl("h4", "pcal-popover-title", title),
       pcalEl("p", "pcal-popover-activity", pcalActivity(session.activity_type, session.steps)),
       pcalEl("p", "pcal-popover-when", `${plannerDayLabel(session.scheduled_start.slice(0, 10))} · ${pcalSessionTimes(session)} · ${plannerFormatDuration(session.duration_minutes)}`));
+    const subject = subjectOfDocument(session.document_id);
+    if (subject) content.appendChild(subjectBadge(subject, "pcal-popover-subject"));
     const reason = pcalReasonText(session.reason);
     if (reason) {
       const why = pcalEl("p", "pcal-popover-reason");
@@ -2930,13 +2946,14 @@ function pcalRenderSheet() {
   if (!pcal.sheet || pcal.sheet.hidden) return;
   pcal.sheetList.innerHTML = "";
   const chosen = new Set(plannerMaterials.map((material) => material.document_id));
-  const available = indexedDocuments.filter((doc) => !chosen.has(doc.id));
+  const available = indexedDocuments.filter((doc) => !chosen.has(doc.id) && plannerSubjectMatches(doc.id));
   if (!indexedDocuments.length) {
     pcal.sheetList.appendChild(pcalEl("li", "pcal-sheet-empty", "Upload a document first, then add it here."));
     return;
   }
   if (!available.length) {
-    pcal.sheetList.appendChild(pcalEl("li", "pcal-sheet-empty", "All your documents are in this plan."));
+    pcal.sheetList.appendChild(pcalEl("li", "pcal-sheet-empty", plannerSubjectFilter === SUBJECT_ALL
+      ? "All your documents are in this plan." : "Every document of this subject is already in the plan."));
     return;
   }
   const today = plannerDateKey(plannerNow());
@@ -2946,6 +2963,8 @@ function pcalRenderSheet() {
     const name = pcalEl("strong", "pcal-sheet-title", doc.title);
     name.title = doc.title;
     const facts = pcalEl("div", "pcal-sheet-facts");
+    const subject = subjectOfDocument(doc.id);
+    if (subject) facts.appendChild(subjectBadge(subject, "pcal-sheet-subject"));
     if (plannerDocStates.has(doc.id)) {
       const stateKey = pcalLearningKey(doc.id);
       const line = pcalEl("span", "pcal-sheet-state");
@@ -3707,6 +3726,7 @@ function pcalAgendaCard({ kind, session, change = null }) {
   card.dataset.start = session.scheduled_start;
   if (session.session_id) card.dataset.sessionId = session.session_id;
   if (change) card.classList.add("pcal-change", `pcal-change--${change.type}`);
+  plannerMarkSubject(card, session.document_id);
 
   const time = pcalEl("div", "pcal-agenda-time");
   time.append(pcalEl("strong", "pcal-agenda-start", session.scheduled_start.slice(11, 16)),

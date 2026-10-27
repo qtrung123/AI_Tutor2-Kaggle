@@ -47,6 +47,9 @@ def _initialize_schema(connection: db.Connection) -> None:
     # Durable original upload (Supabase Storage); NULL for documents kept only on local disk.
     db.add_column(connection, "indexed_documents", "object_path", "TEXT")
     db.add_column(connection, "indexed_documents", "object_bucket", "TEXT")
+    # Optional subject/course grouping (backend/subject_store.py); NULL = Unassigned, so every
+    # legacy row stays valid. Re-indexing never touches it: the upsert below leaves it alone.
+    db.add_column(connection, "indexed_documents", "subject_id", "TEXT")
     # The pre-authentication indexed_files.json registry is a local file: import it into the local
     # SQLite database only. The shared PostgreSQL database never ingests stale local state.
     if connection.backend != db.SQLITE:
@@ -104,6 +107,7 @@ def _row_to_document(row) -> dict:
         "topic_schema_version": row["topic_schema_version"],
         "topics": json.loads(row["topics_json"] or "[]"),
         "object_path": row["object_path"], "object_bucket": row["object_bucket"],
+        "subject_id": row["subject_id"],
     }
 
 
