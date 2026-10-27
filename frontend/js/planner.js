@@ -247,54 +247,76 @@ function renderPlannerMaterials() {
   if (!plannerMaterialList) return;
   plannerMaterialList.innerHTML = "";
   plannerMaterialEmpty.hidden = indexedDocuments.length > 0;
-  plannerRenderStepSubjectFilter("planner-subject-filter", renderPlannerMaterials);
   const today = plannerDateKey(new Date());
-  indexedDocuments.forEach((doc) => {
-    const material = plannerMaterialFor(doc.id);
-    const row = document.createElement("div");
-    row.className = "planner-material-row";
-    // The subject filter only hides rows; a hidden material stays in the plan exactly as it is.
-    row.hidden = !plannerSubjectMatches(doc.id);
-    row.classList.toggle("selected", Boolean(material));
-    const pick = document.createElement("label");
-    pick.className = "planner-material-pick";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = Boolean(material);
-    checkbox.dataset.documentId = doc.id;
-    checkbox.addEventListener("change", () => plannerToggleMaterial(doc.id, checkbox));
-    const name = document.createElement("span");
-    name.textContent = doc.title;
-    pick.append(checkbox, name);
-    const subject = subjectOfDocument(doc.id);
-    if (subject) pick.appendChild(subjectBadge(subject, "planner-material-subject"));
-    row.appendChild(pick);
-    if (material) {
-      const goal = document.createElement("div");
-      goal.className = "planner-material-goal";
-      const summary = document.createElement("span");
-      summary.className = `planner-goal-summary planner-goal-summary--${plannerMaterialGoal(material) || "none"}`;
-      summary.textContent = plannerGoalSummary(material);
-      const { form, read } = plannerGoalForm(plannerGoalValues(material), { today, title: doc.title });
-      const save = document.createElement("button");
-      save.type = "button";
-      save.className = "secondary-button planner-goal-save";
-      save.textContent = "Save goal";
-      save.addEventListener("click", () => plannerSaveStepGoal(material, read(), save));
-      goal.append(summary, form, save);
-      if (plannerMaterialHasGoal(material)) {
-        const remove = document.createElement("button");
-        remove.type = "button";
-        remove.className = "text-button planner-goal-remove";
-        remove.textContent = "Remove goal";
-        remove.addEventListener("click", () => plannerSaveStepGoal(material, PLANNER_NO_GOAL, remove));
-        goal.appendChild(remove);
-      }
-      row.appendChild(goal);
-    }
-    plannerMaterialList.appendChild(row);
-  });
+  if (!userSubjects.length) {
+    indexedDocuments.forEach((doc) => plannerMaterialList.appendChild(plannerMaterialRow(doc, today)));
+  } else {
+    // Grouped by subject (Unassigned last); documents of several subjects can be in one plan.
+    groupDocumentsBySubject(indexedDocuments, (doc) => doc.id).forEach((group) => {
+      const ids = group.documents.map((doc) => doc.id);
+      const selected = ids.filter((id) => plannerMaterialFor(id)).length;
+      plannerMaterialList.appendChild(plannerSubjectGroup(group, {
+        idPrefix: "planner-material-group",
+        countText: `${selected} of ${ids.length} selected`,
+        rows: group.documents.map((doc) => plannerMaterialRow(doc, today)),
+        selectAll: {
+          checked: selected === ids.length, indeterminate: selected > 0 && selected < ids.length,
+          label: `Select all documents in ${group.name}`,
+          onChange: (box) => plannerToggleMaterialGroup(group, box),
+        },
+        onToggle: renderPlannerMaterials,
+      }));
+    });
+  }
+  if (plannerMaterialCount) {
+    const count = plannerMaterials.length;
+    plannerMaterialCount.hidden = !indexedDocuments.length;
+    plannerMaterialCount.textContent = count ? `${count} document${count === 1 ? "" : "s"} selected` : "No documents selected yet";
+  }
   plannerToAvailabilityButton.disabled = plannerMaterials.length === 0;
+}
+
+// One document of the Materials step: its checkbox and, once chosen, its learning goal.
+function plannerMaterialRow(doc, today) {
+  const material = plannerMaterialFor(doc.id);
+  const row = document.createElement("div");
+  row.className = "planner-material-row";
+  row.classList.toggle("selected", Boolean(material));
+  const pick = document.createElement("label");
+  pick.className = "planner-material-pick";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = Boolean(material);
+  checkbox.dataset.documentId = doc.id;
+  checkbox.addEventListener("change", () => plannerToggleMaterial(doc.id, checkbox));
+  const name = document.createElement("span");
+  name.textContent = doc.title;
+  pick.append(checkbox, name);
+  row.appendChild(pick);
+  if (material) {
+    const goal = document.createElement("div");
+    goal.className = "planner-material-goal";
+    const summary = document.createElement("span");
+    summary.className = `planner-goal-summary planner-goal-summary--${plannerMaterialGoal(material) || "none"}`;
+    summary.textContent = plannerGoalSummary(material);
+    const { form, read } = plannerGoalForm(plannerGoalValues(material), { today, title: doc.title });
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "secondary-button planner-goal-save";
+    save.textContent = "Save goal";
+    save.addEventListener("click", () => plannerSaveStepGoal(material, read(), save));
+    goal.append(summary, form, save);
+    if (plannerMaterialHasGoal(material)) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "text-button planner-goal-remove";
+      remove.textContent = "Remove goal";
+      remove.addEventListener("click", () => plannerSaveStepGoal(material, PLANNER_NO_GOAL, remove));
+      goal.appendChild(remove);
+    }
+    row.appendChild(goal);
+  }
+  return row;
 }
 
 async function plannerEnsurePlan() {
@@ -304,21 +326,46 @@ async function plannerEnsurePlan() {
   return plannerPlan;
 }
 
+// Adds or removes one document as a plan material (state only; the caller re-renders). A material
+// is always exactly one document -- a subject is never added to a plan as a whole.
+async function plannerSetMaterialSelected(documentId, selected) {
+  if (selected) {
+    if (plannerMaterialFor(documentId)) return;
+    await plannerEnsurePlan();
+    const material = await plannerRequest(plannerPlanUrl("/materials"), { method: "POST", body: { document_id: documentId } });
+    plannerMaterials = [...plannerMaterials, material];
+  } else {
+    const material = plannerMaterialFor(documentId);
+    if (material) {
+      await plannerRequest(plannerPlanUrl(`/materials/${encodeURIComponent(material.material_id)}`), { method: "DELETE" });
+    }
+    plannerMaterials = plannerMaterials.filter((item) => item.document_id !== documentId);
+  }
+  plannerPreview = null;
+}
+
 async function plannerToggleMaterial(documentId, checkbox) {
   checkbox.disabled = true;
   try {
-    if (checkbox.checked) {
-      await plannerEnsurePlan();
-      const material = await plannerRequest(plannerPlanUrl("/materials"), { method: "POST", body: { document_id: documentId } });
-      plannerMaterials = [...plannerMaterials, material];
-    } else {
-      const material = plannerMaterialFor(documentId);
-      if (material) {
-        await plannerRequest(plannerPlanUrl(`/materials/${encodeURIComponent(material.material_id)}`), { method: "DELETE" });
-      }
-      plannerMaterials = plannerMaterials.filter((item) => item.document_id !== documentId);
-    }
-    plannerPreview = null;
+    await plannerSetMaterialSelected(documentId, checkbox.checked);
+  } catch (error) {
+    showToast(error.message || "Could not update the plan");
+  }
+  renderPlannerMaterials();
+}
+
+// "Select all" of a subject group: adds (or removes) its documents one by one, each as its own material.
+async function plannerToggleMaterialGroup(group, checkbox) {
+  const selected = checkbox.checked;
+  const changing = group.documents.map((doc) => doc.id).filter((id) => Boolean(plannerMaterialFor(id)) !== selected);
+  if (!selected && changing.length > 1 && !window.confirm(
+    `Remove ${changing.length} documents of ${group.name} from this plan? Their learning goals are removed too.`)) {
+    renderPlannerMaterials();
+    return;
+  }
+  checkbox.disabled = true;
+  try {
+    for (const documentId of changing) await plannerSetMaterialSelected(documentId, selected);
   } catch (error) {
     showToast(error.message || "Could not update the plan");
   }
@@ -1319,6 +1366,7 @@ function pcalOpenChangePopover(change, session, block) {
 async function plannerRefreshSchedules() {
   // Home and the saved week both reflect the change; the week being viewed is kept.
   await Promise.all([loadTodayPlan(), plannerPlan ? loadPlannerData({ keepWeek: true }) : null]);
+  refreshHomeDocumentStates();   // per-document and per-subject session counts
 }
 
 function renderPlannerSessionList(container, sessions, emptyText, options = {}) {
@@ -1742,8 +1790,11 @@ async function pcalAddMaterial(documentId, goal, button) {
     }
   } catch (error) {
     showToast(error.message || "Could not add this material");
+    plannerQueueAutoPreview();
+    return false;
   }
   plannerQueueAutoPreview();
+  return true;
 }
 
 async function pcalRemoveMaterial(material, button) {
@@ -2275,8 +2326,11 @@ function pcalRenderGrid() {
       plannerEndMinutes(item.session)]);
     pcalEffectiveAvailabilityFor(key, weekday).forEach((piece) => column.appendChild(pcalAvailabilityBlock(piece, key, busy)));
     pcalGoogleBusyFor(key).forEach(([from, to]) => column.appendChild(pcalBusyBlock(from, to)));
-    const lanes = pcalLayoutLanes(busy.map(([start, end]) => ({ start, end })));
-    dayItems.forEach((item, index) => column.appendChild(pcalEventBlock(item, lanes[index])));
+    // The subject filter only decides what is drawn: availability, conflicts and drag targets
+    // still see every session (pcalOccupied reads the data, not the calendar).
+    const shown = dayItems.filter(pcalShownBySubject);
+    const lanes = pcalLayoutLanes(shown.map((item) => ({ start: plannerToMinutes(item.session.scheduled_start.slice(11, 16)), end: plannerEndMinutes(item.session) })));
+    shown.forEach((item, index) => column.appendChild(pcalEventBlock(item, lanes[index])));
     if (key === todayKey) {
       const shade = pcalEl("div", "pcal-past-shade");   // the part of today that has passed
       shade.style.height = `${(now.getHours() * 60 + now.getMinutes()) * PCAL_MINUTE_PX}px`;
@@ -2358,7 +2412,9 @@ function pcalEventBlock({ kind, session, change = null }, { lane = 0, lanes = 1 
   const title = plannerDisplayTitle(fullTitle);
   const label = change ? PCAL_CHANGE_KIND_LABELS[change.type] : PCAL_KIND_LABELS[kind];
   const duration = plannerFormatDuration(session.duration_minutes || end - start);
-  block.setAttribute("aria-label", `${label}: ${pcalActivity(session.activity_type, session.steps)} · ${fullTitle}, ${pcalShortDay(session.scheduled_start.slice(0, 10))} ${pcalSessionTimes(session)}`);
+  const subjectTag = plannerSubjectTag(session.document_id, "pcal-event-subject");
+  const subjectText = subjectTag ? ` · ${subjectTag.textContent}` : "";
+  block.setAttribute("aria-label", `${label}: ${pcalActivity(session.activity_type, session.steps)} · ${fullTitle}${subjectText}, ${pcalShortDay(session.scheduled_start.slice(0, 10))} ${pcalSessionTimes(session)}`);
   pcalPlace(block, start, end);
   if (lanes > 1) {
     // Overlapping events share the column side by side; neither covers the other.
@@ -2386,7 +2442,7 @@ function pcalEventBlock({ kind, session, change = null }, { lane = 0, lanes = 1 
       : change.type === "added" ? `+ ${PCAL_CHANGE_LABELS.added}` : PCAL_CHANGE_LABELS[change.type];
     if (tag) block.appendChild(pcalEl("span", "pcal-event-tag", tag));
   } else {
-    block.title = `${fullTitle}\n${pcalActivity(session.activity_type, session.steps)} · ${pcalSessionTimes(session)} (${duration})\n${label}`;
+    block.title = `${fullTitle}${subjectTag ? `\nSubject: ${subjectTag.textContent}` : ""}\n${pcalActivity(session.activity_type, session.steps)} · ${pcalSessionTimes(session)} (${duration})\n${label}`;
   }
   const meta = pcalEl("span", "pcal-event-meta");   // its text stays "Activity · 15:30–16:00"
   // The end time is its own span so a one-row or narrow block can show only the start.
@@ -2398,6 +2454,7 @@ function pcalEventBlock({ kind, session, change = null }, { lane = 0, lanes = 1 
   extra.append(pcalEl("span", "pcal-event-duration", duration), pcalEl("span", "pcal-event-break"),
     pcalEl("span", `pcal-event-status pcal-event-status--${kind}`, label));
   block.append(pcalEl("strong", "pcal-event-title", title), meta, extra);
+  if (subjectTag) block.appendChild(subjectTag);
   const source = change ? null : pcalMoveSourceFor(kind, session, block);
   block.addEventListener("pointerdown", (event) => {
     event.stopPropagation();
@@ -2957,35 +3014,73 @@ function pcalRenderSheet() {
     return;
   }
   const today = plannerDateKey(plannerNow());
-  available.forEach((doc) => {
-    const row = pcalEl("li", "pcal-sheet-row");
-    row.dataset.documentId = doc.id;
-    const name = pcalEl("strong", "pcal-sheet-title", doc.title);
-    name.title = doc.title;
-    const facts = pcalEl("div", "pcal-sheet-facts");
-    const subject = subjectOfDocument(doc.id);
-    if (subject) facts.appendChild(subjectBadge(subject, "pcal-sheet-subject"));
-    if (plannerDocStates.has(doc.id)) {
-      const stateKey = pcalLearningKey(doc.id);
-      const line = pcalEl("span", "pcal-sheet-state");
-      line.append(pcalEl("span", `pcal-pill pcal-pill--${stateKey}`, PLANNER_LEARNING_STATE_LABELS[stateKey] || stateKey),
-        pcalEl("span", "pcal-sheet-quiz", pcalQuizText(doc.id)));
-      facts.append(line, pcalEl("span", "pcal-sheet-pack", pcalStudyPackText(doc.id)));
-    }
-    // Every new material starts with a goal choice; "Flexible learning" is preselected because it is
-    // what a material without a deadline already means.
-    const draft = pcalSheetGoals.get(doc.id) || { goal_type: "flexible", deadline: null, target_date: null };
-    const { form, read } = plannerGoalForm(draft, { today, title: doc.title, onChange: (values) => pcalSheetGoals.set(doc.id, values) });
-    const add = pcalEl("button", "pcal-button pcal-sheet-add", "Add");
-    add.type = "button";
-    add.setAttribute("aria-label", `Add ${doc.title}`);
-    add.addEventListener("click", () => {
-      const goal = read();
-      if (goal) pcalAddMaterial(doc.id, goal, add);
-    });
-    row.append(name, facts, form, add);
-    pcal.sheetList.appendChild(row);
+  if (!userSubjects.length) {
+    available.forEach((doc) => pcal.sheetList.appendChild(pcalSheetRow(doc, today).row));
+    return;
+  }
+  // Grouped by subject; every document is added as its own material, with its own goal.
+  const live = plannerHasLivePlan();
+  if (live) pcal.sheetList.appendChild(pcalEl("li", "pcal-sheet-note", "Your plan is active: add documents one at a time so each schedule change can be reviewed."));
+  groupDocumentsBySubject(indexedDocuments.filter((doc) => plannerSubjectMatches(doc.id)), (doc) => doc.id).forEach((group) => {
+    const open = group.documents.filter((doc) => !chosen.has(doc.id));
+    const inPlan = group.documents.length - open.length;
+    const entries = open.map((doc) => ({ doc, ...pcalSheetRow(doc, today) }));
+    const rows = entries.length ? entries.map((entry) => entry.row)
+      : [pcalEl("li", "pcal-sheet-empty", "All documents of this subject are in the plan.")];
+    pcal.sheetList.appendChild(plannerSubjectGroup(group, {
+      idPrefix: "pcal-sheet-group", tag: "li", rows, onToggle: pcalRenderSheet,
+      countText: `${inPlan} of ${group.documents.length} in plan`,
+      action: !live && entries.length > 1 ? { label: `Add all ${entries.length}`, ariaLabel: `Add all ${entries.length} documents of ${group.name}`,
+        onClick: (button) => pcalAddMaterialGroup(entries, button) } : null,
+    }));
   });
+}
+
+// "Add all" of a subject in the sheet, offered only before a plan is accepted: there adding a
+// document just re-runs the debounced preview, so adding several is the same as adding them one by
+// one. Each document keeps the goal chosen on its row (Flexible learning unless changed).
+async function pcalAddMaterialGroup(entries, button) {
+  if (plannerHasLivePlan()) return;
+  const goals = entries.map(({ doc, read }) => [doc.id, read()]);
+  if (goals.some(([, goal]) => !goal)) return;   // an incomplete goal shows its own message on its row
+  button.disabled = true;
+  const failed = [];
+  for (const [documentId, goal] of goals) {
+    if (!(await pcalAddMaterial(documentId, goal, null))) failed.push(plannerDocumentTitle(documentId));
+  }
+  // One summary after the per-document attempts: what was added and what still needs adding.
+  const added = goals.length - failed.length;
+  if (!failed.length) showToast(`Added ${added} documents to your plan`);
+  else showToast(`Added ${added} of ${goals.length} documents. Not added: ${failed.join(", ")}. Add ${failed.length === 1 ? "it" : "them"} again from this list.`);
+}
+
+// One document of the Add materials sheet: {row, read} where read() returns its goal (or null).
+function pcalSheetRow(doc, today) {
+  const row = pcalEl("li", "pcal-sheet-row");
+  row.dataset.documentId = doc.id;
+  const name = pcalEl("strong", "pcal-sheet-title", doc.title);
+  name.title = doc.title;
+  const facts = pcalEl("div", "pcal-sheet-facts");
+  if (plannerDocStates.has(doc.id)) {
+    const stateKey = pcalLearningKey(doc.id);
+    const line = pcalEl("span", "pcal-sheet-state");
+    line.append(pcalEl("span", `pcal-pill pcal-pill--${stateKey}`, PLANNER_LEARNING_STATE_LABELS[stateKey] || stateKey),
+      pcalEl("span", "pcal-sheet-quiz", pcalQuizText(doc.id)));
+    facts.append(line, pcalEl("span", "pcal-sheet-pack", pcalStudyPackText(doc.id)));
+  }
+  // Every new material starts with a goal choice; "Flexible learning" is preselected because it is
+  // what a material without a deadline already means.
+  const draft = pcalSheetGoals.get(doc.id) || { goal_type: "flexible", deadline: null, target_date: null };
+  const { form, read } = plannerGoalForm(draft, { today, title: doc.title, onChange: (values) => pcalSheetGoals.set(doc.id, values) });
+  const add = pcalEl("button", "pcal-button pcal-sheet-add", "Add");
+  add.type = "button";
+  add.setAttribute("aria-label", `Add ${doc.title}`);
+  add.addEventListener("click", () => {
+    const goal = read();
+    if (goal) pcalAddMaterial(doc.id, goal, add);
+  });
+  row.append(name, facts, form, add);
+  return { row, read };
 }
 
 // -- study queue ----------------------------------------------------------------------
@@ -2997,6 +3092,8 @@ function pcalQueueItem(entry, kind) {
   const item = pcalEl("li", "pcal-queue-item pcal-queue-item--unscheduled");
   item.append(pcalEl("strong", "pcal-queue-title", title),
     pcalEl("span", "pcal-queue-meta", `${pcalActivity(entry.activity_type, entry.steps)} · ${plannerFormatDuration(entry.estimated_minutes || 0)}`));
+  const subject = plannerSubjectTag(entry.document_id, "pcal-queue-subject");
+  if (subject) item.appendChild(subject);
   if (entry.reason?.message) item.appendChild(pcalEl("small", "pcal-queue-reason", entry.reason.message));
   const due = entry.deadline
     ? `Due ${new Date(`${entry.deadline}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })} · ` : "";
@@ -3018,12 +3115,14 @@ function pcalRenderQueue() {
   // The queue holds only work without a calendar slot: scheduled, suggested and past sessions are
   // on the calendar, and their actions live in its popovers (and on Home).
   pcal.queue.innerHTML = "";
-  const waiting = plannerHasLivePlan()
-    ? plannerLiveCandidates.map((candidate) => pcalQueueItem(candidate, "live"))
-    : (plannerPreview?.capacity.unscheduled || []).map((entry) => pcalQueueItem(entry, "suggested"));
+  const entries = plannerHasLivePlan() ? plannerLiveCandidates : (plannerPreview?.capacity.unscheduled || []);
+  const kind = plannerHasLivePlan() ? "live" : "suggested";
+  const waiting = entries.filter(pcalShownBySubject).map((entry) => pcalQueueItem(entry, kind));
   waiting.forEach((item) => pcal.queue.appendChild(item));
   pcal.queueCount.textContent = waiting.length ? String(waiting.length) : "";
-  if (waiting.length) return;
+  const hidden = entries.length - waiting.length;
+  if (hidden) pcal.queue.appendChild(pcalEl("li", "pcal-queue-hidden", `${hidden} more in other subjects`));
+  if (waiting.length || hidden) return;
   const empty = pcalEl("li", "pcal-queue-empty");
   const live = plannerHasLivePlan();
   if (!live && !plannerMaterials.length) empty.appendChild(pcalEl("span", "", "Add materials to get started."));
@@ -3684,7 +3783,7 @@ function pcalRenderAgenda() {
   const dates = pcalWeekDates();
   const fromKey = plannerDateKey(dates[0]), untilKey = plannerDateKey(dates[6]);
   const todayKey = plannerDateKey(plannerNow());
-  const items = pcalWeekItems(fromKey, untilKey).sort(pcalItemOrder);
+  const items = pcalWeekItems(fromKey, untilKey).filter(pcalShownBySubject).sort(pcalItemOrder);
   box.innerHTML = "";
   if (!items.length) {
     const empty = pcalEl("div", "pcal-agenda-empty");
@@ -3739,6 +3838,8 @@ function pcalAgendaCard({ kind, session, change = null }) {
   if (title !== fullTitle) heading.title = fullTitle;
   top.append(heading, pcalEl("span", `pcal-agenda-status pcal-kind pcal-kind--${kind}`,
     change ? PCAL_CHANGE_KIND_LABELS[change.type] : PCAL_KIND_LABELS[kind]));
+  const agendaSubject = plannerSubjectTag(session.document_id, "pcal-agenda-subject");
+  if (agendaSubject) top.appendChild(agendaSubject);
   const topic = pcalEl("p", "pcal-agenda-topic");
   topic.appendChild(pcalEl("span", "pcal-agenda-activity", activity));
   const reason = change ? plannerChangeWhy(change.type === "moving" ? "moved" : change.type, change.item) : pcalReasonText(session.reason);

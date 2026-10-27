@@ -439,6 +439,34 @@ class DashboardSubjectPayloadTests(SubjectStoreTestCase):
         self.assertIn("subjects", result)   # the name-derived grouping is still served
 
 
+class SubjectProgressCountingTests(unittest.TestCase):
+    """Home's per-subject progress sums each document's plan figures from study_progress; these are
+    the counting rules it relies on."""
+
+    def test_saved_sessions_count_once_and_history_is_left_out(self):
+        from backend import study_progress
+
+        def row(session_id, status, steps=None):
+            return {"session_id": session_id, "document_id": "a.pdf", "activity_type": "summary", "status": status,
+                    "scheduled_start": "2026-09-25T10:00:00", "scheduled_end": "2026-09-25T10:35:00",
+                    "duration_minutes": 35, "steps": steps or []}
+
+        combined = [{"activity_type": "summary", "minutes": 20, "status": "completed"},
+                    {"activity_type": "flashcards", "minutes": 15, "status": "completed"}]
+        totals = study_progress._session_totals([
+            row("s1", "completed", combined),   # one combined session = one session, not two steps
+            row("s2", "scheduled"), row("s3", "missed"),
+            row("s4", "rescheduled"), row("s5", "cancelled"),   # superseded / withdrawn history
+        ], "2026-09-24T09:00:00")
+        self.assertEqual((totals["completed_sessions"], totals["planned_sessions"]), (1, 3))
+
+    def test_home_sums_document_figures_per_subject(self):
+        source = frontend_script_text()
+        self.assertIn("function homeSubjectProgressGroups", source)
+        self.assertIn("plan?.completed_sessions", source)
+        self.assertIn("plan?.planned_sessions", source)
+
+
 class SubjectFrontendTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

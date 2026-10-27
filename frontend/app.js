@@ -289,10 +289,9 @@ if (plannerView) {
   <ol class="planner-steps" aria-label="Planner steps"><li data-step-indicator="materials"><span>1</span>Materials</li><li data-step-indicator="availability"><span>2</span>Availability</li><li data-step-indicator="preview"><span>3</span>Preview</li><li data-step-indicator="plan"><span>4</span>Plan</li></ol>
   <section class="panel planner-step" data-planner-step="materials">
     <div class="planner-step-heading"><p class="eyebrow">Step 1</p><h3>What do you want to study?</h3><p class="planner-hint">Pick documents and, if there is one, a deadline for each.</p></div>
-    <label class="planner-subject-filter" id="planner-subject-filter" hidden></label>
     <div id="planner-material-list" class="planner-material-list"></div>
     <p id="planner-material-empty" class="empty-state" hidden>Upload a document first, then come back to plan study time for it.</p>
-    <div class="planner-step-actions"><button class="primary-button" id="planner-to-availability" type="button">Next: availability</button></div>
+    <div class="planner-step-actions"><p class="planner-material-count" id="planner-material-count" aria-live="polite" hidden></p><button class="primary-button" id="planner-to-availability" type="button">Next: availability</button></div>
   </section>
   <section class="panel planner-step" data-planner-step="availability" hidden>
     <div class="planner-step-heading"><p class="eyebrow">Step 2</p><h3>When could you study?</h3><p class="planner-hint">Select when you could study. We won’t necessarily fill all of this time.</p></div>
@@ -340,7 +339,7 @@ if (plannerView) {
           <button class="pcal-panel-toggle" id="pcal-prefs-toggle" type="button" aria-label="Study preferences" title="Study preferences" aria-haspopup="dialog" aria-expanded="false" aria-controls="pcal-prefs-rail"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h9M15 5h2M3 10h3M9 10h8M3 15h7M13 15h4M12 3.5v3M6 8.5v3M10 13.5v3"/></svg></button>
         </div>
       </div>
-      <div class="pcal-status-line"><label class="pcal-subject-filter" id="pcal-subject-filter" hidden></label><span class="pcal-status" id="pcal-status" aria-live="polite"></span><button class="pcal-explain" id="pcal-explain" type="button" aria-haspopup="dialog" hidden>How this plan was built</button></div>
+      <div class="pcal-status-line"><div class="pcal-subject-filter" id="pcal-subject-filter" role="group" aria-label="Subject filter" hidden></div><span class="pcal-status" id="pcal-status" aria-live="polite"></span><button class="pcal-explain" id="pcal-explain" type="button" aria-haspopup="dialog" hidden>How this plan was built</button></div>
       <div class="pcal-review" id="pcal-review" role="region" aria-label="Suggested schedule changes" hidden></div>
     </div>
     <div class="pcal-notice" id="pcal-notice" role="status" hidden></div>
@@ -368,6 +367,7 @@ if (plannerView) {
 const plannerMaterialList = document.getElementById("planner-material-list");
 const plannerMaterialEmpty = document.getElementById("planner-material-empty");
 const plannerToAvailabilityButton = document.getElementById("planner-to-availability");
+const plannerMaterialCount = document.getElementById("planner-material-count");
 const plannerWeekLabel = document.getElementById("planner-week-label");
 const plannerPrevWeekButton = document.getElementById("planner-prev-week");
 const plannerNextWeekButton = document.getElementById("planner-next-week");
@@ -534,7 +534,10 @@ function setPage(page) {
   pageTitle.textContent = pageTitles[page];
   if (pageTitles[page]) showToast(`Opened ${pageTitles[page]}`);
   if (page === "planner") plannerOpen();   // the current layout at once, never the bare step-by-step markup
-  if (page === "overview") loadTodayPlan();
+  if (page === "overview") {
+    loadTodayPlan();
+    refreshHomeDocumentStates();   // sessions may have been completed or re-planned elsewhere
+  }
 }
 
 async function loadGenerationModels() {
@@ -1084,6 +1087,7 @@ if ("ResizeObserver" in window) new ResizeObserver(syncTutorWideLayout).observe(
 // metrics (topics mastered, overall accuracy) are intentionally not shown on Home.
 const HOME_SEARCH_MIN_MATERIALS = 7;   // search only helps once the library is large
 let homeDocStates = new Map();   // document id -> progress payload
+let homeDocStatesReady = false;   // the first load finished (per-subject progress waits for it)
 let homeDocStatesLoad = 0;
 
 // With quizId, opens exactly that quiz artifact (Quiz Library Start/Resume) -- staleness is then

@@ -175,7 +175,7 @@ const submitDialog = async (fill) => {
       out.planner.sessions = [...document.querySelectorAll("#planner-plan-sessions .planner-session")].map((item) => [item.textContent.includes("Marketing") ? "s1" : "s2", item.classList.contains("is-subject-muted")]);
     }
     filter.value = ""; filter.dispatchEvent(new Event("change")); await sleep(200);
-    if (desktop) out.planner.mutedAfterReset = document.querySelectorAll(".pcal-event.is-subject-muted").length;
+    if (desktop) out.planner.eventsAfterReset = document.querySelectorAll(".pcal-event[data-session-id]").length;
   }
   out.overflow.planner = noOverflow();
   publish();
@@ -245,9 +245,9 @@ class SubjectUiAssertions:
         self.assertEqual(planner["options"], ["All subjects", "Biology", "Unassigned"])
         self.assertEqual(planner["newCalls"], [])   # filtering never asks the planner for anything
         if planner["desktop"]:
-            self.assertEqual(sorted(planner["events"]), [["s1", False], ["s2", True]])   # faded, still in place
+            self.assertEqual(planner["events"], [["s1", False]])   # desktop: only the chosen subject's sessions
             self.assertEqual(sorted(planner["materials"]), [["mkt.pdf", False], ["stats.pdf", True]])
-            self.assertEqual(planner["mutedAfterReset"], 0)
+            self.assertEqual(planner["eventsAfterReset"], 2)
         else:
             self.assertEqual(sorted(planner["sessions"]), [["s1", False], ["s2", True]])   # Your plan: faded in place
         self.assertEqual(self.out["planner_caption"], "Subject")   # a visible label, not only an aria-label

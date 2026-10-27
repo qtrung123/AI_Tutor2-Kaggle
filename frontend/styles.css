@@ -4661,3 +4661,82 @@ body[data-page="session"] .persistent-tutor .chat-form input:disabled,
   .home-doc-actions .home-doc-subject { flex: 1 1 140px; width: auto; }
 }
 @media (prefers-reduced-motion: reduce) { .pcal-event.is-subject-muted { transition: none; } }
+
+/* -- Planner: documents grouped by subject (Materials step and Add materials sheet) -- */
+.planner-subject-group { --subject-color: var(--ds-border-strong); display: grid; gap: var(--ds-space-2); min-width: 0; margin: 0; padding: 0; list-style: none; }
+.planner-subject-group + .planner-subject-group { margin-top: var(--ds-space-2); }
+.planner-subject-group-head { display: flex; align-items: center; justify-content: space-between; gap: var(--ds-space-2) var(--ds-space-3); flex-wrap: wrap;
+  padding: var(--ds-space-2) var(--ds-space-3); border: 1px solid var(--ds-border); border-radius: var(--ds-radius-lg); background: var(--ds-surface-2);
+  box-shadow: inset 3px 0 0 var(--subject-color); }
+.planner-subject-group-toggle { display: inline-flex; align-items: center; gap: var(--ds-space-2); flex: 1 1 180px; min-width: 0; min-height: var(--ds-control-sm);
+  padding: 0; border: 0; background: transparent; color: var(--ds-text); font: inherit; text-align: left; cursor: pointer; }
+.planner-subject-group-chevron { flex: none; width: 8px; height: 8px; border-right: 2px solid var(--ds-text-3); border-bottom: 2px solid var(--ds-text-3); transform: rotate(45deg); margin: 0 4px 3px 2px; }
+.planner-subject-group.is-collapsed .planner-subject-group-chevron { transform: rotate(-45deg); margin-bottom: 0; }
+.planner-subject-group .subject-card-dot { flex: none; background: var(--subject-color); }
+.planner-subject-group-name { min-width: 0; font-weight: var(--ds-weight-semibold); overflow-wrap: anywhere; }
+.planner-subject-group-count { flex: none; color: var(--ds-text-3); font-size: var(--ds-text-sm); }
+.planner-subject-group-all { display: inline-flex; align-items: center; gap: 6px; color: var(--ds-text-2); font-size: var(--ds-text-sm); font-weight: var(--ds-weight-medium); cursor: pointer; }
+.planner-subject-group-all input { width: 16px; height: 16px; margin: 0; accent-color: var(--ds-accent); }
+.planner-subject-group-body { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 0 0 0 var(--ds-space-3); list-style: none; }
+.planner-subject-group-body[hidden] { display: none; }
+.pcal-sheet-list .planner-subject-group-body { padding-left: 0; }
+.planner-material-count { margin: 0 auto 0 0; color: var(--ds-text-2); font-size: var(--ds-text-sm); font-weight: var(--ds-weight-medium); }
+.planner-material-count[hidden] { display: none; }
+@media (max-width: 480px) {
+  .planner-subject-group-body { padding-left: 0; }
+  .planner-subject-group-toggle { flex-wrap: wrap; row-gap: 0; }
+  .planner-subject-group-count { flex-basis: 100%; padding-left: 26px; }
+}
+
+/* -- Planner calendar (desktop): subject of each session, and the subject filter's state -- */
+.pcal-subject-filter { display: inline-flex; align-items: center; flex-wrap: wrap; gap: var(--ds-space-2) var(--ds-space-3); }
+.pcal-subject-filter[hidden] { display: none; }
+.pcal-subject-filter-label { display: inline-flex; align-items: center; gap: var(--ds-space-2); }
+.pcal-subject-filter-note { color: var(--ds-text-2); font-size: var(--ds-text-sm); font-weight: var(--ds-weight-medium); }
+.pcal-subject-filter-reset { padding: 0; font-size: var(--ds-text-sm); font-weight: var(--ds-weight-semibold); color: var(--ds-accent-text); }
+/* On a block: name + color line when there is room; otherwise only its color dot in the corner. */
+.pcal-event .pcal-event-subject { flex-basis: 100%; min-width: 0; font-size: 11px; color: inherit; opacity: 0.85; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.pcal-event:not(.pcal-event--roomy) .pcal-event-subject { position: absolute; top: 5px; right: 5px; flex-basis: auto; width: 8px; height: 8px; font-size: 0; opacity: 1; }
+.pcal-event:not(.pcal-event--roomy) .pcal-event-subject::before { width: 8px; height: 8px; box-shadow: 0 0 0 1.5px var(--ds-surface); }
+.pcal-event:not(.pcal-event--roomy):has(.pcal-event-subject) .pcal-event-title { padding-right: 10px; }
+.pcal-queue-subject, .pcal-agenda-subject { margin-top: 2px; }
+.pcal-agenda-top .pcal-agenda-subject { flex-basis: 100%; }
+.pcal-queue-hidden { padding: var(--ds-space-2) var(--ds-space-3); color: var(--ds-text-3); font-size: var(--ds-text-sm); list-style: none; }
+.pcal-sheet-note { padding: var(--ds-space-2) var(--ds-space-3); border-radius: var(--ds-radius); background: var(--ds-surface-2); color: var(--ds-text-2); font-size: var(--ds-text-sm); list-style: none; }
+.planner-subject-group-head .planner-subject-group-action { flex: none; min-height: 28px; padding: 3px 10px; font-size: var(--ds-text-sm); }
+.pcal-agenda-top:has(.pcal-agenda-subject) { flex-wrap: wrap; row-gap: 2px; }
+
+/* -- Home: study progress per subject (saved Planner sessions, summed per document) -- */
+.subject-progress { display: grid; gap: var(--ds-space-2); min-width: 0; margin-top: var(--ds-space-2); }
+.subject-progress[hidden] { display: none; }
+.subject-progress-title { margin: 0; font-size: var(--ds-text-md); font-weight: var(--ds-weight-semibold); color: var(--ds-text-2); }
+.subject-progress-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; border: 1px solid var(--ds-border); border-radius: var(--ds-radius-lg); background: var(--ds-surface); overflow: hidden; }
+.subject-progress-item { --subject-color: var(--ds-border-strong); border-bottom: 1px solid var(--ds-border); }
+.subject-progress-item:last-child { border-bottom: 0; }
+.subject-progress-head, .subject-progress-doc { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(120px, 2fr) 240px; align-items: center; gap: var(--ds-space-4); min-width: 0; }
+.subject-progress-head { padding: var(--ds-space-2) var(--ds-space-4); }
+.subject-progress-toggle { display: inline-flex; align-items: center; gap: var(--ds-space-2); min-width: 0; min-height: var(--ds-control-sm); padding: 0;
+  border: 0; background: transparent; color: var(--ds-text); font: inherit; text-align: left; cursor: pointer; }
+.subject-progress-item .subject-card-dot { flex: none; background: var(--subject-color); }
+.subject-progress-item .planner-subject-group-chevron { transform: rotate(-45deg); margin-bottom: 0; }
+.subject-progress-toggle[aria-expanded="true"] .planner-subject-group-chevron { transform: rotate(45deg); margin-bottom: 3px; }
+.subject-progress-name { min-width: 0; font-weight: var(--ds-weight-semibold); overflow-wrap: anywhere; }
+.subject-progress-count { color: var(--ds-text-2); font-size: var(--ds-text-sm); text-align: right; white-space: nowrap; }
+.subject-progress-bar { position: relative; height: 8px; border-radius: var(--ds-radius-pill); background: var(--ds-surface-3); overflow: hidden; }
+.subject-progress-bar span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--subject-color, var(--ds-accent)); }
+.subject-progress-item:not([style]) .subject-progress-bar span { background: var(--ds-text-3); }
+.subject-progress-docs { display: grid; gap: var(--ds-space-2); margin: 0; padding: 0 var(--ds-space-4) var(--ds-space-3) calc(var(--ds-space-4) + 34px); list-style: none; }
+.subject-progress-docs[hidden] { display: none; }
+.subject-progress-doc-name { min-width: 0; color: var(--ds-text-2); font-size: var(--ds-text-sm); overflow-wrap: anywhere; }
+.subject-progress-doc .subject-progress-bar { height: 6px; }
+
+/* Review fixes: the calendar's "Show all subjects" uses the accent text color (the generic .pcal
+   .text-button rule is muted), and per-subject progress marks totals it could not fully read. */
+.pcal .pcal-subject-filter .pcal-subject-filter-reset { padding: 0; font-size: var(--ds-text-sm); color: var(--ds-accent-text); }
+.pcal .pcal-subject-filter .pcal-subject-filter-reset:hover { color: var(--ds-accent-hover); text-decoration: underline; text-underline-offset: 3px; }
+.subject-progress-hint { margin: -4px 0 0; color: var(--ds-text-3); font-size: var(--ds-text-sm); }
+.subject-progress-warning { margin: 0; padding: var(--ds-space-2) var(--ds-space-3); border: 1px solid var(--ds-warning-border); border-radius: var(--ds-radius);
+  background: var(--ds-warning-soft); color: var(--ds-warning); font-size: var(--ds-text-sm); }
+.subject-progress-warning .subject-progress-retry { padding: 0; font-size: inherit; color: var(--ds-warning); text-decoration: underline; text-underline-offset: 3px; }
+.subject-progress-item.is-incomplete .subject-progress-head .subject-progress-count, .subject-progress-doc.is-unavailable .subject-progress-count { color: var(--ds-warning); }
+.subject-progress-doc.is-unavailable .subject-progress-bar { background: repeating-linear-gradient(135deg, var(--ds-surface-3) 0 6px, var(--ds-surface-2) 6px 12px); }

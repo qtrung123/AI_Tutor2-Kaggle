@@ -10,7 +10,15 @@ function renderDashboard() {
   if (homeMaterialSearch) homeMaterialSearch.hidden = materials.length < HOME_SEARCH_MIN_MATERIALS && !userSubjects.length;
   renderHomeSubjects();
   renderHomeDocumentCards();
+  // Subjects can arrive after the desktop calendar first rendered (a reload on the Planner page).
+  if (document.body.dataset.page === "planner" && plannerIsDesktop()) renderPlannerWorkspace();
   loadHomeDocumentStates(materials.map((material) => material.document_id));
+}
+
+// Re-reads every document's progress (Home cards and per-subject progress), e.g. after a planned
+// session changed status.
+function refreshHomeDocumentStates() {
+  if (dashboardData) loadHomeDocumentStates((dashboardData.materials || []).map((material) => material.document_id));
 }
 
 async function loadHomeDocumentStates(documentIds) {
@@ -26,7 +34,9 @@ async function loadHomeDocumentStates(documentIds) {
   }));
   if (load !== homeDocStatesLoad) return;
   homeDocStates = states;
+  homeDocStatesReady = true;
   renderHomeDocumentCards();
+  renderHomeSubjectProgress();
 }
 
 // What a document's Study Pack holds right now; missing parts are said plainly, never assumed.

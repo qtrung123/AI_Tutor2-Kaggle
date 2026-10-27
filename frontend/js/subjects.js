@@ -436,6 +436,152 @@ function renderHomeSubjects() {
   })));
   grid.appendChild(homeSubjectCard({ key: SUBJECT_UNASSIGNED, name: "Unassigned", count: unassigned }));
   panel.appendChild(grid);
+  const progress = document.createElement("section");
+  progress.className = "subject-progress";
+  progress.id = "home-subject-progress";
+  progress.setAttribute("aria-labelledby", "home-subject-progress-title");
+  panel.appendChild(progress);
+  renderHomeSubjectProgress();
+}
+
+// ---- Home: study progress per subject ---------------------------------------------------------------
+// Derived only from each document's saved Planner sessions, as /api/progress/documents/{id} already
+// reports them (homeDocStates: the document's active plan, counted by backend/study_progress.py):
+// one saved session row = one session, a combined session included; superseded ("rescheduled") and
+// withdrawn ("cancelled") rows, drafts and preview suggestions are never counted. A subject's figure
+// is the sum of its documents'; nothing here touches Summary, Flashcards, Quiz or scheduling.
+
+const homeExpandedSubjectProgress = new Set();   // subject keys whose per-PDF rows are shown
+
+function subjectProgressBar(completed, planned, label) {
+  const bar = document.createElement("div");
+  bar.className = "subject-progress-bar";
+  bar.setAttribute("role", "progressbar");
+  bar.setAttribute("aria-label", label);
+  bar.setAttribute("aria-valuemin", "0");
+  bar.setAttribute("aria-valuemax", String(planned));
+  bar.setAttribute("aria-valuenow", String(completed));
+  const fill = document.createElement("span");
+  fill.style.width = `${planned ? Math.round((100 * completed) / planned) : 0}%`;
+  bar.appendChild(fill);
+  return bar;
+}
+
+function subjectSessionText(completed, planned) {
+  return planned ? `${completed} of ${planned} session${planned === 1 ? "" : "s"} done` : "Not in your study plan";
+}
+
+// [{key, subject, name, completed, planned, unavailable, documents: [{document_id, name, completed, planned, available}]}]:
+// every subject with documents, plus Unassigned when its documents have planned sessions (or could
+// not be read). A document whose progress request failed is "unavailable" -- never counted as 0.
+function homeSubjectProgressGroups(materials) {
+  return groupDocumentsBySubject(materials, (material) => material.document_id).map((group) => {
+    const documents = group.documents.map((material) => {
+      const available = homeDocStates.has(material.document_id);
+      const plan = homeDocStates.get(material.document_id)?.plan;
+      return { document_id: material.document_id, name: material.document_name || material.document_id, available,
+        completed: plan?.completed_sessions || 0, planned: plan?.planned_sessions || 0 };
+    });
+    const sum = (key) => documents.reduce((total, doc) => total + doc[key], 0);
+    const unavailable = documents.filter((doc) => !doc.available).length;
+    return { ...group, documents, unavailable, completed: sum("completed"), planned: sum("planned") };
+  }).filter((group) => group.subject || group.planned > 0 || group.unavailable > 0);
+}
+
+// "x of y sessions done", marked when some of the documents could not be read.
+function subjectGroupProgressText(group) {
+  if (group.unavailable === group.documents.length) return "Progress unavailable";
+  const text = subjectSessionText(group.completed, group.planned);
+  return group.unavailable ? `${text} · incomplete` : text;
+}
+
+function renderHomeSubjectProgress() {
+  const section = document.getElementById("home-subject-progress");
+  if (!section) return;
+  section.innerHTML = "";
+  const groups = homeDocStatesReady ? homeSubjectProgressGroups(dashboardData?.materials || []) : [];
+  section.hidden = !groups.length;
+  if (section.hidden) return;
+  const title = document.createElement("h3");
+  title.id = "home-subject-progress-title";
+  title.className = "subject-progress-title";
+  title.textContent = "Current plan progress by subject";
+  const hint = document.createElement("p");
+  hint.className = "subject-progress-hint";
+  hint.textContent = "Sessions saved in your active study plan, not your lifetime study history.";
+  const failed = groups.reduce((total, group) => total + group.unavailable, 0);
+  let warning = null;
+  if (failed) {
+    warning = document.createElement("p");
+    warning.className = "subject-progress-warning";
+    warning.setAttribute("role", "status");
+    warning.textContent = `Progress for ${failed} document${failed === 1 ? "" : "s"} could not be loaded, so the totals marked "incomplete" leave ${failed === 1 ? "it" : "them"} out. `;
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "text-button subject-progress-retry";
+    retry.textContent = "Try again";
+    retry.addEventListener("click", () => { retry.disabled = true; refreshHomeDocumentStates(); });
+    warning.appendChild(retry);
+  }
+  const list = document.createElement("ul");
+  list.className = "subject-progress-list";
+  groups.forEach((group) => {
+    const expanded = homeExpandedSubjectProgress.has(group.key);
+    const item = document.createElement("li");
+    item.className = "subject-progress-item";
+    item.dataset.subjectProgress = group.key;
+    if (group.subject) item.style.setProperty("--subject-color", group.subject.color);
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "subject-progress-toggle";
+    toggle.setAttribute("aria-expanded", String(expanded));
+    toggle.setAttribute("aria-controls", `subject-progress-docs-${group.key}`);
+    const chevron = document.createElement("span");
+    chevron.className = "planner-subject-group-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    const dot = document.createElement("span");
+    dot.className = "subject-card-dot";
+    dot.setAttribute("aria-hidden", "true");
+    const name = document.createElement("span");
+    name.className = "subject-progress-name";
+    name.textContent = group.name;
+    const count = document.createElement("span");
+    count.className = "subject-progress-count";
+    count.textContent = subjectGroupProgressText(group);
+    item.classList.toggle("is-incomplete", group.unavailable > 0);
+    toggle.append(chevron, dot, name);
+    toggle.addEventListener("click", () => {
+      if (expanded) homeExpandedSubjectProgress.delete(group.key);
+      else homeExpandedSubjectProgress.add(group.key);
+      renderHomeSubjectProgress();
+    });
+    const head = document.createElement("div");
+    head.className = "subject-progress-head";
+    head.append(toggle, subjectProgressBar(group.completed, group.planned, `${group.name}: ${count.textContent}`), count);
+    const docs = document.createElement("ul");
+    docs.className = "subject-progress-docs";
+    docs.id = `subject-progress-docs-${group.key}`;
+    docs.hidden = !expanded;
+    group.documents.forEach((doc) => {
+      const row = document.createElement("li");
+      row.className = "subject-progress-doc";
+      row.dataset.documentId = doc.document_id;
+      const docName = document.createElement("span");
+      docName.className = "subject-progress-doc-name";
+      docName.textContent = doc.name;
+      const docCount = document.createElement("span");
+      docCount.className = "subject-progress-count";
+      docCount.textContent = doc.available ? subjectSessionText(doc.completed, doc.planned) : "Progress unavailable";
+      row.classList.toggle("is-unavailable", !doc.available);
+      row.append(docName, subjectProgressBar(doc.completed, doc.planned, `${doc.name}: ${docCount.textContent}`), docCount);
+      docs.appendChild(row);
+    });
+    item.append(head, docs);
+    list.appendChild(item);
+  });
+  section.append(title, hint);
+  if (warning) section.appendChild(warning);
+  section.appendChild(list);
 }
 
 function homeMaterialsHeading() {
@@ -539,13 +685,49 @@ function plannerRenderStepSubjectFilter(holderId, onChange) {
   if (!holder.hidden) holder.append(subjectFilterCaption(), plannerSubjectFilterSelect(onChange));
 }
 
+// Desktop calendar: the Subject select, and -- while it narrows the view -- how many of the week's
+// sessions are shown plus a one-click way back to all subjects.
 function pcalRenderSubjectFilter() {
   const holder = document.getElementById("pcal-subject-filter");
   if (!holder) return;
   holder.innerHTML = "";
   holder.hidden = !userSubjects.length;
   if (holder.hidden) return;
-  holder.append(subjectFilterCaption(), plannerSubjectFilterSelect(() => renderPlannerWorkspace()));
+  const label = document.createElement("label");
+  label.className = "pcal-subject-filter-label";
+  label.append(subjectFilterCaption(), plannerSubjectFilterSelect(() => renderPlannerWorkspace()));
+  holder.appendChild(label);
+  if (!pcalSubjectFilterOn()) return;
+  const dates = pcalWeekDates();
+  const week = pcalWeekItems(plannerDateKey(dates[0]), plannerDateKey(dates[6]));
+  const shown = week.filter(pcalShownBySubject).length;
+  holder.appendChild(Object.assign(document.createElement("span"), {
+    className: "pcal-subject-filter-note", textContent: `Showing ${shown} of ${week.length} session${week.length === 1 ? "" : "s"} this week`,
+  }));
+  const reset = document.createElement("button");
+  reset.type = "button";
+  reset.className = "text-button pcal-subject-filter-reset";
+  reset.textContent = "Show all subjects";
+  reset.addEventListener("click", () => { plannerSubjectFilter = SUBJECT_ALL; renderPlannerWorkspace(); });
+  holder.appendChild(reset);
+}
+
+// The desktop filter hides other subjects' sessions; it pauses while a schedule change is under review
+// (the review bar replaces the filter's line), so every proposed change stays visible.
+function pcalSubjectFilterOn() {
+  return plannerSubjectFilter !== SUBJECT_ALL && !pcalReviewActive();
+}
+
+function pcalShownBySubject(item) {
+  return !pcalSubjectFilterOn() || plannerSubjectMatches(item.session?.document_id ?? item.document_id);
+}
+
+// The subject shown on a session or queue item: its subject, or "Unassigned" once the user has
+// subjects at all (nothing is added for a user without subjects). Read at render time, so a moved
+// document or a deleted subject shows up on the next render.
+function plannerSubjectTag(documentId, className) {
+  if (!userSubjects.length || !documentId) return null;
+  return subjectBadge(subjectOfDocument(documentId), className);
 }
 
 // A calendar block / agenda card / material of another subject stays in place, only muted, so
@@ -559,4 +741,96 @@ function plannerMarkSubject(element, documentId) {
   }
   element.classList.toggle("is-subject-muted", !plannerSubjectMatches(documentId));
   return element;
+}
+
+// ---- Planner: documents grouped by subject ----------------------------------------------------------
+// The Materials step and the Add materials sheet list documents under their subject (Unassigned last).
+// Grouping is presentation only: a plan material is still one document, chosen or removed one at a time.
+
+const plannerCollapsedSubjectGroups = new Set();   // group keys the user collapsed (UI state only)
+
+// [{key, subject, name, documents}] in subject order, Unassigned last; empty groups are left out.
+function groupDocumentsBySubject(documents, idOf) {
+  const groups = userSubjects.map((subject) => ({ key: subject.subject_id, subject, name: subject.name, documents: [] }));
+  const unassigned = { key: SUBJECT_UNASSIGNED, subject: null, name: "Unassigned", documents: [] };
+  const byKey = new Map(groups.map((group) => [group.key, group]));
+  documents.forEach((doc) => (byKey.get(subjectOfDocument(idOf(doc))?.subject_id) || unassigned).documents.push(doc));
+  return [...groups, unassigned].filter((group) => group.documents.length);
+}
+
+// One collapsible subject group: a header (expand/collapse, name, count, optional select-all box) and
+// its rows. `selectAll` = {checked, indeterminate, label, onChange(checkbox)} or null.
+function plannerSubjectGroup(group, { idPrefix, countText, rows, tag = "section", selectAll = null, action = null, onToggle }) {
+  const collapsed = plannerCollapsedSubjectGroups.has(group.key);
+  const section = document.createElement(tag);
+  section.className = "planner-subject-group";
+  section.dataset.subjectGroup = group.key;
+  section.classList.toggle("is-collapsed", collapsed);
+  if (group.subject) section.style.setProperty("--subject-color", group.subject.color);
+  const head = document.createElement("div");
+  head.className = "planner-subject-group-head";
+  const bodyId = `${idPrefix}-${group.key}`;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "planner-subject-group-toggle";
+  toggle.setAttribute("aria-expanded", String(!collapsed));
+  toggle.setAttribute("aria-controls", bodyId);
+  const chevron = document.createElement("span");
+  chevron.className = "planner-subject-group-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  const dot = document.createElement("span");
+  dot.className = "subject-card-dot";
+  dot.setAttribute("aria-hidden", "true");
+  const name = document.createElement("span");
+  name.className = "planner-subject-group-name";
+  name.textContent = group.name;
+  const count = document.createElement("span");
+  count.className = "planner-subject-group-count";
+  count.textContent = countText;
+  toggle.append(chevron, dot, name, count);
+  toggle.addEventListener("click", () => {
+    if (collapsed) plannerCollapsedSubjectGroups.delete(group.key);
+    else plannerCollapsedSubjectGroups.add(group.key);
+    onToggle();
+  });
+  head.appendChild(toggle);
+  if (selectAll) {
+    const label = document.createElement("label");
+    label.className = "planner-subject-group-all";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = selectAll.checked;
+    box.indeterminate = selectAll.indeterminate;
+    box.setAttribute("aria-label", selectAll.label);
+    box.addEventListener("change", () => selectAll.onChange(box));
+    const text = document.createElement("span");
+    text.textContent = "Select all";
+    label.append(box, text);
+    head.appendChild(label);
+  }
+  if (action) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "pcal-button pcal-secondary planner-subject-group-action";
+    button.textContent = action.label;
+    button.setAttribute("aria-label", action.ariaLabel);
+    button.addEventListener("click", () => action.onClick(button));
+    head.appendChild(button);
+  }
+  if (action) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "pcal-button pcal-secondary planner-subject-group-action";
+    button.textContent = action.label;
+    button.setAttribute("aria-label", action.ariaLabel);
+    button.addEventListener("click", () => action.onClick(button));
+    head.appendChild(button);
+  }
+  const body = document.createElement(tag === "li" ? "ul" : "div");
+  body.className = "planner-subject-group-body";
+  body.id = bodyId;
+  body.hidden = collapsed;
+  rows.forEach((row) => body.appendChild(row));
+  section.append(head, body);
+  return section;
 }
