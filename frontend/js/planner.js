@@ -3097,7 +3097,15 @@ function pcalQueueItem(entry, kind) {
   if (entry.reason?.message) item.appendChild(pcalEl("small", "pcal-queue-reason", entry.reason.message));
   const due = entry.deadline
     ? `Due ${new Date(`${entry.deadline}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })} · ` : "";
-  item.appendChild(pcalEl("span", "pcal-queue-need", `${due}Needs a time slot`));
+  // After Accept Plan the server says why it has no session yet: held back by the plan's pacing
+  // (free time is left: it can be dragged in) or genuinely no free slot before the deadline.
+  const why = entry.queue_reason;
+  const noRoom = why && why.code !== "held_by_pacing";
+  item.appendChild(pcalEl("span", "pcal-queue-need", `${due}${noRoom ? "No free time slot" : "Needs a time slot"}`));
+  if (why?.message) {
+    item.dataset.queueReason = why.code;
+    item.appendChild(pcalEl("small", "pcal-queue-why", why.message));
+  }
   if (entry.candidate_key && entry.estimated_minutes) {
     item.classList.add("is-draggable");
     item.dataset.candidateKey = entry.candidate_key;

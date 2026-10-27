@@ -4740,3 +4740,6 @@ body[data-page="session"] .persistent-tutor .chat-form input:disabled,
 .subject-progress-warning .subject-progress-retry { padding: 0; font-size: inherit; color: var(--ds-warning); text-decoration: underline; text-underline-offset: 3px; }
 .subject-progress-item.is-incomplete .subject-progress-head .subject-progress-count, .subject-progress-doc.is-unavailable .subject-progress-count { color: var(--ds-warning); }
 .subject-progress-doc.is-unavailable .subject-progress-bar { background: repeating-linear-gradient(135deg, var(--ds-surface-3) 0 6px, var(--ds-surface-2) 6px 12px); }
+
+/* Study Queue: why an activity has no session yet (server reason after Accept Plan). */
+.pcal-queue-why { margin-top: 2px; font-size: 11px; line-height: 1.35; color: var(--ds-text-2); }

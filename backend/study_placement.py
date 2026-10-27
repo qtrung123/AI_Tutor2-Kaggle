@@ -19,10 +19,11 @@ other study sessions. Durations always come from the server (the proposal or the
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 
-from backend.study_combined_sessions import activity_key, in_flight_activities, keeps_single_sessions
-from backend.study_time import free_minutes_by_date
-from backend.study_scheduler import select_candidates
-from backend.study_scheduler_contracts import ProposedSession
+from backend.study_combined_sessions import activity_key, activity_types, in_flight_activities, keeps_single_sessions
+from backend.study_time import free_minutes_by_date, to_hhmm
+from backend.study_scheduler import DEFAULT_CONFIG, select_candidates
+from backend.study_scheduler_contracts import REASON_FINAL_REVIEW, ProposedSession
+from backend.study_session_duration import MIN_SESSION_MINUTES
 
 PLACEMENT_STEP_MINUTES = 15
 
@@ -192,10 +193,82 @@ def planning_material(material, document_sessions):
     return replace(material, state=state)
 
 
+def queue_reason(duration: int, deadline: str | None, *, now: datetime, availability, busy,
+                 horizon_days: int) -> dict:
+    """Why a still-wanted activity has no session yet, for the Study Queue. Checks the same rules a
+    drag onto the calendar is validated against (15-minute grid, inside availability and Google free
+    time, not past, not after the deadline, not overlapping a session):
+    - a valid window exists -> the plan's own pacing held it back (daily study target, heavy sessions
+      per day, spacing between steps); the learner may still drag it there;
+    - none exists -> there is genuinely no room before the deadline (or in the planning horizon)."""
+    today = now.date()
+    last = date.fromisoformat(deadline) if deadline else today + timedelta(days=horizon_days)
+    taken: dict = {}
+    for session in busy:
+        same_day = session["scheduled_end"][:10] == session["scheduled_start"][:10]
+        taken.setdefault(session["scheduled_start"][:10], []).append(
+            (session["scheduled_start"][11:16], session["scheduled_end"][11:16] if same_day else "24:00"))
+    day = today
+    while day <= last:
+        for begin, finish in free_minutes_by_date(day, day, list(availability), [], now=now).get(day, []):
+            start = -(-begin // PLACEMENT_STEP_MINUTES) * PLACEMENT_STEP_MINUTES
+            while start + duration <= finish:
+                window_start, window_end = to_hhmm(start), to_hhmm(start + duration)
+                if not any(b_start < window_end and b_end > window_start for b_start, b_end in taken.get(day.isoformat(), [])):
+                    return {"code": "held_by_pacing", "message": (
+                        "Free time is left, but your daily study target and the spacing between study steps "
+                        "kept it out of the plan. Drag it onto a free slot to add it.")}
+                start += PLACEMENT_STEP_MINUTES
+        day += timedelta(days=1)
+    if deadline:
+        return {"code": "no_room_before_deadline", "message": (
+            f"No free {duration}-minute slot before the deadline ({deadline}). "
+            "Add available time or move another session.")}
+    return {"code": "no_room", "message": (
+        f"No free {duration}-minute slot in the next {horizon_days} days. Add available time to fit it in.")}
+
+
+def _final_window_start(deadline: date, availability, rules) -> date:
+    """The first day of a deadline's final review window, widened like the scheduler's
+    _widen_empty_final_windows: a window without a usable day starts on the last usable day before
+    it, at most final_review_fallback_days before the deadline. Usable = at least one session's
+    worth of available time that day (the learner's availability, not the sessions now in it)."""
+    start = deadline - timedelta(days=rules.final_review_window_days)
+    floor = deadline - timedelta(days=rules.final_review_fallback_days)
+    free = free_minutes_by_date(min(start, floor), deadline - timedelta(days=1),
+                                [slot for slot in availability if not slot.get("busy")], [])
+    usable = sorted(day for day, intervals in free.items()
+                    if min(rules.daily_target_minutes, sum(end - begin for begin, end in intervals)) >= MIN_SESSION_MINUTES)
+    if any(day >= start for day in usable):
+        return start
+    earlier = [day for day in usable if floor <= day < start]
+    return earlier[-1] if earlier else start
+
+
+def _final_review_covered(document_sessions: list[dict], deadline: str | None, availability, config) -> bool:
+    """The scheduler's own rule (_DocumentPlan.final_satisfied_by_retrieval): a quiz / quiz retry
+    placed inside the final review window, as the document's last session before the deadline,
+    already is the final review, so the plan never schedules a separate one. Without this the queue
+    listed that review as "needs a time slot" right after Accept Plan although nothing was missing."""
+    if not deadline:
+        return False
+    rules = config or DEFAULT_CONFIG
+    window_start = _final_window_start(date.fromisoformat(deadline), availability, rules).isoformat()
+    kept = sorted((s for s in document_sessions
+                   if s["status"] in ("scheduled", "in_progress", "completed") and s["scheduled_start"][:10] < deadline),
+                  key=lambda s: s["scheduled_start"])
+    if not kept:
+        return False
+    last = kept[-1]
+    return (last["scheduled_start"][:10] >= window_start
+            and activity_types(last["activity_type"], last.get("steps"))[-1] in rules.retrieval_activities)
+
+
 def live_candidates(context, plan_sessions: list[dict], config=None) -> list[dict]:
     """The scheduler's current candidate activities for each material of a confirmed plan that no
     scheduled / in-progress session of that document and activity already covers (a combined
-    session covers a combined candidate of the same two activities)."""
+    session covers a combined candidate of the same two activities). A final review that a quiz in
+    its window already covers is left out, exactly as the scheduler leaves it out."""
     covered: dict = {}
     for session in plan_sessions:
         if session["status"] in ("scheduled", "in_progress"):
@@ -214,9 +287,12 @@ def live_candidates(context, plan_sessions: list[dict], config=None) -> list[dic
         own = [s for s in plan_sessions if s["document_id"] == material.document_id]
         if config is not None and keeps_single_sessions(own):
             rules = replace(config, combine_sessions=False)   # an older plan keeps single-activity suggestions
+        final_covered = _final_review_covered(own, material.deadline, context.availability, rules)
         material = planning_material(material, own)
         for candidate in select_candidates(material, context.now, utc_offset=context.utc_offset,
                                            **({"config": rules} if rules is not None else {})):
+            if final_covered and candidate.reason.code == REASON_FINAL_REVIEW:
+                continue
             pair = (candidate.document_id, candidate.key)
             ordinal = seen.get(pair, 0)
             seen[pair] = ordinal + 1

@@ -661,15 +661,21 @@ def _live_context(owner_id: str, plan_id: str, utc_offset_minutes: int, local_no
 def list_live_candidates(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None = None) -> list[dict]:
     """Activities the scheduler still wants for a confirmed plan that no scheduled / in-progress
     session covers -- the only things a learner may drag onto the calendar. Read-only."""
-    _, context, plan_sessions = _live_context(owner_id, plan_id, utc_offset_minutes, local_now)
+    now, context, plan_sessions = _live_context(owner_id, plan_id, utc_offset_minutes, local_now)
+    config = study_preferences.scheduler_config(owner_id)
+    busy = study_planner_store.list_busy_sessions(owner_id, start_from=now.date().isoformat())
     found = []
-    for item in study_placement.live_candidates(context, plan_sessions, study_preferences.scheduler_config(owner_id)):
+    for item in study_placement.live_candidates(context, plan_sessions, config):
         candidate = item["candidate"]
         found.append({"candidate_key": item["candidate_key"], "document_id": candidate.document_id,
                       "document_title": item["title"], "activity_type": candidate.activity_type,
                       "estimated_minutes": candidate.estimated_minutes, "deadline": candidate.deadline,
                       "reason": _reason(candidate.reason), "artifact_id": candidate.artifact_id,
-                      "steps": [dict(step) for step in candidate.steps]})
+                      "steps": [dict(step) for step in candidate.steps],
+                      # Why it has no session yet (pacing vs. genuinely no room), for the Study Queue.
+                      "queue_reason": study_placement.queue_reason(
+                          candidate.estimated_minutes, candidate.deadline, now=now, availability=context.availability,
+                          busy=busy, horizon_days=config.default_horizon_days)})
     return found
 
 

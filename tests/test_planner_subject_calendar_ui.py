@@ -57,13 +57,17 @@ const note = () => document.querySelector(".pcal-subject-filter-note")?.textCont
     session("s3", "pbi.pdf", "PowerBI", "2026-09-26T10:00:00", "2026-09-26T11:00:00",
       {steps: [{activity_type: "summary", minutes: 30, status: "pending"}, {activity_type: "flashcards", minutes: 30, status: "pending"}]})]};
   window.__planner.sessions = window.__planner.sessionsByPlan["plan-1"];
-  window.__candidates = [{candidate_key: "c1", document_id: "mkt.pdf", document_title: "Marketing", activity_type: "quiz", estimated_minutes: 30, reason: {message: "Check"}},
-                         {candidate_key: "c2", document_id: "pbi.pdf", document_title: "PowerBI", activity_type: "quiz", estimated_minutes: 30, reason: {message: "Check"}}];
+  window.__candidates = [{candidate_key: "c1", document_id: "mkt.pdf", document_title: "Marketing", activity_type: "quiz", estimated_minutes: 30, reason: {message: "Check"},
+                          queue_reason: {code: "held_by_pacing", message: "Free time is left, but your daily study target and the spacing between study steps kept it out of the plan. Drag it onto a free slot to add it."}},
+                         {candidate_key: "c2", document_id: "pbi.pdf", document_title: "PowerBI", activity_type: "quiz", estimated_minutes: 30, reason: {message: "Check"},
+                          queue_reason: {code: "no_room_before_deadline", message: "No free 30-minute slot before the deadline (2026-09-27). Add available time or move another session."}}];
   setPage("overview"); await sleep(600);
   setPage("planner"); await sleep(900);
   out.all = {events: events(), options: [...filter().options].map((o) => o.textContent), note: note()};
   document.getElementById("pcal-queue-toggle").click(); await sleep(200);
   out.queueAll = queue();
+  out.queueWhy = [...document.querySelectorAll("#pcal-queue .pcal-queue-item")].map((item) => [item.dataset.queueReason || null,
+    item.querySelector(".pcal-queue-need").textContent, item.querySelector(".pcal-queue-why")?.textContent || null]);
   const plannerCallsBefore = window.__planner.calls.length, otherBefore = window.__otherCalls.length;
   await choose("phy");
   out.physics = {events: events(), note: note(), queue: queue(), queueCount: document.getElementById("pcal-queue-count").textContent};
@@ -175,6 +179,13 @@ class LivePlanSubjectCalendarTests(unittest.TestCase):
     def test_queue_items_show_their_subject(self):
         self.assertEqual([(cls, subject) for cls, _title, subject in self.out["queueAll"]],
                          [("pcal-queue-item", "Biology"), ("pcal-queue-item", "Unassigned")])
+
+    def test_queue_items_say_why_they_have_no_session(self):
+        (pacing_code, pacing_need, pacing_why), (room_code, room_need, room_why) = self.out["queueWhy"]
+        self.assertEqual((pacing_code, pacing_need), ("held_by_pacing", "Needs a time slot"))
+        self.assertIn("Drag it onto a free slot", pacing_why)
+        self.assertEqual((room_code, room_need), ("no_room_before_deadline", "No free time slot"))
+        self.assertIn("before the deadline", room_why)
 
     def test_filter_shows_only_matching_sessions_and_queue_items(self):
         physics = self.out["physics"]
