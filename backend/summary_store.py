@@ -61,18 +61,26 @@ def _decode(row) -> dict | None:
     }
 
 
-def get_compatible_summary(identity: dict) -> dict | None:
+def _versions(summary_versions) -> tuple[str, ...]:
+    return (summary_versions,) if isinstance(summary_versions, str) else tuple(summary_versions)
+
+
+def get_compatible_summary(identity: dict, accepted_versions=None) -> dict | None:
+    """The newest summary for this identity. `accepted_versions` (default: identity["summary_version"])
+    also lets a still-valid earlier summary format count, so it is not regenerated."""
     initialize_summary_store()
+    versions = _versions(accepted_versions or identity["summary_version"])
     with _connect() as connection:
         row = connection.execute(
-            """
+            f"""
             SELECT * FROM document_summaries
             WHERE owner_id=? AND document_id=? AND document_hash=?
-              AND topic_schema_version=? AND summary_version=? AND model_id=? AND runtime_model=?
+              AND topic_schema_version=? AND summary_version IN ({", ".join("?" for _ in versions)})
+              AND model_id=? AND runtime_model=?
             ORDER BY version_number DESC LIMIT 1
             """,
             (identity["owner_id"], identity["document_id"], identity["document_hash"],
-             identity["topic_schema_version"], identity["summary_version"], identity["model_id"],
+             identity["topic_schema_version"], *versions, identity["model_id"],
              identity["runtime_model"]),
         ).fetchone()
     return _decode(row)
@@ -119,18 +127,20 @@ def delete_document_summaries(owner_id: str, document_id: str) -> None:
 
 
 def get_latest_summary_info(owner_id: str, document_id: str, document_hash: str, topic_schema_version: int,
-                            summary_version: str) -> dict | None:
+                            summary_version) -> dict | None:
     """Model-agnostic existence check for the Study Planner: metadata of the newest summary
-    generated from the document's CURRENT content/topic schema/summary format, by any model.
-    Never loads the summary body."""
+    generated from the document's CURRENT content/topic schema/summary format(s), by any model.
+    `summary_version` is one format or the accepted formats. Never loads the summary body."""
     initialize_summary_store()
+    versions = _versions(summary_version)
     with _connect(autocommit=True) as connection:  # one read: no BEGIN/COMMIT round trips
         row = connection.execute(
-            """
+            f"""
             SELECT summary_id, model_id, created_at FROM document_summaries
-            WHERE owner_id=? AND document_id=? AND document_hash=? AND topic_schema_version=? AND summary_version=?
+            WHERE owner_id=? AND document_id=? AND document_hash=? AND topic_schema_version=?
+              AND summary_version IN ({", ".join("?" for _ in versions)})
             ORDER BY version_number DESC LIMIT 1
             """,
-            (owner_id, document_id, document_hash, topic_schema_version, summary_version),
+            (owner_id, document_id, document_hash, topic_schema_version, *versions),
         ).fetchone()
     return dict(row) if row else None

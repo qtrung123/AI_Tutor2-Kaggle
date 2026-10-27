@@ -205,6 +205,18 @@ class DocumentStudyStateTests(unittest.TestCase):
         self.assertEqual((state.learning_state, state.state_reason.metadata["evidence"]), ("learning", ["quiz"]))
         self.assertIsNone(state.last_activity_at)
 
+    def test_previous_summary_format_counts_only_for_structured_documents(self):
+        from backend.summary_service import PREVIOUS_STRUCTURED_SUMMARY_VERSIONS
+        indexed_document_store.upsert_indexed_document(self.alice, "doc-s", {
+            "display_name": "Structured", "hash": HASH, "chunks": 12, "path": "x", "topic_schema_version": SCHEMA,
+            "topics": [{"topic_id": "t1", "name": "T1", "subtopics": [{"subtopic_id": "t1_1", "name": "S1"}]},
+                       {"topic_id": "t2", "name": "T2"}],
+        })
+        self.add_summary(self.alice, "doc-s", version=PREVIOUS_STRUCTURED_SUMMARY_VERSIONS[0])
+        self.add_summary(self.alice, "doc-a", version=PREVIOUS_STRUCTURED_SUMMARY_VERSIONS[0])   # one topic, no subtopics
+        self.assertTrue(self.state(document_id="doc-s").summary.available)
+        self.assertFalse(self.state().summary.available)
+
     def test_user_isolation(self):
         self.add_summary(self.alice, "doc-a")
         self.add_flashcards(self.alice, "doc-a", 4)

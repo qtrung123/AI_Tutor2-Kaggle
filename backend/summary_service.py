@@ -1,4 +1,5 @@
-"""Grounded, two-call full-document summarization over existing indexed chunks."""
+"""Grounded full-document summarization over existing indexed chunks: topic notes in a few bounded
+calls (missing topics retried once), then one synthesis call."""
 
 import json
 import re
@@ -13,8 +14,24 @@ from backend.document_retrieval import get_schema_topic_evidence, get_topic_chun
 from backend.summary_store import get_compatible_summary, save_summary
 from config import DEFAULT_GENERATION_MODEL
 
-SUMMARY_VERSION = "full_document_summary_v3_structured_study_notes_low_value_filter"
+SUMMARY_VERSION = "full_document_summary_v4_derived_sections_for_unstructured_documents"
+# Earlier formats a saved summary is still served in. v4 changed the notes only for documents with no
+# detected structure (one topic without subtopics); topic batching changed how notes are requested,
+# not their shape. So a structured document's v3 summary stays valid instead of forcing every user to
+# regenerate (new LLM calls); an unstructured document's v3 summary (no subsections) does not.
+PREVIOUS_STRUCTURED_SUMMARY_VERSIONS = ("full_document_summary_v3_structured_study_notes_low_value_filter",)
 MAX_CHARS_PER_CHUNK = 1200
+MAX_DERIVED_SECTIONS = 6
+DERIVE_SECTIONS_MARKER = "DERIVE_FROM_EVIDENCE"
+# Topic notes are generated a few topics per call: asked for ten topics in one JSON reply, Qwen 2.5 7B
+# may close the list after the first object ("returned 1 topic summaries for 10 requested"). Each
+# call's prompt plus its reserved output must fit SUMMARY_NUM_CTX, so Ollama never silently drops the
+# start of the prompt (the instructions) and a runaway reply stops at num_predict.
+SUMMARY_NUM_CTX = 32768
+SUMMARY_TOPICS_PER_CALL = 4
+SUMMARY_OUTPUT_TOKENS_PER_TOPIC = 1500
+SUMMARY_TOPIC_ATTEMPTS = 2   # the first call per batch, plus one retry for only the topics it missed
+_CHARS_PER_TOKEN_ESTIMATE = 2   # conservative for mixed English/Vietnamese text (see flashcard_service)
 _WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]{2,}")
 _STOP_WORDS = {
     "about", "after", "also", "and", "are", "because", "been", "being", "between", "both",
@@ -48,7 +65,22 @@ def _usage(response) -> dict:
     return usage
 
 
-def _topic_prompt(document_id: str, topic_evidence: list[tuple[dict, list[dict]]]) -> str:
+def _derives_sections(topics: list[dict]) -> bool:
+    """One topic with no extracted subtopics (e.g. the topic_document_overview fallback) means the
+    document has no usable structure, so its subsections are derived from the evidence instead."""
+    return len(topics) == 1 and not topics[0].get("subtopics")
+
+
+def accepted_summary_versions(topics: list[dict]) -> tuple[str, ...]:
+    """The summary formats that count as this document's current summary (newest format first)."""
+    return (SUMMARY_VERSION,) if _derives_sections(topics) else (SUMMARY_VERSION, *PREVIOUS_STRUCTURED_SUMMARY_VERSIONS)
+
+
+def _topic_prompt(document_id: str, topic_evidence: list[tuple[dict, list[dict]]], derive: bool | None = None) -> str:
+    # `derive` is decided for the whole document: a one-topic batch of a structured document is not
+    # an unstructured document.
+    if derive is None:
+        derive = _derives_sections([topic for topic, _chunks in topic_evidence])
     sections = []
     for topic, chunks in topic_evidence:
         evidence = []
@@ -65,14 +97,25 @@ def _topic_prompt(document_id: str, topic_evidence: list[tuple[dict, list[dict]]
             {"subtopic_id": str(item["subtopic_id"]), "subtopic_name": str(item.get("name") or item["subtopic_id"])}
             for item in topic.get("subtopics") or []
         ]
+        subtopic_line = (
+            f"SUBSECTIONS: {DERIVE_SECTIONS_MARKER}" if derive
+            else f"REQUIRED_SUBTOPICS_IN_ORDER: {json.dumps(subtopics, ensure_ascii=False)}"
+        )
         sections.append(
             f"TOPIC_ID: {topic['topic_id']}\n"
             f"TOPIC_NAME: {topic.get('name') or topic['topic_id']}\n"
-            f"REQUIRED_SUBTOPICS_IN_ORDER: {json.dumps(subtopics, ensure_ascii=False)}\n"
+            f"{subtopic_line}\n"
             f"EVIDENCE:\n{joined_evidence}\n"
             "END_TOPIC"
         )
     joined_sections = "\n\n".join(sections)
+    derive_instructions = (
+        f"\nA topic block marked SUBSECTIONS: {DERIVE_SECTIONS_MARKER} comes from a document with no detected headings.\n"
+        f"For that block only, organize the evidence into 2 to {MAX_DERIVED_SECTIONS} subsections in source order, one per distinct\n"
+        "major idea the evidence actually covers, and give each a short \"heading\" (2 to 6 words) built from the evidence's\n"
+        "own terminology instead of a subtopic_id. Return an empty subsections list only if the evidence is too short to divide.\n"
+    ) if derive else ""
+    subsection_identity = '"heading":"short evidence-based heading"' if derive else '"subtopic_id":"exact id"'
     return f"""Create complete, easy-to-study notes for every requested topic using ONLY the evidence inside that topic's own block.
 Follow these priorities in order:
 1. Cover all important ideas from the evidence.
@@ -87,7 +130,7 @@ Return exactly one summary object per requested TOPIC_ID, in the same order, wit
 For each topic, write one concise overview and use only subsection headings from REQUIRED_SUBTOPICS_IN_ORDER.
 Include each supported, non-redundant subtopic in that existing order. You may omit a subtopic only when its evidence
 is not meaningful enough to summarize or its content would merely repeat the parent topic overview. Do not invent,
-rename, or merge subtopics. Topics with no useful required subtopics must return an empty subsections list.
+rename, or merge subtopics. Topics with no useful required subtopics must return an empty subsections list.{derive_instructions}
 Never create placeholder sections such as "not detailed in the provided evidence", and do not return sections that
 only restate the subsection heading without meaningful explanation.
 Avoid repeating the same fact in the topic overview and subsections.
@@ -95,7 +138,7 @@ Each subsection content must use exactly one natural format: paragraph, bullets,
 when the evidence genuinely contains compact comparable attributes. Do not return per-topic key takeaways.
 Return JSON only using this schema:
 {{"topics":[{{"topic_id":"exact id","overview":"concise grounded overview","subsections":[
-{{"subtopic_id":"exact id","content_type":"paragraph|bullets|table","paragraph":"", "bullets":[],
+{{{subsection_identity},"content_type":"paragraph|bullets|table","paragraph":"", "bullets":[],
 "table":{{"headers":[],"rows":[[]]}}}}]}}]}}
 
 DOCUMENT: {document_id}
@@ -182,6 +225,25 @@ def _bind_optional_subtopics(raw_items, expected_subtopics: list[dict]) -> tuple
     return bound, len(bound) != len(raw_items)
 
 
+def _bind_derived_sections(raw_items, evidence_text: str) -> list[tuple[dict, dict]]:
+    """Accept model-derived headings for an unstructured document only when they are grounded and distinct."""
+    evidence_lower = evidence_text.lower()
+    bound, seen = [], set()
+    for item in raw_items if isinstance(raw_items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        heading = re.sub(r"\s+", " ", str(item.get("heading") or "")).strip()
+        heading_tokens = _tokens(heading) - _TRIVIAL_SUBTOPIC_WORDS
+        # Substring match also grounds headings in PDFs extracted without spaces between words.
+        if not heading_tokens or heading.casefold() in seen or not any(token in evidence_lower for token in heading_tokens):
+            continue
+        seen.add(heading.casefold())
+        bound.append(({"name": heading}, item))
+        if len(bound) == MAX_DERIVED_SECTIONS:
+            break
+    return bound
+
+
 def _content_text(content: dict) -> str:
     if content["type"] == "paragraph":
         return content["text"]
@@ -228,46 +290,177 @@ def _grounding_warnings(summary_text: str, takeaways: list[str], own_tokens: set
     return list(dict.fromkeys(warnings))
 
 
+def _validated_topic_summary(index: int, item: dict, topics: list[dict], evidence: list[tuple[dict, list[dict]]],
+                             evidence_tokens: list[set[str]], derive: bool) -> dict:
+    """Validate one topic's reply against its own evidence; the other topics' evidence (from the whole
+    document, whichever call produced them) is used only to flag cross-topic contamination."""
+    topic = topics[index]
+    overview = str(item["overview"]).strip()
+    raw_subsections = item.get("subsections")
+    if derive:
+        bound_subsections = _bind_derived_sections(raw_subsections, _evidence_text(evidence[index][1]))
+    else:
+        bound_subsections, _ = _bind_optional_subtopics(raw_subsections, list(topic.get("subtopics") or []))
+    normalized_subsections = []
+    for subtopic, subsection in bound_subsections:
+        content = _normalized_subsection_content(subsection)
+        if _is_low_value_subsection(subtopic, content):
+            continue
+        # Derived sections get backend-owned IDs numbered after filtering, so they stay contiguous.
+        subtopic_id = str(subtopic.get("subtopic_id") or f"{topic['topic_id']}_section_{len(normalized_subsections) + 1}")
+        normalized_subsections.append({
+            "subtopic_id": subtopic_id,
+            "subtopic_name": str(subtopic.get("name") or subtopic_id),
+            "content": content,
+        })
+    structured_text = " ".join([overview, *(_content_text(section["content"]) for section in normalized_subsections)])
+    generated_tokens = _tokens(structured_text)
+    if not generated_tokens or any(pattern in structured_text.lower() for pattern in _OBVIOUSLY_UNRELATED_PATTERNS):
+        raise ValueError(f"Summary for topic {topic['topic_id']} is empty or obviously unrelated to its evidence.")
+    own_tokens = evidence_tokens[index]
+    overlap = generated_tokens & own_tokens
+    required_overlap = 1 if len(generated_tokens) <= 4 else 2
+    other_tokens = set().union(*(tokens for other_index, tokens in enumerate(evidence_tokens) if other_index != index))
+    warnings = _grounding_warnings(
+        overview, [_content_text(section["content"]) for section in normalized_subsections], own_tokens, other_tokens
+    )
+    if len(overlap) < required_overlap:
+        warnings.insert(0, "low_lexical_support_from_topic_evidence")
+    return {
+        "topic_id": str(topic["topic_id"]),
+        "topic_name": str(topic.get("name") or topic["topic_id"]),
+        "overview": overview,
+        "subsections": normalized_subsections,
+        "grounding_warnings": list(dict.fromkeys(warnings)),
+    }
+
+
 def _validated_topic_summaries(raw_topics, topics: list[dict], evidence: list[tuple[dict, list[dict]]]) -> list[dict]:
     bound, _ = _bind_topic_responses(raw_topics, topics)
     evidence_tokens = [_tokens(_evidence_text(chunks)) for _topic, chunks in evidence]
-    validated = []
-    for index, (topic, item) in enumerate(zip(topics, bound)):
-        overview = str(item["overview"]).strip()
-        expected_subtopics = list(topic.get("subtopics") or [])
-        raw_subsections = item.get("subsections")
-        bound_subsections, _ = _bind_optional_subtopics(raw_subsections, expected_subtopics)
-        normalized_subsections = []
-        for subtopic, subsection in bound_subsections:
-            content = _normalized_subsection_content(subsection)
-            if _is_low_value_subsection(subtopic, content):
-                continue
-            normalized_subsections.append({
-                "subtopic_id": str(subtopic["subtopic_id"]),
-                "subtopic_name": str(subtopic.get("name") or subtopic["subtopic_id"]),
-                "content": content,
-            })
-        structured_text = " ".join([overview, *(_content_text(section["content"]) for section in normalized_subsections)])
-        generated_tokens = _tokens(structured_text)
-        if not generated_tokens or any(pattern in structured_text.lower() for pattern in _OBVIOUSLY_UNRELATED_PATTERNS):
-            raise ValueError(f"Summary for topic {topic['topic_id']} is empty or obviously unrelated to its evidence.")
-        own_tokens = evidence_tokens[index]
-        overlap = generated_tokens & own_tokens
-        required_overlap = 1 if len(generated_tokens) <= 4 else 2
-        other_tokens = set().union(*(tokens for other_index, tokens in enumerate(evidence_tokens) if other_index != index))
-        warnings = _grounding_warnings(
-            overview, [_content_text(section["content"]) for section in normalized_subsections], own_tokens, other_tokens
-        )
-        if len(overlap) < required_overlap:
-            warnings.insert(0, "low_lexical_support_from_topic_evidence")
-        validated.append({
-            "topic_id": str(topic["topic_id"]),
-            "topic_name": str(topic.get("name") or topic["topic_id"]),
-            "overview": overview,
-            "subsections": normalized_subsections,
-            "grounding_warnings": list(dict.fromkeys(warnings)),
-        })
-    return validated
+    derive = _derives_sections(topics)
+    return [_validated_topic_summary(index, item, topics, evidence, evidence_tokens, derive)
+            for index, item in enumerate(bound)]
+
+
+def _usable_topic_items(raw_topics, requested_ids: list[str]) -> dict[str, dict]:
+    """The reply's objects for requested topics that carry an overview, keyed by topic_id. Unlike
+    _bind_topic_responses this keeps every usable topic of a partial reply: unknown IDs are ignored,
+    and a topic returned twice or without an overview is treated as missing (retried, never guessed)."""
+    by_id: dict[str, dict] = {}
+    repeated: set[str] = set()
+    for item in raw_topics if isinstance(raw_topics, list) else []:
+        if not isinstance(item, dict):
+            continue
+        topic_id = str(item.get("topic_id") or "")
+        if topic_id not in requested_ids:
+            continue
+        if topic_id in by_id:
+            repeated.add(topic_id)
+        by_id[topic_id] = item
+    return {topic_id: item for topic_id, item in by_id.items()
+            if topic_id not in repeated and str(item.get("overview") or "").strip()}
+
+
+def _token_estimate(text: str) -> int:
+    return len(text) // _CHARS_PER_TOKEN_ESTIMATE
+
+
+def _fit_topic_evidence(document_id: str, topic: dict, chunks: list[dict], derive: bool, budget_tokens: int) -> list[dict]:
+    """A topic whose evidence alone exceeds the prompt budget keeps evenly spaced chunks in source
+    order (the whole topic stays represented) instead of letting Ollama cut the prompt's start."""
+    if _token_estimate(_topic_prompt(document_id, [(topic, chunks)], derive)) <= budget_tokens:
+        return chunks
+    keep = len(chunks)
+    while keep > 1:
+        keep = max(1, keep * 3 // 4)
+        selected = [chunks[round(i * (len(chunks) - 1) / max(1, keep - 1))] for i in range(keep)] if keep > 1 else chunks[:1]
+        if _token_estimate(_topic_prompt(document_id, [(topic, selected)], derive)) <= budget_tokens:
+            return selected
+    return chunks[:1]
+
+
+def _topic_batches(document_id: str, evidence: list[tuple[dict, list[dict]]], derive: bool) -> tuple[list[list[int]], list[tuple[dict, list[dict]]], int]:
+    """Group topic indexes (source order) into calls of at most SUMMARY_TOPICS_PER_CALL topics whose
+    prompt fits the context left after the reserved output. Returns (batches, prompt evidence,
+    number of topics whose evidence had to be sampled to fit)."""
+    budget = SUMMARY_NUM_CTX - SUMMARY_TOPICS_PER_CALL * SUMMARY_OUTPUT_TOKENS_PER_TOPIC
+    prompt_evidence, trimmed = [], 0
+    for topic, chunks in evidence:
+        fitted = _fit_topic_evidence(document_id, topic, chunks, derive, budget)
+        trimmed += len(fitted) != len(chunks)
+        prompt_evidence.append((topic, fitted))
+    batches: list[list[int]] = []
+    for index in range(len(prompt_evidence)):
+        current = batches[-1] if batches else None
+        if current and len(current) < SUMMARY_TOPICS_PER_CALL and _token_estimate(
+                _topic_prompt(document_id, [prompt_evidence[i] for i in [*current, index]], derive)) <= budget:
+            current.append(index)
+        else:
+            batches.append([index])
+    return batches, prompt_evidence, trimmed
+
+
+def _add_usage(total: dict, response) -> None:
+    for key, value in _usage(response).items():
+        if isinstance(value, (int, float)):
+            total[key] = total.get(key, 0) + value
+
+
+def _generate_topic_summaries(llm, document_id: str, topics: list[dict], evidence: list[tuple[dict, list[dict]]]) -> tuple[list[dict], dict]:
+    """Topic notes for every topic, in source order, a batch at a time. A batch's reply keeps every
+    valid topic; only the topics it missed (omitted, duplicated, malformed JSON, failed validation)
+    are asked for once more. Nothing is returned unless every topic has validated notes."""
+    derive = _derives_sections(topics)
+    evidence_tokens = [_tokens(_evidence_text(chunks)) for _topic, chunks in evidence]
+    batches, prompt_evidence, trimmed = _topic_batches(document_id, evidence, derive)
+    validated: dict[int, dict] = {}
+    usage: dict = {}
+    calls = retries = 0
+    errors: list[str] = []
+    for batch in batches:
+        pending = list(batch)
+        for attempt in range(SUMMARY_TOPIC_ATTEMPTS):
+            if not pending:
+                break
+            calls += 1
+            retries += attempt > 0
+            requested_ids = [str(topics[index]["topic_id"]) for index in pending]
+            started = time.perf_counter()
+            response, items, failure = None, {}, ""
+            try:
+                response = llm.invoke(_topic_prompt(document_id, [prompt_evidence[index] for index in pending], derive))
+                _add_usage(usage, response)
+                items = _usable_topic_items(parse_json_object(response.content, "Summary").get("topics"), requested_ids)
+            except Exception as error:   # malformed/truncated JSON or a raised model/runtime failure
+                failure = str(error)
+            for index in pending:
+                item = items.get(str(topics[index]["topic_id"]))
+                if item is None:
+                    continue
+                try:
+                    validated[index] = _validated_topic_summary(index, item, topics, evidence, evidence_tokens, derive)
+                except ValueError as error:
+                    errors.append(str(error))
+            missing = [index for index in pending if index not in validated]
+            metadata = dict(getattr(response, "response_metadata", {}) or {})
+            print(f"[summary] topic_call={calls} attempt={attempt + 1} topics_requested={len(pending)} "
+                  f"topics_valid={len(pending) - len(missing)} done_reason={metadata.get('done_reason')} "
+                  f"prompt_tokens={metadata.get('prompt_eval_count')} output_tokens={metadata.get('eval_count')} "
+                  f"seconds={time.perf_counter() - started:.1f}" + (f" error={failure[:200]}" if failure else ""))
+            if failure:
+                errors.append(failure)
+            pending = missing
+        if pending:
+            missing_ids = ", ".join(str(topics[index]["topic_id"]) for index in pending)
+            detail = f" Last error: {errors[-1]}" if errors else ""
+            raise ValueError(
+                f"Summary model did not return valid notes for {len(pending)} of {len(topics)} topics "
+                f"after {SUMMARY_TOPIC_ATTEMPTS} attempts: {missing_ids}.{detail}"
+            )
+    metrics = {"topic_calls": calls, "topic_retries": retries, "topic_batches": len(batches),
+               "evidence_sampled_topics": trimmed}
+    return [validated[index] for index in range(len(topics))], {**metrics, "usage": usage}
 
 
 def _synthesis_prompt(document_id: str, topic_summaries: list[dict]) -> str:
@@ -303,7 +496,7 @@ def generate_document_summary(owner_id: str, document_id: str, model_id: str | N
         "summary_version": SUMMARY_VERSION, "model_id": selected_model, "runtime_model": runtime_model,
     }
     if not regenerate:
-        cached = get_compatible_summary(identity)
+        cached = get_compatible_summary(identity, accepted_summary_versions(topics))
         if cached:
             cached["cache_hit"] = True
             return cached
@@ -324,11 +517,10 @@ def generate_document_summary(owner_id: str, document_id: str, model_id: str | N
         raise ValueError("Document has no topics with meaningful indexed evidence.")
     retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000)
 
-    llm = ChatOllama(model=runtime_model, temperature=0, format="json", num_ctx=32768)
+    llm = ChatOllama(model=runtime_model, temperature=0, format="json", num_ctx=SUMMARY_NUM_CTX,
+                     num_predict=SUMMARY_TOPICS_PER_CALL * SUMMARY_OUTPUT_TOKENS_PER_TOPIC)
     topic_started = time.perf_counter()
-    topic_response = llm.invoke(_topic_prompt(document_id, evidence))
-    raw_topics = parse_json_object(topic_response.content, "Summary").get("topics")
-    topic_summaries = _validated_topic_summaries(raw_topics, topics, evidence)
+    topic_summaries, topic_metrics = _generate_topic_summaries(llm, document_id, topics, evidence)
     topic_ms = round((time.perf_counter() - topic_started) * 1000)
 
     synthesis_started = time.perf_counter()
@@ -341,9 +533,10 @@ def generate_document_summary(owner_id: str, document_id: str, model_id: str | N
         raise ValueError("Summary model must return 4 to 7 document-level key takeaways.")
     final_summary = {"overview": str(final_summary["overview"]).strip(), "key_takeaways": final_takeaways}
     synthesis_ms = round((time.perf_counter() - synthesis_started) * 1000)
+    topic_usage = topic_metrics.pop("usage")
     metrics = {"chunk_retrieval_ms": retrieval_ms, "topic_generation_ms": topic_ms,
-               "synthesis_ms": synthesis_ms, "llm_calls": 2,
-               "topic_generation_usage": _usage(topic_response), "synthesis_usage": _usage(synthesis_response)}
+               "synthesis_ms": synthesis_ms, "llm_calls": topic_metrics["topic_calls"] + 1, **topic_metrics,
+               "topic_generation_usage": topic_usage, "synthesis_usage": _usage(synthesis_response)}
     persistence_started = time.perf_counter()
     stored = save_summary(identity, topic_summaries, final_summary, metrics)
     persistence_ms = round((time.perf_counter() - persistence_started) * 1000)

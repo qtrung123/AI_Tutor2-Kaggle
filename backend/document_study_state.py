@@ -16,7 +16,7 @@ from backend.flashcard_service import FLASHCARD_VERSION
 from backend.flashcard_store import get_latest_flashcard_set_info
 from backend.indexed_document_store import get_indexed_document
 from backend.knowledge_gap_service import detect_knowledge_gaps
-from backend.summary_service import SUMMARY_VERSION
+from backend.summary_service import accepted_summary_versions
 from backend.summary_store import get_latest_summary_info
 
 # MVP learning-state thresholds on the latest completed quiz percentage (0-100) -- the only place
@@ -244,7 +244,8 @@ def get_document_study_state(owner_id: str, document_id: str, plan_id: str | Non
     document_hash = str(document.get("hash") or "")
     schema_version = int(document.get("topic_schema_version") or 0)
 
-    summary_row = get_latest_summary_info(owner_id, document_id, document_hash, schema_version, SUMMARY_VERSION)
+    summary_row = get_latest_summary_info(owner_id, document_id, document_hash, schema_version,
+                                          accepted_summary_versions(list(document.get("topics") or [])))
     summary = SummaryState(
         available=True, summary_id=summary_row["summary_id"], model_id=summary_row["model_id"],
         generated_at=summary_row["created_at"],

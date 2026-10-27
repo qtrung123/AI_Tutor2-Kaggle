@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -89,6 +90,49 @@ class SummaryFeatureTests(unittest.TestCase):
         self.assertTrue(same["cache_hit"]); self.assertEqual(same["final_summary"]["overview"], "Whole document overview.")
         self.assertEqual(other["status"], "not_generated")
         llm.assert_not_called()
+
+    def save_previous_format_summary(self, document_id="lecture.pdf"):
+        """A summary saved before topic batching / derived sections (format v3)."""
+        return summary_store.save_summary({
+            "owner_id": self.alice, "document_id": document_id, "document_hash": "hash-v1", "topic_schema_version": 3,
+            "summary_version": summary_service.PREVIOUS_STRUCTURED_SUMMARY_VERSIONS[0],
+            "model_id": "model-a", "runtime_model": "runtime-model-a",
+        }, [{"topic_id": "topic_b", "overview": "Saved earlier.", "subsections": []}],
+           {"overview": "Saved earlier overview.", "key_takeaways": ["a", "b", "c", "d"]}, {})
+
+    def test_a_structured_documents_previous_format_summary_is_kept_without_regenerating(self):
+        saved = self.save_previous_format_summary()
+        with patch.object(summary_service, "ChatOllama") as llm, \
+             patch.object(summary_service, "resolve_generation_model", return_value="runtime-model-a"):
+            cached = summary_service.generate_document_summary(self.alice, "lecture.pdf", model_id="model-a")
+        llm.assert_not_called()
+        self.assertTrue(cached["cache_hit"])
+        self.assertEqual(cached["summary_id"], saved["summary_id"])
+        # The Planner / Study Pack also still sees it as the document's summary.
+        info = summary_store.get_latest_summary_info(self.alice, "lecture.pdf", "hash-v1", 3,
+                                                     summary_service.accepted_summary_versions(
+                                                         indexed_document_store.get_indexed_document(self.alice, "lecture.pdf")["topics"]))
+        self.assertEqual(info["summary_id"], saved["summary_id"])
+
+    def test_regenerating_saves_the_current_format_which_then_wins(self):
+        self.save_previous_format_summary()
+        result, _retrieval, _prompts = self.generate(model="model-a", regenerate=True)
+        self.assertEqual(result["summary_version"], summary_service.SUMMARY_VERSION)
+        with patch.object(summary_service, "resolve_generation_model", return_value="runtime-model-a"):
+            cached = summary_service.generate_document_summary(self.alice, "lecture.pdf", model_id="model-a", cache_only=True)
+        self.assertEqual((cached["summary_id"], cached["summary_version"]), (result["summary_id"], summary_service.SUMMARY_VERSION))
+
+    def test_an_unstructured_documents_previous_format_summary_is_not_reused(self):
+        indexed_document_store.upsert_indexed_document(self.alice, "notes.pdf", {
+            "hash": "hash-v1", "chunks": 2, "path": "notes.pdf", "topic_schema_version": 3,
+            "topics": [{"topic_id": "topic_document_overview", "name": "Document overview"}],   # no subtopics
+        })
+        self.save_previous_format_summary("notes.pdf")   # v3 had no subsections for such documents
+        with patch.object(summary_service, "ChatOllama") as llm, \
+             patch.object(summary_service, "resolve_generation_model", return_value="runtime-model-a"):
+            missing = summary_service.generate_document_summary(self.alice, "notes.pdf", model_id="model-a", cache_only=True)
+        llm.assert_not_called()
+        self.assertEqual(missing["status"], "not_generated")
 
     def test_normal_path_uses_two_calls_and_preserves_topic_order_and_scope(self):
         result, retrievals, prompts = self.generate()
@@ -288,6 +332,95 @@ class SummaryFeatureTests(unittest.TestCase):
         self.assertEqual([item["subtopic_id"] for item in validated[0]["subsections"]], ["sync"])
         self.assertEqual(validated[0]["subsections"][0]["subtopic_name"], "Synchronization")
 
+    @staticmethod
+    def paragraph(text, **identity):
+        return {**identity, "content_type": "paragraph", "paragraph": text, "bullets": [], "table": {"headers": [], "rows": []}}
+
+    def generate_with_topics(self, topics, evidence_by_topic, topic_response):
+        document = indexed_document_store.get_indexed_document(self.alice, "lecture.pdf")
+        indexed_document_store.upsert_indexed_document(self.alice, "lecture.pdf", {**document, "topics": topics})
+        FakeLlm.responses = [
+            FakeResponse(topic_response, 500, 400),
+            FakeResponse('{"overview":"Grounded document overview.","key_takeaways":["One","Two","Three","Four"]}', 100, 50),
+        ]
+        FakeLlm.prompts = []
+        with patch.object(summary_service, "get_schema_topic_evidence", side_effect=lambda _d, t, _o: evidence_by_topic[t["topic_id"]]), \
+             patch.object(summary_service, "ChatOllama", FakeLlm), \
+             patch.object(summary_service, "resolve_generation_model", return_value="runtime-model"):
+            result = summary_service.generate_document_summary(self.alice, "lecture.pdf", regenerate=True)
+        return result, list(FakeLlm.prompts)
+
+    def test_multi_topic_document_keeps_every_topic_and_its_subsections(self):
+        boundary = {"start": {}, "end": {}}
+        topics = [
+            {"topic_id": "topic_embedded", "name": "Section 1: Embedded Systems", "boundary": boundary,
+             "subtopics": [{"subtopic_id": "sub_devices", "name": "Examples of Embedded Devices"}]},
+            {"topic_id": "topic_ecos", "name": "Section 3: eCos", "boundary": boundary,
+             "subtopics": [{"subtopic_id": "sub_kernel", "name": "eCos Kernel Design"}]},
+            {"topic_id": "topic_tinyos", "name": "Section 4: TinyOS", "boundary": boundary, "subtopics": []},
+        ]
+        evidence = {
+            "topic_embedded": [{"content": "Embedded systems perform a dedicated function. Devices include braking controllers.", "metadata": {"chunk_id": "c1"}}],
+            "topic_ecos": [{"content": "eCos kernel design uses configurable schedulers and synchronization.", "metadata": {"chunk_id": "c2"}}],
+            "topic_tinyos": [{"content": "TinyOS targets wireless sensor networks with components and a scheduler.", "metadata": {"chunk_id": "c3"}}],
+        }
+        response = json.dumps({"topics": [
+            {"topic_id": "topic_embedded", "overview": "Embedded systems perform a dedicated function.", "subsections": [
+                self.paragraph("Braking controllers are typical embedded devices.", subtopic_id="sub_devices")]},
+            {"topic_id": "topic_ecos", "overview": "eCos is a configurable embedded operating system.", "subsections": [
+                self.paragraph("The kernel offers configurable schedulers and synchronization.", subtopic_id="sub_kernel")]},
+            {"topic_id": "topic_tinyos", "overview": "TinyOS targets wireless sensor networks.", "subsections": []},
+        ]})
+        result, prompts = self.generate_with_topics(topics, evidence, response)
+        self.assertEqual([item["topic_id"] for item in result["topic_summaries"]], ["topic_embedded", "topic_ecos", "topic_tinyos"])
+        self.assertNotIn("topic_document_overview", [item["topic_id"] for item in result["topic_summaries"]])
+        self.assertEqual([[sub["subtopic_id"] for sub in item["subsections"]] for item in result["topic_summaries"]],
+                         [["sub_devices"], ["sub_kernel"], []])
+        # Structured documents keep the authoritative-subtopic contract: nothing is derived.
+        self.assertNotIn(summary_service.DERIVE_SECTIONS_MARKER, prompts[0])
+        self.assertIn('"subtopic_id":"exact id"', prompts[0])
+        self.assertEqual(result["final_summary"]["overview"], "Grounded document overview.")
+        self.assertEqual(len(result["final_summary"]["key_takeaways"]), 4)
+
+    def test_unstructured_fallback_document_gets_grounded_derived_sections(self):
+        topics = [{"topic_id": "topic_document_overview", "name": "Document Overview",
+                   "boundary": {"start": {}, "end": {}}, "subtopics": []}]
+        # No spaces between words, as pypdf extracts Embedded Systems.pdf.
+        evidence = {"topic_document_overview": [
+            {"content": "Embeddedsystemsaretightlycoupledtotheirenvironment.Real-timeconstraintsapply.", "metadata": {"chunk_id": "c1"}},
+            {"content": "eCosisaconfigurableoperatingsystem.TinyOStargetswirelesssensornetworks.", "metadata": {"chunk_id": "c2"}},
+        ]}
+        response = json.dumps({"topics": [{"topic_id": "topic_document_overview",
+            "overview": "The lecture covers embedded systems and two embedded operating systems.", "subsections": [
+                self.paragraph("Embedded systems are tightly coupled to their environment and face real-time constraints.", heading="Embedded Systems and Real-Time Constraints"),
+                self.paragraph("eCos is a configurable operating system for embedded devices.", heading="eCos"),
+                self.paragraph("Invented content about quantum compilers.", heading="Quantum Compilers"),
+                self.paragraph("Duplicate heading content about eCos configuration.", heading="eCos"),
+                self.paragraph("Overview.", heading="TinyOS Overview"),
+                self.paragraph("TinyOS targets wireless sensor networks.", heading="TinyOS for Sensor Networks"),
+            ]}]})
+        result, prompts = self.generate_with_topics(topics, evidence, response)
+        self.assertIn(f"SUBSECTIONS: {summary_service.DERIVE_SECTIONS_MARKER}", prompts[0])
+        self.assertNotIn("REQUIRED_SUBTOPICS_IN_ORDER: []", prompts[0])
+        [topic] = result["topic_summaries"]
+        self.assertEqual(topic["topic_id"], "topic_document_overview")
+        self.assertEqual([sub["subtopic_name"] for sub in topic["subsections"]],
+                         ["Embedded Systems and Real-Time Constraints", "eCos", "TinyOS for Sensor Networks"])
+        self.assertEqual([sub["subtopic_id"] for sub in topic["subsections"]],
+                         [f"topic_document_overview_section_{n}" for n in (1, 2, 3)])
+        self.assertEqual(len(result["final_summary"]["key_takeaways"]), 4)
+
+    def test_unstructured_fallback_without_derivable_sections_still_returns_overview(self):
+        topics = [{"topic_id": "topic_document_overview", "name": "Document Overview",
+                   "boundary": {"start": {}, "end": {}}, "subtopics": []}]
+        evidence = {"topic_document_overview": [{"content": "A short note about interrupts.", "metadata": {"chunk_id": "c1"}}]}
+        response = json.dumps({"topics": [{"topic_id": "topic_document_overview",
+                                           "overview": "A short note about interrupts.", "subsections": []}]})
+        result, _prompts = self.generate_with_topics(topics, evidence, response)
+        self.assertEqual([(item["topic_id"], item["subsections"]) for item in result["topic_summaries"]],
+                         [("topic_document_overview", [])])
+        self.assertEqual(result["final_summary"]["overview"], "Grounded document overview.")
+
     def test_frontend_renders_structured_notes_and_one_final_takeaway_block(self):
         script = frontend_script_text()
         styles = (Path(__file__).parents[1] / "frontend" / "styles.css").read_text(encoding="utf-8")
@@ -321,6 +454,161 @@ class SummaryFeatureTests(unittest.TestCase):
             connection.close()
         self.assertTrue({"owner_id", "document_id", "document_hash", "topic_schema_version",
                          "summary_version", "model_id", "topic_summaries_json", "final_summary_json"} <= columns)
+
+
+SYNTHESIS_REPLY = '{"overview":"Whole document overview.","key_takeaways":["One point","Two point","Three point","Four point"]}'
+
+
+def _topic_ids_in(prompt: str) -> list[str]:
+    return [line.split(":", 1)[1].strip() for line in prompt.splitlines() if line.startswith("TOPIC_ID:")]
+
+
+def _topic_reply(topic_ids) -> str:
+    return json.dumps({"topics": [{"topic_id": topic_id, "overview": f"Evidence {topic_id} is summarized.",
+                                   "subsections": []} for topic_id in topic_ids]})
+
+
+class ScriptedLlm:
+    """Answers each topic call from a script keyed by call number (missing → a complete reply for the
+    prompt's own topics) and the synthesis call with SYNTHESIS_REPLY. Records prompts and options."""
+    script: dict = {}
+    prompts: list = []
+    options: list = []
+
+    def __init__(self, **kwargs):
+        ScriptedLlm.options.append(kwargs)
+
+    def invoke(self, prompt):
+        ScriptedLlm.prompts.append(prompt)
+        if "END_TOPIC" not in prompt:
+            return FakeResponse(SYNTHESIS_REPLY, 40, 12)
+        reply = ScriptedLlm.script.get(sum("END_TOPIC" in item for item in ScriptedLlm.prompts), _topic_reply)
+        if isinstance(reply, Exception):
+            raise reply
+        content = reply(_topic_ids_in(prompt)) if callable(reply) else reply
+        return FakeResponse(content, 100, 30)
+
+
+class SummaryTopicRecoveryTests(unittest.TestCase):
+    """Summary model returned 1 topic summaries for 10 requested: batching and missing-topic recovery."""
+
+    TOPIC_IDS = [f"topic_{index:02d}" for index in range(1, 11)]
+    tearDown = SummaryFeatureTests.tearDown
+    chunks = staticmethod(SummaryFeatureTests.chunks)
+    generate = SummaryFeatureTests.generate
+
+    def setUp(self):
+        SummaryFeatureTests.setUp(self)
+        indexed_document_store.upsert_indexed_document(self.alice, "lecture.pdf", {
+            "hash": "hash-v1", "chunks": 10, "path": "lecture.pdf", "topic_schema_version": 3,
+            "topics": [{"topic_id": topic_id, "name": f"Name {topic_id}"} for topic_id in self.TOPIC_IDS],
+        })
+        ScriptedLlm.script, ScriptedLlm.prompts, ScriptedLlm.options = {}, [], []
+
+    def run_summary(self, script=None, regenerate=True):
+        ScriptedLlm.script = script or {}
+        ScriptedLlm.prompts, ScriptedLlm.options = [], []
+        with patch.object(summary_service, "ChatOllama", ScriptedLlm), \
+             patch.object(summary_service, "get_topic_chunks", side_effect=self.chunks), \
+             patch.object(summary_service, "resolve_generation_model", return_value="runtime-model-a"):
+            return summary_service.generate_document_summary(self.alice, "lecture.pdf", model_id="model-a",
+                                                             regenerate=regenerate)
+
+    def topic_prompts(self):
+        return [prompt for prompt in ScriptedLlm.prompts if "END_TOPIC" in prompt]
+
+    def test_ten_topics_are_requested_in_bounded_batches_with_explicit_context_and_output_limits(self):
+        result = self.run_summary()
+        self.assertEqual([_topic_ids_in(prompt) for prompt in self.topic_prompts()],
+                         [self.TOPIC_IDS[0:4], self.TOPIC_IDS[4:8], self.TOPIC_IDS[8:10]])
+        self.assertEqual([item["topic_id"] for item in result["topic_summaries"]], self.TOPIC_IDS)
+        self.assertEqual((result["metrics"]["llm_calls"], result["metrics"]["topic_retries"]), (4, 0))
+        self.assertEqual(result["metrics"]["topic_generation_usage"]["input_tokens"], 300)
+        options = ScriptedLlm.options[0]
+        self.assertEqual(options["num_ctx"], summary_service.SUMMARY_NUM_CTX)
+        self.assertEqual(options["num_predict"],
+                         summary_service.SUMMARY_TOPICS_PER_CALL * summary_service.SUMMARY_OUTPUT_TOKENS_PER_TOPIC)
+        # A one-topic batch of a structured document must not switch to derived (unstructured) sections.
+        self.assertIn("REQUIRED_SUBTOPICS_IN_ORDER", self.topic_prompts()[2])
+        self.assertNotIn(summary_service.DERIVE_SECTIONS_MARKER, self.topic_prompts()[2])
+
+    def test_reply_with_one_of_requested_topics_keeps_it_and_retries_only_the_missing_ones(self):
+        result = self.run_summary({1: _topic_reply(self.TOPIC_IDS[:1])})
+        prompts = self.topic_prompts()
+        self.assertEqual(_topic_ids_in(prompts[1]), self.TOPIC_IDS[1:4])   # the retry asks for the 3 missing only
+        self.assertEqual([item["topic_id"] for item in result["topic_summaries"]], self.TOPIC_IDS)
+        self.assertEqual((result["metrics"]["llm_calls"], result["metrics"]["topic_retries"]), (5, 1))
+
+    def test_malformed_or_truncated_json_is_retried_for_that_batch_only(self):
+        truncated = _topic_reply(self.TOPIC_IDS[4:8])[:-40]
+        result = self.run_summary({1: "not json at all", 3: truncated})
+        self.assertEqual([_topic_ids_in(prompt) for prompt in self.topic_prompts()], [
+            self.TOPIC_IDS[0:4], self.TOPIC_IDS[0:4], self.TOPIC_IDS[4:8], self.TOPIC_IDS[4:8], self.TOPIC_IDS[8:10]])
+        self.assertEqual(len(result["topic_summaries"]), 10)
+        self.assertEqual(result["metrics"]["topic_retries"], 2)
+
+    def test_runtime_error_duplicate_and_invalid_topics_are_recovered_without_guessing(self):
+        duplicate = json.dumps({"topics": [
+            {"topic_id": "topic_01", "overview": "Evidence topic_01 is summarized.", "subsections": []},
+            {"topic_id": "topic_01", "overview": "Evidence topic_01 again.", "subsections": []},
+            {"topic_id": "invented", "overview": "Invented topic.", "subsections": []},
+            {"topic_id": "topic_02", "overview": "", "subsections": []},
+            {"topic_id": "topic_03", "overview": "Evidence topic_03 is summarized.", "subsections": [
+                {"subtopic_id": "x", "content_type": "unsupported"}]},
+            {"topic_id": "topic_04", "overview": "Evidence topic_04 is summarized.", "subsections": []},
+        ]})
+        result = self.run_summary({1: duplicate, 3: RuntimeError("token repeat limit reached")})
+        prompts = self.topic_prompts()
+        self.assertEqual(_topic_ids_in(prompts[1]), ["topic_01", "topic_02"])   # topic_03's bad subsection is ignored
+        self.assertEqual(_topic_ids_in(prompts[3]), self.TOPIC_IDS[4:8])
+        self.assertEqual(result["topic_summaries"][0]["overview"], "Evidence topic_01 is summarized.")
+        self.assertEqual(len(result["topic_summaries"]), 10)
+
+    def test_topic_failing_validation_is_retried_alone(self):
+        bad_table = json.dumps({"topics": [
+            *json.loads(_topic_reply(self.TOPIC_IDS[0:3]))["topics"],
+            {"topic_id": "topic_04", "overview": "Evidence topic_04 is summarized.", "subsections": [
+                {"subtopic_id": "s", "content_type": "table", "table": {"headers": ["A", "B"], "rows": [["only one"]]}}]},
+        ]})
+        indexed = indexed_document_store.get_indexed_document(self.alice, "lecture.pdf")
+        topics = indexed["topics"]
+        topics[3]["subtopics"] = [{"subtopic_id": "s", "name": "Table"}]
+        indexed_document_store.upsert_indexed_document(self.alice, "lecture.pdf", {**indexed, "topics": topics})
+        result = self.run_summary({1: bad_table})
+        self.assertEqual(_topic_ids_in(self.topic_prompts()[1]), ["topic_04"])
+        self.assertEqual(len(result["topic_summaries"]), 10)
+
+    def test_topics_still_missing_after_the_retry_fail_without_touching_the_saved_summary(self):
+        saved = self.run_summary(regenerate=False)
+        with self.assertRaisesRegex(ValueError, r"did not return valid notes for 3 of 10 topics after 2 attempts: "
+                                                r"topic_02, topic_03, topic_04"):
+            self.run_summary({1: _topic_reply(self.TOPIC_IDS[:1]), 2: _topic_reply([])})
+        self.assertEqual(len(self.topic_prompts()), 2)   # bounded: no further calls, no synthesis
+        identity = {"owner_id": self.alice, "document_id": "lecture.pdf", "document_hash": "hash-v1",
+                    "topic_schema_version": 3, "summary_version": summary_service.SUMMARY_VERSION,
+                    "model_id": "model-a", "runtime_model": "runtime-model-a"}
+        self.assertEqual(summary_store.get_compatible_summary(identity)["summary_id"], saved["summary_id"])
+
+    def test_documents_with_few_topics_still_use_a_single_topic_call(self):
+        result, _retrievals, prompts = self.generate(self.bob)
+        self.assertEqual(len(prompts), 2)
+        self.assertEqual(result["metrics"]["topic_calls"], 1)
+
+    def test_prompt_plus_reserved_output_fits_the_context_and_oversized_topics_are_sampled(self):
+        big_chunks = [{"content": f"Chunk {index} " + "evidence " * 130, "metadata": {"chunk_id": f"c{index}", "chunk": index}}
+                      for index in range(300)]
+        topics = [{"topic_id": "big", "name": "Big"}, {"topic_id": "small", "name": "Small"}]
+        evidence = [(topics[0], big_chunks), (topics[1], big_chunks[:3])]
+        batches, prompt_evidence, sampled = summary_service._topic_batches("lecture.pdf", evidence, False)
+        budget = summary_service.SUMMARY_NUM_CTX - summary_service.SUMMARY_TOPICS_PER_CALL * summary_service.SUMMARY_OUTPUT_TOKENS_PER_TOPIC
+        for batch in batches:
+            prompt = summary_service._topic_prompt("lecture.pdf", [prompt_evidence[index] for index in batch], False)
+            self.assertLessEqual(summary_service._token_estimate(prompt), budget)
+        kept = prompt_evidence[0][1]
+        self.assertEqual(sampled, 1)
+        self.assertLess(len(kept), len(big_chunks))
+        self.assertEqual((kept[0]["metadata"]["chunk_id"], kept[-1]["metadata"]["chunk_id"]), ("c0", "c299"))
+        self.assertEqual(prompt_evidence[1][1], big_chunks[:3])
 
 
 if __name__ == "__main__":
