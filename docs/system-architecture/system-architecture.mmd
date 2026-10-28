@@ -1,0 +1,63 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontFamily": "Times New Roman, serif", "fontSize": "16px", "lineColor": "#333333", "primaryBorderColor": "#333333", "clusterBkg": "#fafafa", "clusterBorder": "#888888"}, "flowchart": {"curve": "basis", "nodeSpacing": 35, "rankSpacing": 50, "padding": 10}}}%%
+flowchart TB
+    U["Learner (web browser)"]
+
+    subgraph EDGE["Gateway (Kaggle only)"]
+        direction TB
+        W["Cloudflare Worker<br/>permanent workers.dev URL"] --> T["Cloudflare Quick Tunnel<br/>*.trycloudflare.com"] --> NG["nginx :7860"]
+    end
+
+    subgraph FT["Frontend :3000"]
+        FE["Node.js server.js<br/>static HTML / CSS / JS"]
+    end
+
+    subgraph BT["Backend: FastAPI + Uvicorn :8000"]
+        direction TB
+        R["API routers<br/>cookie session → owner_id"]
+        S["Domain services<br/>RAG · ingestion · summary jobs<br/>flashcards · quiz · planner"]
+        ST["Persistence adapters<br/>stores · db.py · vector_store.py"]
+        R --> S --> ST
+    end
+
+    subgraph AI["AI inference (GPU)"]
+        direction LR
+        Q["Qwen2.5-7B<br/>default LLM<br/>(Ollama :11434)"]
+        G["Gemma 3 12B<br/>lazy, optional<br/>(Ollama)"]
+        E["BGE-M3<br/>embeddings<br/>(Ollama)"]
+        V["vLLM :8001<br/>optional Qwen<br/>chat backend"]
+    end
+    GC["Google Calendar API<br/>optional"]
+
+    subgraph PA["Data profile A: SQLite mode (no DATABASE_URL)"]
+        direction LR
+        SQ["SQLite<br/>conversations.db"]
+        CH["ChromaDB<br/>vectorstore/"]
+        FS["Uploads<br/>data/users/"]
+    end
+
+    subgraph PB["Data profile B: durable mode (DATABASE_URL)"]
+        direction LR
+        PG["Supabase PostgreSQL<br/>+ pgvector"]
+        SB["Supabase Storage<br/>private bucket"]
+    end
+
+    KD["Private Kaggle Dataset<br/>snapshots (Kaggle, profile A)"]
+    HF["Hugging Face / Ollama library<br/>model downloads"]
+
+    U -->|HTTPS| W
+    NG -->|"/"| FE
+    NG -->|"/api/*"| R
+
+    S -->|"generation"| Q
+    S -.->|"if selected"| G
+    S -.->|"LLM_BACKEND=vllm"| V
+    S -.->|"if connected"| GC
+    ST -->|"embeddings"| E
+
+    ST -->|"either"| PA
+    ST -.->|"or"| PB
+    PA -.->|"restore / save ~10 min"| KD
+    Q -.->|"ollama pull"| HF
+
+    classDef optional stroke-dasharray: 5 4
+    class G,V,GC,KD,HF optional

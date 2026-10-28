@@ -1,0 +1,45 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontFamily": "Times New Roman, serif", "fontSize": "16px", "lineColor": "#333333", "primaryBorderColor": "#333333", "clusterBkg": "#fafafa", "clusterBorder": "#888888"}, "flowchart": {"curve": "basis", "nodeSpacing": 30, "rankSpacing": 45, "padding": 12}}}%%
+flowchart LR
+    subgraph L["1. Local development"]
+        direction TB
+        LB["Browser"]
+        LF["Node server.js :3000<br/>API_BASE_URL = http://127.0.0.1:8000"]
+        LA["FastAPI :8000<br/>(CORS, cookie)"]
+        LO["Ollama :11434<br/>Qwen · BGE-M3"]
+        LD["SQLite + ChromaDB<br/>+ data/ files"]
+        LB -->|"UI"| LF
+        LB -->|"/api/* (cross-origin)"| LA
+        LA --> LO
+        LA --> LD
+    end
+
+    subgraph K1["2. Kaggle: SQLite mode + snapshots"]
+        direction TB
+        KB1["Browser"]
+        KW1["Cloudflare Worker<br/>permanent workers.dev URL"]
+        KT1["Cloudflare Quick Tunnel<br/>*.trycloudflare.com"]
+        KN1["nginx :7860 → Node :3000<br/>and FastAPI :8000 (same origin)"]
+        KO1["Ollama on Kaggle GPU<br/>Qwen · BGE-M3 (+ lazy Gemma)"]
+        KD1["SQLite + ChromaDB + data/<br/>in /kaggle/working (ephemeral)"]
+        KS1["Private Kaggle Dataset<br/>state snapshot"]
+        KB1 --> KW1
+        KW1 -->|"origin URL from Workers KV,<br/>set by the notebook at each start"| KT1
+        KT1 --> KN1
+        KN1 --> KO1
+        KN1 --> KD1
+        KD1 <-.->|"restore at start / save about every 10 min"| KS1
+    end
+
+    subgraph K2["3. Kaggle: durable mode (Supabase)"]
+        direction TB
+        KB2["Browser"]
+        KT2["Public tunnel<br/>(ngrok in kaggle_run.ipynb)"]
+        KN2["nginx :7860 → Node :3000<br/>and FastAPI :8000 (same origin)"]
+        KO2["Ollama on Kaggle GPU<br/>Qwen · BGE-M3 (+ lazy Gemma)"]
+        KD2["Supabase PostgreSQL + pgvector<br/>Supabase Storage (private)"]
+        KB2 --> KT2 --> KN2
+        KN2 --> KO2
+        KN2 -->|"checked by durable_setup<br/>before startup"| KD2
+    end
+
+    L ~~~ K1 ~~~ K2
