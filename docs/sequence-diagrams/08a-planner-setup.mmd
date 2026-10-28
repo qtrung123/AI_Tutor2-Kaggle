@@ -1,0 +1,40 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontFamily": "Times New Roman, serif", "fontSize": "16px", "noteBkgColor": "#f7f7f2", "noteTextColor": "#111111", "noteBorderColor": "#888888", "actorBkg": "#ffffff", "actorBorder": "#333333", "signalColor": "#222222", "signalTextColor": "#111111", "labelBoxBkgColor": "#eeeeee", "activationBkgColor": "#e6e6e6", "activationBorderColor": "#444444"}, "sequence": {"mirrorActors": true, "showSequenceNumbers": true, "messageAlign": "center", "actorMargin": 35, "width": 130, "boxMargin": 8, "noteMargin": 8, "actorFontSize": 16, "messageFontSize": 16, "noteFontSize": 15}}}%%
+sequenceDiagram
+    autonumber
+    actor S as Student
+    participant UI as Frontend<br/>(planner.js)
+    participant API as FastAPI<br/>(planner_v2.py)
+    participant PL as Planner Service<br/>(study_plan_api_service.py)
+    participant DB as SQLite<br/>(study_plans, materials,<br/>availability_slots)
+
+    S->>UI: Open Planner
+    UI->>API: GET /api/planner/plans + /availability
+    API->>DB: list_plans(), list_availability()
+    API-->>UI: plans, availability
+
+    opt Set free time
+        S->>UI: Draw availability on calendar
+        UI->>API: POST /api/planner/availability
+        Note over API: reject slots in the past (400)
+        API->>DB: add_availability()
+        API-->>UI: availability rows
+    end
+
+    loop Each document added (grouped by subject)
+        S->>UI: Add material (+ deadline / goal)
+        opt No plan yet (plannerEnsurePlan)
+            UI->>API: POST /api/planner/plans
+            API->>DB: create_plan()
+            API-->>UI: 201 plan
+        end
+        UI->>API: POST /plans/{id}/materials
+        API->>PL: add_plan_material()
+        PL->>DB: check document owner
+        alt Not found / already in plan
+            API-->>UI: 404 / 409
+        else
+            PL->>DB: add_material()
+            API-->>UI: 201 material
+        end
+    end
+    Note over UI: any change triggers a debounced<br/>preview (diagram 08b)

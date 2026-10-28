@@ -1,0 +1,50 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontFamily": "Times New Roman, serif", "fontSize": "16px", "noteBkgColor": "#f7f7f2", "noteTextColor": "#111111", "noteBorderColor": "#888888", "actorBkg": "#ffffff", "actorBorder": "#333333", "signalColor": "#222222", "signalTextColor": "#111111", "labelBoxBkgColor": "#eeeeee", "activationBkgColor": "#e6e6e6", "activationBorderColor": "#444444"}, "sequence": {"mirrorActors": true, "showSequenceNumbers": true, "messageAlign": "center", "actorMargin": 35, "width": 130, "boxMargin": 8, "noteMargin": 8, "actorFontSize": 16, "messageFontSize": 16, "noteFontSize": 15}}}%%
+sequenceDiagram
+    autonumber
+    actor S as Student
+    participant UI as Frontend<br/>(app.js)
+    participant API as FastAPI<br/>(api/auth.py)
+    participant AUTH as Auth Store<br/>(auth_store.py)
+    participant DB as SQLite<br/>(users, auth_sessions)
+
+    Note over UI,API: Page load: bootstrapAuthentication()
+    UI->>API: GET /api/auth/me (cookie)
+    API->>AUTH: get_user_for_session(token)
+    AUTH->>DB: find session by sha256(token)
+    DB-->>AUTH: user / none
+    alt Session valid (not expired, not revoked)
+        API-->>UI: 200 user
+    else
+        API-->>UI: 401 → login screen
+    end
+
+    S->>UI: Submit sign-up / sign-in form
+    alt Sign up
+        UI->>API: POST /api/auth/signup
+        API->>AUTH: create_user() (Argon2 hash)
+        AUTH->>DB: INSERT users
+        opt Email already registered
+            API-->>UI: 409 Conflict
+        end
+    else Sign in
+        UI->>API: POST /api/auth/login
+        API->>AUTH: authenticate_user()
+        AUTH->>DB: SELECT user by email
+        Note over AUTH: Argon2 verify
+        opt Wrong email or password
+            API-->>UI: 401 Unauthorized
+        end
+    end
+    opt Credentials accepted
+        API->>AUTH: create_session(user_id)
+        AUTH->>DB: INSERT auth_sessions<br/>(sha256 token, expires +14 days)
+        API-->>UI: 201 / 200 user + Set-Cookie (HttpOnly)
+        UI-->>S: App shell (initializeApplication)
+    end
+
+    S->>UI: Logout
+    UI->>API: POST /api/auth/logout
+    API->>AUTH: revoke_session(token)
+    AUTH->>DB: UPDATE revoked_at
+    API-->>UI: 200 + delete cookie
+    UI-->>S: Login screen

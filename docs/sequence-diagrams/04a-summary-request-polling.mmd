@@ -1,0 +1,42 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontFamily": "Times New Roman, serif", "fontSize": "16px", "noteBkgColor": "#f7f7f2", "noteTextColor": "#111111", "noteBorderColor": "#888888", "actorBkg": "#ffffff", "actorBorder": "#333333", "signalColor": "#222222", "signalTextColor": "#111111", "labelBoxBkgColor": "#eeeeee", "activationBkgColor": "#e6e6e6", "activationBorderColor": "#444444"}, "sequence": {"mirrorActors": true, "showSequenceNumbers": true, "messageAlign": "center", "actorMargin": 35, "width": 130, "boxMargin": 8, "noteMargin": 8, "actorFontSize": 16, "messageFontSize": 16, "noteFontSize": 15}}}%%
+sequenceDiagram
+    autonumber
+    actor S as Student
+    participant UI as Frontend<br/>(session.js)
+    participant API as FastAPI<br/>(api/summary.py)
+    participant JOB as Summary Jobs<br/>(summary_jobs.py)
+    participant DB as SQLite<br/>(summary_jobs,<br/>document_summaries)
+
+    S->>UI: Open Summary tab
+    UI->>API: GET /api/summary/{doc}?cache_only=true
+    API->>DB: get_compatible_summary()
+    API-->>UI: saved summary / not_generated
+    UI->>API: GET /api/summary/jobs?document_id
+    API->>JOB: find_active_summary_job()
+    API-->>UI: running job_id / none
+
+    S->>UI: Click Generate
+    UI->>API: POST /api/summary/generate
+    opt regenerate = false
+        API->>DB: get_compatible_summary()
+    end
+    alt Compatible summary found
+        API-->>UI: 200 summary
+    else Needs generation
+        API->>JOB: start_summary_job()
+        alt Same summary already processing
+            JOB-->>API: existing job
+        else New job
+            JOB->>DB: INSERT summary_jobs (processing)
+            Note over JOB: submit to 1-worker pool<br/>(see diagram 04b)
+            JOB-->>API: new job
+        end
+        API-->>UI: 202 {job_id}
+        loop Every 2 s while processing
+            UI->>API: GET /api/summary/jobs/{job_id}
+            API->>JOB: get_summary_job()
+            JOB->>DB: SELECT job
+            API-->>UI: processing / complete / failed
+        end
+    end
+    UI-->>S: Summary or error message

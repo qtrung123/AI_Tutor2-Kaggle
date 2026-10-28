@@ -1,0 +1,49 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontFamily": "Times New Roman, serif", "fontSize": "16px", "noteBkgColor": "#f7f7f2", "noteTextColor": "#111111", "noteBorderColor": "#888888", "actorBkg": "#ffffff", "actorBorder": "#333333", "signalColor": "#222222", "signalTextColor": "#111111", "labelBoxBkgColor": "#eeeeee", "activationBkgColor": "#e6e6e6", "activationBorderColor": "#444444"}, "sequence": {"mirrorActors": true, "showSequenceNumbers": true, "messageAlign": "center", "actorMargin": 35, "width": 130, "boxMargin": 8, "noteMargin": 8, "actorFontSize": 16, "messageFontSize": 16, "noteFontSize": 15}}}%%
+sequenceDiagram
+    autonumber
+    actor S as Student
+    participant UI as Frontend<br/>(planner.js)
+    participant API as FastAPI<br/>(planner_v2.py)
+    participant PL as Planner Service
+    participant SCH as Scheduler<br/>(study_scheduler.py)
+    participant DB as SQLite
+    participant GC as Google Calendar<br/>(optional)
+
+    Note over UI: auto preview after each change (debounced)
+    UI->>API: POST /plans/{id}/preview (UTC offset, drags)
+    API->>PL: preview_plan()
+    PL->>DB: list_materials()
+    alt No materials / deadline passed
+        API-->>UI: 400 validation error
+    else Valid plan
+        PL->>DB: availability, study state,<br/>preferences, busy sessions
+        opt Calendar connected, "Avoid conflicts" on
+            PL->>GC: freeBusy query
+            GC-->>PL: busy intervals
+        end
+        PL->>SCH: plan_schedule() + apply_placements()
+        Note over SCH: deterministic, no LLM:<br/>pace steps over free time,<br/>daily budget, deadlines
+        SCH-->>PL: sessions + capacity report
+        API-->>UI: 200 preview (nothing saved)
+    end
+    UI-->>S: Proposed sessions on calendar
+
+    S->>UI: Accept plan
+    UI->>API: POST /plans/{id}/confirm (UTC offset, drags)
+    API->>PL: confirm_plan()
+    alt Plan already confirmed
+        API-->>UI: 409 Conflict
+    else
+        PL->>SCH: recompute the same schedule
+        SCH-->>PL: sessions
+        alt Drag no longer valid / nothing fits
+            API-->>UI: 409 / 400 (nothing saved)
+        else
+            PL->>DB: INSERT study_sessions + schedule_run<br/>(one transaction)
+            opt Google Calendar connected
+                PL->>GC: create / update study events
+            end
+            API-->>UI: 201 saved sessions
+        end
+    end
+    UI-->>S: Confirmed weekly schedule

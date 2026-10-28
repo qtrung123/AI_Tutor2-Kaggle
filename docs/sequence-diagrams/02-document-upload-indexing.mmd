@@ -1,0 +1,52 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontFamily": "Times New Roman, serif", "fontSize": "16px", "noteBkgColor": "#f7f7f2", "noteTextColor": "#111111", "noteBorderColor": "#888888", "actorBkg": "#ffffff", "actorBorder": "#333333", "signalColor": "#222222", "signalTextColor": "#111111", "labelBoxBkgColor": "#eeeeee", "activationBkgColor": "#e6e6e6", "activationBorderColor": "#444444"}, "sequence": {"mirrorActors": true, "showSequenceNumbers": true, "messageAlign": "center", "actorMargin": 35, "width": 130, "boxMargin": 8, "noteMargin": 8, "actorFontSize": 16, "messageFontSize": 16, "noteFontSize": 15}}}%%
+sequenceDiagram
+    autonumber
+    actor S as Student
+    participant UI as Frontend<br/>(tutor.js)
+    participant API as FastAPI<br/>(api/documents.py)
+    participant ING as Ingestion<br/>(ingest.py)
+    participant TE as Topic Extractor
+    participant DB as SQLite
+    participant VS as ChromaDB
+    participant EMB as BGE-M3
+    participant LLM as Qwen2.5-7B
+
+    S->>UI: Select PDF/TXT (+ optional subject)
+    UI->>API: POST /api/sources/upload
+    alt Invalid file type or subject
+        API-->>UI: 400 / 404 (nothing saved)
+    else Valid
+        Note over API: threadpool + _INDEXING_LOCK,<br/>save to data/users/{owner_id}/
+        API->>ING: index_files(paths, owner_id)
+        ING->>DB: list_indexed_documents()
+        loop Each file
+            Note over ING: SHA-256 hash
+            alt Same hash, vectors exist
+                Note over ING: skip (or refresh topics only)
+            else New or changed file
+                Note over ING: parse PDF/TXT,<br/>split 800 / 150 chars
+                ING->>TE: add_topic_metadata()
+                opt Low heading confidence
+                    TE->>LLM: classify headings (JSON)
+                    LLM-->>TE: heading roles
+                end
+                TE-->>ING: topics, chunk topic ids
+                ING->>VS: add_documents(chunks)
+                VS->>EMB: embed chunks
+                EMB-->>VS: 1024-d vectors
+                ING->>VS: delete stale vectors
+                ING->>DB: upsert_indexed_document()
+            end
+        end
+        ING-->>API: indexing stats
+        opt Subject chosen
+            API->>DB: assign_documents(only_unassigned)
+        end
+        alt Success
+            API->>DB: list_uploaded_sources()
+            API-->>UI: 200 {stats, sources}
+        else Parse / embedding / DB error
+            API-->>UI: 500 error
+        end
+    end
+    UI-->>S: "N files indexed (M chunks)"

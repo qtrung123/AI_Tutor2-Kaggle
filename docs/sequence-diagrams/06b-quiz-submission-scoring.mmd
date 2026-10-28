@@ -1,0 +1,47 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontFamily": "Times New Roman, serif", "fontSize": "16px", "noteBkgColor": "#f7f7f2", "noteTextColor": "#111111", "noteBorderColor": "#888888", "actorBkg": "#ffffff", "actorBorder": "#333333", "signalColor": "#222222", "signalTextColor": "#111111", "labelBoxBkgColor": "#eeeeee", "activationBkgColor": "#e6e6e6", "activationBorderColor": "#444444"}, "sequence": {"mirrorActors": true, "showSequenceNumbers": true, "messageAlign": "center", "actorMargin": 35, "width": 130, "boxMargin": 8, "noteMargin": 8, "actorFontSize": 16, "messageFontSize": 16, "noteFontSize": 15}}}%%
+sequenceDiagram
+    autonumber
+    actor S as Student
+    participant UI as Frontend<br/>(quiz.js)
+    participant API as FastAPI<br/>(quiz_attempts.py)
+    participant QA as Attempt Service<br/>(quiz_attempt_service.py)
+    participant PL as Planner Service
+    participant DB as SQLite
+
+    loop Each answer
+        S->>UI: Answer question
+        UI->>API: PATCH /api/quiz/{doc}/progress
+        API->>QA: update_quiz_progress()
+        QA->>DB: save in-progress answers
+    end
+
+    S->>UI: Finish Quiz
+    UI->>API: POST /api/quiz/{doc}/submit
+    API->>QA: submit_quiz_attempt()
+    QA->>DB: get_quiz_by_id()
+    alt Invalid answer set
+        API-->>UI: 400 Bad Request
+    else Valid
+        Note over QA: deterministic grading (no LLM):<br/>options, exact match, matching pairs
+        QA->>DB: save completed attempt (score, %)
+        opt Assessment quiz
+            QA->>DB: recompute topic mastery
+        end
+        API->>PL: complete_quiz_from_attempt()
+        opt Started planner session found
+            PL->>DB: complete quiz activity / step
+        end
+        API-->>UI: 200 attempt + planner_completion
+    end
+    UI-->>S: Score and answer review
+
+    opt Assessment quiz in an active plan
+        UI->>API: POST …/adaptation/apply (quiz_completed)
+        API->>PL: apply_adaptation()
+        alt Small change
+            PL->>DB: add / move / cancel sessions
+            API-->>UI: applied
+        else Large change
+            API-->>UI: requires_confirmation
+        end
+    end

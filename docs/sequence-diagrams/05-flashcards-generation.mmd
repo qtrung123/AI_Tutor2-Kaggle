@@ -1,0 +1,48 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontFamily": "Times New Roman, serif", "fontSize": "16px", "noteBkgColor": "#f7f7f2", "noteTextColor": "#111111", "noteBorderColor": "#888888", "actorBkg": "#ffffff", "actorBorder": "#333333", "signalColor": "#222222", "signalTextColor": "#111111", "labelBoxBkgColor": "#eeeeee", "activationBkgColor": "#e6e6e6", "activationBorderColor": "#444444"}, "sequence": {"mirrorActors": true, "showSequenceNumbers": true, "messageAlign": "center", "actorMargin": 35, "width": 130, "boxMargin": 8, "noteMargin": 8, "actorFontSize": 16, "messageFontSize": 16, "noteFontSize": 15}}}%%
+sequenceDiagram
+    autonumber
+    actor S as Student
+    participant UI as Frontend<br/>(session.js)
+    participant API as FastAPI<br/>(api/flashcards.py)
+    participant SVC as Flashcard Service
+    participant DB as SQLite
+    participant VS as ChromaDB
+    participant LLM as Qwen2.5-7B
+
+    S->>UI: Open Flashcards tab
+    UI->>API: GET /api/flashcards/{doc}?cache_only=true
+    API->>SVC: generate_flashcards(cache_only)
+    SVC->>DB: get_compatible_flashcards()
+    API-->>UI: saved set / not_generated
+
+    S->>UI: Generate / Regenerate
+    UI->>API: GET /api/flashcards/{doc} (or POST …/regenerate)
+    Note over API: prepare_generation_model()
+    API->>SVC: generate_flashcards()
+    opt Not regenerate
+        SVC->>DB: get_compatible_flashcards()
+    end
+    alt Compatible set found
+        API-->>UI: 200 saved set (no LLM)
+    else Generate
+        loop Each selected topic
+            SVC->>VS: get_topic_chunks() (metadata filter)
+        end
+        loop Up to 2 attempts (topics without a valid card)
+            SVC->>LLM: flashcard prompt (JSON)
+            LLM-->>SVC: cards per topic / error
+            Note over SVC: filter provenance, quality,<br/>language, duplicates
+        end
+        alt Every topic has ≥ 1 valid card
+            SVC->>DB: save_flashcards()
+            API-->>UI: 200 flashcard set
+        else
+            API-->>UI: 502 safe error message
+        end
+    end
+    UI-->>S: Flashcard deck
+
+    opt Learner edits the deck
+        UI->>API: POST / PATCH / DELETE …/cards
+        API->>DB: add / update / delete card
+    end

@@ -1,0 +1,23 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontFamily": "Times New Roman, serif", "fontSize": "16px", "noteBkgColor": "#f7f7f2", "noteTextColor": "#111111", "noteBorderColor": "#888888", "actorBkg": "#ffffff", "actorBorder": "#333333", "signalColor": "#222222", "signalTextColor": "#111111", "labelBoxBkgColor": "#eeeeee", "activationBkgColor": "#e6e6e6", "activationBorderColor": "#444444"}, "sequence": {"mirrorActors": true, "showSequenceNumbers": true, "messageAlign": "center", "actorMargin": 35, "width": 130, "boxMargin": 8, "noteMargin": 8, "actorFontSize": 16, "messageFontSize": 16, "noteFontSize": 15}}}%%
+sequenceDiagram
+    autonumber
+    actor S as Student
+    participant UI as Frontend<br/>(home.js, session.js)
+    participant API as FastAPI<br/>(planner_v2.py)
+    participant PR as Progress Service<br/>(study_progress.py)
+    participant DB as SQLite<br/>(sessions, quizzes,<br/>flashcards, summaries)
+
+    S->>UI: Open Home / Study Session
+    par Document progress
+        UI->>API: GET /api/progress/documents/{doc}
+        API->>PR: document_progress()
+        PR->>DB: study state, quiz attempts,<br/>plan sessions of the document
+        API-->>UI: learning state, quiz trend, study pack
+    and Plan progress
+        UI->>API: GET /api/planner/plans/{id}/progress
+        API->>PR: plan_progress()
+        PR->>DB: plan sessions + materials
+        API-->>UI: sessions done / planned,<br/>minutes left, next session
+    end
+    Note over PR: read-only: nothing is written
+    UI-->>S: Progress dashboard

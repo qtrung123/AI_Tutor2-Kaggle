@@ -1,0 +1,50 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontFamily": "Times New Roman, serif", "fontSize": "16px", "noteBkgColor": "#f7f7f2", "noteTextColor": "#111111", "noteBorderColor": "#888888", "actorBkg": "#ffffff", "actorBorder": "#333333", "signalColor": "#222222", "signalTextColor": "#111111", "labelBoxBkgColor": "#eeeeee", "activationBkgColor": "#e6e6e6", "activationBorderColor": "#444444"}, "sequence": {"mirrorActors": true, "showSequenceNumbers": true, "messageAlign": "center", "actorMargin": 35, "width": 130, "boxMargin": 8, "noteMargin": 8, "actorFontSize": 16, "messageFontSize": 16, "noteFontSize": 15}}}%%
+sequenceDiagram
+    autonumber
+    actor S as Student
+    participant UI as Frontend<br/>(planner.js)
+    participant API as FastAPI<br/>(planner_v2.py)
+    participant PL as Planner Service<br/>(study_plan_api_service.py)
+    participant DB as SQLite<br/>(study_sessions)
+
+    S->>UI: Start planned session
+    UI->>API: POST /sessions/{id}/start
+    API->>PL: start_session()
+    PL->>DB: get_session()
+    alt Session time already passed
+        API-->>UI: 409 session_missed
+    else Startable
+        PL->>DB: status: scheduled → in_progress
+        PL->>DB: get_document_study_state()
+        Note over PL: _session_tool(): Summary,<br/>Flashcards or Quiz (nothing generated)
+        API-->>UI: 200 {session, tool}
+        UI-->>S: Open study tool
+    end
+
+    alt Quiz activity
+        Note over UI,API: quiz submit completes it (diagram 06b)
+    else Combined session step
+        S->>UI: Step done
+        UI->>API: POST /sessions/{id}/steps/{i}/complete
+        API->>PL: complete_session_step()
+        PL->>DB: mark step done (last step → completed)
+        API-->>UI: session
+    else Single session
+        S->>UI: Complete
+        UI->>API: POST /sessions/{id}/complete
+        API->>PL: complete_session()
+        PL->>DB: status: in_progress → completed
+        API-->>UI: session
+    else Skip
+        S->>UI: Skip
+        UI->>API: POST /sessions/{id}/skip
+        API->>PL: skip_session()
+        PL->>DB: status → skipped
+        API-->>UI: session
+        opt Skip changed the session
+            UI->>API: POST …/adaptation/apply (session_skipped)
+            API->>PL: apply_adaptation()
+        end
+    end
+    Note over PL: Google Calendar sync after each change<br/>(only when connected)
+    UI-->>S: Updated schedule

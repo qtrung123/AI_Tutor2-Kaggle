@@ -1,0 +1,34 @@
+%%{init: {"theme": "neutral", "themeVariables": {"fontFamily": "Times New Roman, serif", "fontSize": "16px", "noteBkgColor": "#f7f7f2", "noteTextColor": "#111111", "noteBorderColor": "#888888", "actorBkg": "#ffffff", "actorBorder": "#333333", "signalColor": "#222222", "signalTextColor": "#111111", "labelBoxBkgColor": "#eeeeee", "activationBkgColor": "#e6e6e6", "activationBorderColor": "#444444"}, "sequence": {"mirrorActors": true, "showSequenceNumbers": true, "messageAlign": "center", "actorMargin": 35, "width": 130, "boxMargin": 8, "noteMargin": 8, "actorFontSize": 16, "messageFontSize": 16, "noteFontSize": 15}}}%%
+sequenceDiagram
+    autonumber
+    participant JOB as Job Worker<br/>(summary_jobs.py)
+    participant SVC as Summary Service<br/>(summary_service.py)
+    participant DB as SQLite
+    participant VS as ChromaDB
+    participant LLM as Qwen2.5-7B
+
+    Note over JOB: prepare_generation_model()
+    JOB->>SVC: generate_document_summary()
+    SVC->>DB: get_indexed_document() → topics
+    loop Each topic
+        SVC->>VS: get topic chunks (metadata filter)
+        VS-->>SVC: chunks
+    end
+    Note over SVC: _topic_batches(): ≤ 4 topics per call,<br/>prompt fits num_ctx 32768
+    loop Each topic batch
+        loop Up to 2 attempts (missing topics only)
+            SVC->>LLM: topic notes prompt (JSON)
+            LLM-->>SVC: notes per topic
+            Note over SVC: parse + validate each topic<br/>against its own evidence
+        end
+    end
+    alt Every topic has valid notes
+        SVC->>LLM: synthesis prompt (all topic notes)
+        LLM-->>SVC: overview + 4–7 key takeaways
+        SVC->>DB: save_summary()
+        SVC-->>JOB: summary_id
+        JOB->>DB: UPDATE job: complete, summary_id
+    else Topic missing after 2 attempts / any error
+        SVC-->>JOB: exception
+        JOB->>DB: UPDATE job: failed, error message
+    end
