@@ -1,0 +1,4 @@
+A topic block marked SUBSECTIONS: {marker} comes from a document with no detected headings.
+For that block only, organize the evidence into 2 to {max_sections} subsections in source order, one per distinct
+major idea the evidence actually covers, and give each a short "heading" (2 to 6 words) built from the evidence's
+own terminology instead of a subtopic_id. Return an empty subsections list only if the evidence is too short to divide.

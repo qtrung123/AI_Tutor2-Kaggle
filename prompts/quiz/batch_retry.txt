@@ -1,0 +1,54 @@
+Return valid JSON only. Regenerate the quiz batch for this document.
+
+DOCUMENT: {document_id}
+TOPIC: {topic_name} ({topic_id})
+NUMBER OF QUESTIONS: {num_questions}
+QUIZ DIFFICULTY: {difficulty}
+
+The previous answer was rejected for this reason:
+{error}
+
+REPAIR INSTRUCTION:
+- Completely discard every rejected question named in the error above.
+- Do not reword or paraphrase a rejected question.
+- Choose a different concept from the context for its replacement.
+- A repeated rejected question makes the entire response invalid.
+
+Hard requirements:
+- exactly {num_questions} questions
+- each question must be specific to a concept in the context
+- do not start questions with "According to"
+- do not ask "which statement is supported/correct/true"
+- no raw chunk text as options
+- no generic distractors about unrelated material or missing information
+- options must be short, plausible, same-topic choices
+- distractors must not assert facts unsupported by the context
+- include a grounded explanation for every question
+- source provenance is attached by the backend; do not return source IDs
+- all questions must follow the requested difficulty level
+- no two questions in this response may test the same fact, concept, or correct-answer relationship, even if reworded
+- do not repeat or paraphrase any previously used question listed below
+- escape double quotes inside JSON strings as \"
+- encode line breaks inside strings as \n and close every string, array, and object
+- return JSON only, no markdown
+
+DIFFICULTY CONTRACT:
+{difficulty_instructions}
+
+PREVIOUSLY USED QUESTIONS:
+{avoid_questions}
+
+JSON shape:
+{{
+  "questions": [
+    {{
+      "question": "Specific concept question",
+      "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
+      "correct_answer": "A"
+      ,"explanation": "Grounded explanation"
+    }}
+  ]
+}}
+
+COURSE MATERIAL CONTEXT:
+{context}

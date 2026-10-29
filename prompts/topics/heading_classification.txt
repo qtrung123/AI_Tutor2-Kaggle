@@ -1,0 +1,2 @@
+Classify each ordered candidate as role major or subtopic. Copy id and heading exactly. For a major use parent_id and parent_heading null; for a subtopic copy the id and exact heading text of its preceding major parent. Do not omit, reorder, invent, or rename anything. Return JSON only as {{"classifications":[{{"id":"h0","heading":"exact text","role":"major|subtopic","parent_id":null|"hN","parent_heading":null|"exact parent text"}}]}}.
+{candidates}

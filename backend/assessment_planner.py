@@ -7,6 +7,7 @@ import time
 from backend.llm_backend import ChatOllama
 
 from backend import quiz_diagnostics
+from backend.prompt_loader import render_prompt
 
 from config import (
     AUTO_QUIZ_MAX_DOCUMENT,
@@ -294,19 +295,12 @@ def _parse_json(text: str) -> dict:
 
 def _plan_seeds(topic_name: str, seeds: list[dict]) -> list[dict]:
     seed_ids = [seed["subtopic_id"] for seed in seeds if seed["subtopic_id"]]
-    prompt = f"""
-Identify distinct, educationally meaningful assessment concepts for this topic.
-Structural subtopics are seeds, not mandatory one-to-one concepts. You may split a broad seed,
-merge small or redundant seeds, or derive concepts from TOPIC_LEVEL evidence.
-Every concept must cite exact supplied Chunk IDs and only applicable structural subtopic IDs.
-Return only name, source_subtopic_ids, and source_chunk_ids for each concept.
-Return JSON only: {{"concepts":[{{"name":"label","source_subtopic_ids":[],"source_chunk_ids":["exact id"]}}]}}
-
-TOPIC: {topic_name}
-ALLOWED SUBTOPIC IDS: {json.dumps(seed_ids, ensure_ascii=False)}
-CONTEXT:
-{_planner_context(seeds)}
-""".strip()
+    prompt = render_prompt(
+        "quiz/assessment_concepts.txt",
+        topic_name=topic_name,
+        allowed_subtopic_ids=json.dumps(seed_ids, ensure_ascii=False),
+        context=_planner_context(seeds),
+    ).strip()
     diag = quiz_diagnostics.get_current()
     diag.record_context(
         stage="planner",

@@ -1,0 +1,6 @@
+Write exactly {count} {difficulty} quiz questions for {topic_name}.
+JSON only: {{"questions":[{{"slot_id":"S1","question_type":"single_choice|true_false|multi_select","question":"...","options":["..."],"correct_answers":[0],"explanation":"..."}}]}}
+Use each evidence slot exactly once and only its evidence. single_choice uses four options and one answer; true_false uses exactly True/False and one answer; multi_select uses four options, two or more answers, and at least one incorrect option. {type_instruction} Question <=18 words, each option <=10 words, explanation <=16 words. No markdown or extra fields.
+{difficulty_contract}
+{repair_instructions}EVIDENCE:
+{evidence}

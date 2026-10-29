@@ -78,13 +78,13 @@ FastAPI (127.0.0.1:8000)
         |
         +-- Chat RAG
         |     +-- Chroma retrieval filtered by conversation sources
-        |     +-- prompts/rag_prompt.txt
+        |     +-- prompts/chat/rag_answer.txt
         |     +-- Ollama chat model
         |     +-- data/conversations.db (SQLite)
         |
         +-- Quiz RAG
               +-- all chunks from the selected document
-              +-- prompts/quiz_prompt.txt
+              +-- prompts/quiz/*.txt
               +-- Ollama chat model
               +-- data/conversations.db (SQLite)
 ```
@@ -110,9 +110,12 @@ python-ollama-rag/
 │   └── package.json
 ├── deployment/                 # Kaggle startup, nginx and persistence scripts
 ├── docs/ARCHITECTURE.md        # Architecture guide (Vietnamese)
-├── prompts/
-│   ├── rag_prompt.txt          # Grounded chat instructions
-│   └── quiz_prompt.txt         # Quiz generation instructions
+├── prompts/                    # LLM prompt texts, loaded by backend/prompt_loader.py
+│   ├── chat/                   # Grounded chat instructions (rag_answer.txt)
+│   ├── quiz/                   # Quiz generation, repair, validation and explanation prompts
+│   ├── summary/                # Topic notes and document synthesis prompts
+│   ├── flashcards/             # Flashcard generation prompts
+│   └── topics/                 # Heading classification prompt
 ├── data/                       # Uploaded documents and persistent application data
 ├── vectorstore/                # Chroma database
 ├── config.py                   # Paths, models, and retrieval settings

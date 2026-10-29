@@ -272,16 +272,9 @@ class TopicExtractor:
 def ollama_heading_refiner(model: str):
     """Create a bounded classifier that cannot alter detected candidates."""
     from backend.llm_backend import ChatOllama
+    from backend.prompt_loader import render_prompt
     def refine(payload: dict) -> list[dict]:
-        prompt = (
-            "Classify each ordered candidate as role major or subtopic. Copy id and heading exactly. "
-            "For a major use parent_id and parent_heading null; for a subtopic copy the id and exact "
-            "heading text of its preceding major parent. "
-            "Do not omit, reorder, invent, or rename anything. Return JSON only as "
-            '{"classifications":[{"id":"h0","heading":"exact text","role":"major|subtopic",'
-            '"parent_id":null|"hN","parent_heading":null|"exact parent text"}]}.\n'
-            + json.dumps(payload, ensure_ascii=False)
-        )
+        prompt = render_prompt("topics/heading_classification.txt", candidates=json.dumps(payload, ensure_ascii=False))
         import time
 
         from backend.perf_timing import log_llm_call

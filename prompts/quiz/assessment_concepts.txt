@@ -1,0 +1,11 @@
+Identify distinct, educationally meaningful assessment concepts for this topic.
+Structural subtopics are seeds, not mandatory one-to-one concepts. You may split a broad seed,
+merge small or redundant seeds, or derive concepts from TOPIC_LEVEL evidence.
+Every concept must cite exact supplied Chunk IDs and only applicable structural subtopic IDs.
+Return only name, source_subtopic_ids, and source_chunk_ids for each concept.
+Return JSON only: {{"concepts":[{{"name":"label","source_subtopic_ids":[],"source_chunk_ids":["exact id"]}}]}}
+
+TOPIC: {topic_name}
+ALLOWED SUBTOPIC IDS: {allowed_subtopic_ids}
+CONTEXT:
+{context}

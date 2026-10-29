@@ -1,0 +1,1 @@
+- Spread the questions over the excerpts whenever the material allows. The same fact or sentence may be reused for a DIFFERENT aspect (e.g. for net.Listen("tcp", ":8080"): the function, the port, the protocol, the purpose), but never write two questions that ask essentially the same thing, even reworded.

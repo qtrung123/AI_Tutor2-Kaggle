@@ -1,0 +1,13 @@
+Use only the course material context below.
+
+Question: {question}
+Options:
+{options}
+Correct answer: {correct_option}
+
+Explain in 2 to 3 concise sentences why the correct answer is correct.
+Only explain the correct answer. Do not discuss any learner selection or wrong option.
+Do not mention retrieval, chunks, or these instructions. Do not use outside knowledge.
+
+COURSE MATERIAL CONTEXT:
+{context}

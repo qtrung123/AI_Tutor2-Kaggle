@@ -9,6 +9,7 @@ from backend.flashcard_store import get_compatible_flashcards, save_flashcards
 from backend.indexed_document_store import get_indexed_document
 from backend.llm_json import parse_json_object
 from backend.model_registry import resolve_generation_model
+from backend.prompt_loader import load_prompt, render_prompt
 # Generic (non-document-specific) text-quality helpers shared with the Quiz pipeline.
 from backend.text_safety import _clean_inline_text, _reject_unsafe_final_text
 from config import (
@@ -167,30 +168,11 @@ def _is_well_formed_card_text(front: str, back: str) -> bool:
     return True
 
 
-_LANGUAGE_INSTRUCTIONS = {
-    "english": (
-        "Write every card -- front and back -- in English only, even if some evidence is "
-        "written in another language."
-    ),
-    "vietnamese": (
-        "Write every card -- front and back -- in Vietnamese only, even if some evidence is "
-        "written in another language."
-    ),
-    "auto": (
-        "The evidence may contain more than one language. Infer the single canonical language "
-        "of this document (the language most of its structure and content is written in) and "
-        "write EVERY card, front and back, in that one language consistently. Never mix "
-        "languages within one card, and never switch languages between cards in the same set."
-    ),
+_LANGUAGE_PROMPTS = {
+    "english": "flashcards/language_english.txt",
+    "vietnamese": "flashcards/language_vietnamese.txt",
+    "auto": "flashcards/language_auto.txt",
 }
-
-_BILINGUAL_INSTRUCTIONS = (
-    "Some evidence may repeat the same sentence twice, once in one language and again "
-    "immediately after in a translation of it. Treat a pair like this as ONE single fact, not "
-    "two separate facts, and never make one language's sentence the front and its translation "
-    "into another language the back -- a translation is not a real question/answer "
-    "relationship."
-)
 
 
 def _prompt(document_id: str, evidence_groups: list[tuple[dict, list[dict]]], language: str,
@@ -210,30 +192,14 @@ def _prompt(document_id: str, evidence_groups: list[tuple[dict, list[dict]]], la
             f"TOPIC_ID: {topic['topic_id']}\nTOPIC_NAME: {topic.get('name') or topic['topic_id']}\n"
             f"EVIDENCE:\n{'\n\n'.join(evidence)}\nEND_TOPIC"
         )
-    return f"""Create concise, recall-oriented study flashcards for every topic block below.
-Flashcards test KNOWLEDGE, not translation. Prefer a question-style front ("What is...", "When
-does...", "Why does...") whose back is a clear, concise answer grounded in the evidence. A
-statement-style front is fine too, but front and back must never be two versions of the same
-sentence -- the back must add real information (an answer, a definition, a consequence), never
-just restate or translate the front.
-{_BILINGUAL_INSTRUCTIONS}
-{_LANGUAGE_INSTRUCTIONS[language]}
-Preserve precise technical terms and identifiers exactly as written regardless of the study
-language (for example eCos, TinyOS, HAL, FIFO, mutex, semaphore, FPGA, ASIC, API).
-Prioritize important definitions, concepts, characteristics, mechanisms, components, and comparisons.
-Use ONLY evidence from the card's own TOPIC block. Never transfer facts between topics or add outside facts.
-Include source_chunk_ids that directly support each card. A subtopic_id is optional and must come from evidence metadata.
-Do not pad to an exact count. Avoid duplicates or near-duplicates. Never copy a raw header, footer, page number, or email address into a card. Return one topic group per input block, in the same order.
-Generate at most {FLASHCARD_MAX_CARDS_PER_TOPIC} cards per topic block -- fewer is fine, prioritize
-the most important content over exhaustive coverage. Stop as soon as each topic's most important
-content is covered; never repeat a card or a near-identical card to reach a higher count.
-Return JSON only, with no extra text before or after it, in exactly this shape:
-{{"topics":[{{"topic_id":"id","cards":[{{"front":"...","back":"...",
-"subtopic_id":"optional","source_chunk_ids":["..."]}}]}}]}}
-
-DOCUMENT: {document_id}
-
-{chr(10).join(blocks)}"""
+    return render_prompt(
+        "flashcards/card_generation.txt",
+        bilingual_instructions=load_prompt("flashcards/bilingual_evidence.txt"),
+        language_instructions=load_prompt(_LANGUAGE_PROMPTS[language]),
+        max_cards_per_topic=FLASHCARD_MAX_CARDS_PER_TOPIC,
+        document_id=document_id,
+        topic_blocks="\n".join(blocks),
+    )
 
 
 def _bind_topic_groups(raw_topics, groups: list[tuple[dict, list[dict]]]) -> dict[str, dict]:

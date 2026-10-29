@@ -39,6 +39,8 @@ import re
 import unicodedata
 from collections import Counter
 
+from backend.prompt_loader import load_prompt, render_prompt
+
 # v9: single_choice ONLY (no flashcard fill_blank in the Normal Quiz) and one target language per
 # quiz -- bumped so cached v8 quizzes (mixed types / mixed languages) are never silently reused.
 # v10: local option/evidence repair, aspect-aware duplicates, at most 3 calls -- cached v9 quizzes
@@ -298,11 +300,8 @@ QUIZ_VIETNAMESE_MIN_SHARE = 0.2         # a Vietnamese question below this share
 QUIZ_ENGLISH_MAX_VI_WORDS = 1           # an English question may carry one stray accented word (a name)
 
 _LANGUAGE_DIRECTIVES = {
-    "english": "Write ALL question text, answer options and explanations in English only.",
-    "vietnamese": (
-        "Write ALL question text, answer options and explanations in Vietnamese only. "
-        "Preserve technical identifiers such as eCos, TinyOS, HAL, FIFO exactly."
-    ),
+    "english": "quiz/single_choice_language_english.txt",
+    "vietnamese": "quiz/single_choice_language_vietnamese.txt",
 }
 
 
@@ -611,15 +610,9 @@ def select_context_units(units: list[dict], budget_chars: int, exclude_ids=froze
 # ---------------------------------------------------------------------------------------------
 
 _DIFFICULTY_CONTRACTS = {
-    "easy": "Difficulty EASY: test one explicitly stated fact, definition, purpose or step.",
-    "medium": (
-        "Difficulty MEDIUM: require one reasoning step (comparison, cause and effect, ordering or "
-        "applying a stated rule to a short situation), not plain recall."
-    ),
-    "difficult": (
-        "Difficulty DIFFICULT: require applying or combining facts from the SAME excerpt (diagnose, "
-        "predict, choose a consequence); never plain recall."
-    ),
+    "easy": "quiz/single_choice_difficulty_easy.txt",
+    "medium": "quiz/single_choice_difficulty_medium.txt",
+    "difficult": "quiz/single_choice_difficulty_difficult.txt",
 }
 
 
@@ -636,7 +629,7 @@ def build_generation_prompt(
     follow-up call is shown each stem with the sentence it was written from, so it can pick other
     facts instead of asking the same one again. `language` is the quiz's ONE target language
     (detect_quiz_language), stated in every call -- the first one and every follow-up."""
-    directive = _LANGUAGE_DIRECTIVES.get(language, _LANGUAGE_DIRECTIVES[QUIZ_DEFAULT_LANGUAGE])
+    directive = load_prompt(_LANGUAGE_DIRECTIVES.get(language, _LANGUAGE_DIRECTIVES[QUIZ_DEFAULT_LANGUAGE]))
     excerpts = "\n\n".join(f"[{unit['unit_id']}]\n{unit['evidence_excerpt']}" for unit in units)
     avoid = ""
     if avoid_stems:
@@ -645,51 +638,20 @@ def build_generation_prompt(
         for index, stem in enumerate(avoid_stems):
             source = _clean_inline(quotes[index])[:QUIZ_AVOID_QUOTE_CHARS] if index < len(quotes) and quotes[index] else ""
             lines.append(f'- {stem}  [source: "{source}"]' if source else f"- {stem}")
-        avoid = (
-            "The list below holds the questions that already exist (each with the sentence it used). "
-            "Do not repeat them and do not reword them: never ask the same thing again. A listed sentence "
-            "may be used again only to ask about a DIFFERENT aspect of it. Questions already written:\n"
-            + "\n".join(lines) + "\n"
-        )
-    spread_rule = (
-        "- The questions already written are listed below the rules; prefer sentences and parts of the "
-        "excerpts that they did not use. A sentence they used may still hold a different fact or aspect: "
-        "ask about it only if none of the listed questions asks that.\n"
-        if avoid_stems else
-        "- Spread the questions over the excerpts whenever the material allows. The same fact or sentence "
-        "may be reused for a DIFFERENT aspect (e.g. for net.Listen(\"tcp\", \":8080\"): the function, the "
-        "port, the protocol, the purpose), but never write two questions that ask essentially the same "
-        "thing, even reworded.\n"
+        avoid = render_prompt("quiz/single_choice_existing_questions.txt", questions="\n".join(lines)) + "\n"
+    spread_rule = load_prompt(
+        "quiz/single_choice_spread_follow_up.txt" if avoid_stems else "quiz/single_choice_spread_first_call.txt"
     )
-    return (
-        f"Write exactly {count} {difficulty} single_choice revision questions about \"{scope_name}\", "
-        "using ONLY the excerpts below. Every fact in a question and in its correct answer must be stated "
-        "in the excerpts; never add knowledge from outside them.\n"
-        f"LANGUAGE: {directive}\n"
-        'Return JSON only: {"questions":[{"evidence_quote":"...","question":"...",'
-        '"options":["...","...","...","..."],"answer_index":0,"explanation":"..."}]}\n'
-        "Rules:\n"
-        "- First choose evidence_quote: one or two consecutive sentences (about 8-30 words) copied exactly "
-        "as written from an excerpt. Do not paraphrase, translate, or fix its spelling or spacing.\n"
-        "- Then write a question whose correct answer is stated in that quote. Never ask about something "
-        "the quote does not say.\n"
-        "- single_choice only: exactly 4 options, exactly 1 correct option; answer_index is the 0-based "
-        "position (0-3) of the correct option. Vary the position of the correct option.\n"
-        "- The 3 wrong options are distinct, plausible distractors that are clearly incorrect. They do NOT "
-        "need to appear in the excerpts: related concepts, nearby values, opposite actions or invented "
-        "alternatives are fine, as long as none of them is also correct.\n"
-        "- The 4 options must have clearly different meanings: never write two options that say the same "
-        "thing in different words, and no option may be a shorter or longer version of another.\n"
-        f"{spread_rule}"
-        "- No 'all/none of the above' options. No negative questions: the question must not contain NOT, EXCEPT, "
-        "incorrect or false (or their equivalent in the excerpts' language) -- never ask which option is NOT true; "
-        "ask what the excerpts positively state.\n"
-        f"- Write ALL {count} questions: do not stop early.\n"
-        f"- {directive} Never mix languages. Be concise: question <=20 words, each option <=10 words, "
-        "explanation <=20 words. No markdown, no extra fields.\n"
-        f"{_DIFFICULTY_CONTRACTS[difficulty]}\n"
-        f"{avoid}"
-        f"EXCERPTS:\n{excerpts}"
+    return render_prompt(
+        "quiz/single_choice_generation.txt",
+        count=count,
+        difficulty=difficulty,
+        scope_name=scope_name,
+        language_directive=directive,
+        spread_rule=spread_rule,
+        difficulty_contract=load_prompt(_DIFFICULTY_CONTRACTS[difficulty]),
+        existing_questions=avoid,
+        excerpts=excerpts,
     )
 
 

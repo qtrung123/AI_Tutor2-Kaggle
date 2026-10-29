@@ -1,0 +1,1 @@
+{slot_id} previous rejection: {reasons}

@@ -1,0 +1,1 @@
+Some evidence may repeat the same sentence twice, once in one language and again immediately after in a translation of it. Treat a pair like this as ONE single fact, not two separate facts, and never make one language's sentence the front and its translation into another language the back -- a translation is not a real question/answer relationship.

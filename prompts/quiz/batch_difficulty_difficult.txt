@@ -1,0 +1,5 @@
+DIFFICULT
+- Require analysis, diagnosis, prediction, or application in a concrete scenario.
+- Combine at least two related facts, rules, examples, or code behaviors from the context whenever the material supports it.
+- Prefer predicting code behavior, choosing a design consequence, diagnosing an error, or distinguishing subtly plausible alternatives.
+- Do not ask names, dates, direct definitions, direct syntax recognition, or any question answerable by copying one sentence.

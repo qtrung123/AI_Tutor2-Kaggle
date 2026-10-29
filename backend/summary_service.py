@@ -10,6 +10,7 @@ from backend.llm_backend import ChatOllama
 from backend.indexed_document_store import get_indexed_document
 from backend.llm_json import parse_json_object
 from backend.model_registry import resolve_generation_model
+from backend.prompt_loader import load_prompt, render_prompt
 from backend.document_retrieval import get_schema_topic_evidence, get_topic_chunks
 from backend.summary_store import get_compatible_summary, save_summary
 from config import DEFAULT_GENERATION_MODEL, GENERATION_KEEP_ALIVE
@@ -109,41 +110,19 @@ def _topic_prompt(document_id: str, topic_evidence: list[tuple[dict, list[dict]]
             "END_TOPIC"
         )
     joined_sections = "\n\n".join(sections)
-    derive_instructions = (
-        f"\nA topic block marked SUBSECTIONS: {DERIVE_SECTIONS_MARKER} comes from a document with no detected headings.\n"
-        f"For that block only, organize the evidence into 2 to {MAX_DERIVED_SECTIONS} subsections in source order, one per distinct\n"
-        "major idea the evidence actually covers, and give each a short \"heading\" (2 to 6 words) built from the evidence's\n"
-        "own terminology instead of a subtopic_id. Return an empty subsections list only if the evidence is too short to divide.\n"
-    ) if derive else ""
-    subsection_identity = '"heading":"short evidence-based heading"' if derive else '"subtopic_id":"exact id"'
-    return f"""Create complete, easy-to-study notes for every requested topic using ONLY the evidence inside that topic's own block.
-Follow these priorities in order:
-1. Cover all important ideas from the evidence.
-2. Explain them in concise, easy-to-understand study language; paraphrase freely when helpful.
-3. Preserve useful details, definitions, characteristics, mechanisms, and comparisons.
-4. Avoid unnecessary repetition.
-5. Never introduce facts unsupported by that topic's evidence.
-Treat every TOPIC_ID ... END_TOPIC block as isolated. Never transfer facts, terminology, examples,
-properties, or conclusions between topics. If a fact is not supported inside the current topic block,
-omit it from that topic's overview and subsections. If evidence is limited, say so plainly.
-Return exactly one summary object per requested TOPIC_ID, in the same order, with no missing or extra objects.
-For each topic, write one concise overview and use only subsection headings from REQUIRED_SUBTOPICS_IN_ORDER.
-Include each supported, non-redundant subtopic in that existing order. You may omit a subtopic only when its evidence
-is not meaningful enough to summarize or its content would merely repeat the parent topic overview. Do not invent,
-rename, or merge subtopics. Topics with no useful required subtopics must return an empty subsections list.{derive_instructions}
-Never create placeholder sections such as "not detailed in the provided evidence", and do not return sections that
-only restate the subsection heading without meaningful explanation.
-Avoid repeating the same fact in the topic overview and subsections.
-Each subsection content must use exactly one natural format: paragraph, bullets, or a small table. Use tables only
-when the evidence genuinely contains compact comparable attributes. Do not return per-topic key takeaways.
-Return JSON only using this schema:
-{{"topics":[{{"topic_id":"exact id","overview":"concise grounded overview","subsections":[
-{{{subsection_identity},"content_type":"paragraph|bullets|table","paragraph":"", "bullets":[],
-"table":{{"headers":[],"rows":[[]]}}}}]}}]}}
-
-DOCUMENT: {document_id}
-
-{joined_sections}"""
+    derive_instructions = "\n" + render_prompt(
+        "summary/derive_sections_instructions.txt", marker=DERIVE_SECTIONS_MARKER, max_sections=MAX_DERIVED_SECTIONS,
+    ) + "\n" if derive else ""
+    subsection_identity = load_prompt(
+        "summary/subsection_identity_derived.txt" if derive else "summary/subsection_identity_required.txt"
+    )
+    return render_prompt(
+        "summary/topic_notes.txt",
+        derive_instructions=derive_instructions,
+        subsection_identity=subsection_identity,
+        document_id=document_id,
+        topic_blocks=joined_sections,
+    )
 
 
 def _tokens(text: str) -> set[str]:
@@ -468,14 +447,11 @@ def _synthesis_prompt(document_id: str, topic_summaries: list[dict]) -> str:
         {key: item[key] for key in ("topic_id", "topic_name", "overview", "subsections")}
         for item in topic_summaries
     ]
-    return f"""Using only the validated ordered study notes below, write one concise Document Overview paragraph
-and 4 to 7 document-level key takeaways. Do not introduce unsupported facts. Avoid repeating the same fact
-between the overview, topic notes, and final takeaways. Do not return topic-level takeaways.
-Return JSON only: {{"overview":"one concise paragraph","key_takeaways":["takeaway 1","takeaway 2","takeaway 3","takeaway 4"]}}
-
-DOCUMENT: {document_id}
-ORDERED TOPIC SUMMARIES:
-{json.dumps(synthesis_evidence, ensure_ascii=False)}"""
+    return render_prompt(
+        "summary/document_synthesis.txt",
+        document_id=document_id,
+        topic_summaries=json.dumps(synthesis_evidence, ensure_ascii=False),
+    )
 
 
 def generate_document_summary(owner_id: str, document_id: str, model_id: str | None = None, regenerate: bool = False,

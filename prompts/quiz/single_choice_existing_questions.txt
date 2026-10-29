@@ -1,0 +1,2 @@
+The list below holds the questions that already exist (each with the sentence it used). Do not repeat them and do not reword them: never ask the same thing again. A listed sentence may be used again only to ask about a DIFFERENT aspect of it. Questions already written:
+{questions}

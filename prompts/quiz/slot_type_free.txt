@@ -1,0 +1,1 @@
+Choose each question_type from what its evidence can assess naturally; include single_choice, true_false, and multi_select at least once each, with no fixed ratio. On retries, try another valid question_type or a different same-topic angle before fallback.

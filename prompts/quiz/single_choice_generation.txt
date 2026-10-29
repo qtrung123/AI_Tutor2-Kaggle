@@ -1,0 +1,16 @@
+Write exactly {count} {difficulty} single_choice revision questions about "{scope_name}", using ONLY the excerpts below. Every fact in a question and in its correct answer must be stated in the excerpts; never add knowledge from outside them.
+LANGUAGE: {language_directive}
+Return JSON only: {{"questions":[{{"evidence_quote":"...","question":"...","options":["...","...","...","..."],"answer_index":0,"explanation":"..."}}]}}
+Rules:
+- First choose evidence_quote: one or two consecutive sentences (about 8-30 words) copied exactly as written from an excerpt. Do not paraphrase, translate, or fix its spelling or spacing.
+- Then write a question whose correct answer is stated in that quote. Never ask about something the quote does not say.
+- single_choice only: exactly 4 options, exactly 1 correct option; answer_index is the 0-based position (0-3) of the correct option. Vary the position of the correct option.
+- The 3 wrong options are distinct, plausible distractors that are clearly incorrect. They do NOT need to appear in the excerpts: related concepts, nearby values, opposite actions or invented alternatives are fine, as long as none of them is also correct.
+- The 4 options must have clearly different meanings: never write two options that say the same thing in different words, and no option may be a shorter or longer version of another.
+{spread_rule}
+- No 'all/none of the above' options. No negative questions: the question must not contain NOT, EXCEPT, incorrect or false (or their equivalent in the excerpts' language) -- never ask which option is NOT true; ask what the excerpts positively state.
+- Write ALL {count} questions: do not stop early.
+- {language_directive} Never mix languages. Be concise: question <=20 words, each option <=10 words, explanation <=20 words. No markdown, no extra fields.
+{difficulty_contract}
+{existing_questions}EXCERPTS:
+{excerpts}

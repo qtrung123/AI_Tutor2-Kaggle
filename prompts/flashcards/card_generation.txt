@@ -1,0 +1,24 @@
+Create concise, recall-oriented study flashcards for every topic block below.
+Flashcards test KNOWLEDGE, not translation. Prefer a question-style front ("What is...", "When
+does...", "Why does...") whose back is a clear, concise answer grounded in the evidence. A
+statement-style front is fine too, but front and back must never be two versions of the same
+sentence -- the back must add real information (an answer, a definition, a consequence), never
+just restate or translate the front.
+{bilingual_instructions}
+{language_instructions}
+Preserve precise technical terms and identifiers exactly as written regardless of the study
+language (for example eCos, TinyOS, HAL, FIFO, mutex, semaphore, FPGA, ASIC, API).
+Prioritize important definitions, concepts, characteristics, mechanisms, components, and comparisons.
+Use ONLY evidence from the card's own TOPIC block. Never transfer facts between topics or add outside facts.
+Include source_chunk_ids that directly support each card. A subtopic_id is optional and must come from evidence metadata.
+Do not pad to an exact count. Avoid duplicates or near-duplicates. Never copy a raw header, footer, page number, or email address into a card. Return one topic group per input block, in the same order.
+Generate at most {max_cards_per_topic} cards per topic block -- fewer is fine, prioritize
+the most important content over exhaustive coverage. Stop as soon as each topic's most important
+content is covered; never repeat a card or a near-identical card to reach a higher count.
+Return JSON only, with no extra text before or after it, in exactly this shape:
+{{"topics":[{{"topic_id":"id","cards":[{{"front":"...","back":"...",
+"subtopic_id":"optional","source_chunk_ids":["..."]}}]}}]}}
+
+DOCUMENT: {document_id}
+
+{topic_blocks}

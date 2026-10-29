@@ -1,0 +1,1 @@
+{slot_id} diversification attempt {attempt}: use a different question angle and formulation from every forbidden question, while staying within this slot's evidence.

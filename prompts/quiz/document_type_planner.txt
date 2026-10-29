@@ -1,0 +1,5 @@
+Rank ALL of these evidence slots by fit for two special quiz question types, best fit first. Do not write any questions.
+JSON only: {{"multi_select_ranked":["Sx","Sy",...],"true_false_ranked":["Sa","Sb",...]}}
+multi_select needs evidence with two or more independently correct statements -- rank every slot_id best-to-worst fit for multi_select. true_false needs evidence stating one clear factual proposition, rule, or relationship -- rank every slot_id best-to-worst fit for true_false, independently of the multi_select ranking (do not exclude a slot from one ranking just because it ranks well in the other). Include every slot_id exactly once in each ranking. Only use the slot_ids listed below.
+SLOTS:
+{slots}

@@ -1,0 +1,1 @@
+DIFFICULT QUALITY: Require multi-fact reasoning that combines at least two supported facts already inside this same concept slot evidence to diagnose, predict, justify, or select a consequence. Do not combine separate concept slots and do not ask direct recall alone.

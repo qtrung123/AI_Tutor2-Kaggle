@@ -43,7 +43,7 @@ deployment/               # start_kaggle.sh, start_vllm.sh, nginx.kaggle.conf, k
 kaggle_run_ollama_cloudflare.ipynb  # Notebook Kaggle đang dùng (Cloudflare, SQLite mode)
 kaggle_run.ipynb          # Notebook Kaggle cũ (ngrok); xem KAGGLE_DEPLOYMENT.md
 config.py                 # Đường dẫn, model, tham số (đọc từ biến môi trường, .env.local khi chạy local)
-prompts/                  # rag_prompt.txt, quiz_prompt.txt (quiz_prompt chỉ engine V2 cũ dùng)
+prompts/                  # Prompt LLM theo tính năng: chat/, quiz/, summary/, flashcards/, topics/ (đọc qua backend/prompt_loader.py)
 tests/                    # unittest/pytest; tests/frontend_source.py đọc toàn bộ JS frontend
 ```
 

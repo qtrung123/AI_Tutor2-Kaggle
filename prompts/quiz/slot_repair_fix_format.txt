@@ -1,0 +1,1 @@
+{slot_id} attempt {attempt}: the previous question's content was fine but it broke a formatting rule (see its rejection reason below); keep the same question and evidence, and only fix that exact structural problem.

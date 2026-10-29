@@ -15,6 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from backend.llm_backend import ChatOllama
+from backend.prompt_loader import load_prompt, render_prompt
 
 from backend.quiz_store import (
     delete_document_attempts,
@@ -47,7 +48,6 @@ from backend.text_safety import (
 )
 from config import (
     CHAT_MODEL,
-    QUIZ_PROMPT_PATH,
     QUIZ_GENERATION_RETRY_LIMIT,
     QUIZ_QUALITY_RETRY_LIMIT,
 )
@@ -168,29 +168,13 @@ def _format_context(chunks: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def load_quiz_prompt_template() -> str:
-    with open(QUIZ_PROMPT_PATH, "r", encoding="utf-8") as file:
-        return file.read()
-
-
 def _difficulty_instructions(difficulty: str) -> str:
     instructions = {
-        "easy": """EASY
-- Test one directly stated fact, definition, purpose, syntax element, or explicit step.
-- The learner should answer by recognizing or recalling one piece of information.
-- Do not require combining separate chunks or inferring an unstated consequence.""",
-        "medium": """MEDIUM
-- Require understanding through comparison, cause and effect, ordering, code interpretation, or applying one stated rule to a short situation.
-- Each question must require at least one reasoning step beyond copying a sentence.
-- Prefer stems such as "Why...", "How would...", "What happens when...", "Which outcome...", or "Which option best explains the relationship...".
-- Do not ask direct who/when questions, isolated definitions, simple syntax recognition, or "Which ... is a characteristic of ...?" questions.""",
-        "difficult": """DIFFICULT
-- Require analysis, diagnosis, prediction, or application in a concrete scenario.
-- Combine at least two related facts, rules, examples, or code behaviors from the context whenever the material supports it.
-- Prefer predicting code behavior, choosing a design consequence, diagnosing an error, or distinguishing subtly plausible alternatives.
-- Do not ask names, dates, direct definitions, direct syntax recognition, or any question answerable by copying one sentence.""",
+        "easy": "quiz/batch_difficulty_easy.txt",
+        "medium": "quiz/batch_difficulty_medium.txt",
+        "difficult": "quiz/batch_difficulty_difficult.txt",
     }
-    return instructions[difficulty]
+    return load_prompt(instructions[difficulty])
 
 
 def _format_avoid_questions(questions: list[str]) -> str:
@@ -209,7 +193,8 @@ def _build_prompt(
     avoid_questions: list[str] | None = None,
 ) -> str:
     print(f"[quiz-prompt] difficulty={difficulty}")
-    prompt_template = load_quiz_prompt_template()
+    # This template is filled by plain replacement (its JSON example keeps single braces), not str.format.
+    prompt_template = load_prompt("quiz/batch_generation.txt")
     prompt = (
         prompt_template
         .replace("{document_id}", document_id)
@@ -240,62 +225,18 @@ def _build_retry_prompt(
     The retry prompt is shorter and repeats the exact failure so the model can
     repair structure/quality without getting distracted by the full rubric.
     """
-    return f"""
-Return valid JSON only. Regenerate the quiz batch for this document.
-
-DOCUMENT: {document_id}
-TOPIC: {topic_name} ({topic_id})
-NUMBER OF QUESTIONS: {num_questions}
-QUIZ DIFFICULTY: {difficulty}
-
-The previous answer was rejected for this reason:
-{error}
-
-REPAIR INSTRUCTION:
-- Completely discard every rejected question named in the error above.
-- Do not reword or paraphrase a rejected question.
-- Choose a different concept from the context for its replacement.
-- A repeated rejected question makes the entire response invalid.
-
-Hard requirements:
-- exactly {num_questions} questions
-- each question must be specific to a concept in the context
-- do not start questions with "According to"
-- do not ask "which statement is supported/correct/true"
-- no raw chunk text as options
-- no generic distractors about unrelated material or missing information
-- options must be short, plausible, same-topic choices
-- distractors must not assert facts unsupported by the context
-- include a grounded explanation for every question
-- source provenance is attached by the backend; do not return source IDs
-- all questions must follow the requested difficulty level
-- no two questions in this response may test the same fact, concept, or correct-answer relationship, even if reworded
-- do not repeat or paraphrase any previously used question listed below
-- escape double quotes inside JSON strings as \\\"
-- encode line breaks inside strings as \\n and close every string, array, and object
-- return JSON only, no markdown
-
-DIFFICULTY CONTRACT:
-{_difficulty_instructions(difficulty)}
-
-PREVIOUSLY USED QUESTIONS:
-{_format_avoid_questions(avoid_questions or [])}
-
-JSON shape:
-{{
-  "questions": [
-    {{
-      "question": "Specific concept question",
-      "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
-      "correct_answer": "A"
-      ,"explanation": "Grounded explanation"
-    }}
-  ]
-}}
-
-COURSE MATERIAL CONTEXT:
-{_format_context(chunks)}
-""".strip()
+    return render_prompt(
+        "quiz/batch_retry.txt",
+        document_id=document_id,
+        topic_name=topic_name,
+        topic_id=topic_id,
+        num_questions=num_questions,
+        difficulty=difficulty,
+        error=error,
+        difficulty_instructions=_difficulty_instructions(difficulty),
+        avoid_questions=_format_avoid_questions(avoid_questions or []),
+        context=_format_context(chunks),
+    ).strip()
 
 
 def _extract_json(text: str) -> dict:
@@ -827,81 +768,51 @@ def _build_v2_prompt(
     avoid = "\n".join(f"- {stem}" for stem in accepted_stems) if repair else ""
     repair_lines = []
     if repair:
-        stem_shape = (
-            "a complete declarative statement (never a question, never ending in '?')"
+        stem_shape = load_prompt(
+            "quiz/slot_stem_shape_statement.txt"
             if required_question_type == "true_false"
-            else "a complete standalone question stem ending in a question mark"
+            else "quiz/slot_stem_shape_question.txt"
         )
-        repair_lines.append(
-            "TARGETED MISSING-SLOT FILL: Return questions only for the listed missing slots. "
-            f"For every slot, write {stem_shape}; never return a fragment, placeholder, or accepted question."
-        )
+        repair_lines.append(render_prompt("quiz/slot_repair_missing_slots.txt", stem_shape=stem_shape))
         for group in groups:
             reasons = (rejection_reasons_by_slot or {}).get(str(group["slot_id"]), [])
             attempt = int((retry_attempt_by_slot or {}).get(str(group["slot_id"]), 1))
             if _is_formatting_rejection(reasons):
-                repair_lines.append(
-                    f"{group['slot_id']} attempt {attempt}: the previous question's content was fine but it broke "
-                    "a formatting rule (see its rejection reason below); keep the same question and evidence, and "
-                    "only fix that exact structural problem."
-                )
+                repair_lines.append(render_prompt("quiz/slot_repair_fix_format.txt", slot_id=group['slot_id'], attempt=attempt))
             else:
-                repair_lines.append(
-                    f"{group['slot_id']} diversification attempt {attempt}: use a different question angle and "
-                    "formulation from every forbidden question, while staying within this slot's evidence."
-                )
+                repair_lines.append(render_prompt("quiz/slot_repair_diversify.txt", slot_id=group['slot_id'], attempt=attempt))
                 if attempt >= 2 and not required_question_type:
-                    repair_lines.append(
-                        f"{group['slot_id']}: prefer a different valid question_type before using deterministic fallback."
-                    )
+                    repair_lines.append(render_prompt("quiz/slot_repair_try_other_type.txt", slot_id=group['slot_id']))
             if group.get("evidence_rotated"):
-                repair_lines.append(f"{group['slot_id']} uses alternative evidence; base the question on that new evidence.")
+                repair_lines.append(render_prompt("quiz/slot_repair_rotated_evidence.txt", slot_id=group['slot_id']))
             if group.get("slot_replanned"):
-                repair_lines.append(
-                    f"{group['slot_id']} alone was replanned with unused evidence from the same topic. "
-                    "Keep its requested difficulty and do not use another topic."
-                )
+                repair_lines.append(render_prompt("quiz/slot_repair_replanned.txt", slot_id=group['slot_id']))
             if reasons:
-                repair_lines.append(f"{group['slot_id']} previous rejection: {'; '.join(reasons[-3:])}")
+                repair_lines.append(render_prompt(
+                    "quiz/slot_repair_previous_rejection.txt", slot_id=group['slot_id'], reasons='; '.join(reasons[-3:]),
+                ))
     if avoid:
-        repair_lines.append(
-            f"ACCEPTED STEMS / FORBIDDEN QUESTIONS (all accepted stems; do not repeat or closely paraphrase):\n{avoid}"
-        )
+        repair_lines.append(render_prompt("quiz/slot_repair_forbidden_questions.txt", stems=avoid))
     repair_line = "\n".join(repair_lines) + ("\n" if repair_lines else "")
     difficulty_contracts = {
-        "easy": (
-            "EASY QUALITY: Ask direct recall/basic comprehension about one explicit evidence fact. "
-            "Exactly one option must fully answer the stem; every distractor must conflict with or be unsupported by this slot evidence. "
-            "Do not rely on outside-world plausibility. Do not use NOT, EXCEPT, false, incorrect, least, or double negatives. "
-            "If several evidence facts are true, do not make them competing options; the correct option must contain the complete requested set. "
-            "The correct option must match the stem in scope and grammar.\n"
-        ),
-        "medium": (
-            "MEDIUM QUALITY: Require one reasoning step using comparison, cause/effect, interpretation, or application "
-            "within this concept or its closely related slot evidence; do not ask direct recall alone.\n"
-        ),
-        "difficult": (
-            "DIFFICULT QUALITY: Require multi-fact reasoning that combines at least two supported facts already inside "
-            "this same concept slot evidence to diagnose, predict, justify, or select a consequence. "
-            "Do not combine separate concept slots and do not ask direct recall alone.\n"
-        ),
+        "easy": "quiz/slot_difficulty_easy.txt",
+        "medium": "quiz/slot_difficulty_medium.txt",
+        "difficult": "quiz/slot_difficulty_difficult.txt",
     }
     type_instruction = (
-        f'Every one of the {count} questions must use "question_type":"{required_question_type}" only, matching its slot; '
-        "do not use any other type. "
+        render_prompt("quiz/slot_type_required.txt", count=count, question_type=required_question_type)
         if required_question_type else
-        "Choose each question_type from what its evidence can assess naturally; include single_choice, true_false, "
-        "and multi_select at least once each, with no fixed ratio. On retries, try another valid question_type "
-        "or a different same-topic angle before fallback. "
+        load_prompt("quiz/slot_type_free.txt")
     )
-    return (
-        f"Write exactly {count} {difficulty} quiz questions for {topic.get('name') or topic.get('topic_id')}.\n"
-        'JSON only: {"questions":[{"slot_id":"S1","question_type":"single_choice|true_false|multi_select","question":"...","options":["..."],"correct_answers":[0],"explanation":"..."}]}\n'
-        "Use each evidence slot exactly once and only its evidence. single_choice uses four options and one answer; "
-        "true_false uses exactly True/False and one answer; multi_select uses four options, two or more answers, and at least one incorrect option. "
-        f"{type_instruction}"
-        "Question <=18 words, each option <=10 words, explanation <=16 words. No markdown or extra fields.\n"
-        f"{difficulty_contracts[difficulty]}{repair_line}EVIDENCE:\n{evidence}"
+    return render_prompt(
+        "quiz/slot_mixed_generation.txt",
+        count=count,
+        difficulty=difficulty,
+        topic_name=topic.get('name') or topic.get('topic_id'),
+        type_instruction=type_instruction,
+        difficulty_contract=load_prompt(difficulty_contracts[difficulty]),
+        repair_instructions=repair_line,
+        evidence=evidence,
     )
 
 
@@ -1765,18 +1676,7 @@ def _document_type_planner_prompt(slots: list[dict]) -> str:
         f"{_sanitize_fallback_evidence(str(slot.get('evidence_excerpt') or ''))[:220]}"
         for slot in slots
     )
-    return (
-        "Rank ALL of these evidence slots by fit for two special quiz question types, best fit "
-        "first. Do not write any questions.\n"
-        'JSON only: {"multi_select_ranked":["Sx","Sy",...],"true_false_ranked":["Sa","Sb",...]}\n'
-        "multi_select needs evidence with two or more independently correct statements -- rank "
-        "every slot_id best-to-worst fit for multi_select. true_false needs evidence stating one "
-        "clear factual proposition, rule, or relationship -- rank every slot_id best-to-worst fit "
-        "for true_false, independently of the multi_select ranking (do not exclude a slot from "
-        "one ranking just because it ranks well in the other). Include every slot_id exactly once "
-        "in each ranking. Only use the slot_ids listed below.\n"
-        f"SLOTS:\n{lines}"
-    )
+    return render_prompt("quiz/document_type_planner.txt", slots=lines)
 
 
 def _plan_document_slot_rankings(slots: list[dict], model_id: str) -> tuple[dict | None, dict]:
@@ -2212,65 +2112,40 @@ def _build_document_single_choice_prompt(
     avoid = "\n".join(f"- {stem}" for stem in accepted_stems) if repair else ""
     repair_lines = []
     if repair:
-        repair_lines.append(
-            "TARGETED MISSING-SLOT FILL: Return questions only for the listed missing slots. "
-            "For every slot, write a complete standalone question stem ending in a question mark; "
-            "never return a fragment, placeholder, or accepted question."
-        )
+        repair_lines.append(render_prompt(
+            "quiz/slot_repair_missing_slots.txt", stem_shape=load_prompt("quiz/slot_stem_shape_question.txt"),
+        ))
         for group in groups:
             reasons = (rejection_reasons_by_slot or {}).get(str(group["slot_id"]), [])
             attempt = int((retry_attempt_by_slot or {}).get(str(group["slot_id"]), 1))
             if _is_formatting_rejection(reasons):
-                repair_lines.append(
-                    f"{group['slot_id']} attempt {attempt}: the previous question's content was fine but it broke "
-                    "a formatting rule (see its rejection reason below); keep the same question and evidence, and "
-                    "only fix that exact structural problem."
-                )
+                repair_lines.append(render_prompt("quiz/slot_repair_fix_format.txt", slot_id=group['slot_id'], attempt=attempt))
             else:
-                repair_lines.append(
-                    f"{group['slot_id']} diversification attempt {attempt}: use a different question angle and "
-                    "formulation from every forbidden question, while staying within this slot's evidence."
-                )
+                repair_lines.append(render_prompt("quiz/slot_repair_diversify.txt", slot_id=group['slot_id'], attempt=attempt))
             if group.get("evidence_rotated"):
-                repair_lines.append(f"{group['slot_id']} uses alternative evidence; base the question on that new evidence.")
+                repair_lines.append(render_prompt("quiz/slot_repair_rotated_evidence.txt", slot_id=group['slot_id']))
             if group.get("slot_replanned"):
-                repair_lines.append(
-                    f"{group['slot_id']} alone was replanned with unused evidence from the same topic. "
-                    "Keep its requested difficulty and do not use another topic."
-                )
+                repair_lines.append(render_prompt("quiz/slot_repair_replanned.txt", slot_id=group['slot_id']))
             if reasons:
-                repair_lines.append(f"{group['slot_id']} previous rejection: {'; '.join(reasons[-3:])}")
+                repair_lines.append(render_prompt(
+                    "quiz/slot_repair_previous_rejection.txt", slot_id=group['slot_id'], reasons='; '.join(reasons[-3:]),
+                ))
     if avoid:
-        repair_lines.append(
-            f"ACCEPTED STEMS / FORBIDDEN QUESTIONS (all accepted stems; do not repeat or closely paraphrase):\n{avoid}"
-        )
+        repair_lines.append(render_prompt("quiz/slot_repair_forbidden_questions.txt", stems=avoid))
     repair_line = "\n".join(repair_lines) + ("\n" if repair_lines else "")
     difficulty_contracts = {
-        "easy": (
-            "EASY QUALITY: Ask direct recall/basic comprehension about one explicit evidence fact. "
-            "Exactly one option must fully answer the stem; every distractor must conflict with or be unsupported by this slot evidence. "
-            "Do not rely on outside-world plausibility. Do not use NOT, EXCEPT, false, incorrect, least, or double negatives. "
-            "If several evidence facts are true, do not make them competing options; the correct option must contain the complete requested set. "
-            "The correct option must match the stem in scope and grammar.\n"
-        ),
-        "medium": (
-            "MEDIUM QUALITY: Require one reasoning step using comparison, cause/effect, interpretation, or application "
-            "within this concept or its closely related slot evidence; do not ask direct recall alone.\n"
-        ),
-        "difficult": (
-            "DIFFICULT QUALITY: Require multi-fact reasoning that combines at least two supported facts already inside "
-            "this same concept slot evidence to diagnose, predict, justify, or select a consequence. "
-            "Do not combine separate concept slots and do not ask direct recall alone.\n"
-        ),
+        "easy": "quiz/slot_difficulty_easy.txt",
+        "medium": "quiz/slot_difficulty_medium.txt",
+        "difficult": "quiz/slot_difficulty_difficult.txt",
     }
-    return (
-        f"Write exactly {count} {difficulty} single-answer multiple-choice questions for "
-        f"{topic.get('name') or topic.get('topic_id')}.\n"
-        'JSON only: {"questions":[{"slot_id":"S1","question":"...","options":["...","...","...","..."],"correct_answer":0,"explanation":"..."}]}\n'
-        "For each requested slot_id, return exactly one question grounded only in that slot's own evidence: "
-        "exactly four distinct options and exactly one correct option; correct_answer is 0-3. "
-        "Question <=18 words, each option <=10 words, explanation <=16 words. No markdown or extra fields.\n"
-        f"{difficulty_contracts[difficulty]}{repair_line}EVIDENCE:\n{evidence}"
+    return render_prompt(
+        "quiz/slot_single_choice_generation.txt",
+        count=count,
+        difficulty=difficulty,
+        topic_name=topic.get('name') or topic.get('topic_id'),
+        difficulty_contract=load_prompt(difficulty_contracts[difficulty]),
+        repair_instructions=repair_line,
+        evidence=evidence,
     )
 
 

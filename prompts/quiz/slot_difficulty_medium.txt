@@ -1,0 +1,1 @@
+MEDIUM QUALITY: Require one reasoning step using comparison, cause/effect, interpretation, or application within this concept or its closely related slot evidence; do not ask direct recall alone.

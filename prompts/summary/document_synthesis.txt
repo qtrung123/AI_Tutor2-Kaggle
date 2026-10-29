@@ -1,0 +1,8 @@
+Using only the validated ordered study notes below, write one concise Document Overview paragraph
+and 4 to 7 document-level key takeaways. Do not introduce unsupported facts. Avoid repeating the same fact
+between the overview, topic notes, and final takeaways. Do not return topic-level takeaways.
+Return JSON only: {{"overview":"one concise paragraph","key_takeaways":["takeaway 1","takeaway 2","takeaway 3","takeaway 4"]}}
+
+DOCUMENT: {document_id}
+ORDERED TOPIC SUMMARIES:
+{topic_summaries}

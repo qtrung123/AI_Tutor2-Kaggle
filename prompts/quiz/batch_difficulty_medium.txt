@@ -1,0 +1,5 @@
+MEDIUM
+- Require understanding through comparison, cause and effect, ordering, code interpretation, or applying one stated rule to a short situation.
+- Each question must require at least one reasoning step beyond copying a sentence.
+- Prefer stems such as "Why...", "How would...", "What happens when...", "Which outcome...", or "Which option best explains the relationship...".
+- Do not ask direct who/when questions, isolated definitions, simple syntax recognition, or "Which ... is a characteristic of ...?" questions.

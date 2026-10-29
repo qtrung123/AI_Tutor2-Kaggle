@@ -1,0 +1,1 @@
+Every one of the {count} questions must use "question_type":"{question_type}" only, matching its slot; do not use any other type.

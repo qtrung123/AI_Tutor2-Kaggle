@@ -20,8 +20,7 @@ def _env_path(name: str, default: Path) -> Path:
 
 DATA_DIR = _env_path("AI_TUTOR_DATA_DIR", BASE_DIR / "data")
 VECTORSTORE_DIR = _env_path("AI_TUTOR_VECTORSTORE_DIR", BASE_DIR / "vectorstore")
-PROMPT_PATH = BASE_DIR / "prompts" / "rag_prompt.txt"
-QUIZ_PROMPT_PATH = BASE_DIR / "prompts" / "quiz_prompt.txt"
+PROMPTS_DIR = BASE_DIR / "prompts"   # LLM prompt texts, prompts/<feature>/*.txt (backend/prompt_loader.py)
 INDEXED_FILES_PATH = _env_path("AI_TUTOR_INDEXED_FILES_PATH", BASE_DIR / "indexed_files.json")
 DATABASE_PATH = _env_path("AI_TUTOR_DATABASE_PATH", DATA_DIR / "conversations.db")
 AUTH_COOKIE_NAME = os.getenv("AI_TUTOR_AUTH_COOKIE_NAME", "ai_tutor_session")

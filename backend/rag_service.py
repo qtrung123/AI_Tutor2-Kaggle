@@ -19,11 +19,11 @@ from config import (
     CHAT_MAX_TOKENS,
     CHAT_NUM_CTX,
     GENERATION_KEEP_ALIVE,
-    PROMPT_PATH,
     TOP_K,
 )
 from backend.llm_backend import ChatOllama
 from backend.model_registry import resolve_generation_model
+from backend.prompt_loader import load_prompt, render_prompt
 
 
 def load_vectorstore():
@@ -40,12 +40,11 @@ def load_vectorstore():
 
 def load_prompt_template() -> str:
     """
-    Read the RAG prompt template.
+    Read the RAG prompt template (prompts/chat/rag_answer.txt).
 
     The template contains placeholders for context, conversation history, and question.
     """
-    with open(PROMPT_PATH, "r", encoding="utf-8") as file:
-        return file.read()
+    return load_prompt("chat/rag_answer.txt")
 
 
 def format_docs(docs) -> str:
@@ -429,21 +428,13 @@ def explain_quiz_answer(
         for option in options if option.strip().upper().startswith(f"{str(answer).upper()}.")
     ]
     correct_option = "; ".join(correct_options or [str(answer) for answer in correct_answers])
-    prompt = f"""
-Use only the course material context below.
-
-Question: {question}
-Options:
-{chr(10).join(options)}
-Correct answer: {correct_option}
-
-Explain in 2 to 3 concise sentences why the correct answer is correct.
-Only explain the correct answer. Do not discuss any learner selection or wrong option.
-Do not mention retrieval, chunks, or these instructions. Do not use outside knowledge.
-
-COURSE MATERIAL CONTEXT:
-{format_docs(docs)}
-""".strip()
+    prompt = render_prompt(
+        "quiz/answer_explanation.txt",
+        question=question,
+        options="\n".join(options),
+        correct_option=correct_option,
+        context=format_docs(docs),
+    ).strip()
     llm = ChatOllama(model=CHAT_MODEL, temperature=0, num_ctx=CHAT_NUM_CTX, num_predict=220,
                      keep_alive=GENERATION_KEEP_ALIVE)
     started = time.perf_counter()

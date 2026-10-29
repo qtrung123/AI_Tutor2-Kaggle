@@ -1,0 +1,1 @@
+{slot_id} uses alternative evidence; base the question on that new evidence.

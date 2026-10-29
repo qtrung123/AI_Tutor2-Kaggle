@@ -1,0 +1,4 @@
+EASY
+- Test one directly stated fact, definition, purpose, syntax element, or explicit step.
+- The learner should answer by recognizing or recalling one piece of information.
+- Do not require combining separate chunks or inferring an unstated consequence.

@@ -1,0 +1,1 @@
+TARGETED MISSING-SLOT FILL: Return questions only for the listed missing slots. For every slot, write {stem_shape}; never return a fragment, placeholder, or accepted question.

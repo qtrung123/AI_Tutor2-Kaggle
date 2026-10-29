@@ -78,7 +78,7 @@ owner and document. If there is no document or no relevant chunk, a fixed answer
 without calling the LLM. Tokens are streamed over SSE. Nothing is saved until the answer is
 complete, and then it is saved in one transaction (`add_exchange`).
 Sources: `backend/api/conversations.py`, `backend/rag_service.py`, `backend/conversation_store.py`,
-`prompts/rag_prompt.txt`, `frontend/js/tutor.js`, `frontend/js/chat_stream.js`.
+`prompts/chat/rag_answer.txt`, `frontend/js/tutor.js`, `frontend/js/chat_stream.js`.
 
 **4a/4b. Summary.** Opening the tab only looks up an existing summary. Generate either returns the
 cached summary or starts a job and returns 202 with a `job_id`. A second request for the same

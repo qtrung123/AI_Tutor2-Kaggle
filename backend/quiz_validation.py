@@ -4,6 +4,7 @@ import time
 from dataclasses import asdict, dataclass
 
 from backend.llm_backend import ChatOllama
+from backend.prompt_loader import render_prompt
 
 from config import (
     QUIZ_SEMANTIC_VALIDATION_ENABLED,
@@ -75,42 +76,16 @@ def _prompt(question: dict, cited_chunks: list[dict], requested_difficulty: str,
         key: question[key]
         for key in ("question", "options", "correct_answer", "explanation")
     }
-    return f"""
-You are a cautious reviewer of one multiple-choice question. Your judgment is a runtime quality signal, not ground truth.
-Use only the cited context. Do not repair the question and do not use outside knowledge.
-
-Selected topic: {topic_name}
-Assessment concept: {question.get('concept_name') or question.get('concept_id') or 'legacy'}
-Structural lineage: {json.dumps(question.get('source_subtopic_ids') or [], ensure_ascii=False)}
-Concept origin: {question.get('concept_origin') or 'legacy'}
-Requested difficulty: {requested_difficulty}
-Candidate: {json.dumps(candidate, ensure_ascii=False)}
-Cited context: {json.dumps(context, ensure_ascii=False)}
-
-Return JSON only with this exact shape:
-{{
-  "question_supported": true,
-  "correct_answer_supported": true,
-  "explanation_supported": true,
-  "meaningful_concept": true,
-  "distractor_quality": true,
-  "difficulty_match": true,
-  "detected_difficulty": "easy",
-  "reasons": []
-}}
-
-Hard grounding criteria:
-- question_supported: the context establishes the premise and contains enough information to answer.
-- correct_answer_supported: the declared correct option is directly supported.
-- explanation_supported: every factual claim in the explanation is supported.
-
-Quality criteria:
-- meaningful_concept: assesses educationally meaningful topic knowledge, not incidental trivia unless the context makes that detail important.
-- distractor_quality: all distractors are plausible, same-domain, and clearly incorrect from the context without invented factual claims.
-- difficulty_match: the cognitive task reasonably matches {requested_difficulty}; allow normal judgment variation.
-
-Evidence identity is owned and attached by the backend. Judge semantic support from the cited context.
-""".strip()
+    return render_prompt(
+        "quiz/semantic_validation.txt",
+        topic_name=topic_name,
+        concept=question.get('concept_name') or question.get('concept_id') or 'legacy',
+        structural_lineage=json.dumps(question.get('source_subtopic_ids') or [], ensure_ascii=False),
+        concept_origin=question.get('concept_origin') or 'legacy',
+        requested_difficulty=requested_difficulty,
+        candidate=json.dumps(candidate, ensure_ascii=False),
+        cited_context=json.dumps(context, ensure_ascii=False),
+    ).strip()
 
 
 def validate_question_semantics(

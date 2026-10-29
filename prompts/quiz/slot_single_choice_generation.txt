@@ -1,0 +1,6 @@
+Write exactly {count} {difficulty} single-answer multiple-choice questions for {topic_name}.
+JSON only: {{"questions":[{{"slot_id":"S1","question":"...","options":["...","...","...","..."],"correct_answer":0,"explanation":"..."}}]}}
+For each requested slot_id, return exactly one question grounded only in that slot's own evidence: exactly four distinct options and exactly one correct option; correct_answer is 0-3. Question <=18 words, each option <=10 words, explanation <=16 words. No markdown or extra fields.
+{difficulty_contract}
+{repair_instructions}EVIDENCE:
+{evidence}
