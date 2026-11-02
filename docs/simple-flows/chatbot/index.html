@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Tutor Chatbot RAG</title>
+<style>
+  :root {
+    --bg: #f6f5f1;
+    --surface: #ffffff;
+    --ink: #1d1f24;
+    --muted: #5d6270;
+    --line: #e2e0d8;
+    --accent: #2f5bd3;
+    --accent-soft: #e8eefc;
+    --warn: #9a4a12;
+    --warn-soft: #fbf0e6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #15171c;
+      --surface: #1e2128;
+      --ink: #eceef2;
+      --muted: #a1a7b4;
+      --line: #30343e;
+      --accent: #8aa7ff;
+      --accent-soft: #232c45;
+      --warn: #f0b27a;
+      --warn-soft: #33261b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #15171c;
+    --surface: #1e2128;
+    --ink: #eceef2;
+    --muted: #a1a7b4;
+    --line: #30343e;
+    --accent: #8aa7ff;
+    --accent-soft: #232c45;
+    --warn: #f0b27a;
+    --warn-soft: #33261b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1180px; margin: 0 auto; padding: 40px 24px 64px; }
+  header { margin-bottom: 28px; }
+  header h1 { margin: 0 0 4px; font-size: 28px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--muted); }
+  a { color: var(--accent); }
+  code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.9em; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px 24px; }
+  .card h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .story { font-size: 18px; margin: 0; }
+  ol.journey { margin: 0; padding-left: 22px; }
+  ol.journey li { margin: 2px 0; }
+
+  .diagram-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .diagram-head h2 { margin: 0; }
+  .legend { display: flex; gap: 18px; font-size: 13px; color: var(--muted); align-items: center; flex-wrap: wrap; }
+  .legend svg { vertical-align: middle; margin-right: 6px; }
+  .btn {
+    font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+    color: var(--accent); background: var(--accent-soft);
+    border: 1px solid transparent; border-radius: 8px; padding: 6px 14px;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .paper { background: #ffffff; border-radius: 8px; border: 1px solid var(--line); overflow-x: auto; }
+  .paper svg { display: block; width: 100%; min-width: 860px; height: auto; }
+  .diagram-note { margin: 14px 0 0; padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0; font-size: 15px; }
+
+  .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
+  .explain p { margin: 0 0 10px; }
+  .explain p:last-child { margin-bottom: 0; }
+  .explain details { margin-top: 4px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .explain summary { cursor: pointer; font-weight: 600; color: var(--accent); }
+  .explain details ul { margin: 8px 0 0; padding-left: 20px; }
+  .explain details li { margin: 0 0 6px; }
+  dl.terms { margin: 0; }
+  dl.terms dt { font-weight: 700; margin-top: 10px; }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd { margin: 0; color: var(--muted); }
+  .behaviour { margin-top: 20px; }
+  .behaviour .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+  .behaviour h3 { margin: 0 0 6px; font-size: 16px; }
+  .behaviour ul { margin: 0; padding-left: 20px; }
+  .behaviour li { margin: 0 0 6px; }
+  .behaviour .fail { background: var(--warn-soft); border-radius: 8px; padding: 12px 16px; }
+  .behaviour .fail h3 { color: var(--warn); }
+  footer { margin-top: 28px; font-size: 13px; color: var(--muted); }
+
+  @media (max-width: 760px) {
+    main { padding: 24px 16px 48px; }
+    .grid, .notes, .behaviour .cols { grid-template-columns: 1fr; }
+  }
+  .behaviour p { margin: 0; }
+  .errors { background: var(--warn-soft); border-color: transparent; margin-top: 20px; }
+  .errors h2 { color: var(--warn); }
+  .errors ul { margin: 0; padding-left: 20px; columns: 2; column-gap: 40px; }
+  .errors li { margin: 0 0 6px; break-inside: avoid; }
+  @media (max-width: 760px) { .errors ul { columns: 1; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Chatbot RAG trong AI Tutor</h1>
+    <p>User hỏi một câu về tài liệu của mình; hệ thống tìm đoạn liên quan trong tài liệu, nhờ AI viết câu trả lời dựa trên các đoạn đó và hiện dần kèm nguồn trích dẫn. Sơ đồ chỉ vẽ trường hợp thành công; hành vi đặc biệt và lỗi được ghi chú riêng.</p>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <h2>User Story</h2>
+      <p class="story">As a user, I want to ask questions about my uploaded document and see the answer appear as it is written, with the sources it came from, so that I can learn quickly and check the material myself.</p>
+    </div>
+    <div class="card">
+      <h2>User Journey</h2>
+      <ol class="journey">
+        <li>Mở một cuộc trò chuyện đã gắn với một tài liệu PDF hoặc TXT — mọi câu trả lời sẽ chỉ dựa trên tài liệu này.</li>
+        <li>Gõ câu hỏi và bấm “Send”; nút đổi thành “Stop” để có thể dừng giữa chừng.</li>
+        <li>Trong lúc chờ, dòng trạng thái báo hệ thống đang đọc tài liệu: nó tìm các đoạn trong tài liệu liên quan đến câu hỏi.</li>
+        <li>Câu trả lời hiện dần từng phần ngay khi AI viết ra, không phải đợi viết xong.</li>
+        <li>Khi xong, dưới câu trả lời có nguồn trích dẫn (tên file, số trang) để tự kiểm tra lại trong tài liệu.</li>
+        <li>Lượt hỏi–đáp được lưu, nên câu hỏi tiếp theo vẫn hiểu ngữ cảnh các câu trước.</li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="diagram-head">
+      <h2>Sequence Diagram</h2>
+      <div class="legend">
+        <span><svg width="44" height="10"><line x1="2" y1="5" x2="34" y2="5" stroke="#1f2937" stroke-width="1.5"/><path d="M34 0 L44 5 L34 10 Z" fill="#1f2937"/></svg>Request</span>
+        <span><svg width="44" height="10"><line x1="2" y1="5" x2="40" y2="5" stroke="#8a8f99" stroke-width="1.5" stroke-dasharray="5 4"/><path d="M33 0 L43 5 L33 10" fill="none" stroke="#8a8f99" stroke-width="1.5"/></svg>Response</span>
+        <button class="btn" id="export">Export SVG</button>
+      </div>
+    </div>
+    <div class="paper" id="diagram"></div>
+    <p class="diagram-note"><b>Lưu ý:</b> bước 6–8 diễn ra đan xen: mỗi phần Qwen viết ra được chuyển ngay về trình duyệt. Khung <b>opt</b>: trường hợp không có đoạn phù hợp được giải thích ở mục “Không có ngữ cảnh”. Khung <b>loop</b> kết thúc bằng sự kiện <code>done</code>. Việc embed câu hỏi diễn ra bên trong <code>similarity_search_with_score()</code>; sơ đồ tách riêng bước 3 cho dễ hiểu.</p>
+  </div>
+
+  <div class="notes">
+    <div class="card explain">
+      <h2>Giải thích</h2>
+      <p><b>Bước 3–4 — tìm ngữ cảnh.</b> Máy không so chữ, mà so <i>ý nghĩa</i>: BGE-M3 nhận câu hỏi và trả về một vector số. ChromaDB lấy vector đó, so với vector của các đoạn đã lưu khi upload, và trả về tối đa 4 đoạn gần nghĩa nhất — chỉ trong tài liệu của cuộc trò chuyện này.</p>
+      <p><b>Bước 5–6 — viết câu trả lời.</b> Backend ghép câu hỏi, các đoạn tài liệu và vài tin nhắn gần nhất thành một prompt. Qwen đọc prompt đó và viết câu trả lời chỉ dựa trên các đoạn được đưa vào, trả về từng phần một.</p>
+      <p><b>Bước 7–8 — hiện dần.</b> Mỗi phần Qwen viết ra được FastAPI chuyển ngay về trình duyệt qua SSE, nên User thấy câu trả lời “được gõ” dần thay vì đợi đến cuối.</p>
+      <p><b>Sau bước 8 — lưu và trích dẫn</b> (không vẽ trong sơ đồ). Khi Qwen viết xong, backend lưu câu hỏi, câu trả lời và nguồn trích dẫn vào SQLite trong một lần, rồi gửi tín hiệu kết thúc (<code>done</code>). Frontend hiện lại bản đã lưu và thêm nguồn trích dẫn (tên file, số trang) bên dưới.</p>
+      <details>
+        <summary>Chi tiết kỹ thuật (tuỳ chọn)</summary>
+        <ul>
+          <li>Request: <code>POST /api/conversations/{conversation_id}/messages</code> với <code>Accept: text/event-stream</code>; xử lý trong <code>rag_service.stream_conversation_message()</code>.</li>
+          <li>Khi có <code>DATABASE_URL</code>, PostgreSQL thay SQLite và pgvector thay ChromaDB.</li>
+          <li>Tìm <b>4 chunk</b>, lọc theo <code>owner_id</code> + <code>document_id</code>. Câu hỏi ngắn (≤ 12 từ) được ghép thêm câu hỏi trước để hiểu câu hỏi nối tiếp.</li>
+          <li>Prompt gồm các chunk, 6 tin nhắn gần nhất và câu hỏi; Qwen2.5-7B chạy với temperature 0, tối đa 1024 token.</li>
+          <li>Sự kiện SSE: <code>start</code> → nhiều <code>delta</code> → <code>done</code> (hoặc <code>error</code>). Frontend render Markdown khoảng 80 ms/lần.</li>
+          <li>Lưu bằng <code>add_exchange()</code>: câu hỏi, câu trả lời, citations, trạng thái grounding (và tiêu đề cho chat mới) trong <b>một transaction</b>.</li>
+        </ul>
+      </details>
+    </div>
+    <div class="card">
+      <h2>Thuật ngữ</h2>
+      <dl class="terms">
+        <dt>RAG</dt><dd>Retrieval-Augmented Generation: tìm đoạn tài liệu liên quan trước, rồi cho LLM trả lời chỉ dựa trên các đoạn đó.</dd>
+        <dt>SSE (Server-Sent Events)</dt><dd>Server gửi nhiều mẩu dữ liệu nối tiếp trong cùng một response HTTP (<code>data: …</code>), nên trình duyệt nhận được câu trả lời từng phần.</dd>
+        <dt>BGE-M3</dt><dd>Model <b>embedding</b>: biến câu hỏi thành vector để tìm chunk tương tự. Không viết câu trả lời.</dd>
+        <dt>Qwen2.5-7B</dt><dd>Model <b>sinh văn bản</b> (LLM): đọc prompt và viết câu trả lời.</dd>
+        <dt>Chunk</dt><dd>Một đoạn ~800 ký tự cắt từ tài liệu lúc upload.</dd>
+        <dt>ChromaDB</dt><dd>Vector database chứa chunk, vector và metadata (file, trang, người sở hữu).</dd>
+        <dt>Citation</dt><dd>Nguồn của câu trả lời: tên file, số trang và nội dung chunk đã dùng làm ngữ cảnh.</dd>
+        <dt>Grounding status</dt><dd><code>supported</code> nếu có ngữ cảnh, <code>insufficient_context</code> nếu trả lời “I don't know…”.</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="card behaviour">
+    <h2>Hành vi đặc biệt (ngoài sơ đồ)</h2>
+    <div class="cols">
+      <div>
+        <h3>Không có ngữ cảnh</h3>
+        <p>Nếu ChromaDB không trả về chunk nào hợp lệ, <b>Qwen không được gọi</b>. Hệ thống gửi một câu cố định “I don't know based on the provided documents.” (một <code>delta</code>), vẫn lưu lượt hỏi–đáp với trạng thái <code>insufficient_context</code> và không có citation. Cuộc trò chuyện chưa chọn tài liệu cũng nhận một câu cố định tương tự.</p>
+      </div>
+      <div>
+        <h3>Huỷ (bấm Stop hoặc đóng tab)</h3>
+        <p>Frontend huỷ request (<code>AbortController</code>). FastAPI phát hiện client đã ngắt, đặt cờ <code>cancelled</code> và đóng luồng tới Qwen; <b>không lưu gì cả</b>. Phần text đã hiện vẫn được giữ trên màn hình kèm ghi chú “Stopped. This answer was not saved.”</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="card errors">
+    <h2>Trường hợp lỗi</h2>
+    <ul>
+      <li><b>400</b> — câu hỏi rỗng (“Message is required.”).</li>
+      <li><b>404</b> — không tìm thấy cuộc trò chuyện hoặc model không hợp lệ; trả về trước khi stream bắt đầu.</li>
+      <li><b>500</b> — lỗi khi chuẩn bị model, trước khi stream bắt đầu.</li>
+      <li>Lỗi giữa chừng (Ollama/Qwen lỗi): server gửi sự kiện <code>{type: "error"}</code>, <b>không lưu gì</b>.</li>
+      <li>Kết nối đóng trước sự kiện <code>done</code>: frontend coi là bị ngắt, không lưu.</li>
+      <li>Khi lỗi: phần trả lời dở bị xoá khỏi màn hình, hiện “The answer was interrupted and was not saved.” và câu hỏi đã gõ được trả lại ô nhập để gửi lại.</li>
+      <li>Câu trả lời chạm giới hạn 1024 token: bản lưu (và bản <code>done</code>) được cắt tại câu hoàn chỉnh cuối cùng.</li>
+    </ul>
+  </div>
+
+  <footer>
+    Nguồn: <code>frontend/js/tutor.js</code>, <code>frontend/js/chat_stream.js</code>, <code>backend/api/conversations.py</code>,
+    <code>backend/rag_service.py</code>, <code>backend/conversation_store.py</code>, <code>backend/vector_store.py</code>, <code>config.py</code>.
+  </footer>
+</main>
+
+<script>
+const PARTICIPANTS = [
+  { name: "User", sub: "End user", w: 130, fill: "#e3edfb", line: "#9db8e3", bar: "#c9dbf6" },
+  { name: "Frontend", sub: "tutor.js · chat_stream.js", w: 170, fill: "#e4f4ea", line: "#93c7a6", bar: "#c6e6d2" },
+  { name: "FastAPI Backend", sub: "conversations.py · rag_service.py", w: 210, fill: "#ece8fb", line: "#aea2dd", bar: "#d8d1f5" },
+  { name: "BGE-M3", sub: "Ollama · embedding", w: 130, fill: "#fbe7ee", line: "#e3a3bb", bar: "#f6cfdd" },
+  { name: "Qwen2.5-7B", sub: "Ollama · text generation", w: 150, fill: "#fdebdc", line: "#e5b088", bar: "#f9d9bf" },
+  { name: "Storage", sub: "SQLite · ChromaDB", w: 140, fill: "#fbf4d6", line: "#d9c474", bar: "#f4e8ad" }
+];
+const S = 0, F = 1, B = 2, E = 3, Q = 4, D = 5;
+
+// Numbered steps. Above each arrow: `label` says what happens and `code` names the verified API/function.
+// A "quiet" row is the plain reply to the step above it: drawn, not numbered. A "self" row is work
+// done inside one participant.
+const DIAGRAM = {
+  label: "Sequence diagram of one AI Tutor chat answer: retrieval and streamed generation",
+  rows: [
+    { from: S, to: F, type: "req", label: "Send Question", code: "sendTutorMessage()" },
+    { from: F, to: B, type: "req", label: "Request Answer", code: "POST /api/conversations/{conversation_id}/messages" },
+    { from: B, to: E, type: "req", label: "Embed Question", code: "OllamaEmbeddings (bge-m3)" },
+    { from: E, to: B, type: "res", label: "Question vector", quiet: true },
+    { from: B, to: D, type: "req", label: "Search Relevant Chunks", code: "similarity_search_with_score(k=4)" },
+    { from: D, to: B, type: "res", label: "Chunks + file, page", quiet: true },
+    { from: B, to: Q, type: "req", label: "Generate Answer", code: "ChatOllama.stream(prompt)" },
+    { from: Q, to: B, type: "res", label: "Stream Answer Chunks", code: "chunk.content" },
+    { from: B, to: F, type: "res", label: "Stream Over SSE", code: "StreamingResponse · delta" },
+    { from: F, to: S, type: "res", label: "Show Streaming Answer", code: "readTutorAnswerStream()" }
+  ],
+  frames: [
+    { label: "opt", note: "[Chunks found]", left: B, right: Q, inset: 22, pad: 10, start: 6, end: 7 },
+    { label: "loop", note: "[Each delta until done]", left: S, right: B, inset: 22, pad: 10, start: 8, end: 9 }
+  ]
+};
+
+const NS = "http://www.w3.org/2000/svg";
+const COL_X = [80, 270, 590, 790, 960, 1130];
+const WIDTH = 1215, TOP = 14, BOX_H = 46;
+// Vertical stack above an arrow, measured from the arrow up.
+const GAP = { code: 11, label: 15, row: 12, quiet: 26, step: 40, self: 20, selfBelow: 26, frameTop: 24 };
+const C = { ink: "#1d1f24", muted: "#5d6270", req: "#1f2937", res: "#8a8f99", life: "#b9b6ab", frame: "#9b9fa8" };
+const STYLE = {
+  "req": { color: C.req, dashed: false, head: "fill" },
+  "res": { color: C.res, dashed: true, head: "open" }
+};
+const MONO = "ui-monospace, Consolas, monospace";
+
+function el(tag, attrs, text) {
+  const node = document.createElementNS(NS, tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+// White halo behind labels so text stays readable where it crosses a lifeline.
+const HALO = { stroke: "#ffffff", "stroke-width": 4, "stroke-linejoin": "round", "paint-order": "stroke" };
+
+function marker(id, color, head) {
+  const node = el("marker", { id, viewBox: "0 0 10 10", refX: 10, refY: 5, markerWidth: 9, markerHeight: 9, markerUnits: "userSpaceOnUse", orient: "auto-start-reverse" });
+  node.append(head === "fill"
+    ? el("path", { d: "M0 0 L10 5 L0 10 Z", fill: color })
+    : el("path", { d: "M0 0 L10 5 L0 10", fill: "none", stroke: color, "stroke-width": 1.5 }));
+  return node;
+}
+
+function participantBox(svg, index, y) {
+  const p = PARTICIPANTS[index];
+  svg.append(el("rect", { x: COL_X[index] - p.w / 2, y, width: p.w, height: BOX_H, rx: 10, fill: p.fill, stroke: p.line, "stroke-width": 1.2 }));
+  svg.append(el("text", { x: COL_X[index], y: y + 20, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: C.ink }, p.name));
+  svg.append(el("text", { x: COL_X[index], y: y + 36, "text-anchor": "middle", "font-size": 11, fill: C.muted }, p.sub));
+}
+
+function badge(svg, x, y, number, color) {
+  svg.append(el("circle", { cx: x, cy: y, r: 9, fill: color }));
+  svg.append(el("text", { x, y: y + 3.5, "text-anchor": "middle", "font-size": 10.5, "font-weight": 700, fill: "#ffffff" }, String(number)));
+}
+
+// Height a row's label stack needs above its arrow.
+function stackHeight(row) {
+  return row.quiet ? GAP.quiet : row.self ? GAP.self : GAP.step;
+}
+
+function drawFrame(svg, frame, { top, bottom }) {
+  const left = COL_X[frame.left] - frame.inset, right = COL_X[frame.right] + frame.inset;
+  svg.append(el("rect", { x: left, y: top, width: right - left, height: bottom - top, fill: "none", stroke: C.frame, "stroke-width": 1 }));
+  svg.append(el("path", { d: `M${left} ${top} H${left + 42} V${top + 12} L${left + 35} ${top + 19} H${left} Z`, fill: "#f0f0ec", stroke: C.frame, "stroke-width": 1 }));
+  svg.append(el("text", { x: left + 8, y: top + 14, "font-size": 11, "font-weight": 700, fill: C.ink }, frame.label));
+  svg.append(el("text", { x: left + 50, y: top + 14, "font-size": 11, fill: C.muted, ...HALO }, frame.note));
+}
+
+function drawSelf(svg, row, y, number) {
+  const x = COL_X[row.from];
+  const style = STYLE[row.type];
+  svg.append(el("path", {
+    d: `M${x + 4} ${y} H${x + 44} V${y + 22} H${x + 5}`,
+    fill: "none", stroke: style.color, "stroke-width": 1.5, "marker-end": `url(#head-${row.type})`
+  }));
+  svg.append(el("text", { x: x + 56, y: y + 6, "font-size": 13.5, "font-weight": 600, fill: C.ink, ...HALO }, row.label));
+  svg.append(el("text", { x: x + 56, y: y + 21, "font-size": 10.5, fill: C.muted, "font-family": MONO, ...HALO }, row.code));
+  badge(svg, x + 18, y, number, style.color);
+}
+
+function renderDiagram({ rows, frames = [], activations, label }) {
+  // Frontend holds the whole exchange; Backend holds it from the request to its reply.
+  const bars = activations || [{ at: F, start: 0, end: rows.length - 1 }, { at: B, start: 1, end: rows.length - 2 }];
+  const boxes = new Map();
+  let y = TOP + BOX_H, after = 0;
+  const positions = rows.map((row, i) => {
+    y += (row.quiet ? 0 : GAP.row) + after;
+    after = 0;
+    frames.forEach((frame) => {
+      if (frame.start === i) { boxes.set(frame, { top: y }); y += GAP.frameTop; }
+    });
+    y += stackHeight(row);
+    if (row.self) after = GAP.selfBelow;
+    frames.forEach((frame) => {
+      if (frame.end === i) { boxes.get(frame).bottom = y + frame.pad; after = Math.max(after, frame.pad + 2); }
+    });
+    return y;
+  });
+  const bottomBox = y + 20;
+  const height = bottomBox + BOX_H + TOP;
+
+  const svg = el("svg", {
+    xmlns: NS, viewBox: `0 0 ${WIDTH} ${height}`, width: WIDTH, height,
+    "font-family": "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+    role: "img", "aria-label": label
+  });
+  const defs = el("defs", {});
+  for (const [key, style] of Object.entries(STYLE)) defs.append(marker(`head-${key}`, style.color, style.head));
+  svg.append(defs);
+  svg.append(el("rect", { x: 0, y: 0, width: WIDTH, height, fill: "#ffffff" }));
+
+  COL_X.forEach((x, i) => {
+    svg.append(el("line", { x1: x, y1: TOP + BOX_H, x2: x, y2: bottomBox, stroke: C.life, "stroke-width": 1, "stroke-dasharray": "4 4" }));
+    participantBox(svg, i, TOP);
+    participantBox(svg, i, bottomBox);
+  });
+
+  bars.forEach(({ at, start, end }) => {
+    svg.append(el("rect", {
+      x: COL_X[at] - 4, y: positions[start], width: 8, height: positions[end] - positions[start],
+      fill: PARTICIPANTS[at].bar, stroke: PARTICIPANTS[at].line, "stroke-width": 1
+    }));
+  });
+
+  frames.forEach((frame) => drawFrame(svg, frame, boxes.get(frame)));
+
+  let number = 0;
+  rows.forEach((row, i) => {
+    const y = positions[i];
+    if (row.self) {
+      number += 1;
+      drawSelf(svg, row, y, number);
+      return;
+    }
+    const style = STYLE[row.type];
+    const x1 = COL_X[row.from], x2 = COL_X[row.to];
+    const dir = Math.sign(x2 - x1);
+    const mid = (x1 + x2) / 2;
+    svg.append(el("line", {
+      x1: x1 + dir * 4, y1: y, x2: x2 - dir * 5, y2: y,
+      stroke: style.color, "stroke-width": 1.5,
+      ...(style.dashed ? { "stroke-dasharray": "6 4" } : {}),
+      "marker-end": `url(#head-${row.type})`
+    }));
+    if (row.quiet) {
+      svg.append(el("text", { x: mid, y: y - 7, "text-anchor": "middle", "font-size": 12, fill: C.muted, ...HALO }, row.label));
+      return;
+    }
+    number += 1;
+    svg.append(el("text", { x: mid, y: y - GAP.code, "text-anchor": "middle", "font-size": 10.5, fill: C.muted, "font-family": MONO, ...HALO }, row.code));
+    svg.append(el("text", { x: mid, y: y - GAP.code - GAP.label, "text-anchor": "middle", "font-size": 13.5, "font-weight": 600, fill: C.ink, ...HALO }, row.label));
+    badge(svg, x1 + dir * 18, y, number, style.color);
+  });
+  return svg;
+}
+
+document.getElementById("diagram").replaceChildren(renderDiagram(DIAGRAM));
+
+document.getElementById("export").addEventListener("click", () => {
+  const svg = document.querySelector("#diagram svg");
+  const source = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svg);
+  const url = URL.createObjectURL(new Blob([source], { type: "image/svg+xml;charset=utf-8" }));
+  const link = Object.assign(document.createElement("a"), { href: url, download: "chatbot-rag-sequence.svg" });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>

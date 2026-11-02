@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Tutor Study Session</title>
+<style>
+  :root {
+    --bg: #f6f5f1;
+    --surface: #ffffff;
+    --ink: #1d1f24;
+    --muted: #5d6270;
+    --line: #e2e0d8;
+    --accent: #2f5bd3;
+    --accent-soft: #e8eefc;
+    --warn: #9a4a12;
+    --warn-soft: #fbf0e6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #15171c;
+      --surface: #1e2128;
+      --ink: #eceef2;
+      --muted: #a1a7b4;
+      --line: #30343e;
+      --accent: #8aa7ff;
+      --accent-soft: #232c45;
+      --warn: #f0b27a;
+      --warn-soft: #33261b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #15171c;
+    --surface: #1e2128;
+    --ink: #eceef2;
+    --muted: #a1a7b4;
+    --line: #30343e;
+    --accent: #8aa7ff;
+    --accent-soft: #232c45;
+    --warn: #f0b27a;
+    --warn-soft: #33261b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1180px; margin: 0 auto; padding: 40px 24px 64px; }
+  header { margin-bottom: 28px; }
+  header h1 { margin: 0 0 4px; font-size: 28px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--muted); }
+  a { color: var(--accent); }
+  code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.9em; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px 24px; }
+  .card h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .story { font-size: 18px; margin: 0; }
+  ol.journey { margin: 0; padding-left: 22px; }
+  ol.journey li { margin: 2px 0; }
+
+  .diagram-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .diagram-head h2 { margin: 0; }
+  .legend { display: flex; gap: 18px; font-size: 13px; color: var(--muted); align-items: center; flex-wrap: wrap; }
+  .legend svg { vertical-align: middle; margin-right: 6px; }
+  .btn {
+    font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+    color: var(--accent); background: var(--accent-soft);
+    border: 1px solid transparent; border-radius: 8px; padding: 6px 14px;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .paper { background: #ffffff; border-radius: 8px; border: 1px solid var(--line); overflow-x: auto; }
+  .paper svg { display: block; width: 100%; min-width: 860px; height: auto; }
+  .diagram-note { margin: 14px 0 0; padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0; font-size: 15px; }
+
+  .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
+  .explain p { margin: 0 0 10px; }
+  .explain p:last-child { margin-bottom: 0; }
+  .explain details { margin-top: 4px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .explain summary { cursor: pointer; font-weight: 600; color: var(--accent); }
+  .explain details ul { margin: 8px 0 0; padding-left: 20px; }
+  .explain details li { margin: 0 0 6px; }
+  dl.terms { margin: 0; }
+  dl.terms dt { font-weight: 700; margin-top: 10px; }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd { margin: 0; color: var(--muted); }
+  .behaviour { margin-top: 20px; }
+  .behaviour .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+  .behaviour h3 { margin: 0 0 6px; font-size: 16px; }
+  .behaviour ul { margin: 0; padding-left: 20px; }
+  .behaviour li { margin: 0 0 6px; }
+  .behaviour .fail { background: var(--warn-soft); border-radius: 8px; padding: 12px 16px; }
+  .behaviour .fail h3 { color: var(--warn); }
+  footer { margin-top: 28px; font-size: 13px; color: var(--muted); }
+
+  @media (max-width: 760px) {
+    main { padding: 24px 16px 48px; }
+    .grid, .notes, .behaviour .cols { grid-template-columns: 1fr; }
+  }
+  .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 24px; border-bottom: 1px solid var(--line); }
+  .tab {
+    appearance: none; border: 0; background: none; cursor: pointer;
+    font: inherit; font-weight: 600; color: var(--muted);
+    padding: 10px 18px; border-bottom: 3px solid transparent; margin-bottom: -1px;
+  }
+  .tab:hover { color: var(--ink); }
+  .tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  .errors { background: var(--warn-soft); border-color: transparent; }
+  .errors h2 { color: var(--warn); }
+  .errors ul { margin: 0; padding-left: 20px; }
+  .errors li { margin: 4px 0; }
+  @media (max-width: 760px) { .tab { padding: 10px 12px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Thực hiện buổi học (Study Session) trong AI Tutor</h1>
+    <p>Các thao tác với một buổi học đã lưu: bắt đầu, hoàn thành, đổi lịch khi quá hạn và bỏ qua. Các thao tác này không gọi LLM; điểm chỉ có khi nộp quiz. Cách hiển thị tiến độ nằm ở <a href="../progress-tracking/index.html">trang Progress Tracking</a>.</p>
+  </header>
+
+  <div class="tabs" role="tablist" aria-label="Study session actions">
+    <button class="tab" role="tab" id="tab-start" aria-controls="panel" data-flow="start">Start</button>
+    <button class="tab" role="tab" id="tab-complete" aria-controls="panel" data-flow="complete">Complete</button>
+    <button class="tab" role="tab" id="tab-step" aria-controls="panel" data-flow="step">Complete Step</button>
+    <button class="tab" role="tab" id="tab-quiz" aria-controls="panel" data-flow="quiz">Quiz Completion</button>
+    <button class="tab" role="tab" id="tab-overdue" aria-controls="panel" data-flow="overdue">Reschedule Overdue</button>
+    <button class="tab" role="tab" id="tab-skip" aria-controls="panel" data-flow="skip">Skip</button>
+  </div>
+
+  <section id="panel" role="tabpanel">
+    <div class="grid">
+      <div class="card"><h2>User Story</h2><p class="story" id="story"></p></div>
+      <div class="card"><h2>User Journey</h2><ol class="journey" id="journey"></ol></div>
+    </div>
+
+    <div class="card">
+      <div class="diagram-head">
+        <h2>Sequence Diagram</h2>
+        <div class="legend">
+        <span><svg width="44" height="10"><line x1="2" y1="5" x2="34" y2="5" stroke="#1f2937" stroke-width="1.5"/><path d="M34 0 L44 5 L34 10 Z" fill="#1f2937"/></svg>Request</span>
+        <span><svg width="44" height="10"><line x1="2" y1="5" x2="40" y2="5" stroke="#8a8f99" stroke-width="1.5" stroke-dasharray="5 4"/><path d="M33 0 L43 5 L33 10" fill="none" stroke="#8a8f99" stroke-width="1.5"/></svg>Response</span>
+        <button class="btn" id="export">Export SVG</button>
+      </div>
+      </div>
+      <div class="paper" id="diagram"></div>
+      <p class="diagram-note" id="note"></p>
+    </div>
+
+    <div class="notes">
+      <div class="card explain">
+        <h2>Giải thích</h2>
+        <div id="explain"></div>
+        <details>
+          <summary>Chi tiết kỹ thuật (tuỳ chọn)</summary>
+          <ul id="details"></ul>
+        </details>
+      </div>
+      <div class="card errors"><h2>Trường hợp lỗi (ngoài sơ đồ)</h2><ul id="errors"></ul></div>
+    </div>
+  </section>
+
+  <div class="card behaviour">
+    <h2>Trạng thái buổi học (áp dụng cho cả sáu tab)</h2>
+    <div class="cols">
+      <div>
+        <h3>Trạng thái được lưu</h3>
+        <dl class="terms">
+          <dt>scheduled</dt><dd>Đã lên lịch, chưa bắt đầu. Đây là trạng thái ngay sau khi xác nhận plan.</dd>
+          <dt>in_progress</dt><dd>Đã bấm Start; <code>started_at</code> chỉ ghi một lần. Không tự về lại <code>scheduled</code>.</dd>
+          <dt>completed</dt><dd>Đã hoàn thành; <code>completed_at</code> chỉ ghi một lần. Không làm thay đổi điểm mastery.</dd>
+          <dt>skipped</dt><dd>User chọn bỏ qua. Dòng vẫn được giữ làm lịch sử.</dd>
+        </dl>
+      </div>
+      <div>
+        <h3>Quá hạn, đổi lịch và các trạng thái khác</h3>
+        <dl class="terms">
+          <dt>Overdue (quá hạn)</dt><dd><b>Không phải trạng thái được lưu.</b> Là buổi <code>scheduled</code> có <code>scheduled_end</code> đã qua theo giờ của User, được tính khi hiển thị. Giao diện ghi “Session not completed”.</dd>
+          <dt>rescheduled</dt><dd>Dòng gốc được giữ làm lịch sử; một dòng <code>scheduled</code> mới trỏ về nó qua <code>rescheduled_from</code>.</dd>
+          <dt>missed</dt><dd>Có trong danh sách trạng thái và được code đọc, nhưng hiện <b>không có code nào ghi giá trị này</b>.</dd>
+          <dt>cancelled</dt><dd>Do việc điều chỉnh lịch rút lại một buổi tương lai không còn cần; User không có nút riêng cho việc này.</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Nguồn: <code>frontend/js/planner.js</code>, <code>frontend/js/quiz.js</code>, <code>frontend/js/session.js</code>, <code>backend/api/planner_v2.py</code>, <code>backend/api/quiz_attempts.py</code>,
+    <code>backend/study_plan_api_service.py</code>, <code>backend/study_planner_store.py</code>, <code>backend/study_adaptation.py</code>.
+  </footer>
+</main>
+
+<script>
+const PARTICIPANTS = [
+  { name: "User", sub: "End user", w: 130, fill: "#e3edfb", line: "#9db8e3", bar: "#c9dbf6" },
+  { name: "Frontend", sub: "planner.js · quiz.js · session.js", w: 190, fill: "#e4f4ea", line: "#93c7a6", bar: "#c6e6d2" },
+  { name: "FastAPI Backend", sub: "planner_v2.py · study_plan_api_service.py", w: 250, fill: "#ece8fb", line: "#aea2dd", bar: "#d8d1f5" },
+  { name: "Storage", sub: "SQLite / PostgreSQL", w: 150, fill: "#fbf4d6", line: "#d9c474", bar: "#f4e8ad" }
+];
+const S = 0, F = 1, B = 2, D = 3;
+
+// Numbered steps. Above each arrow: `label` says what happens and `code` names the verified API/function.
+// A "quiet" row is the plain reply to the step above it: drawn, not numbered.
+const FLOWS = {
+  start: {
+    file: "study-session-start-sequence.svg",
+    story: "As a user, I want to start a scheduled session so that the app opens the right study tool for it.",
+    journey: [
+      "Tìm buổi học trong Today's Study Plan ở Home hoặc trên lịch của Planner.",
+      "Bấm “Start” (trên lịch là “Start Session”).",
+      "Trạng thái đổi sang “In progress”.",
+      "App mở đúng công cụ của buổi học: Summary, Flashcards hoặc Quiz.",
+      "Nếu rời đi, sau này bấm “Resume” để quay lại."
+    ],
+    note: "<b>Lưu ý:</b> bắt đầu buổi học <b>có đổi trạng thái</b>: <code>scheduled</code> sang <code>in_progress</code>. Bước này không tạo Summary, Flashcards hay Quiz; nếu chưa có, công cụ đó tự mời User tạo.",
+    rows: [
+      { from: S, to: F, type: "req", label: "Click Start Session", code: "plannerSessionAction()" },
+      { from: F, to: B, type: "req", label: "Start Session", code: "POST /api/planner/sessions/{session_id}/start" },
+      { from: B, to: D, type: "req", label: "Set In Progress", code: "start_session() · transition_session()" },
+      { from: D, to: B, type: "res", label: "Updated session", quiet: true },
+      { from: B, to: F, type: "res", label: "Return Tool to Open", code: "200 · {session, started, tool, artifact_available}" },
+      { from: F, to: S, type: "res", label: "Open Study Tool", code: "openStudySession()" }
+    ],
+    explain: [
+      "<b>Bước 1–2 — yêu cầu.</b> Frontend gửi mã buổi học và múi giờ của User.",
+      "<b>Bước 3 — đổi trạng thái.</b> Backend kiểm tra buổi học chưa quá hạn, đổi sang <code>in_progress</code> và ghi <code>started_at</code>. Bấm Resume với buổi đang học thì không đổi gì.",
+      "<b>Bước 4–5 — mở công cụ.</b> Backend cho biết công cụ cần mở dựa trên loại buổi học và tài liệu đang có; frontend mở đúng tab đó trong trang tài liệu."
+    ],
+    details: [
+      "Buổi <code>review</code> ưu tiên Flashcards, rồi Summary, rồi Quiz (<code>_session_tool()</code>).",
+      "Buổi Quiz chưa có quiz nào: frontend mở <code>openQuizCreateDialog()</code>; chưa có flashcards thì báo “Create Flashcards first, then create the quiz”.",
+      "Với buổi có quiz, frontend lưu mã buổi học bằng <code>plannerRememberQuizSession()</code> để gửi kèm khi nộp bài.",
+      "Ghi trạng thái dùng <code>BEGIN IMMEDIATE</code>, nên hai request cùng lúc không thể cùng ghi. Nếu đã kết nối Google Calendar, thay đổi được đồng bộ qua <code>_with_calendar_sync()</code>."
+    ],
+    errors: [
+      "<b>409</b> <code>session_missed</code> — buổi đã quá hạn; phải đổi lịch hoặc bỏ qua, không bắt đầu được.",
+      "<b>409</b> <code>session_not_startable</code> — buổi đã kết thúc theo trạng thái khác.",
+      "<b>409</b> <code>plan_not_active</code> — plan đã được lưu trữ.",
+      "<b>404</b> — không tìm thấy buổi học.",
+      "Khi lỗi: frontend hiện thông báo và tải lại lịch."
+    ]
+  },
+  complete: {
+    file: "study-session-complete-sequence.svg",
+    story: "As a user, I want to mark a session as completed so that my study plan shows the work I have finished.",
+    journey: [
+      "Học xong với công cụ đã mở.",
+      "Quay lại buổi học đang “In progress”.",
+      "Bấm “Complete” (trên lịch là “Complete session”).",
+      "Thông báo “Session completed. Nice work!” hiện ra và buổi học có nhãn “Completed”."
+    ],
+    note: "<b>Lưu ý:</b> chỉ buổi <code>in_progress</code> mới hoàn thành được, nên phải Start trước. Hệ thống <b>không kiểm tra</b> User đã thực sự học chưa; đây là việc User tự xác nhận. Tiến độ không có bước ghi riêng mà được tính lại khi đọc.",
+    rows: [
+      { from: S, to: F, type: "req", label: "Click Complete", code: "plannerSessionAction()" },
+      { from: F, to: B, type: "req", label: "Complete Session", code: "POST /api/planner/sessions/{session_id}/complete" },
+      { from: B, to: D, type: "req", label: "Set Completed", code: "complete_session() · transition_session()" },
+      { from: D, to: B, type: "res", label: "Updated session", quiet: true },
+      { from: B, to: F, type: "res", label: "Return Session", code: "200 · {session, changed}" },
+      { from: F, to: B, type: "req", label: "Refresh Sessions", code: "GET /api/planner/plans/{plan_id}/sessions" },
+      { from: B, to: F, type: "res", label: "Current sessions", quiet: true },
+      { from: F, to: S, type: "res", label: "Show Completed Session", code: "plannerRefreshSchedules()" }
+    ],
+    activations: [{ at: F, start: 0, end: 7 }, { at: B, start: 1, end: 4 }, { at: B, start: 5, end: 6 }],
+    explain: [
+      "<b>Bước 1–2 — yêu cầu.</b> User bấm nút hoàn thành; request không gửi kèm dữ liệu nào khác.",
+      "<b>Bước 3–4 — lưu.</b> Backend đổi trạng thái sang <code>completed</code> và ghi <code>completed_at</code>. Bấm lại không đổi gì (<code>changed: false</code>).",
+      "<b>Bước 5–6 — hiển thị.</b> Frontend tải lại lịch ở Home và Planner, và tải lại tiến độ từng tài liệu."
+    ],
+    details: [
+      "Quy tắc chuyển trạng thái nằm trong <code>_TRANSITIONS</code>: <code>start</code>, <code>complete</code>, <code>skip</code>.",
+      "<code>plannerRefreshSchedules()</code> gọi <code>loadTodayPlan()</code>, <code>loadPlannerData()</code> và <code>refreshHomeDocumentStates()</code>.",
+      "Với buổi gồm hai hoạt động, dùng tab Complete Step. Với buổi Quiz, nộp bài sẽ tự hoàn thành (tab Quiz Completion).",
+      "Hoàn thành buổi học không gọi <code>recompute_topic_mastery()</code>. Nó có thể đổi nhãn học tập của tài liệu, vì <code>get_document_study_state()</code> có đếm số buổi đã hoàn thành."
+    ],
+    errors: [
+      "<b>409</b> <code>session_not_started</code> — chưa Start buổi học.",
+      "<b>409</b> <code>session_steps_incomplete</code> — buổi hai hoạt động còn hoạt động chưa xong.",
+      "<b>409</b> <code>session_not_completable</code> — buổi đã bị bỏ qua hoặc đã đổi lịch.",
+      "<b>404</b> — không tìm thấy buổi học."
+    ]
+  },
+  step: {
+    file: "study-session-complete-step-sequence.svg",
+    story: "As a user, I want to finish each part of a combined session in order so that I can see what comes next.",
+    journey: [
+      "Bắt đầu một buổi gồm hai hoạt động, ví dụ Summary + Flashcards.",
+      "Thanh trên trang tài liệu cho biết “Step 1 of 2”.",
+      "Học xong, bấm nút “… done” của hoạt động hiện tại.",
+      "Thanh chuyển sang hoạt động tiếp theo. Sau hoạt động cuối, buổi học hoàn thành."
+    ],
+    note: "<b>Lưu ý:</b> các hoạt động phải làm <b>theo thứ tự</b>. Hoạt động cuối cùng cũng đổi cả buổi học sang <code>completed</code>, không cần bấm thêm.",
+    rows: [
+      { from: S, to: F, type: "req", label: "Click Step Done", code: "plannerStepBarAction()" },
+      { from: F, to: B, type: "req", label: "Complete Step", code: "POST .../sessions/{session_id}/steps/{step_index}/complete" },
+      { from: B, to: D, type: "req", label: "Save Step", code: "complete_session_step()" },
+      { from: D, to: B, type: "res", label: "Updated steps", quiet: true },
+      { from: B, to: F, type: "res", label: "Return Step Result", code: "200 · {session, changed, session_completed}" },
+      { from: F, to: S, type: "res", label: "Show Next Step", code: "loadDocumentProgress()" }
+    ],
+    explain: [
+      "<b>Bước 1–2 — yêu cầu.</b> Frontend gửi vị trí của hoạt động hiện tại.",
+      "<b>Bước 3–4 — lưu.</b> Backend kiểm tra đúng thứ tự, đánh dấu hoạt động đã xong trong <code>steps_json</code>; nếu là hoạt động cuối thì đổi cả buổi sang <code>completed</code>.",
+      "<b>Bước 5 — hiển thị.</b> Frontend đọc lại tiến độ của tài liệu rồi hiện hoạt động tiếp theo, hoặc báo buổi học đã xong."
+    ],
+    details: [
+      "Đường dẫn đầy đủ: <code>POST /api/planner/sessions/{session_id}/steps/{step_index}/complete</code>.",
+      "Frontend: <code>plannerSessionAction()</code> với <code>kind = \"step_done\"</code>, vị trí lấy từ <code>plannerCurrentStep()</code>. Thanh hiển thị: <code>plannerRenderSessionStepBar()</code>.",
+      "Hoạt động Quiz không có nút “done”: nộp bài sẽ hoàn thành hoạt động đó (tab Quiz Completion)."
+    ],
+    errors: [
+      "<b>409</b> <code>step_out_of_order</code> — chưa xong hoạt động trước.",
+      "<b>409</b> <code>session_not_started</code> — chưa Start buổi học.",
+      "<b>409</b> <code>session_not_combined</code> hoặc <code>step_not_found</code> — buổi chỉ có một hoạt động hoặc vị trí không tồn tại."
+    ]
+  },
+  quiz: {
+    file: "study-session-quiz-completion-sequence.svg",
+    story: "As a user, I want a quiz session to finish when I submit the quiz so that I do not have to mark it again.",
+    journey: [
+      "Bắt đầu một buổi Quiz; Quiz Player mở ra.",
+      "Làm bài và bấm “Finish Quiz”.",
+      "Xem kết quả như bình thường.",
+      "Buổi học tự hoàn thành và thông báo “Study session completed. Nice work!” hiện ra."
+    ],
+    note: "<b>Lưu ý:</b> đây là nơi duy nhất buổi học liên quan tới mastery: mastery được tính lại <b>từ bài nộp</b> (<code>recompute_topic_mastery()</code>), không phải từ việc hoàn thành buổi học. Khung <b>opt</b>: chỉ chạy khi tìm được buổi học phù hợp đang diễn ra.",
+    rows: [
+      { from: S, to: F, type: "req", label: "Submit Quiz", code: "submitQuizPlayer()" },
+      { from: F, to: B, type: "req", label: "Send Answers & Session", code: "POST /api/quiz/{document_id}/submit" },
+      { from: B, to: D, type: "req", label: "Save Attempt", code: "submit_quiz_attempt()" },
+      { from: B, to: D, type: "req", label: "Complete Quiz Activity", code: "complete_quiz_activity()" },
+      { from: D, to: B, type: "res", label: "Updated session", quiet: true },
+      { from: B, to: F, type: "res", label: "Return Attempt & Status", code: "200 · {score, question_results, planner_completion}" },
+      { from: F, to: S, type: "res", label: "Update Plan View", code: "plannerAfterQuizSubmission()" }
+    ],
+    frames: [
+      { label: "opt", note: "[Matching session in progress]", left: B, right: D, inset: 22, pad: 10, start: 3, end: 4 }
+    ],
+    explain: [
+      "<b>Bước 1–3 — nộp bài.</b> Frontend gửi câu trả lời kèm <code>planner_session_id</code>; backend chấm và lưu bài. Chi tiết ở <a href=\"../quiz-submission/index.html\">sơ đồ Quiz Submission</a>.",
+      "<b>Bước 4 — hoàn thành buổi học.</b> Sau khi lưu bài, backend kiểm tra buổi học đúng tài liệu và đúng quiz, rồi đánh dấu hoàn thành.",
+      "<b>Bước 5–6 — hiển thị.</b> Response có <code>planner_completion</code>; frontend báo kết quả và tải lại lịch."
+    ],
+    details: [
+      "Route: <code>quiz_submit()</code> → <code>_complete_planner_quiz()</code> trong <code>backend/api/quiz_attempts.py</code> → <code>complete_quiz_from_attempt()</code> → <code>complete_quiz_activity()</code>.",
+      "Không có <code>planner_session_id</code>: backend chỉ dùng buổi đang diễn ra nếu có đúng một buổi phù hợp (<code>in_progress_quiz_sessions()</code>).",
+      "Buổi hai hoạt động: chỉ hoạt động Quiz được đánh dấu xong, kèm <code>attempt_id</code>; hoạt động còn lại vẫn phải làm.",
+      "Sau khi nộp bài, frontend còn gọi <code>plannerAdaptAfterQuiz()</code> để có thể điều chỉnh lịch, trừ quiz luyện tập từ flashcards."
+    ],
+    errors: [
+      "Không tìm được buổi phù hợp: <code>planner_completion</code> là <code>null</code>; bài nộp vẫn được lưu.",
+      "Buổi không khớp (<code>quiz_session_mismatch</code>) hoặc chưa Start: <code>planner_completion.status = \"not_applied\"</code>; bài nộp vẫn được lưu.",
+      "Lỗi ở phần buổi học không làm hỏng việc nộp bài: <code>status = \"error\"</code>, User vẫn có thể hoàn thành buổi học bằng tay."
+    ]
+  },
+  overdue: {
+    file: "study-session-reschedule-overdue-sequence.svg",
+    story: "As a user, I want to move a session I could not attend so that the work still has a place in my schedule.",
+    journey: [
+      "Buổi đã quá giờ mà chưa bắt đầu sẽ hiện trong mục “Not completed” với ghi chú “Session not completed”.",
+      "Nút “Start” không còn; chỉ còn “Reschedule” và “Skip” (trên lịch có thêm “Edit”).",
+      "Bấm “Reschedule”.",
+      "Thông báo cho biết giờ mới; nếu thay đổi lớn, User xem lại đề xuất trước khi áp dụng."
+    ],
+    note: "<b>Lưu ý:</b> không có tác vụ nền nào đánh dấu quá hạn; dòng trong database vẫn là <code>scheduled</code> cho đến khi User xử lý. Khung <b>opt</b>: frontend chỉ đổi lịch trực tiếp khi việc điều chỉnh không áp dụng gì và không cần User xem lại.",
+    rows: [
+      { from: S, to: F, type: "req", label: "Click Reschedule", code: "plannerSessionAction()" },
+      { from: F, to: B, type: "req", label: "Request Adaptation", code: "POST /api/planner/plans/{plan_id}/adaptation/apply" },
+      { from: B, to: D, type: "req", label: "Apply Replacement", code: "apply_adaptation() · apply_adaptation_changes()" },
+      { from: D, to: B, type: "res", label: "Changed sessions", quiet: true },
+      { from: B, to: F, type: "res", label: "Return Adaptation", code: "200 · {applied, requires_confirmation}" },
+      { from: F, to: B, type: "req", label: "Move Session", code: "POST /api/planner/sessions/{session_id}/reschedule" },
+      { from: B, to: D, type: "req", label: "Save New Session", code: "reschedule_session()" },
+      { from: D, to: B, type: "res", label: "Old + new session", quiet: true },
+      { from: B, to: F, type: "res", label: "Return New Session", code: "200 · {session, previous, after_deadline}" },
+      { from: F, to: S, type: "res", label: "Show New Time", code: "plannerRefreshSchedules()" }
+    ],
+    frames: [
+      { label: "opt", note: "[Nothing applied, no review needed]", left: F, right: D, inset: 22, pad: 10, start: 5, end: 8 }
+    ],
+    activations: [{ at: F, start: 0, end: 9 }, { at: B, start: 1, end: 4 }, { at: B, start: 5, end: 8 }],
+    explain: [
+      "<b>Bước 1–2 — thử điều chỉnh.</b> Frontend gửi tín hiệu <code>session_missed</code> để hệ thống tìm buổi thay thế và dời các buổi phụ thuộc.",
+      "<b>Bước 3–4 — kết quả.</b> Thay đổi nhỏ được áp dụng ngay. Thay đổi lớn không được ghi, mà trả <code>requires_confirmation: true</code> để User xem lại. Nếu buổi không còn cần thì không có gì thay đổi.",
+      "<b>Bước 5–7 — đổi lịch trực tiếp.</b> Nếu không có gì được áp dụng, backend tìm khoảng trống đầu tiên, giữ dòng cũ với trạng thái <code>rescheduled</code> và tạo dòng <code>scheduled</code> mới.",
+      "<b>Bước 8 — hiển thị.</b> Frontend báo giờ mới và tải lại lịch."
+    ],
+    details: [
+      "Điều kiện quá hạn: <code>plannerIsOverdue()</code> ở frontend (<code>status = scheduled</code> và <code>scheduled_end</code> đã qua); backend kiểm tra cùng mốc trong <code>start_session()</code>.",
+      "Frontend: <code>plannerRescheduleThroughAdaptation()</code> → <code>plannerAdapt()</code>. Nếu điều chỉnh lỗi, frontend cũng chuyển sang đổi lịch trực tiếp.",
+      "Backend tìm giờ bằng <code>find_next_slot()</code>. Nếu không còn chỗ trước deadline thì dùng giờ sau deadline, kèm <code>after_deadline: true</code>.",
+      "Buổi chưa quá hạn cũng đổi được: nút Reschedule, form Edit hoặc kéo trên lịch (<code>pcalRescheduleTo()</code>) gọi thẳng <code>/reschedule</code>. Dùng <code>target_start</code> thì buổi mới được đánh dấu <code>manual_edit</code>."
+    ],
+    errors: [
+      "<b>409</b> <code>no_available_slot</code> — không còn thời gian rảnh; cần thêm thời gian rồi thử lại.",
+      "<b>409</b> <code>slot_taken</code> — giờ đó đã có buổi khác.",
+      "<b>409</b> <code>session_not_reschedulable</code> — buổi không ở trạng thái đổi được.",
+      "<b>409</b> <code>plan_not_active</code> — plan đã được lưu trữ."
+    ]
+  },
+  skip: {
+    file: "study-session-skip-sequence.svg",
+    story: "As a user, I want to skip a session I do not need so that it no longer counts as work I still have to do.",
+    journey: [
+      "Với buổi đã lên lịch, đang học hoặc đã quá hạn, bấm “Skip”.",
+      "Buổi học có nhãn “Skipped”.",
+      "Thông báo “Session skipped” hiện ra; nếu cần, lịch có thể được điều chỉnh để bù lại."
+    ],
+    note: "<b>Lưu ý:</b> buổi bị bỏ qua vẫn được giữ làm lịch sử và <b>vẫn tính vào số buổi đã lên kế hoạch</b>, nhưng không tính là đã hoàn thành. Khung <b>opt</b>: chỉ yêu cầu điều chỉnh khi trạng thái thực sự thay đổi.",
+    rows: [
+      { from: S, to: F, type: "req", label: "Click Skip", code: "plannerSessionAction()" },
+      { from: F, to: B, type: "req", label: "Skip Session", code: "POST /api/planner/sessions/{session_id}/skip" },
+      { from: B, to: D, type: "req", label: "Set Skipped", code: "skip_session() · transition_session()" },
+      { from: D, to: B, type: "res", label: "Updated session", quiet: true },
+      { from: B, to: F, type: "res", label: "Return Session", code: "200 · {session, changed}" },
+      { from: F, to: B, type: "req", label: "Request Adaptation", code: "POST /api/planner/plans/{plan_id}/adaptation/apply" },
+      { from: B, to: F, type: "res", label: "Applied or review needed", quiet: true },
+      { from: F, to: S, type: "res", label: "Show Skip Result", code: "plannerAdapt()" }
+    ],
+    frames: [
+      { label: "opt", note: "[Status changed]", left: F, right: B, inset: 22, pad: 10, start: 5, end: 6 }
+    ],
+    activations: [{ at: F, start: 0, end: 7 }, { at: B, start: 1, end: 4 }, { at: B, start: 5, end: 6 }],
+    explain: [
+      "<b>Bước 1–4 — bỏ qua.</b> Backend đổi trạng thái sang <code>skipped</code>. Bấm lại không đổi gì (<code>changed: false</code>).",
+      "<b>Bước 5 — điều chỉnh.</b> Frontend tải lại lịch rồi gửi tín hiệu <code>session_skipped</code>; thay đổi nhỏ được áp dụng ngay, thay đổi lớn chờ User xem lại.",
+      "<b>Bước 6 — hiển thị.</b> Frontend báo đã bỏ qua, kèm tóm tắt thay đổi nếu có."
+    ],
+    details: [
+      "Trạng thái được phép bỏ qua: <code>scheduled</code> và <code>in_progress</code> (<code>_TRANSITIONS</code>).",
+      "Trước bước 5, <code>plannerRefreshSchedules()</code> tải lại lịch ở Home và Planner.",
+      "Nếu đã kết nối Google Calendar, sự kiện của buổi bị bỏ qua được xoá."
+    ],
+    errors: [
+      "<b>409</b> <code>session_not_skippable</code> — buổi đã hoàn thành hoặc đã đổi lịch.",
+      "<b>409</b> <code>plan_not_active</code> — buổi <code>scheduled</code> của plan đã lưu trữ.",
+      "<b>404</b> — không tìm thấy buổi học."
+    ]
+  }
+};
+
+const NS = "http://www.w3.org/2000/svg";
+const COL_X = [80, 300, 720, 1040];
+const WIDTH = 1130, TOP = 14, BOX_H = 46;
+// Vertical stack above an arrow, measured from the arrow up.
+const GAP = { code: 11, label: 15, row: 12, quiet: 26, step: 40, self: 20, selfBelow: 26, frameTop: 24 };
+const C = { ink: "#1d1f24", muted: "#5d6270", req: "#1f2937", res: "#8a8f99", life: "#b9b6ab", frame: "#9b9fa8" };
+const STYLE = {
+  "req": { color: C.req, dashed: false, head: "fill" },
+  "res": { color: C.res, dashed: true, head: "open" }
+};
+const MONO = "ui-monospace, Consolas, monospace";
+
+function el(tag, attrs, text) {
+  const node = document.createElementNS(NS, tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+// White halo behind labels so text stays readable where it crosses a lifeline.
+const HALO = { stroke: "#ffffff", "stroke-width": 4, "stroke-linejoin": "round", "paint-order": "stroke" };
+
+function marker(id, color, head) {
+  const node = el("marker", { id, viewBox: "0 0 10 10", refX: 10, refY: 5, markerWidth: 9, markerHeight: 9, markerUnits: "userSpaceOnUse", orient: "auto-start-reverse" });
+  node.append(head === "fill"
+    ? el("path", { d: "M0 0 L10 5 L0 10 Z", fill: color })
+    : el("path", { d: "M0 0 L10 5 L0 10", fill: "none", stroke: color, "stroke-width": 1.5 }));
+  return node;
+}
+
+function participantBox(svg, index, y) {
+  const p = PARTICIPANTS[index];
+  svg.append(el("rect", { x: COL_X[index] - p.w / 2, y, width: p.w, height: BOX_H, rx: 10, fill: p.fill, stroke: p.line, "stroke-width": 1.2 }));
+  svg.append(el("text", { x: COL_X[index], y: y + 20, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: C.ink }, p.name));
+  svg.append(el("text", { x: COL_X[index], y: y + 36, "text-anchor": "middle", "font-size": 11, fill: C.muted }, p.sub));
+}
+
+function badge(svg, x, y, number, color) {
+  svg.append(el("circle", { cx: x, cy: y, r: 9, fill: color }));
+  svg.append(el("text", { x, y: y + 3.5, "text-anchor": "middle", "font-size": 10.5, "font-weight": 700, fill: "#ffffff" }, String(number)));
+}
+
+// Height a row's label stack needs above its arrow.
+function stackHeight(row) {
+  return row.quiet ? GAP.quiet : row.self ? GAP.self : GAP.step;
+}
+
+function drawFrame(svg, frame, { top, bottom }) {
+  const left = COL_X[frame.left] - frame.inset, right = COL_X[frame.right] + frame.inset;
+  svg.append(el("rect", { x: left, y: top, width: right - left, height: bottom - top, fill: "none", stroke: C.frame, "stroke-width": 1 }));
+  svg.append(el("path", { d: `M${left} ${top} H${left + 42} V${top + 12} L${left + 35} ${top + 19} H${left} Z`, fill: "#f0f0ec", stroke: C.frame, "stroke-width": 1 }));
+  svg.append(el("text", { x: left + 8, y: top + 14, "font-size": 11, "font-weight": 700, fill: C.ink }, frame.label));
+  svg.append(el("text", { x: left + 50, y: top + 14, "font-size": 11, fill: C.muted, ...HALO }, frame.note));
+}
+
+function drawSelf(svg, row, y, number) {
+  const x = COL_X[row.from];
+  const style = STYLE[row.type];
+  svg.append(el("path", {
+    d: `M${x + 4} ${y} H${x + 44} V${y + 22} H${x + 5}`,
+    fill: "none", stroke: style.color, "stroke-width": 1.5, "marker-end": `url(#head-${row.type})`
+  }));
+  svg.append(el("text", { x: x + 56, y: y + 6, "font-size": 13.5, "font-weight": 600, fill: C.ink, ...HALO }, row.label));
+  svg.append(el("text", { x: x + 56, y: y + 21, "font-size": 10.5, fill: C.muted, "font-family": MONO, ...HALO }, row.code));
+  badge(svg, x + 18, y, number, style.color);
+}
+
+function renderDiagram({ rows, frames = [], activations, label }) {
+  // Frontend holds the whole exchange; Backend holds it from the request to its reply.
+  const bars = activations || [{ at: F, start: 0, end: rows.length - 1 }, { at: B, start: 1, end: rows.length - 2 }];
+  const boxes = new Map();
+  let y = TOP + BOX_H, after = 0;
+  const positions = rows.map((row, i) => {
+    y += (row.quiet ? 0 : GAP.row) + after;
+    after = 0;
+    frames.forEach((frame) => {
+      if (frame.start === i) { boxes.set(frame, { top: y }); y += GAP.frameTop; }
+    });
+    y += stackHeight(row);
+    if (row.self) after = GAP.selfBelow;
+    frames.forEach((frame) => {
+      if (frame.end === i) { boxes.get(frame).bottom = y + frame.pad; after = Math.max(after, frame.pad + 2); }
+    });
+    return y;
+  });
+  const bottomBox = y + 20;
+  const height = bottomBox + BOX_H + TOP;
+
+  const svg = el("svg", {
+    xmlns: NS, viewBox: `0 0 ${WIDTH} ${height}`, width: WIDTH, height,
+    "font-family": "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+    role: "img", "aria-label": label
+  });
+  const defs = el("defs", {});
+  for (const [key, style] of Object.entries(STYLE)) defs.append(marker(`head-${key}`, style.color, style.head));
+  svg.append(defs);
+  svg.append(el("rect", { x: 0, y: 0, width: WIDTH, height, fill: "#ffffff" }));
+
+  COL_X.forEach((x, i) => {
+    svg.append(el("line", { x1: x, y1: TOP + BOX_H, x2: x, y2: bottomBox, stroke: C.life, "stroke-width": 1, "stroke-dasharray": "4 4" }));
+    participantBox(svg, i, TOP);
+    participantBox(svg, i, bottomBox);
+  });
+
+  bars.forEach(({ at, start, end }) => {
+    svg.append(el("rect", {
+      x: COL_X[at] - 4, y: positions[start], width: 8, height: positions[end] - positions[start],
+      fill: PARTICIPANTS[at].bar, stroke: PARTICIPANTS[at].line, "stroke-width": 1
+    }));
+  });
+
+  frames.forEach((frame) => drawFrame(svg, frame, boxes.get(frame)));
+
+  let number = 0;
+  rows.forEach((row, i) => {
+    const y = positions[i];
+    if (row.self) {
+      number += 1;
+      drawSelf(svg, row, y, number);
+      return;
+    }
+    const style = STYLE[row.type];
+    const x1 = COL_X[row.from], x2 = COL_X[row.to];
+    const dir = Math.sign(x2 - x1);
+    const mid = (x1 + x2) / 2;
+    svg.append(el("line", {
+      x1: x1 + dir * 4, y1: y, x2: x2 - dir * 5, y2: y,
+      stroke: style.color, "stroke-width": 1.5,
+      ...(style.dashed ? { "stroke-dasharray": "6 4" } : {}),
+      "marker-end": `url(#head-${row.type})`
+    }));
+    if (row.quiet) {
+      svg.append(el("text", { x: mid, y: y - 7, "text-anchor": "middle", "font-size": 12, fill: C.muted, ...HALO }, row.label));
+      return;
+    }
+    number += 1;
+    svg.append(el("text", { x: mid, y: y - GAP.code, "text-anchor": "middle", "font-size": 10.5, fill: C.muted, "font-family": MONO, ...HALO }, row.code));
+    svg.append(el("text", { x: mid, y: y - GAP.code - GAP.label, "text-anchor": "middle", "font-size": 13.5, "font-weight": 600, fill: C.ink, ...HALO }, row.label));
+    badge(svg, x1 + dir * 18, y, number, style.color);
+  });
+  return svg;
+}
+
+const tabs = [...document.querySelectorAll(".tab")];
+let current = "start";
+
+function show(key, focus) {
+  current = key;
+  const flow = FLOWS[key];
+  tabs.forEach((tab) => {
+    const active = tab.dataset.flow === key;
+    tab.setAttribute("aria-selected", active);
+    tab.tabIndex = active ? 0 : -1;
+    if (active && focus) tab.focus();
+  });
+  document.getElementById("panel").setAttribute("aria-labelledby", `tab-${key}`);
+  document.getElementById("story").textContent = flow.story;
+  document.getElementById("journey").innerHTML = flow.journey.map((step) => `<li>${step}</li>`).join("");
+  document.getElementById("note").innerHTML = flow.note;
+  document.getElementById("explain").innerHTML = flow.explain.map((p) => `<p>${p}</p>`).join("");
+  document.getElementById("details").innerHTML = flow.details.map((d) => `<li>${d}</li>`).join("");
+  document.getElementById("errors").innerHTML = flow.errors.map((e) => `<li>${e}</li>`).join("");
+  document.getElementById("diagram").replaceChildren(renderDiagram({ rows: flow.rows, frames: flow.frames, activations: flow.activations, label: `Sequence diagram: ${flow.story}` }));
+  history.replaceState(null, "", `#${key}`);
+}
+
+tabs.forEach((tab, index) => {
+  tab.addEventListener("click", () => show(tab.dataset.flow));
+  tab.addEventListener("keydown", (event) => {
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
+    if (!step) return;
+    show(tabs[(index + step + tabs.length) % tabs.length].dataset.flow, true);
+  });
+});
+
+document.getElementById("export").addEventListener("click", () => {
+  const svg = document.querySelector("#diagram svg");
+  const source = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svg);
+  const url = URL.createObjectURL(new Blob([source], { type: "image/svg+xml;charset=utf-8" }));
+  const link = Object.assign(document.createElement("a"), { href: url, download: FLOWS[current].file });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+});
+
+const initial = location.hash.slice(1);
+show(FLOWS[initial] ? initial : "start");
+</script>
+</body>
+</html>

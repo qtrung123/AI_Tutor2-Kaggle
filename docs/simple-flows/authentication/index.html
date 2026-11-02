@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Tutor Authentication</title>
+<style>
+  :root {
+    --bg: #f6f5f1;
+    --surface: #ffffff;
+    --ink: #1d1f24;
+    --muted: #5d6270;
+    --line: #e2e0d8;
+    --accent: #2f5bd3;
+    --accent-soft: #e8eefc;
+    --warn: #9a4a12;
+    --warn-soft: #fbf0e6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #15171c;
+      --surface: #1e2128;
+      --ink: #eceef2;
+      --muted: #a1a7b4;
+      --line: #30343e;
+      --accent: #8aa7ff;
+      --accent-soft: #232c45;
+      --warn: #f0b27a;
+      --warn-soft: #33261b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #15171c;
+    --surface: #1e2128;
+    --ink: #eceef2;
+    --muted: #a1a7b4;
+    --line: #30343e;
+    --accent: #8aa7ff;
+    --accent-soft: #232c45;
+    --warn: #f0b27a;
+    --warn-soft: #33261b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1180px; margin: 0 auto; padding: 40px 24px 64px; }
+  header { margin-bottom: 28px; }
+  header h1 { margin: 0 0 4px; font-size: 28px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--muted); }
+  a { color: var(--accent); }
+  code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.9em; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px 24px; }
+  .card h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .story { font-size: 18px; margin: 0; }
+  ol.journey { margin: 0; padding-left: 22px; }
+  ol.journey li { margin: 2px 0; }
+
+  .diagram-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .diagram-head h2 { margin: 0; }
+  .legend { display: flex; gap: 18px; font-size: 13px; color: var(--muted); align-items: center; flex-wrap: wrap; }
+  .legend svg { vertical-align: middle; margin-right: 6px; }
+  .btn {
+    font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+    color: var(--accent); background: var(--accent-soft);
+    border: 1px solid transparent; border-radius: 8px; padding: 6px 14px;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .paper { background: #ffffff; border-radius: 8px; border: 1px solid var(--line); overflow-x: auto; }
+  .paper svg { display: block; width: 100%; min-width: 860px; height: auto; }
+  .diagram-note { margin: 14px 0 0; padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0; font-size: 15px; }
+
+  .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
+  .explain p { margin: 0 0 10px; }
+  .explain p:last-child { margin-bottom: 0; }
+  .explain details { margin-top: 4px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .explain summary { cursor: pointer; font-weight: 600; color: var(--accent); }
+  .explain details ul { margin: 8px 0 0; padding-left: 20px; }
+  .explain details li { margin: 0 0 6px; }
+  dl.terms { margin: 0; }
+  dl.terms dt { font-weight: 700; margin-top: 10px; }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd { margin: 0; color: var(--muted); }
+  .behaviour { margin-top: 20px; }
+  .behaviour .cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
+  .behaviour h3 { margin: 0 0 6px; font-size: 16px; }
+  .behaviour ul { margin: 0; padding-left: 20px; }
+  .behaviour li { margin: 0 0 6px; }
+  .behaviour .fail { background: var(--warn-soft); border-radius: 8px; padding: 12px 16px; }
+  .behaviour .fail h3 { color: var(--warn); }
+  footer { margin-top: 28px; font-size: 13px; color: var(--muted); }
+
+  @media (max-width: 760px) {
+    main { padding: 24px 16px 48px; }
+    .grid, .notes, .behaviour .cols { grid-template-columns: 1fr; }
+  }
+  .tabs { display: flex; gap: 8px; margin: 0 0 24px; border-bottom: 1px solid var(--line); }
+  .tab {
+    appearance: none; border: 0; background: none; cursor: pointer;
+    font: inherit; font-weight: 600; color: var(--muted);
+    padding: 10px 18px; border-bottom: 3px solid transparent; margin-bottom: -1px;
+  }
+  .tab:hover { color: var(--ink); }
+  .tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  .errors { background: var(--warn-soft); border-color: transparent; }
+  .errors h2 { color: var(--warn); }
+  .errors ul { margin: 0; padding-left: 20px; }
+  .errors li { margin: 4px 0; }
+  @media (max-width: 760px) { .tab { padding: 10px 12px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Authentication trong AI Tutor</h1>
+    <p>Ba luồng chính: Đăng ký, Đăng nhập, Đăng xuất. Chỉ hiển thị luồng thành công; lỗi được ghi chú riêng.</p>
+  </header>
+
+  <div class="tabs" role="tablist" aria-label="Authentication flows">
+    <button class="tab" role="tab" id="tab-signup" aria-controls="panel" data-flow="signup">Sign Up</button>
+    <button class="tab" role="tab" id="tab-signin" aria-controls="panel" data-flow="signin">Sign In</button>
+    <button class="tab" role="tab" id="tab-signout" aria-controls="panel" data-flow="signout">Sign Out</button>
+  </div>
+
+  <section id="panel" role="tabpanel">
+    <div class="grid">
+      <div class="card"><h2>User Story</h2><p class="story" id="story"></p></div>
+      <div class="card"><h2>User Journey</h2><ol class="journey" id="journey"></ol></div>
+    </div>
+
+    <div class="card">
+      <div class="diagram-head">
+        <h2>Sequence Diagram</h2>
+        <div class="legend">
+        <span><svg width="44" height="10"><line x1="2" y1="5" x2="34" y2="5" stroke="#1f2937" stroke-width="1.5"/><path d="M34 0 L44 5 L34 10 Z" fill="#1f2937"/></svg>Request</span>
+        <span><svg width="44" height="10"><line x1="2" y1="5" x2="40" y2="5" stroke="#8a8f99" stroke-width="1.5" stroke-dasharray="5 4"/><path d="M33 0 L43 5 L33 10" fill="none" stroke="#8a8f99" stroke-width="1.5"/></svg>Response</span>
+        <button class="btn" id="export">Export SVG</button>
+      </div>
+      </div>
+      <div class="paper" id="diagram"></div>
+    </div>
+
+    <div class="notes">
+      <div class="card explain"><h2>Giải thích</h2><div id="explain"></div></div>
+      <div class="card errors"><h2>Trường hợp lỗi (ngoài sơ đồ)</h2><ul id="errors"></ul></div>
+    </div>
+  </section>
+
+  <footer>
+    Nguồn: <code>backend/api/auth.py</code>, <code>backend/auth_store.py</code>, <code>frontend/app.js</code>,
+    <code>frontend/js/api.js</code>, <code>config.py</code>. Giá trị mặc định: cookie <code>ai_tutor_session</code>, phiên 14 ngày.
+  </footer>
+</main>
+
+<script>
+const PARTICIPANTS = [
+  { name: "User", sub: "End user", w: 130, fill: "#e3edfb", line: "#9db8e3", bar: "#c9dbf6" },
+  { name: "Frontend", sub: "app.js", w: 130, fill: "#e4f4ea", line: "#93c7a6", bar: "#c6e6d2" },
+  { name: "FastAPI Backend", sub: "auth.py", w: 200, fill: "#ece8fb", line: "#aea2dd", bar: "#d8d1f5" },
+  { name: "Auth Store", sub: "auth_store.py · DB", w: 150, fill: "#fbf4d6", line: "#d9c474", bar: "#f4e8ad" }
+];
+const S = 0, F = 1, B = 2, D = 3;
+
+// Numbered steps. Above each arrow: `label` says what happens and `code` names the verified API/function.
+// A "quiet" row is the plain reply to the step above it: drawn, not numbered. A "self" row is work
+// done inside one participant.
+const FLOWS = {
+  signup: {
+    file: "sign-up-sequence.svg",
+    story: "As a new user, I want to create an account with my name, email and password so that I can start using AI Tutor right away.",
+    journey: [
+      "Mở trang và chọn “Create an account”.",
+      "Nhập tên hiển thị, email và mật khẩu (tối thiểu 10 ký tự).",
+      "Bấm “Sign up”.",
+      "Hệ thống tạo tài khoản và tự động đăng nhập luôn.",
+      "Giao diện chính của AI Tutor hiện ra."
+    ],
+    rows: [
+      { from: S, to: F, type: "req", label: "Submit Sign-Up Form", code: "handleAuthentication()" },
+      { from: F, to: B, type: "req", label: "Request Sign-Up", code: "POST /api/auth/signup" },
+      { from: B, to: D, type: "req", label: "Create User", code: "create_user()" },
+      { from: D, to: B, type: "res", label: "User record", quiet: true },
+      { from: B, to: D, type: "req", label: "Create Session", code: "create_session()" },
+      { from: D, to: B, type: "res", label: "Raw token + session", quiet: true },
+      { from: B, to: F, type: "res", label: "Return User & Cookie", code: "201 · Set-Cookie: ai_tutor_session" },
+      { from: F, to: S, type: "res", label: "Open App Shell", code: "showAuthenticatedShell()" }
+    ],
+    explain: [
+      "Frontend gửi tên, email và mật khẩu tới <code>POST /api/auth/signup</code>. API chuẩn hoá email (trim + chữ thường), rồi <code>create_user()</code> băm mật khẩu bằng <b>Argon2</b> trước khi lưu vào bảng <code>users</code> — mật khẩu gốc không bao giờ được lưu.",
+      "Ngay sau đó API gọi <code>create_session()</code>: sinh một token ngẫu nhiên, chỉ lưu <b>bản băm SHA-256</b> của token vào bảng <code>auth_sessions</code> (hết hạn sau 14 ngày). Token gốc chỉ được gửi về trình duyệt.",
+      "Response <code>201</code> kèm cookie <code>ai_tutor_session</code> với <code>HttpOnly</code>, <code>SameSite=Lax</code>, <code>Path=/</code>, thời hạn 14 ngày (<code>Secure</code> khi bật cấu hình). JavaScript không đọc được cookie; trình duyệt tự gửi nó ở các request sau nhờ <code>credentials: \"include\"</code>. Body trả về thông tin user kèm cờ <code>is_admin</code>."
+    ],
+    errors: [
+      "<b>422</b> — email sai định dạng, tên trống, hoặc mật khẩu ngắn hơn 10 ký tự.",
+      "<b>409</b> — “An account with this email already exists.”",
+      "Khi lỗi: không tạo session, không set cookie; Frontend hiện thông báo dưới form."
+    ]
+  },
+  signin: {
+    file: "sign-in-sequence.svg",
+    story: "As a returning user, I want to sign in with my email and password so that I can continue studying with my own documents and progress.",
+    journey: [
+      "Mở trang, màn hình “Sign in” hiện ra.",
+      "Nhập email và mật khẩu.",
+      "Bấm “Sign in”.",
+      "Hệ thống kiểm tra thông tin và tạo phiên đăng nhập mới.",
+      "Giao diện chính hiện ra với dữ liệu của riêng mình."
+    ],
+    rows: [
+      { from: S, to: F, type: "req", label: "Submit Sign-In Form", code: "handleAuthentication()" },
+      { from: F, to: B, type: "req", label: "Request Sign-In", code: "POST /api/auth/login" },
+      { from: B, to: D, type: "req", label: "Verify Credentials", code: "authenticate_user()" },
+      { from: D, to: B, type: "res", label: "User record", quiet: true },
+      { from: B, to: D, type: "req", label: "Create Session", code: "create_session()" },
+      { from: D, to: B, type: "res", label: "Raw token + session", quiet: true },
+      { from: B, to: F, type: "res", label: "Return User & Cookie", code: "200 · Set-Cookie: ai_tutor_session" },
+      { from: F, to: S, type: "res", label: "Open App Shell", code: "showAuthenticatedShell()" }
+    ],
+    explain: [
+      "Frontend gửi email và mật khẩu tới <code>POST /api/auth/login</code>. <code>authenticate_user()</code> tìm user theo email (không phân biệt hoa thường) và so mật khẩu với hash <b>Argon2</b> đã lưu. Tài khoản bị vô hiệu hoá (<code>disabled_at</code>) cũng bị từ chối.",
+      "Mỗi lần đăng nhập thành công tạo một <b>session mới</b> trong <code>auth_sessions</code> (chỉ lưu SHA-256 của token, hạn 14 ngày). Đăng nhập trên nhiều thiết bị sẽ có nhiều session song song.",
+      "Response <code>200</code> set cookie <code>ai_tutor_session</code> giống hệt luồng Sign Up (<code>HttpOnly</code>, <code>SameSite=Lax</code>, 14 ngày) và trả về user kèm <code>is_admin</code>; Frontend hiện giao diện chính rồi tải dữ liệu."
+    ],
+    errors: [
+      "<b>422</b> — email sai định dạng hoặc thiếu mật khẩu.",
+      "<b>401</b> — “Invalid email or password.” Dùng chung cho email không tồn tại, sai mật khẩu, hoặc tài khoản bị vô hiệu hoá (không lộ email nào đã đăng ký; vẫn verify với hash giả để thời gian phản hồi giống nhau).",
+      "Khi lỗi: không tạo session, không set cookie."
+    ]
+  },
+  signout: {
+    file: "sign-out-sequence.svg",
+    story: "As a signed-in user, I want to sign out so that nobody else using this browser can access my account.",
+    journey: [
+      "Bấm nút “Sign out” trên thanh bên.",
+      "Hệ thống huỷ phiên đăng nhập hiện tại.",
+      "Cookie đăng nhập bị xoá khỏi trình duyệt.",
+      "Dữ liệu đang hiển thị được dọn sạch.",
+      "Quay về màn hình đăng nhập."
+    ],
+    rows: [
+      { from: S, to: F, type: "req", label: "Click Sign Out", code: "signOut()" },
+      { from: F, to: B, type: "req", label: "Request Sign-Out", code: "POST /api/auth/logout" },
+      { from: B, to: D, type: "req", label: "Revoke Session", code: "revoke_session()" },
+      { from: D, to: B, type: "res", label: "Session revoked", quiet: true },
+      { from: B, to: F, type: "res", label: "Return & Clear Cookie", code: "200 · {signed_out: true}" },
+      { from: F, to: S, type: "res", label: "Show Sign-In Screen", code: "showAuthentication()" }
+    ],
+    explain: [
+      "Frontend gọi <code>POST /api/auth/logout</code>; cookie <code>ai_tutor_session</code> được trình duyệt gửi kèm tự động. API băm token và đặt <code>revoked_at</code> cho session tương ứng — session <b>bị thu hồi</b> chứ không bị xoá khỏi DB, nên token đó không dùng lại được nữa.",
+      "API trả về <code>{signed_out: true}</code> và yêu cầu trình duyệt xoá cookie (cùng <code>Path=/</code>, <code>SameSite=Lax</code>).",
+      "Frontend dọn sạch dữ liệu trong bộ nhớ (tài liệu, hội thoại, quiz, dashboard…) và hiện lại màn hình đăng nhập. Chỉ session của trình duyệt này bị huỷ; session trên thiết bị khác vẫn còn hiệu lực."
+    ],
+    errors: [
+      "Không có cookie hoặc session đã hết hạn/đã thu hồi: API vẫn trả <b>200</b> (revoke không làm gì).",
+      "Nếu request lỗi (mất mạng…), Frontend vẫn dọn dữ liệu và về màn hình đăng nhập."
+    ]
+  }
+};
+
+const NS = "http://www.w3.org/2000/svg";
+const COL_X = [90, 390, 700, 1030];
+const WIDTH = 1130, TOP = 14, BOX_H = 46;
+// Vertical stack above an arrow, measured from the arrow up.
+const GAP = { code: 11, label: 15, row: 12, quiet: 26, step: 40, self: 20, selfBelow: 26, frameTop: 24 };
+const C = { ink: "#1d1f24", muted: "#5d6270", req: "#1f2937", res: "#8a8f99", life: "#b9b6ab", frame: "#9b9fa8" };
+const STYLE = {
+  "req": { color: C.req, dashed: false, head: "fill" },
+  "res": { color: C.res, dashed: true, head: "open" }
+};
+const MONO = "ui-monospace, Consolas, monospace";
+
+function el(tag, attrs, text) {
+  const node = document.createElementNS(NS, tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+// White halo behind labels so text stays readable where it crosses a lifeline.
+const HALO = { stroke: "#ffffff", "stroke-width": 4, "stroke-linejoin": "round", "paint-order": "stroke" };
+
+function marker(id, color, head) {
+  const node = el("marker", { id, viewBox: "0 0 10 10", refX: 10, refY: 5, markerWidth: 9, markerHeight: 9, markerUnits: "userSpaceOnUse", orient: "auto-start-reverse" });
+  node.append(head === "fill"
+    ? el("path", { d: "M0 0 L10 5 L0 10 Z", fill: color })
+    : el("path", { d: "M0 0 L10 5 L0 10", fill: "none", stroke: color, "stroke-width": 1.5 }));
+  return node;
+}
+
+function participantBox(svg, index, y) {
+  const p = PARTICIPANTS[index];
+  svg.append(el("rect", { x: COL_X[index] - p.w / 2, y, width: p.w, height: BOX_H, rx: 10, fill: p.fill, stroke: p.line, "stroke-width": 1.2 }));
+  svg.append(el("text", { x: COL_X[index], y: y + 20, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: C.ink }, p.name));
+  svg.append(el("text", { x: COL_X[index], y: y + 36, "text-anchor": "middle", "font-size": 11, fill: C.muted }, p.sub));
+}
+
+function badge(svg, x, y, number, color) {
+  svg.append(el("circle", { cx: x, cy: y, r: 9, fill: color }));
+  svg.append(el("text", { x, y: y + 3.5, "text-anchor": "middle", "font-size": 10.5, "font-weight": 700, fill: "#ffffff" }, String(number)));
+}
+
+// Height a row's label stack needs above its arrow.
+function stackHeight(row) {
+  return row.quiet ? GAP.quiet : row.self ? GAP.self : GAP.step;
+}
+
+function drawFrame(svg, frame, { top, bottom }) {
+  const left = COL_X[frame.left] - frame.inset, right = COL_X[frame.right] + frame.inset;
+  svg.append(el("rect", { x: left, y: top, width: right - left, height: bottom - top, fill: "none", stroke: C.frame, "stroke-width": 1 }));
+  svg.append(el("path", { d: `M${left} ${top} H${left + 42} V${top + 12} L${left + 35} ${top + 19} H${left} Z`, fill: "#f0f0ec", stroke: C.frame, "stroke-width": 1 }));
+  svg.append(el("text", { x: left + 8, y: top + 14, "font-size": 11, "font-weight": 700, fill: C.ink }, frame.label));
+  svg.append(el("text", { x: left + 50, y: top + 14, "font-size": 11, fill: C.muted, ...HALO }, frame.note));
+}
+
+function drawSelf(svg, row, y, number) {
+  const x = COL_X[row.from];
+  const style = STYLE[row.type];
+  svg.append(el("path", {
+    d: `M${x + 4} ${y} H${x + 44} V${y + 22} H${x + 5}`,
+    fill: "none", stroke: style.color, "stroke-width": 1.5, "marker-end": `url(#head-${row.type})`
+  }));
+  svg.append(el("text", { x: x + 56, y: y + 6, "font-size": 13.5, "font-weight": 600, fill: C.ink, ...HALO }, row.label));
+  svg.append(el("text", { x: x + 56, y: y + 21, "font-size": 10.5, fill: C.muted, "font-family": MONO, ...HALO }, row.code));
+  badge(svg, x + 18, y, number, style.color);
+}
+
+function renderDiagram({ rows, frames = [], activations, label }) {
+  // Frontend holds the whole exchange; Backend holds it from the request to its reply.
+  const bars = activations || [{ at: F, start: 0, end: rows.length - 1 }, { at: B, start: 1, end: rows.length - 2 }];
+  const boxes = new Map();
+  let y = TOP + BOX_H, after = 0;
+  const positions = rows.map((row, i) => {
+    y += (row.quiet ? 0 : GAP.row) + after;
+    after = 0;
+    frames.forEach((frame) => {
+      if (frame.start === i) { boxes.set(frame, { top: y }); y += GAP.frameTop; }
+    });
+    y += stackHeight(row);
+    if (row.self) after = GAP.selfBelow;
+    frames.forEach((frame) => {
+      if (frame.end === i) { boxes.get(frame).bottom = y + frame.pad; after = Math.max(after, frame.pad + 2); }
+    });
+    return y;
+  });
+  const bottomBox = y + 20;
+  const height = bottomBox + BOX_H + TOP;
+
+  const svg = el("svg", {
+    xmlns: NS, viewBox: `0 0 ${WIDTH} ${height}`, width: WIDTH, height,
+    "font-family": "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+    role: "img", "aria-label": label
+  });
+  const defs = el("defs", {});
+  for (const [key, style] of Object.entries(STYLE)) defs.append(marker(`head-${key}`, style.color, style.head));
+  svg.append(defs);
+  svg.append(el("rect", { x: 0, y: 0, width: WIDTH, height, fill: "#ffffff" }));
+
+  COL_X.forEach((x, i) => {
+    svg.append(el("line", { x1: x, y1: TOP + BOX_H, x2: x, y2: bottomBox, stroke: C.life, "stroke-width": 1, "stroke-dasharray": "4 4" }));
+    participantBox(svg, i, TOP);
+    participantBox(svg, i, bottomBox);
+  });
+
+  bars.forEach(({ at, start, end }) => {
+    svg.append(el("rect", {
+      x: COL_X[at] - 4, y: positions[start], width: 8, height: positions[end] - positions[start],
+      fill: PARTICIPANTS[at].bar, stroke: PARTICIPANTS[at].line, "stroke-width": 1
+    }));
+  });
+
+  frames.forEach((frame) => drawFrame(svg, frame, boxes.get(frame)));
+
+  let number = 0;
+  rows.forEach((row, i) => {
+    const y = positions[i];
+    if (row.self) {
+      number += 1;
+      drawSelf(svg, row, y, number);
+      return;
+    }
+    const style = STYLE[row.type];
+    const x1 = COL_X[row.from], x2 = COL_X[row.to];
+    const dir = Math.sign(x2 - x1);
+    const mid = (x1 + x2) / 2;
+    svg.append(el("line", {
+      x1: x1 + dir * 4, y1: y, x2: x2 - dir * 5, y2: y,
+      stroke: style.color, "stroke-width": 1.5,
+      ...(style.dashed ? { "stroke-dasharray": "6 4" } : {}),
+      "marker-end": `url(#head-${row.type})`
+    }));
+    if (row.quiet) {
+      svg.append(el("text", { x: mid, y: y - 7, "text-anchor": "middle", "font-size": 12, fill: C.muted, ...HALO }, row.label));
+      return;
+    }
+    number += 1;
+    svg.append(el("text", { x: mid, y: y - GAP.code, "text-anchor": "middle", "font-size": 10.5, fill: C.muted, "font-family": MONO, ...HALO }, row.code));
+    svg.append(el("text", { x: mid, y: y - GAP.code - GAP.label, "text-anchor": "middle", "font-size": 13.5, "font-weight": 600, fill: C.ink, ...HALO }, row.label));
+    badge(svg, x1 + dir * 18, y, number, style.color);
+  });
+  return svg;
+}
+
+const tabs = [...document.querySelectorAll(".tab")];
+let current = "signup";
+
+function show(key, focus) {
+  current = key;
+  const flow = FLOWS[key];
+  tabs.forEach((tab) => {
+    const active = tab.dataset.flow === key;
+    tab.setAttribute("aria-selected", active);
+    tab.tabIndex = active ? 0 : -1;
+    if (active && focus) tab.focus();
+  });
+  document.getElementById("panel").setAttribute("aria-labelledby", `tab-${key}`);
+  document.getElementById("story").textContent = flow.story;
+  document.getElementById("journey").innerHTML = flow.journey.map((step) => `<li>${step}</li>`).join("");
+  document.getElementById("explain").innerHTML = flow.explain.map((p) => `<p>${p}</p>`).join("");
+  document.getElementById("errors").innerHTML = flow.errors.map((e) => `<li>${e}</li>`).join("");
+  document.getElementById("diagram").replaceChildren(renderDiagram({ rows: flow.rows, label: `Sequence diagram: ${flow.story}` }));
+  history.replaceState(null, "", `#${key}`);
+}
+
+tabs.forEach((tab, index) => {
+  tab.addEventListener("click", () => show(tab.dataset.flow));
+  tab.addEventListener("keydown", (event) => {
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
+    if (!step) return;
+    show(tabs[(index + step + tabs.length) % tabs.length].dataset.flow, true);
+  });
+});
+
+document.getElementById("export").addEventListener("click", () => {
+  const svg = document.querySelector("#diagram svg");
+  const source = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svg);
+  const url = URL.createObjectURL(new Blob([source], { type: "image/svg+xml;charset=utf-8" }));
+  const link = Object.assign(document.createElement("a"), { href: url, download: FLOWS[current].file });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+});
+
+const initial = location.hash.slice(1);
+show(FLOWS[initial] ? initial : "signup");
+</script>
+</body>
+</html>

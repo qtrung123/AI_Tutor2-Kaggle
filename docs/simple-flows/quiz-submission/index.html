@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Tutor Quiz Submission</title>
+<style>
+  :root {
+    --bg: #f6f5f1;
+    --surface: #ffffff;
+    --ink: #1d1f24;
+    --muted: #5d6270;
+    --line: #e2e0d8;
+    --accent: #2f5bd3;
+    --accent-soft: #e8eefc;
+    --warn: #9a4a12;
+    --warn-soft: #fbf0e6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #15171c;
+      --surface: #1e2128;
+      --ink: #eceef2;
+      --muted: #a1a7b4;
+      --line: #30343e;
+      --accent: #8aa7ff;
+      --accent-soft: #232c45;
+      --warn: #f0b27a;
+      --warn-soft: #33261b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #15171c;
+    --surface: #1e2128;
+    --ink: #eceef2;
+    --muted: #a1a7b4;
+    --line: #30343e;
+    --accent: #8aa7ff;
+    --accent-soft: #232c45;
+    --warn: #f0b27a;
+    --warn-soft: #33261b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1180px; margin: 0 auto; padding: 40px 24px 64px; }
+  header { margin-bottom: 28px; }
+  header h1 { margin: 0 0 4px; font-size: 28px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--muted); }
+  a { color: var(--accent); }
+  code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.9em; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px 24px; }
+  .card h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .story { font-size: 18px; margin: 0; }
+  ol.journey { margin: 0; padding-left: 22px; }
+  ol.journey li { margin: 2px 0; }
+
+  .diagram-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .diagram-head h2 { margin: 0; }
+  .legend { display: flex; gap: 18px; font-size: 13px; color: var(--muted); align-items: center; flex-wrap: wrap; }
+  .legend svg { vertical-align: middle; margin-right: 6px; }
+  .btn {
+    font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+    color: var(--accent); background: var(--accent-soft);
+    border: 1px solid transparent; border-radius: 8px; padding: 6px 14px;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .paper { background: #ffffff; border-radius: 8px; border: 1px solid var(--line); overflow-x: auto; }
+  .paper svg { display: block; width: 100%; min-width: 860px; height: auto; }
+  .diagram-note { margin: 14px 0 0; padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0; font-size: 15px; }
+
+  .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
+  .explain p { margin: 0 0 10px; }
+  .explain p:last-child { margin-bottom: 0; }
+  .explain details { margin-top: 4px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .explain summary { cursor: pointer; font-weight: 600; color: var(--accent); }
+  .explain details ul { margin: 8px 0 0; padding-left: 20px; }
+  .explain details li { margin: 0 0 6px; }
+  dl.terms { margin: 0; }
+  dl.terms dt { font-weight: 700; margin-top: 10px; }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd { margin: 0; color: var(--muted); }
+  .behaviour { margin-top: 20px; }
+  .behaviour .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+  .behaviour h3 { margin: 0 0 6px; font-size: 16px; }
+  .behaviour ul { margin: 0; padding-left: 20px; }
+  .behaviour li { margin: 0 0 6px; }
+  .behaviour .fail { background: var(--warn-soft); border-radius: 8px; padding: 12px 16px; }
+  .behaviour .fail h3 { color: var(--warn); }
+  footer { margin-top: 28px; font-size: 13px; color: var(--muted); }
+
+  @media (max-width: 760px) {
+    main { padding: 24px 16px 48px; }
+    .grid, .notes, .behaviour .cols { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Nộp Quiz và chấm điểm trong AI Tutor</h1>
+    <p>User làm xong và bấm Finish Quiz; frontend gửi câu trả lời, <b>backend</b> so với đáp án đã lưu, tính điểm và lưu thành một lần làm bài mới, rồi frontend hiện kết quả. Sơ đồ chỉ vẽ việc <b>nộp bài</b>; việc tạo quiz nằm ở sơ đồ riêng (<code>../quiz/index.html</code>).</p>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <h2>User Story</h2>
+      <p class="story">As a user, I want to submit my finished quiz and see my score with the correct and incorrect answers so that I know what I have learned and what to review.</p>
+    </div>
+    <div class="card">
+      <h2>User Journey</h2>
+      <ol class="journey">
+        <li>Trả lời các câu hỏi trong Quiz Player; đến câu cuối, nút Next đổi thành “Finish Quiz”.</li>
+        <li>Bấm “Finish Quiz”. Nếu còn câu chưa trả lời, hộp thoại cho chọn “Review Unanswered” để quay lại hoặc “Submit Anyway” để nộp luôn.</li>
+        <li>Nút hiện “Submitting…” trong lúc chờ.</li>
+        <li>Màn hình kết quả hiện điểm, phần trăm và số câu đúng / sai / bỏ trống.</li>
+        <li>Bấm “Review Answers” để xem từng câu: câu đã chọn, đáp án đúng và giải thích.</li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="diagram-head">
+      <h2>Sequence Diagram</h2>
+      <div class="legend">
+        <span><svg width="44" height="10"><line x1="2" y1="5" x2="34" y2="5" stroke="#1f2937" stroke-width="1.5"/><path d="M34 0 L44 5 L34 10 Z" fill="#1f2937"/></svg>Request</span>
+        <span><svg width="44" height="10"><line x1="2" y1="5" x2="40" y2="5" stroke="#8a8f99" stroke-width="1.5" stroke-dasharray="5 4"/><path d="M33 0 L43 5 L33 10" fill="none" stroke="#8a8f99" stroke-width="1.5"/></svg>Response</span>
+        <button class="btn" id="export">Export SVG</button>
+      </div>
+    </div>
+    <div class="paper" id="diagram"></div>
+    <p class="diagram-note"><b>Lưu ý:</b> việc chấm điểm diễn ra hoàn toàn ở <b>backend</b>; frontend chỉ hiển thị kết quả, không chấm lại. Luồng này <b>không gọi Qwen</b> và không dùng ChromaDB: điểm được tính bằng cách so sánh với đáp án đã lưu. Khung <b>opt</b>: quiz luyện tập từ flashcards bỏ qua bước cập nhật mastery.</p>
+  </div>
+
+  <div class="notes">
+    <div class="card explain">
+      <h2>Giải thích</h2>
+      <p><b>Bước 1–2 — nộp bài.</b> User bấm Finish Quiz; frontend gửi một lần toàn bộ câu trả lời cùng <code>quiz_id</code>, độ khó và topic tới FastAPI.</p>
+      <p><b>Bước 3 — lấy đáp án.</b> Backend đọc đúng quiz đó từ database, gồm câu hỏi và đáp án đúng, rồi kiểm tra quiz khớp với tài liệu, topic và độ khó đã gửi.</p>
+      <p><b>Bước 4 — chấm điểm.</b> Mỗi câu đúng được 1 điểm, không có điểm từng phần. Câu bỏ trống tính là chưa đúng. Điểm là số câu đúng; phần trăm là điểm chia tổng số câu.</p>
+      <p><b>Bước 5–6 — lưu kết quả.</b> Backend lưu một lần làm bài mới cùng kết quả từng câu, rồi tính lại mức độ thành thạo (mastery) của các topic có trong quiz.</p>
+      <p><b>Bước 7–9 — xem kết quả.</b> Backend trả lần làm bài đã lưu; frontend hiện điểm. Khi User bấm Review Answers, frontend dùng dữ liệu đã có để hiện đúng/sai từng câu, không gọi lại API.</p>
+      <details>
+        <summary>Chi tiết kỹ thuật (tuỳ chọn)</summary>
+        <ul>
+          <li>Frontend: <code>handleQuizPlayerFinish()</code> → <code>submitQuizPlayer()</code> → <code>requestQuizSubmission({ allowUnanswered: true })</code>. Quiz Player luôn gửi <code>allow_unanswered: true</code>; có thể kèm <code>planner_session_id</code>. Trong code còn nhánh <code>submitAssessmentQuiz()</code> ngoài Quiz Player, gọi cùng API nhưng yêu cầu trả lời đủ câu.</li>
+          <li>Route: <code>quiz_submit()</code> trong <code>backend/api/quiz_attempts.py</code> → <code>submit_quiz_attempt()</code> trong <code>backend/quiz_attempt_service.py</code>.</li>
+          <li>Lấy quiz: <code>get_quiz_by_id()</code>. Nếu quiz không còn, backend thử dựng lại từ snapshot của lần làm bài gần nhất (<code>get_latest_completed_attempt_for_quiz()</code>).</li>
+          <li>Cách chấm: trắc nghiệm — <code>option_answers_correct()</code> (khớp đúng tập đáp án); điền từ — <code>fill_blank_is_correct()</code> (khớp chính xác sau khi chuẩn hoá); ghép cặp — đúng toàn bộ theo vị trí; nhiều chỗ trống — mọi chỗ trống đều phải đúng.</li>
+          <li>Lưu: <code>save_quiz_progress()</code> → <code>_save_attempt_row()</code>, ghi bảng <code>quiz_attempts</code> và <code>quiz_attempt_answers</code>. Mastery: <code>recompute_topic_mastery()</code> → <code>save_topic_mastery()</code>, chạy cho từng topic có trong quiz.</li>
+          <li>Database: SQLite mặc định, PostgreSQL khi có <code>DATABASE_URL</code> (<code>backend/db.py</code>).</li>
+          <li>Trước khi hiện kết quả, frontend làm mới dữ liệu qua <code>loadQuizStatuses()</code>, <code>loadQuizHistory()</code> và <code>loadDashboard()</code>; sau đó mới gọi <code>showQuizResults(buildQuizResult(...))</code>.</li>
+        </ul>
+      </details>
+    </div>
+    <div class="card">
+      <h2>Thuật ngữ</h2>
+      <dl class="terms">
+        <dt>Attempt (lần làm bài)</dt><dd>Một lần nộp đã chấm điểm. Mỗi lần nộp tạo một attempt mới có <code>attempt_id</code> riêng.</dd>
+        <dt>Finish Quiz / Submit Anyway</dt><dd>Hai cách nộp bài: nộp khi đã trả lời hết, hoặc nộp dù còn câu bỏ trống.</dd>
+        <dt>question_results</dt><dd>Kết quả từng câu: câu đã chọn, đáp án đúng, đúng/sai và giải thích.</dd>
+        <dt>Mastery</dt><dd>Mức độ thành thạo một topic, được tính lại từ các câu trả lời trong những lần đã nộp.</dd>
+        <dt>Results / Review Answers</dt><dd>Results là màn hình tổng điểm; Review Answers là màn hình xem lại từng câu.</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="card behaviour">
+    <h2>Việc đi kèm và lỗi (ngoài sơ đồ)</h2>
+    <div class="cols">
+      <div>
+        <h3>Đi kèm khi nộp bài</h3>
+        <ul>
+          <li><b>Study Planner:</b> sau khi lưu attempt, <code>_complete_planner_quiz()</code> hoàn thành phần quiz của buổi học nếu có buổi phù hợp. Lỗi ở đây chỉ được báo trong <code>planner_completion</code>, không làm hỏng việc nộp bài.</li>
+          <li><b>Tự lưu tiến độ</b> (<code>PATCH /api/quiz/{document_id}/progress</code>) chạy trong lúc làm bài; khi nộp, autosave đang chờ bị huỷ vì request nộp bài đã chứa mọi câu trả lời.</li>
+          <li><b>“Explain more”</b> trong màn hình Review là thao tác riêng: chỉ khi User bấm, câu hỏi đó mới được gửi cho AI Tutor. Nó không thuộc luồng chấm điểm.</li>
+        </ul>
+      </div>
+      <div class="fail">
+        <h3>Thất bại</h3>
+        <ul>
+          <li><b>400</b> — quiz không còn, thông tin quiz không khớp, hoặc câu trả lời không thuộc quiz / đáp án không tồn tại.</li>
+          <li><b>500</b> — lỗi khác khi nộp bài (“Could not submit quiz”).</li>
+          <li>Frontend hiện lỗi dạng toast và <b>giữ nguyên câu trả lời</b>, nên User có thể bấm Finish Quiz lại.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Nguồn: <code>frontend/js/quiz.js</code>, <code>frontend/app.js</code>, <code>backend/api/quiz_attempts.py</code>, <code>backend/quiz_attempt_service.py</code>,
+    <code>backend/quiz_store.py</code>, <code>backend/mastery_service.py</code>, <code>backend/db.py</code>.
+  </footer>
+</main>
+
+<script>
+const PARTICIPANTS = [
+  { name: "User", sub: "End user", w: 130, fill: "#e3edfb", line: "#9db8e3", bar: "#c9dbf6" },
+  { name: "Frontend", sub: "quiz.js", w: 130, fill: "#e4f4ea", line: "#93c7a6", bar: "#c6e6d2" },
+  { name: "FastAPI Backend", sub: "quiz_attempts.py · quiz_attempt_service.py", w: 250, fill: "#ece8fb", line: "#aea2dd", bar: "#d8d1f5" },
+  { name: "Storage", sub: "SQLite / PostgreSQL", w: 150, fill: "#fbf4d6", line: "#d9c474", bar: "#f4e8ad" }
+];
+const S = 0, F = 1, B = 2, D = 3;
+
+// Numbered steps. Above each arrow: `label` says what happens and `code` names the verified API/function.
+// A "quiet" row is the plain reply to the step above it: drawn, not numbered. A "self" row is work
+// done inside one participant.
+const DIAGRAM = {
+  label: "Sequence diagram of AI Tutor quiz submission: send answers, load the saved quiz, grade on the backend, save the attempt and show the results",
+  rows: [
+    { from: S, to: F, type: "req", label: "Click Finish Quiz", code: "handleQuizPlayerFinish()" },
+    { from: F, to: B, type: "req", label: "Submit Answers", code: "POST /api/quiz/{document_id}/submit" },
+    { from: B, to: D, type: "req", label: "Load Saved Quiz", code: "get_quiz_by_id()" },
+    { from: D, to: B, type: "res", label: "Questions + correct answers", quiet: true },
+    { self: true, from: B, type: "req", label: "Grade Answers", code: "submit_quiz_attempt()" },
+    { from: B, to: D, type: "req", label: "Save Attempt", code: "save_quiz_progress()" },
+    { from: D, to: B, type: "res", label: "Saved attempt", quiet: true },
+    { from: B, to: D, type: "req", label: "Update Topic Mastery", code: "recompute_topic_mastery()" },
+    { from: B, to: F, type: "res", label: "Return Graded Attempt", code: "200 · {score, percentage, question_results}" },
+    { from: F, to: S, type: "res", label: "Show Score", code: "showQuizResults()" },
+    { from: S, to: F, type: "req", label: "Open Review Answers", code: "openQuizReview()" },
+    { from: F, to: S, type: "res", label: "Correct / incorrect per question", quiet: true }
+  ],
+  frames: [
+    { label: "opt", note: "[Not flashcard practice]", left: B, right: D, inset: 22, pad: 10, start: 7, end: 7 }
+  ],
+  // Review Answers uses the attempt the frontend already holds: no backend call.
+  activations: [
+    { at: F, start: 0, end: 9 },
+    { at: B, start: 1, end: 8 },
+    { at: F, start: 10, end: 11 }
+  ]
+};
+
+const NS = "http://www.w3.org/2000/svg";
+const COL_X = [90, 390, 700, 1030];
+const WIDTH = 1130, TOP = 14, BOX_H = 46;
+// Vertical stack above an arrow, measured from the arrow up.
+const GAP = { code: 11, label: 15, row: 12, quiet: 26, step: 40, self: 20, selfBelow: 26, frameTop: 24 };
+const C = { ink: "#1d1f24", muted: "#5d6270", req: "#1f2937", res: "#8a8f99", life: "#b9b6ab", frame: "#9b9fa8" };
+const STYLE = {
+  "req": { color: C.req, dashed: false, head: "fill" },
+  "res": { color: C.res, dashed: true, head: "open" }
+};
+const MONO = "ui-monospace, Consolas, monospace";
+
+function el(tag, attrs, text) {
+  const node = document.createElementNS(NS, tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+// White halo behind labels so text stays readable where it crosses a lifeline.
+const HALO = { stroke: "#ffffff", "stroke-width": 4, "stroke-linejoin": "round", "paint-order": "stroke" };
+
+function marker(id, color, head) {
+  const node = el("marker", { id, viewBox: "0 0 10 10", refX: 10, refY: 5, markerWidth: 9, markerHeight: 9, markerUnits: "userSpaceOnUse", orient: "auto-start-reverse" });
+  node.append(head === "fill"
+    ? el("path", { d: "M0 0 L10 5 L0 10 Z", fill: color })
+    : el("path", { d: "M0 0 L10 5 L0 10", fill: "none", stroke: color, "stroke-width": 1.5 }));
+  return node;
+}
+
+function participantBox(svg, index, y) {
+  const p = PARTICIPANTS[index];
+  svg.append(el("rect", { x: COL_X[index] - p.w / 2, y, width: p.w, height: BOX_H, rx: 10, fill: p.fill, stroke: p.line, "stroke-width": 1.2 }));
+  svg.append(el("text", { x: COL_X[index], y: y + 20, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: C.ink }, p.name));
+  svg.append(el("text", { x: COL_X[index], y: y + 36, "text-anchor": "middle", "font-size": 11, fill: C.muted }, p.sub));
+}
+
+function badge(svg, x, y, number, color) {
+  svg.append(el("circle", { cx: x, cy: y, r: 9, fill: color }));
+  svg.append(el("text", { x, y: y + 3.5, "text-anchor": "middle", "font-size": 10.5, "font-weight": 700, fill: "#ffffff" }, String(number)));
+}
+
+// Height a row's label stack needs above its arrow.
+function stackHeight(row) {
+  return row.quiet ? GAP.quiet : row.self ? GAP.self : GAP.step;
+}
+
+function drawFrame(svg, frame, { top, bottom }) {
+  const left = COL_X[frame.left] - frame.inset, right = COL_X[frame.right] + frame.inset;
+  svg.append(el("rect", { x: left, y: top, width: right - left, height: bottom - top, fill: "none", stroke: C.frame, "stroke-width": 1 }));
+  svg.append(el("path", { d: `M${left} ${top} H${left + 42} V${top + 12} L${left + 35} ${top + 19} H${left} Z`, fill: "#f0f0ec", stroke: C.frame, "stroke-width": 1 }));
+  svg.append(el("text", { x: left + 8, y: top + 14, "font-size": 11, "font-weight": 700, fill: C.ink }, frame.label));
+  svg.append(el("text", { x: left + 50, y: top + 14, "font-size": 11, fill: C.muted, ...HALO }, frame.note));
+}
+
+function drawSelf(svg, row, y, number) {
+  const x = COL_X[row.from];
+  const style = STYLE[row.type];
+  svg.append(el("path", {
+    d: `M${x + 4} ${y} H${x + 44} V${y + 22} H${x + 5}`,
+    fill: "none", stroke: style.color, "stroke-width": 1.5, "marker-end": `url(#head-${row.type})`
+  }));
+  svg.append(el("text", { x: x + 56, y: y + 6, "font-size": 13.5, "font-weight": 600, fill: C.ink, ...HALO }, row.label));
+  svg.append(el("text", { x: x + 56, y: y + 21, "font-size": 10.5, fill: C.muted, "font-family": MONO, ...HALO }, row.code));
+  badge(svg, x + 18, y, number, style.color);
+}
+
+function renderDiagram({ rows, frames = [], activations, label }) {
+  // Frontend holds the whole exchange; Backend holds it from the request to its reply.
+  const bars = activations || [{ at: F, start: 0, end: rows.length - 1 }, { at: B, start: 1, end: rows.length - 2 }];
+  const boxes = new Map();
+  let y = TOP + BOX_H, after = 0;
+  const positions = rows.map((row, i) => {
+    y += (row.quiet ? 0 : GAP.row) + after;
+    after = 0;
+    frames.forEach((frame) => {
+      if (frame.start === i) { boxes.set(frame, { top: y }); y += GAP.frameTop; }
+    });
+    y += stackHeight(row);
+    if (row.self) after = GAP.selfBelow;
+    frames.forEach((frame) => {
+      if (frame.end === i) { boxes.get(frame).bottom = y + frame.pad; after = Math.max(after, frame.pad + 2); }
+    });
+    return y;
+  });
+  const bottomBox = y + 20;
+  const height = bottomBox + BOX_H + TOP;
+
+  const svg = el("svg", {
+    xmlns: NS, viewBox: `0 0 ${WIDTH} ${height}`, width: WIDTH, height,
+    "font-family": "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+    role: "img", "aria-label": label
+  });
+  const defs = el("defs", {});
+  for (const [key, style] of Object.entries(STYLE)) defs.append(marker(`head-${key}`, style.color, style.head));
+  svg.append(defs);
+  svg.append(el("rect", { x: 0, y: 0, width: WIDTH, height, fill: "#ffffff" }));
+
+  COL_X.forEach((x, i) => {
+    svg.append(el("line", { x1: x, y1: TOP + BOX_H, x2: x, y2: bottomBox, stroke: C.life, "stroke-width": 1, "stroke-dasharray": "4 4" }));
+    participantBox(svg, i, TOP);
+    participantBox(svg, i, bottomBox);
+  });
+
+  bars.forEach(({ at, start, end }) => {
+    svg.append(el("rect", {
+      x: COL_X[at] - 4, y: positions[start], width: 8, height: positions[end] - positions[start],
+      fill: PARTICIPANTS[at].bar, stroke: PARTICIPANTS[at].line, "stroke-width": 1
+    }));
+  });
+
+  frames.forEach((frame) => drawFrame(svg, frame, boxes.get(frame)));
+
+  let number = 0;
+  rows.forEach((row, i) => {
+    const y = positions[i];
+    if (row.self) {
+      number += 1;
+      drawSelf(svg, row, y, number);
+      return;
+    }
+    const style = STYLE[row.type];
+    const x1 = COL_X[row.from], x2 = COL_X[row.to];
+    const dir = Math.sign(x2 - x1);
+    const mid = (x1 + x2) / 2;
+    svg.append(el("line", {
+      x1: x1 + dir * 4, y1: y, x2: x2 - dir * 5, y2: y,
+      stroke: style.color, "stroke-width": 1.5,
+      ...(style.dashed ? { "stroke-dasharray": "6 4" } : {}),
+      "marker-end": `url(#head-${row.type})`
+    }));
+    if (row.quiet) {
+      svg.append(el("text", { x: mid, y: y - 7, "text-anchor": "middle", "font-size": 12, fill: C.muted, ...HALO }, row.label));
+      return;
+    }
+    number += 1;
+    svg.append(el("text", { x: mid, y: y - GAP.code, "text-anchor": "middle", "font-size": 10.5, fill: C.muted, "font-family": MONO, ...HALO }, row.code));
+    svg.append(el("text", { x: mid, y: y - GAP.code - GAP.label, "text-anchor": "middle", "font-size": 13.5, "font-weight": 600, fill: C.ink, ...HALO }, row.label));
+    badge(svg, x1 + dir * 18, y, number, style.color);
+  });
+  return svg;
+}
+
+document.getElementById("diagram").replaceChildren(renderDiagram(DIAGRAM));
+
+document.getElementById("export").addEventListener("click", () => {
+  const svg = document.querySelector("#diagram svg");
+  const source = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svg);
+  const url = URL.createObjectURL(new Blob([source], { type: "image/svg+xml;charset=utf-8" }));
+  const link = Object.assign(document.createElement("a"), { href: url, download: "quiz-submission-sequence.svg" });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Tutor Progress Tracking</title>
+<style>
+  :root {
+    --bg: #f6f5f1;
+    --surface: #ffffff;
+    --ink: #1d1f24;
+    --muted: #5d6270;
+    --line: #e2e0d8;
+    --accent: #2f5bd3;
+    --accent-soft: #e8eefc;
+    --warn: #9a4a12;
+    --warn-soft: #fbf0e6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #15171c;
+      --surface: #1e2128;
+      --ink: #eceef2;
+      --muted: #a1a7b4;
+      --line: #30343e;
+      --accent: #8aa7ff;
+      --accent-soft: #232c45;
+      --warn: #f0b27a;
+      --warn-soft: #33261b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #15171c;
+    --surface: #1e2128;
+    --ink: #eceef2;
+    --muted: #a1a7b4;
+    --line: #30343e;
+    --accent: #8aa7ff;
+    --accent-soft: #232c45;
+    --warn: #f0b27a;
+    --warn-soft: #33261b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1180px; margin: 0 auto; padding: 40px 24px 64px; }
+  header { margin-bottom: 28px; }
+  header h1 { margin: 0 0 4px; font-size: 28px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--muted); }
+  a { color: var(--accent); }
+  code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.9em; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px 24px; }
+  .card h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .story { font-size: 18px; margin: 0; }
+  ol.journey { margin: 0; padding-left: 22px; }
+  ol.journey li { margin: 2px 0; }
+
+  .diagram-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .diagram-head h2 { margin: 0; }
+  .legend { display: flex; gap: 18px; font-size: 13px; color: var(--muted); align-items: center; flex-wrap: wrap; }
+  .legend svg { vertical-align: middle; margin-right: 6px; }
+  .btn {
+    font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+    color: var(--accent); background: var(--accent-soft);
+    border: 1px solid transparent; border-radius: 8px; padding: 6px 14px;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .paper { background: #ffffff; border-radius: 8px; border: 1px solid var(--line); overflow-x: auto; }
+  .paper svg { display: block; width: 100%; min-width: 860px; height: auto; }
+  .diagram-note { margin: 14px 0 0; padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0; font-size: 15px; }
+
+  .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
+  .explain p { margin: 0 0 10px; }
+  .explain p:last-child { margin-bottom: 0; }
+  .explain details { margin-top: 4px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .explain summary { cursor: pointer; font-weight: 600; color: var(--accent); }
+  .explain details ul { margin: 8px 0 0; padding-left: 20px; }
+  .explain details li { margin: 0 0 6px; }
+  dl.terms { margin: 0; }
+  dl.terms dt { font-weight: 700; margin-top: 10px; }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd { margin: 0; color: var(--muted); }
+  .behaviour { margin-top: 20px; }
+  .behaviour .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+  .behaviour h3 { margin: 0 0 6px; font-size: 16px; }
+  .behaviour ul { margin: 0; padding-left: 20px; }
+  .behaviour li { margin: 0 0 6px; }
+  .behaviour .fail { background: var(--warn-soft); border-radius: 8px; padding: 12px 16px; }
+  .behaviour .fail h3 { color: var(--warn); }
+  footer { margin-top: 28px; font-size: 13px; color: var(--muted); }
+
+  @media (max-width: 760px) {
+    main { padding: 24px 16px 48px; }
+    .grid, .notes, .behaviour .cols { grid-template-columns: 1fr; }
+  }
+  .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 24px; border-bottom: 1px solid var(--line); }
+  .tab {
+    appearance: none; border: 0; background: none; cursor: pointer;
+    font: inherit; font-weight: 600; color: var(--muted);
+    padding: 10px 18px; border-bottom: 3px solid transparent; margin-bottom: -1px;
+  }
+  .tab:hover { color: var(--ink); }
+  .tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  .errors { background: var(--warn-soft); border-color: transparent; }
+  .errors h2 { color: var(--warn); }
+  .errors ul { margin: 0; padding-left: 20px; }
+  .errors li { margin: 4px 0; }
+  @media (max-width: 760px) { .tab { padding: 10px 12px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Theo dõi tiến độ (Progress Tracking) trong AI Tutor</h1>
+    <p><b>Không có thao tác “cập nhật tiến độ”</b>. Backend tính tiến độ khi được hỏi và không lưu kết quả, từ trạng thái buổi học và bài quiz đã lưu. Ba sơ đồ dưới đây là ba nơi đọc và hiển thị tiến độ. Các thao tác làm tiến độ thay đổi nằm ở <a href="../study-session/index.html">trang Study Session</a>.</p>
+  </header>
+
+  <div class="tabs" role="tablist" aria-label="Progress views">
+    <button class="tab" role="tab" id="tab-plan" aria-controls="panel" data-flow="plan">Plan Progress</button>
+    <button class="tab" role="tab" id="tab-document" aria-controls="panel" data-flow="document">Document Progress</button>
+    <button class="tab" role="tab" id="tab-subject" aria-controls="panel" data-flow="subject">Subject Progress</button>
+  </div>
+
+  <section id="panel" role="tabpanel">
+    <div class="grid">
+      <div class="card"><h2>User Story</h2><p class="story" id="story"></p></div>
+      <div class="card"><h2>User Journey</h2><ol class="journey" id="journey"></ol></div>
+    </div>
+
+    <div class="card">
+      <div class="diagram-head">
+        <h2>Sequence Diagram</h2>
+        <div class="legend">
+        <span><svg width="44" height="10"><line x1="2" y1="5" x2="34" y2="5" stroke="#1f2937" stroke-width="1.5"/><path d="M34 0 L44 5 L34 10 Z" fill="#1f2937"/></svg>Request</span>
+        <span><svg width="44" height="10"><line x1="2" y1="5" x2="40" y2="5" stroke="#8a8f99" stroke-width="1.5" stroke-dasharray="5 4"/><path d="M33 0 L43 5 L33 10" fill="none" stroke="#8a8f99" stroke-width="1.5"/></svg>Response</span>
+        <button class="btn" id="export">Export SVG</button>
+      </div>
+      </div>
+      <div class="paper" id="diagram"></div>
+      <p class="diagram-note" id="note"></p>
+    </div>
+
+    <div class="notes">
+      <div class="card explain">
+        <h2>Giải thích</h2>
+        <div id="explain"></div>
+        <details>
+          <summary>Chi tiết kỹ thuật (tuỳ chọn)</summary>
+          <ul id="details"></ul>
+        </details>
+      </div>
+      <div class="card errors"><h2>Trường hợp lỗi (ngoài sơ đồ)</h2><ul id="errors"></ul></div>
+    </div>
+  </section>
+
+  <div class="card behaviour">
+    <h2>Mỗi trạng thái được tính thế nào (áp dụng cho cả ba tab)</h2>
+    <div class="cols">
+      <div>
+        <h3>Cách tính số buổi và số phút</h3>
+        <dl class="terms">
+          <dt>completed</dt><dd>Tính vào số buổi đã xong và số phút đã học.</dd>
+          <dt>scheduled, in_progress</dt><dd>Tính vào số buổi đã lên kế hoạch và số phút còn lại.</dd>
+          <dt>Overdue (quá hạn)</dt><dd>Vẫn là <code>scheduled</code> nên <b>vẫn tính vào số phút còn lại</b>, nhưng không được chọn làm buổi tiếp theo.</dd>
+          <dt>skipped</dt><dd>Tính vào số buổi đã lên kế hoạch, không tính là đã xong và không tính vào số phút còn lại.</dd>
+          <dt>rescheduled, cancelled</dt><dd><b>Không tính.</b> Đây là dòng lịch sử; buổi thay thế mới là buổi được tính.</dd>
+        </dl>
+      </div>
+      <div>
+        <h3>Dữ liệu được lưu ở đâu</h3>
+        <ul>
+          <li><b>Trạng thái buổi học:</b> bảng <code>study_sessions</code> (<code>status</code>, <code>started_at</code>, <code>completed_at</code>, <code>steps_json</code>, <code>rescheduled_from</code>).</li>
+          <li><b>Kết quả quiz:</b> bảng <code>quiz_attempts</code> và <code>quiz_attempt_answers</code>.</li>
+          <li><b>Mastery:</b> được lưu khi <b>nộp quiz</b>, không phải khi hoàn thành buổi học. Hoàn thành buổi học không làm đổi điểm mastery.</li>
+          <li><b>Nhãn học tập</b> (ví dụ Learning, Needs review) được suy ra khi đọc, từ tài liệu, buổi học đã xong và điểm quiz; không có thao tác nào đặt nhãn này.</li>
+          <li>Không có đánh giá nào cho Flashcards ngoài số thẻ, nên không có tiến độ riêng cho Flashcards.</li>
+          <li>Bảng cũ <code>topic_progress</code> thuộc các route <code>/api/planner/blocks</code>, mà frontend hiện không gọi; các số liệu ở đây không dùng bảng này.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Nguồn: <code>frontend/js/home.js</code>, <code>frontend/js/session.js</code>, <code>frontend/js/subjects.js</code>, <code>frontend/js/planner.js</code>, <code>backend/api/planner_v2.py</code>,
+    <code>backend/study_plan_api_service.py</code>, <code>backend/study_progress.py</code>, <code>backend/document_study_state.py</code>, <code>backend/study_planner_store.py</code>.
+  </footer>
+</main>
+
+<script>
+const PARTICIPANTS = [
+  { name: "User", sub: "End user", w: 130, fill: "#e3edfb", line: "#9db8e3", bar: "#c9dbf6" },
+  { name: "Frontend", sub: "home.js · session.js · subjects.js", w: 190, fill: "#e4f4ea", line: "#93c7a6", bar: "#c6e6d2" },
+  { name: "FastAPI Backend", sub: "planner_v2.py · study_progress.py", w: 230, fill: "#ece8fb", line: "#aea2dd", bar: "#d8d1f5" },
+  { name: "Storage", sub: "SQLite / PostgreSQL", w: 150, fill: "#fbf4d6", line: "#d9c474", bar: "#f4e8ad" }
+];
+const S = 0, F = 1, B = 2, D = 3;
+
+// Numbered steps. Above each arrow: `label` says what happens and `code` names the verified API/function.
+// A "quiet" row is the plain reply to the step above it: drawn, not numbered. A "self" row is work
+// done inside one participant.
+const FLOWS = {
+  plan: {
+    file: "progress-plan-sequence.svg",
+    story: "As a user, I want to see how much of my study plan is done so that I know what remains.",
+    journey: [
+      "Mở Home.",
+      "Mục Today's Study Plan hiện các buổi hôm nay, buổi sắp tới và buổi chưa hoàn thành.",
+      "Dòng tiến độ cho biết, ví dụ, “3 of 10 sessions done · 1h 30m studied · 4h to go”.",
+      "Con số tự cập nhật sau mỗi lần hoàn thành, bỏ qua hoặc đổi lịch."
+    ],
+    note: "<b>Lưu ý:</b> các API này <b>chỉ đọc</b>. Khung <b>loop</b>: frontend đọc buổi học của mọi plan đang hoạt động, nhưng dòng tiến độ chỉ lấy từ plan mới nhất.",
+    rows: [
+      { from: S, to: F, type: "req", label: "Open Home", code: "loadTodayPlan()" },
+      { from: F, to: B, type: "req", label: "Load Plans", code: "GET /api/planner/plans" },
+      { from: B, to: F, type: "res", label: "Plans", quiet: true },
+      { from: F, to: B, type: "req", label: "Load Plan Sessions", code: "GET /api/planner/plans/{plan_id}/sessions" },
+      { from: B, to: F, type: "res", label: "Sessions", quiet: true },
+      { from: F, to: B, type: "req", label: "Request Plan Progress", code: "GET /api/planner/plans/{plan_id}/progress" },
+      { from: B, to: D, type: "req", label: "Read Sessions & Quizzes", code: "plan_progress() · list_sessions()" },
+      { from: D, to: B, type: "res", label: "Sessions + latest quiz results", quiet: true },
+      { from: B, to: F, type: "res", label: "Return Totals", code: "200 · {completed_sessions, planned_sessions, remaining_minutes}" },
+      { from: F, to: S, type: "res", label: "Show Today's Plan", code: "renderTodayPlan()" }
+    ],
+    frames: [
+      { label: "loop", note: "[Each active plan]", left: F, right: B, inset: 22, pad: 10, start: 3, end: 4 }
+    ],
+    activations: [{ at: F, start: 0, end: 9 }, { at: B, start: 1, end: 2 }, { at: B, start: 3, end: 4 }, { at: B, start: 5, end: 8 }],
+    explain: [
+      "<b>Bước 1–3 — đọc lịch.</b> Frontend lấy các plan đang hoạt động và buổi học của từng plan để chia thành hôm nay, sắp tới và chưa hoàn thành.",
+      "<b>Bước 4–5 — tính tiến độ.</b> Backend đọc buổi học của plan rồi đếm theo trạng thái; kết quả không được lưu lại.",
+      "<b>Bước 6–7 — hiển thị.</b> Frontend hiện số buổi đã xong, số phút đã học và số phút còn lại."
+    ],
+    details: [
+      "Tính toán: <code>study_progress.plan_progress()</code> → <code>_session_totals()</code>; response còn có <code>current_quiz_performance</code> và <code>documents</code>.",
+      "Chia nhóm: <code>plannerTodayAgenda()</code>. Quá hạn được xác định bằng <code>plannerIsOverdue()</code> theo giờ của trình duyệt.",
+      "Giao diện từng bước của Planner cũng hiện dòng này qua <code>loadPlannerPlanProgress()</code>, cùng API.",
+      "<code>current_quiz_performance</code> là trung bình điểm quiz mới nhất của các tài liệu đã có điểm; tài liệu chưa làm quiz không bị tính là 0."
+    ],
+    errors: [
+      "<b>404</b> — không tìm thấy plan.",
+      "<b>400</b> — <code>utc_offset_minutes</code> không hợp lệ.",
+      "Lỗi khi đọc tiến độ: danh sách buổi học vẫn hiện, chỉ thiếu dòng tiến độ.",
+      "Lỗi khi đọc plan hoặc buổi học: frontend gọi <code>renderTodayPlan(null)</code>."
+    ]
+  },
+  document: {
+    file: "progress-document-sequence.svg",
+    story: "As a user, I want to see my progress on one document so that I know how well I am doing and what comes next.",
+    journey: [
+      "Mở một tài liệu.",
+      "Phần tiến độ hiện nhãn học tập và lý do của nhãn đó.",
+      "Xem điểm quiz mới nhất, xu hướng so với lần trước và các lần làm trước đó.",
+      "Nếu tài liệu thuộc plan đang hoạt động: xem số buổi đã xong, số phút còn lại, buổi tiếp theo và deadline."
+    ],
+    note: "<b>Lưu ý:</b> phần này gộp nhãn học tập, kết quả quiz và số liệu plan vào một response. Khối <code>plan</code> là <code>null</code> nếu tài liệu không thuộc plan đang hoạt động.",
+    rows: [
+      { from: S, to: F, type: "req", label: "Open Document", code: "openStudySession()" },
+      { from: F, to: B, type: "req", label: "Request Progress", code: "GET /api/progress/documents/{document_id}" },
+      { from: B, to: D, type: "req", label: "Read Study Data", code: "document_progress() · get_document_study_state()" },
+      { from: D, to: B, type: "res", label: "Document, attempts, sessions", quiet: true },
+      { from: B, to: F, type: "res", label: "Return Progress", code: "200 · {learning, quiz, study_pack, plan}" },
+      { from: F, to: S, type: "res", label: "Show Progress", code: "renderDocumentProgress()" }
+    ],
+    explain: [
+      "<b>Bước 1–2 — yêu cầu.</b> Frontend gọi <code>loadDocumentProgress()</code> khi mở tài liệu và sau khi hoàn thành một hoạt động.",
+      "<b>Bước 3–4 — tính.</b> Backend đọc dữ liệu đã lưu và suy ra nhãn học tập; không ghi gì và không tạo số liệu không có thật.",
+      "<b>Bước 5 — hiển thị.</b> Frontend hiện nhãn, điểm quiz, xu hướng và số liệu plan."
+    ],
+    details: [
+      "Xu hướng: <code>_trend()</code> so hai lần làm gần nhất; chênh lệch từ 5 điểm là <code>improving</code> hoặc <code>declining</code>, nhỏ hơn là <code>steady</code>.",
+      "Plan được chọn: <code>_active_plan_for()</code> lấy plan đang hoạt động mới nhất có tài liệu này.",
+      "Buổi tiếp theo: buổi <code>in_progress</code>, nếu không có thì buổi <code>scheduled</code> sớm nhất chưa quá hạn.",
+      "Response này cũng cung cấp <code>next_session</code> cho thanh hoạt động của buổi học gồm hai hoạt động (<code>plannerSetSessionStepBar()</code>)."
+    ],
+    errors: [
+      "<b>404</b> — tài liệu không thuộc về User.",
+      "<b>400</b> — <code>utc_offset_minutes</code> không hợp lệ.",
+      "Khi lỗi: frontend hiện “Progress could not be loaded right now.”"
+    ]
+  },
+  subject: {
+    file: "progress-subject-sequence.svg",
+    story: "As a user, I want to see plan progress grouped by subject so that I can compare my courses at a glance.",
+    journey: [
+      "Mở Home và tìm mục “Current plan progress by subject”.",
+      "Mỗi môn có một thanh tiến độ, ví dụ “2 of 6 sessions done”.",
+      "Bấm vào một môn để xem từng tài liệu trong môn đó.",
+      "Nếu không đọc được một tài liệu, tổng được ghi “incomplete” và có nút “Try again”."
+    ],
+    note: "<b>Lưu ý:</b> backend không có API tiến độ theo môn. Frontend gọi API của từng tài liệu rồi <b>tự cộng</b>. Khung <b>loop</b>: mỗi tài liệu một request.",
+    rows: [
+      { from: S, to: F, type: "req", label: "Open Home", code: "loadHomeDocumentStates()" },
+      { from: F, to: B, type: "req", label: "Request Document Progress", code: "GET /api/progress/documents/{document_id}" },
+      { from: B, to: D, type: "req", label: "Read Study Data", code: "document_progress()" },
+      { from: D, to: B, type: "res", label: "Document + sessions", quiet: true },
+      { from: B, to: F, type: "res", label: "Return Document Progress", code: "200 · {learning, quiz, plan}" },
+      { self: true, from: F, type: "req", label: "Sum by Subject", code: "homeSubjectProgressGroups()" },
+      { from: F, to: S, type: "res", label: "Show Subject Progress", code: "renderHomeSubjectProgress()" }
+    ],
+    frames: [
+      { label: "loop", note: "[Each document]", left: F, right: D, inset: 22, pad: 10, start: 1, end: 4 }
+    ],
+    activations: [{ at: F, start: 0, end: 6 }, { at: B, start: 1, end: 4 }],
+    explain: [
+      "<b>Bước 1–4 — đọc từng tài liệu.</b> Frontend gọi API tiến độ cho mọi tài liệu trên Home.",
+      "<b>Bước 5 — cộng theo môn.</b> Frontend nhóm tài liệu theo môn và cộng số buổi của plan đang hoạt động.",
+      "<b>Bước 6 — hiển thị.</b> Môn có tài liệu luôn được hiện; nhóm Unassigned chỉ hiện khi có buổi đã lên kế hoạch hoặc có tài liệu không đọc được."
+    ],
+    details: [
+      "Nhóm tài liệu: <code>groupDocumentsBySubject()</code>; dữ liệu môn học lấy từ <code>subjectOfDocument()</code>.",
+      "Tài liệu đọc lỗi được đánh dấu “Progress unavailable”, không bị tính là 0 (<code>subjectGroupProgressText()</code>).",
+      "Số liệu chỉ phản ánh plan đang hoạt động, không phải toàn bộ lịch sử học; giao diện cũng ghi rõ điều này.",
+      "Thử lại: nút “Try again” gọi <code>refreshHomeDocumentStates()</code>."
+    ],
+    errors: [
+      "Lỗi ở một tài liệu không chặn các tài liệu khác; tổng của môn được ghi “incomplete”.",
+      "Không đọc được mọi tài liệu của môn: hiện “Progress unavailable”."
+    ]
+  }
+};
+
+const NS = "http://www.w3.org/2000/svg";
+const COL_X = [80, 300, 720, 1040];
+const WIDTH = 1130, TOP = 14, BOX_H = 46;
+// Vertical stack above an arrow, measured from the arrow up.
+const GAP = { code: 11, label: 15, row: 12, quiet: 26, step: 40, self: 20, selfBelow: 26, frameTop: 24 };
+const C = { ink: "#1d1f24", muted: "#5d6270", req: "#1f2937", res: "#8a8f99", life: "#b9b6ab", frame: "#9b9fa8" };
+const STYLE = {
+  "req": { color: C.req, dashed: false, head: "fill" },
+  "res": { color: C.res, dashed: true, head: "open" }
+};
+const MONO = "ui-monospace, Consolas, monospace";
+
+function el(tag, attrs, text) {
+  const node = document.createElementNS(NS, tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+// White halo behind labels so text stays readable where it crosses a lifeline.
+const HALO = { stroke: "#ffffff", "stroke-width": 4, "stroke-linejoin": "round", "paint-order": "stroke" };
+
+function marker(id, color, head) {
+  const node = el("marker", { id, viewBox: "0 0 10 10", refX: 10, refY: 5, markerWidth: 9, markerHeight: 9, markerUnits: "userSpaceOnUse", orient: "auto-start-reverse" });
+  node.append(head === "fill"
+    ? el("path", { d: "M0 0 L10 5 L0 10 Z", fill: color })
+    : el("path", { d: "M0 0 L10 5 L0 10", fill: "none", stroke: color, "stroke-width": 1.5 }));
+  return node;
+}
+
+function participantBox(svg, index, y) {
+  const p = PARTICIPANTS[index];
+  svg.append(el("rect", { x: COL_X[index] - p.w / 2, y, width: p.w, height: BOX_H, rx: 10, fill: p.fill, stroke: p.line, "stroke-width": 1.2 }));
+  svg.append(el("text", { x: COL_X[index], y: y + 20, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: C.ink }, p.name));
+  svg.append(el("text", { x: COL_X[index], y: y + 36, "text-anchor": "middle", "font-size": 11, fill: C.muted }, p.sub));
+}
+
+function badge(svg, x, y, number, color) {
+  svg.append(el("circle", { cx: x, cy: y, r: 9, fill: color }));
+  svg.append(el("text", { x, y: y + 3.5, "text-anchor": "middle", "font-size": 10.5, "font-weight": 700, fill: "#ffffff" }, String(number)));
+}
+
+// Height a row's label stack needs above its arrow.
+function stackHeight(row) {
+  return row.quiet ? GAP.quiet : row.self ? GAP.self : GAP.step;
+}
+
+function drawFrame(svg, frame, { top, bottom }) {
+  const left = COL_X[frame.left] - frame.inset, right = COL_X[frame.right] + frame.inset;
+  svg.append(el("rect", { x: left, y: top, width: right - left, height: bottom - top, fill: "none", stroke: C.frame, "stroke-width": 1 }));
+  svg.append(el("path", { d: `M${left} ${top} H${left + 42} V${top + 12} L${left + 35} ${top + 19} H${left} Z`, fill: "#f0f0ec", stroke: C.frame, "stroke-width": 1 }));
+  svg.append(el("text", { x: left + 8, y: top + 14, "font-size": 11, "font-weight": 700, fill: C.ink }, frame.label));
+  svg.append(el("text", { x: left + 50, y: top + 14, "font-size": 11, fill: C.muted, ...HALO }, frame.note));
+}
+
+function drawSelf(svg, row, y, number) {
+  const x = COL_X[row.from];
+  const style = STYLE[row.type];
+  svg.append(el("path", {
+    d: `M${x + 4} ${y} H${x + 44} V${y + 22} H${x + 5}`,
+    fill: "none", stroke: style.color, "stroke-width": 1.5, "marker-end": `url(#head-${row.type})`
+  }));
+  svg.append(el("text", { x: x + 56, y: y + 6, "font-size": 13.5, "font-weight": 600, fill: C.ink, ...HALO }, row.label));
+  svg.append(el("text", { x: x + 56, y: y + 21, "font-size": 10.5, fill: C.muted, "font-family": MONO, ...HALO }, row.code));
+  badge(svg, x + 18, y, number, style.color);
+}
+
+function renderDiagram({ rows, frames = [], activations, label }) {
+  // Frontend holds the whole exchange; Backend holds it from the request to its reply.
+  const bars = activations || [{ at: F, start: 0, end: rows.length - 1 }, { at: B, start: 1, end: rows.length - 2 }];
+  const boxes = new Map();
+  let y = TOP + BOX_H, after = 0;
+  const positions = rows.map((row, i) => {
+    y += (row.quiet ? 0 : GAP.row) + after;
+    after = 0;
+    frames.forEach((frame) => {
+      if (frame.start === i) { boxes.set(frame, { top: y }); y += GAP.frameTop; }
+    });
+    y += stackHeight(row);
+    if (row.self) after = GAP.selfBelow;
+    frames.forEach((frame) => {
+      if (frame.end === i) { boxes.get(frame).bottom = y + frame.pad; after = Math.max(after, frame.pad + 2); }
+    });
+    return y;
+  });
+  const bottomBox = y + 20;
+  const height = bottomBox + BOX_H + TOP;
+
+  const svg = el("svg", {
+    xmlns: NS, viewBox: `0 0 ${WIDTH} ${height}`, width: WIDTH, height,
+    "font-family": "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+    role: "img", "aria-label": label
+  });
+  const defs = el("defs", {});
+  for (const [key, style] of Object.entries(STYLE)) defs.append(marker(`head-${key}`, style.color, style.head));
+  svg.append(defs);
+  svg.append(el("rect", { x: 0, y: 0, width: WIDTH, height, fill: "#ffffff" }));
+
+  COL_X.forEach((x, i) => {
+    svg.append(el("line", { x1: x, y1: TOP + BOX_H, x2: x, y2: bottomBox, stroke: C.life, "stroke-width": 1, "stroke-dasharray": "4 4" }));
+    participantBox(svg, i, TOP);
+    participantBox(svg, i, bottomBox);
+  });
+
+  bars.forEach(({ at, start, end }) => {
+    svg.append(el("rect", {
+      x: COL_X[at] - 4, y: positions[start], width: 8, height: positions[end] - positions[start],
+      fill: PARTICIPANTS[at].bar, stroke: PARTICIPANTS[at].line, "stroke-width": 1
+    }));
+  });
+
+  frames.forEach((frame) => drawFrame(svg, frame, boxes.get(frame)));
+
+  let number = 0;
+  rows.forEach((row, i) => {
+    const y = positions[i];
+    if (row.self) {
+      number += 1;
+      drawSelf(svg, row, y, number);
+      return;
+    }
+    const style = STYLE[row.type];
+    const x1 = COL_X[row.from], x2 = COL_X[row.to];
+    const dir = Math.sign(x2 - x1);
+    const mid = (x1 + x2) / 2;
+    svg.append(el("line", {
+      x1: x1 + dir * 4, y1: y, x2: x2 - dir * 5, y2: y,
+      stroke: style.color, "stroke-width": 1.5,
+      ...(style.dashed ? { "stroke-dasharray": "6 4" } : {}),
+      "marker-end": `url(#head-${row.type})`
+    }));
+    if (row.quiet) {
+      svg.append(el("text", { x: mid, y: y - 7, "text-anchor": "middle", "font-size": 12, fill: C.muted, ...HALO }, row.label));
+      return;
+    }
+    number += 1;
+    svg.append(el("text", { x: mid, y: y - GAP.code, "text-anchor": "middle", "font-size": 10.5, fill: C.muted, "font-family": MONO, ...HALO }, row.code));
+    svg.append(el("text", { x: mid, y: y - GAP.code - GAP.label, "text-anchor": "middle", "font-size": 13.5, "font-weight": 600, fill: C.ink, ...HALO }, row.label));
+    badge(svg, x1 + dir * 18, y, number, style.color);
+  });
+  return svg;
+}
+
+const tabs = [...document.querySelectorAll(".tab")];
+let current = "plan";
+
+function show(key, focus) {
+  current = key;
+  const flow = FLOWS[key];
+  tabs.forEach((tab) => {
+    const active = tab.dataset.flow === key;
+    tab.setAttribute("aria-selected", active);
+    tab.tabIndex = active ? 0 : -1;
+    if (active && focus) tab.focus();
+  });
+  document.getElementById("panel").setAttribute("aria-labelledby", `tab-${key}`);
+  document.getElementById("story").textContent = flow.story;
+  document.getElementById("journey").innerHTML = flow.journey.map((step) => `<li>${step}</li>`).join("");
+  document.getElementById("note").innerHTML = flow.note;
+  document.getElementById("explain").innerHTML = flow.explain.map((p) => `<p>${p}</p>`).join("");
+  document.getElementById("details").innerHTML = flow.details.map((d) => `<li>${d}</li>`).join("");
+  document.getElementById("errors").innerHTML = flow.errors.map((e) => `<li>${e}</li>`).join("");
+  document.getElementById("diagram").replaceChildren(renderDiagram({ rows: flow.rows, frames: flow.frames, activations: flow.activations, label: `Sequence diagram: ${flow.story}` }));
+  history.replaceState(null, "", `#${key}`);
+}
+
+tabs.forEach((tab, index) => {
+  tab.addEventListener("click", () => show(tab.dataset.flow));
+  tab.addEventListener("keydown", (event) => {
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
+    if (!step) return;
+    show(tabs[(index + step + tabs.length) % tabs.length].dataset.flow, true);
+  });
+});
+
+document.getElementById("export").addEventListener("click", () => {
+  const svg = document.querySelector("#diagram svg");
+  const source = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svg);
+  const url = URL.createObjectURL(new Blob([source], { type: "image/svg+xml;charset=utf-8" }));
+  const link = Object.assign(document.createElement("a"), { href: url, download: FLOWS[current].file });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+});
+
+const initial = location.hash.slice(1);
+show(FLOWS[initial] ? initial : "plan");
+</script>
+</body>
+</html>

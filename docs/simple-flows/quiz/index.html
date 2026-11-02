@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Tutor Quiz</title>
+<style>
+  :root {
+    --bg: #f6f5f1;
+    --surface: #ffffff;
+    --ink: #1d1f24;
+    --muted: #5d6270;
+    --line: #e2e0d8;
+    --accent: #2f5bd3;
+    --accent-soft: #e8eefc;
+    --warn: #9a4a12;
+    --warn-soft: #fbf0e6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #15171c;
+      --surface: #1e2128;
+      --ink: #eceef2;
+      --muted: #a1a7b4;
+      --line: #30343e;
+      --accent: #8aa7ff;
+      --accent-soft: #232c45;
+      --warn: #f0b27a;
+      --warn-soft: #33261b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #15171c;
+    --surface: #1e2128;
+    --ink: #eceef2;
+    --muted: #a1a7b4;
+    --line: #30343e;
+    --accent: #8aa7ff;
+    --accent-soft: #232c45;
+    --warn: #f0b27a;
+    --warn-soft: #33261b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1180px; margin: 0 auto; padding: 40px 24px 64px; }
+  header { margin-bottom: 28px; }
+  header h1 { margin: 0 0 4px; font-size: 28px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--muted); }
+  a { color: var(--accent); }
+  code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.9em; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px 24px; }
+  .card h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .story { font-size: 18px; margin: 0; }
+  ol.journey { margin: 0; padding-left: 22px; }
+  ol.journey li { margin: 2px 0; }
+
+  .diagram-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .diagram-head h2 { margin: 0; }
+  .legend { display: flex; gap: 18px; font-size: 13px; color: var(--muted); align-items: center; flex-wrap: wrap; }
+  .legend svg { vertical-align: middle; margin-right: 6px; }
+  .btn {
+    font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+    color: var(--accent); background: var(--accent-soft);
+    border: 1px solid transparent; border-radius: 8px; padding: 6px 14px;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .paper { background: #ffffff; border-radius: 8px; border: 1px solid var(--line); overflow-x: auto; }
+  .paper svg { display: block; width: 100%; min-width: 860px; height: auto; }
+  .diagram-note { margin: 14px 0 0; padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0; font-size: 15px; }
+
+  .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
+  .explain p { margin: 0 0 10px; }
+  .explain p:last-child { margin-bottom: 0; }
+  .explain details { margin-top: 4px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .explain summary { cursor: pointer; font-weight: 600; color: var(--accent); }
+  .explain details ul { margin: 8px 0 0; padding-left: 20px; }
+  .explain details li { margin: 0 0 6px; }
+  dl.terms { margin: 0; }
+  dl.terms dt { font-weight: 700; margin-top: 10px; }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd { margin: 0; color: var(--muted); }
+  .behaviour { margin-top: 20px; }
+  .behaviour .cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
+  .behaviour h3 { margin: 0 0 6px; font-size: 16px; }
+  .behaviour ul { margin: 0; padding-left: 20px; }
+  .behaviour li { margin: 0 0 6px; }
+  .behaviour .fail { background: var(--warn-soft); border-radius: 8px; padding: 12px 16px; }
+  .behaviour .fail h3 { color: var(--warn); }
+  footer { margin-top: 28px; font-size: 13px; color: var(--muted); }
+
+  @media (max-width: 760px) {
+    main { padding: 24px 16px 48px; }
+    .grid, .notes, .behaviour .cols { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Tạo Quiz trong AI Tutor</h1>
+    <p>User chọn tài liệu và cài đặt rồi bấm Generate; backend lấy nội dung tài liệu và flashcards, nhờ Qwen viết phần câu trắc nghiệm còn thiếu (nếu có) và kiểm tra từng câu, lưu quiz, rồi frontend thêm quiz vào thư viện. Sơ đồ chỉ vẽ việc <b>tạo</b> quiz; làm bài và chấm điểm có <a href="../quiz-submission/index.html">sơ đồ riêng</a>.</p>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <h2>User Story</h2>
+      <p class="story">As a user, I want to generate a quiz from my uploaded document at the scope, difficulty and length I choose so that I can test what I have learned.</p>
+    </div>
+    <div class="card">
+      <h2>User Journey</h2>
+      <ol class="journey">
+        <li>Tạo flashcards cho tài liệu trước — quiz được xây từ nội dung tài liệu <i>và</i> flashcards của nó.</li>
+        <li>Mở Quiz và bấm tạo quiz mới; nhập tên quiz, chọn tài liệu, phạm vi (một topic hoặc cả tài liệu), độ khó (easy / medium / difficult) và số câu (AI Auto hoặc 5–40).</li>
+        <li>Bấm “Generate”; thư viện hiện một thẻ “đang tạo” trong lúc chờ (có thể mất vài phút).</li>
+        <li>Khi xong, hộp thoại đóng lại và thông báo “Quiz created with N questions”; quiz mới xuất hiện trong thư viện.</li>
+        <li>Bấm Start trên thẻ quiz để mở Quiz Player và làm bài.</li>
+        <li>Nộp bài để được chấm điểm và xem lại đáp án; mỗi lần nộp được lưu thành một lần làm bài.</li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="diagram-head">
+      <h2>Sequence Diagram</h2>
+      <div class="legend">
+        <span><svg width="44" height="10"><line x1="2" y1="5" x2="34" y2="5" stroke="#1f2937" stroke-width="1.5"/><path d="M34 0 L44 5 L34 10 Z" fill="#1f2937"/></svg>Request</span>
+        <span><svg width="44" height="10"><line x1="2" y1="5" x2="40" y2="5" stroke="#8a8f99" stroke-width="1.5" stroke-dasharray="5 4"/><path d="M33 0 L43 5 L33 10" fill="none" stroke="#8a8f99" stroke-width="1.5"/></svg>Response</span>
+        <button class="btn" id="export">Export SVG</button>
+      </div>
+    </div>
+    <div class="paper" id="diagram"></div>
+    <p class="diagram-note"><b>Lưu ý:</b> việc tạo quiz chạy <b>đồng bộ</b>: request ở bước 2 được giữ mở cho đến khi bước 7 trả về (không có job nền, không polling, không stream về trình duyệt). Khung <b>opt</b>: nếu flashcards đã đủ số câu (<code>choice_target = 0</code>), backend <b>bỏ qua Qwen</b>, tức không có bước 4–5. Khung <b>loop</b>: backend gọi Qwen tối đa <b>3 lần</b>, chỉ gọi lại khi kiểm tra xong mà vẫn thiếu câu hợp lệ.</p>
+  </div>
+
+  <div class="notes">
+    <div class="card explain">
+      <h2>Giải thích</h2>
+      <p><b>Bước 1–2 — yêu cầu.</b> Frontend gửi tên quiz, mã tài liệu, phạm vi (topic hoặc cả tài liệu), độ khó, số câu và model tới FastAPI.</p>
+      <p><b>Bước 3 — lấy dữ liệu.</b> Backend kiểm tra tài liệu đã có flashcards, rồi lấy các chunk của topic đã chọn (hoặc của cả tài liệu) từ ChromaDB. Đây là lọc theo tài liệu/topic, <b>không phải tìm kiếm theo nghĩa</b>, nên không dùng BGE-M3.</p>
+      <p><b>Bước 4–5 — Qwen viết câu hỏi, backend kiểm tra.</b> Một phần câu hỏi (ghép cặp, điền từ và một số câu trắc nghiệm) được tạo <b>trực tiếp từ flashcards, không gọi Qwen</b>. Phần trắc nghiệm còn lại: backend gửi các đoạn tài liệu để Qwen viết câu hỏi, mỗi câu gồm 4 đáp án, đáp án đúng, giải thích ngắn và câu trích dẫn làm bằng chứng. Ngay sau mỗi lần Qwen trả về, backend giữ câu có trích dẫn thật sự nằm trong tài liệu, đúng cấu trúc, đúng ngôn ngữ và không trùng.</p>
+      <p><b>Bước 6 — lưu.</b> Backend chọn các câu đã qua kiểm tra, trộn với các câu từ flashcards rồi lưu thành một quiz mới (có <code>quiz_id</code> riêng).</p>
+      <p><b>Bước 7–8 — kết quả.</b> Backend trả quiz đã lưu; frontend đóng hộp thoại, báo số câu đã tạo và làm mới thư viện. Quiz chưa mở ngay — User bấm Start để làm bài.</p>
+      <details>
+        <summary>Chi tiết kỹ thuật (tuỳ chọn)</summary>
+        <ul>
+          <li>Route: <code>backend/api/quiz_generation.py</code> → <code>quiz_service.generate_quiz()</code> → <code>_generate_quiz_from_units()</code>. Trước đó route gọi <code>_require_flashcards()</code> và <code>prepare_generation_model()</code>.</li>
+          <li>Khi có <code>DATABASE_URL</code>, PostgreSQL thay SQLite và pgvector thay ChromaDB.</li>
+          <li>Lấy chunk: <code>get_schema_topic_evidence()</code> (phạm vi topic) hoặc <code>get_document_chunks()</code> (cả tài liệu); chunk được gom thành “study units” bằng <code>build_study_units()</code>. Ngôn ngữ quiz được xác định từ tài liệu (<code>detect_quiz_language()</code>).</li>
+          <li>Câu từ flashcards: <code>build_document_question_mix()</code> (matching, multi_blank, một số trắc nghiệm). Qwen chỉ viết phần trắc nghiệm còn thiếu (<code>choice_target</code>).</li>
+          <li>Gọi Qwen: <code>_generate_with_deadline()</code> đọc kết quả dạng stream ở phía server với giới hạn thời gian (lần đầu 300 s, tổng 570 s); JSON schema cố định, cửa sổ 16 384 token. <code>max_calls</code> bằng <code>QUIZ_MAX_CALLS</code> (3), hoặc 0 khi <code>choice_target = 0</code>. Sau lần đầu, chỉ gọi tiếp khi còn thiếu câu; dừng sớm nếu 2 lần liên tiếp không thêm câu hợp lệ hoặc thời gian còn lại dưới 45 s.</li>
+          <li>Kiểm tra: <code>validate_candidate()</code> chạy trong vòng lặp, sau mỗi lần gọi Qwen (trích dẫn có trong ngữ cảnh, cấu trúc, ngôn ngữ, trùng lặp; đáp án nhiễu hoặc trích dẫn ngắn được sửa cục bộ, không gọi lại Qwen). Sau vòng lặp: chọn câu bằng <code>select_questions()</code>, trộn với câu từ flashcards rồi lưu bằng <code>quiz_store.save_quiz()</code>.</li>
+          <li>Frontend: <code>generateAssessmentQuiz()</code> → <code>requestGeneratedQuiz()</code> (luôn gửi <code>regenerate: true</code> để tạo quiz mới) → <code>loadQuizStatuses()</code> (<code>GET /api/quizzes</code>).</li>
+        </ul>
+      </details>
+    </div>
+    <div class="card">
+      <h2>Thuật ngữ</h2>
+      <dl class="terms">
+        <dt>Phạm vi (assessment scope)</dt><dd>Quiz cho <b>một topic</b> hoặc cho <b>cả tài liệu</b>.</dd>
+        <dt>AI Auto</dt><dd>Để hệ thống tự chọn số câu theo lượng nội dung; hoặc chọn một số cụ thể từ 5 đến 40.</dd>
+        <dt>Chunk</dt><dd>Một đoạn văn bản nhỏ cắt từ tài liệu lúc upload; là nguồn để Qwen viết câu hỏi.</dd>
+        <dt>Evidence quote</dt><dd>Câu trích nguyên văn từ tài liệu mà câu hỏi dựa vào; câu hỏi có trích dẫn không tìm thấy trong tài liệu bị loại.</dd>
+        <dt>Qwen2.5-7B</dt><dd>Model ngôn ngữ (LLM) viết câu hỏi trắc nghiệm. Việc tạo quiz không dùng BGE-M3.</dd>
+        <dt>choice_target</dt><dd>Số câu trắc nghiệm Qwen còn phải viết sau khi đã tạo câu từ flashcards. Bằng 0 thì không gọi Qwen.</dd>
+        <dt>Quiz “partial”</dt><dd>Quiz có ít câu hơn số yêu cầu vì tài liệu không đủ nội dung khác nhau; vẫn được lưu, không phải lỗi.</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="card behaviour">
+    <h2>Luồng tiếp theo, thử lại và lỗi khi tạo quiz (ngoài sơ đồ)</h2>
+    <div class="cols">
+      <div>
+        <h3>Sau khi tạo: làm bài & chấm điểm (luồng riêng)</h3>
+        <ul>
+          <li>Start mở quiz đã lưu: <code>GET /api/quiz/{document_id}?quiz_id=…</code>.</li>
+          <li>Nộp bài và chấm điểm do backend xử lý, <b>không gọi Qwen</b>; xem <a href="../quiz-submission/index.html">sơ đồ Quiz Submission</a>.</li>
+          <li>“Explain more” trong màn hình Review: chỉ khi User bấm, frontend mở panel AI Tutor và gửi câu hỏi đó như một tin nhắn chat (<code>explainReviewItemMore()</code> → <code>sendTutorMessage()</code> → <code>POST /api/conversations/{conversation_id}/messages</code>). Câu trả lời đến từ AI Tutor, và kết quả chấm điểm không đổi.</li>
+          <li>Route <code>POST /api/quiz/{document_id}/questions/{question_id}/explain</code> có ở backend nhưng frontend hiện không gọi.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Thử lại & quiz thiếu câu</h3>
+        <ul>
+          <li>Lần gọi Qwen đầu xin dư một ít câu. Nếu sau kiểm tra còn thiếu, backend gọi thêm, mỗi lần ưu tiên đoạn tài liệu chưa dùng và tránh câu đã có.</li>
+          <li>Vòng lặp dừng mà vẫn thiếu câu: quiz được lưu với trạng thái <b>“partial”</b> và thông báo số câu thực tế.</li>
+          <li>Mỗi lần bấm Generate luôn tạo một quiz <b>mới</b>; quiz cũ và lịch sử làm bài của nó giữ nguyên.</li>
+        </ul>
+      </div>
+      <div class="fail">
+        <h3>Lỗi khi tạo quiz</h3>
+        <ul>
+          <li><b>409</b> — tài liệu chưa có flashcards (“Create Flashcards first”).</li>
+          <li><b>400</b> — thiếu tên quiz, tài liệu/topic không hợp lệ, độ khó hoặc số câu ngoài phạm vi.</li>
+          <li><b>422</b> — không tạo được câu hợp lệ nào; không lưu gì.</li>
+          <li><b>500</b> — lỗi khác (ví dụ Ollama không chạy). Frontend hiện lỗi ngay trong hộp thoại tạo quiz.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Nguồn: <code>frontend/js/quiz.js</code>, <code>frontend/js/tutor.js</code>, <code>frontend/js/api.js</code>, <code>backend/api/quiz_generation.py</code>, <code>backend/api/quiz_attempts.py</code>,
+    <code>backend/quiz_service.py</code>, <code>backend/quiz_units.py</code>, <code>backend/flashcard_quiz_service.py</code>.
+  </footer>
+</main>
+
+<script>
+const PARTICIPANTS = [
+  { name: "User", sub: "End user", w: 130, fill: "#e3edfb", line: "#9db8e3", bar: "#c9dbf6" },
+  { name: "Frontend", sub: "quiz.js", w: 130, fill: "#e4f4ea", line: "#93c7a6", bar: "#c6e6d2" },
+  { name: "FastAPI Backend", sub: "quiz_generation.py · quiz_service.py", w: 226, fill: "#ece8fb", line: "#aea2dd", bar: "#d8d1f5" },
+  { name: "Qwen2.5-7B", sub: "Ollama · text generation", w: 150, fill: "#fdebdc", line: "#e5b088", bar: "#f9d9bf" },
+  { name: "Storage", sub: "SQLite · ChromaDB", w: 140, fill: "#fbf4d6", line: "#d9c474", bar: "#f4e8ad" }
+];
+const S = 0, F = 1, B = 2, Q = 3, D = 4;
+
+// Eight numbered steps. Above each arrow: `label` says what happens and `code` names the verified
+// API/function. A "quiet" row is the plain reply to the step above it:
+// drawn, not numbered.
+const ROWS = [
+  { from: S, to: F, type: "req", label: "Select Quiz Settings & Generate", code: "generateAssessmentQuiz()" },
+  { from: F, to: B, type: "req", label: "Request Quiz Generation", code: "POST /api/quiz/generate" },
+  { from: B, to: D, type: "req", label: "Retrieve Quiz Context", code: "usable_flashcards() · get_schema_topic_evidence() / get_document_chunks()" },
+  { from: D, to: B, type: "res", label: "Chunks + flashcards", quiet: true },
+  { from: B, to: Q, type: "req", label: "Generate Questions", code: "_generate_with_deadline()", frameStart: true },
+  { from: Q, to: B, type: "res", label: "Return & Validate Questions", code: "questions[] · validate_candidate()", frameEnd: true },
+  { from: B, to: D, type: "req", label: "Save Quiz", code: "save_quiz()" },
+  { from: B, to: F, type: "res", label: "Return Saved Quiz", code: "200 · {quiz_id, questions, status}" },
+  { from: F, to: S, type: "res", label: "Update Quiz Library", code: "loadQuizStatuses()" }
+];
+// Frontend and Backend are busy for these rows: the request stays open until the backend replies.
+const ACTIVATIONS = [
+  { at: F, start: 0, end: ROWS.length - 1 },
+  { at: B, start: 1, end: ROWS.length - 2 }
+];
+// Outermost first; both wrap the rows marked frameStart/frameEnd, between Backend and Qwen.
+const FRAMES = [
+  { label: "opt", note: "[choice_target > 0, else skip Qwen]", inset: 34, pad: 20 },
+  { label: "loop", note: "[If needed, max 3 attempts]", inset: 22, pad: 10 }
+];
+
+const NS = "http://www.w3.org/2000/svg";
+const COL_X = [85, 310, 565, 820, 1045];
+const WIDTH = 1130, TOP = 14, BOX_H = 46;
+// Vertical stack above an arrow, measured from the arrow up.
+const GAP = { code: 11, label: 15, row: 12, quiet: 26, frameTop: 24, frameBottom: 22 };
+const C = { ink: "#1d1f24", muted: "#5d6270", req: "#1f2937", res: "#8a8f99", life: "#b9b6ab", frame: "#9b9fa8" };
+const STYLE = {
+  "req": { color: C.req, dashed: false, head: "fill" },
+  "res": { color: C.res, dashed: true, head: "open" }
+};
+const MONO = "ui-monospace, Consolas, monospace";
+
+function el(tag, attrs, text) {
+  const node = document.createElementNS(NS, tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+// White halo behind labels so text stays readable where it crosses a lifeline.
+const HALO = { stroke: "#ffffff", "stroke-width": 4, "stroke-linejoin": "round", "paint-order": "stroke" };
+
+function marker(id, color, head) {
+  const node = el("marker", { id, viewBox: "0 0 10 10", refX: 10, refY: 5, markerWidth: 9, markerHeight: 9, markerUnits: "userSpaceOnUse", orient: "auto-start-reverse" });
+  node.append(head === "fill"
+    ? el("path", { d: "M0 0 L10 5 L0 10 Z", fill: color })
+    : el("path", { d: "M0 0 L10 5 L0 10", fill: "none", stroke: color, "stroke-width": 1.5 }));
+  return node;
+}
+
+function participantBox(svg, index, y) {
+  const p = PARTICIPANTS[index];
+  svg.append(el("rect", { x: COL_X[index] - p.w / 2, y, width: p.w, height: BOX_H, rx: 10, fill: p.fill, stroke: p.line, "stroke-width": 1.2 }));
+  svg.append(el("text", { x: COL_X[index], y: y + 20, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: C.ink }, p.name));
+  svg.append(el("text", { x: COL_X[index], y: y + 36, "text-anchor": "middle", "font-size": 11, fill: C.muted }, p.sub));
+}
+
+function badge(svg, x, y, number, color) {
+  svg.append(el("circle", { cx: x, cy: y, r: 9, fill: color }));
+  svg.append(el("text", { x, y: y + 3.5, "text-anchor": "middle", "font-size": 10.5, "font-weight": 700, fill: "#ffffff" }, String(number)));
+}
+
+// Height a row's label stack needs above its arrow.
+function stackHeight(row) {
+  if (row.quiet) return GAP.quiet;
+  return GAP.code + GAP.label + 14;
+}
+
+function renderDiagram() {
+  let y = TOP + BOX_H;
+  const positions = ROWS.map((row, i) => {
+    const stack = stackHeight(row);
+    y += (row.quiet ? 0 : GAP.row) + (ROWS[i - 1]?.frameEnd ? GAP.frameBottom : 0);
+    if (row.frameStart) FRAMES.forEach((frame) => { frame.top = y; y += GAP.frameTop; });
+    y += stack;
+    if (row.frameEnd) FRAMES.forEach((frame) => { frame.bottom = y + frame.pad; });
+    return y;
+  });
+  const bottomBox = y + 20;
+  const height = bottomBox + BOX_H + TOP;
+
+  const svg = el("svg", {
+    xmlns: NS, viewBox: `0 0 ${WIDTH} ${height}`, width: WIDTH, height,
+    "font-family": "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+    role: "img", "aria-label": "Sequence diagram of AI Tutor quiz generation: document chunks and flashcards, optional Qwen questions validated in a retry loop, saving and library update"
+  });
+  const defs = el("defs", {});
+  for (const [key, style] of Object.entries(STYLE)) defs.append(marker(`head-${key}`, style.color, style.head));
+  svg.append(defs);
+  svg.append(el("rect", { x: 0, y: 0, width: WIDTH, height, fill: "#ffffff" }));
+
+  COL_X.forEach((x, i) => {
+    svg.append(el("line", { x1: x, y1: TOP + BOX_H, x2: x, y2: bottomBox, stroke: C.life, "stroke-width": 1, "stroke-dasharray": "4 4" }));
+    participantBox(svg, i, TOP);
+    participantBox(svg, i, bottomBox);
+  });
+
+  ACTIVATIONS.forEach(({ at, start, end }) => {
+    svg.append(el("rect", {
+      x: COL_X[at] - 4, y: positions[start], width: 8, height: positions[end] - positions[start],
+      fill: PARTICIPANTS[at].bar, stroke: PARTICIPANTS[at].line, "stroke-width": 1
+    }));
+  });
+
+  FRAMES.forEach(({ label, note, inset, top, bottom }) => {
+    const left = COL_X[B] - inset, right = COL_X[Q] + inset;
+    svg.append(el("rect", { x: left, y: top, width: right - left, height: bottom - top, fill: "none", stroke: C.frame, "stroke-width": 1 }));
+    svg.append(el("path", { d: `M${left} ${top} H${left + 42} V${top + 12} L${left + 35} ${top + 19} H${left} Z`, fill: "#f0f0ec", stroke: C.frame, "stroke-width": 1 }));
+    svg.append(el("text", { x: left + 8, y: top + 14, "font-size": 11, "font-weight": 700, fill: C.ink }, label));
+    svg.append(el("text", { x: left + 50, y: top + 14, "font-size": 11, fill: C.muted, ...HALO }, note));
+  });
+
+  let number = 0;
+  ROWS.forEach((row, i) => {
+    const y = positions[i];
+    const style = STYLE[row.type];
+    const x1 = COL_X[row.from], x2 = COL_X[row.to];
+    const dir = Math.sign(x2 - x1);
+    const mid = (x1 + x2) / 2;
+    svg.append(el("line", {
+      x1: x1 + dir * 4, y1: y, x2: x2 - dir * 5, y2: y,
+      stroke: style.color, "stroke-width": 1.5,
+      ...(style.dashed ? { "stroke-dasharray": "6 4" } : {}),
+      "marker-end": `url(#head-${row.type})`
+    }));
+    if (row.quiet) {
+      svg.append(el("text", { x: mid, y: y - 7, "text-anchor": "middle", "font-size": 12, fill: C.muted, ...HALO }, row.label));
+      return;
+    }
+    number += 1;
+    let lineY = y - GAP.code;
+    svg.append(el("text", { x: mid, y: lineY, "text-anchor": "middle", "font-size": 10.5, fill: C.muted, "font-family": MONO, ...HALO }, row.code));
+    lineY -= GAP.label;
+    svg.append(el("text", { x: mid, y: lineY, "text-anchor": "middle", "font-size": 13.5, "font-weight": 600, fill: C.ink, ...HALO }, row.label));
+    badge(svg, x1 + dir * 18, y, number, style.color);
+  });
+  return svg;
+}
+
+document.getElementById("diagram").replaceChildren(renderDiagram());
+
+document.getElementById("export").addEventListener("click", () => {
+  const svg = document.querySelector("#diagram svg");
+  const source = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svg);
+  const url = URL.createObjectURL(new Blob([source], { type: "image/svg+xml;charset=utf-8" }));
+  const link = Object.assign(document.createElement("a"), { href: url, download: "quiz-sequence.svg" });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>

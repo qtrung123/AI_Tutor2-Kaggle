@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Tutor Subject Management</title>
+<style>
+  :root {
+    --bg: #f6f5f1;
+    --surface: #ffffff;
+    --ink: #1d1f24;
+    --muted: #5d6270;
+    --line: #e2e0d8;
+    --accent: #2f5bd3;
+    --accent-soft: #e8eefc;
+    --warn: #9a4a12;
+    --warn-soft: #fbf0e6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #15171c;
+      --surface: #1e2128;
+      --ink: #eceef2;
+      --muted: #a1a7b4;
+      --line: #30343e;
+      --accent: #8aa7ff;
+      --accent-soft: #232c45;
+      --warn: #f0b27a;
+      --warn-soft: #33261b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #15171c;
+    --surface: #1e2128;
+    --ink: #eceef2;
+    --muted: #a1a7b4;
+    --line: #30343e;
+    --accent: #8aa7ff;
+    --accent-soft: #232c45;
+    --warn: #f0b27a;
+    --warn-soft: #33261b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1180px; margin: 0 auto; padding: 40px 24px 64px; }
+  header { margin-bottom: 28px; }
+  header h1 { margin: 0 0 4px; font-size: 28px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--muted); }
+  a { color: var(--accent); }
+  code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.9em; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px 24px; }
+  .card h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .story { font-size: 18px; margin: 0; }
+  ol.journey { margin: 0; padding-left: 22px; }
+  ol.journey li { margin: 2px 0; }
+
+  .diagram-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .diagram-head h2 { margin: 0; }
+  .legend { display: flex; gap: 18px; font-size: 13px; color: var(--muted); align-items: center; flex-wrap: wrap; }
+  .legend svg { vertical-align: middle; margin-right: 6px; }
+  .btn {
+    font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+    color: var(--accent); background: var(--accent-soft);
+    border: 1px solid transparent; border-radius: 8px; padding: 6px 14px;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .paper { background: #ffffff; border-radius: 8px; border: 1px solid var(--line); overflow-x: auto; }
+  .paper svg { display: block; width: 100%; min-width: 860px; height: auto; }
+  .diagram-note { margin: 14px 0 0; padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0; font-size: 15px; }
+
+  .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
+  .explain p { margin: 0 0 10px; }
+  .explain p:last-child { margin-bottom: 0; }
+  .explain details { margin-top: 4px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .explain summary { cursor: pointer; font-weight: 600; color: var(--accent); }
+  .explain details ul { margin: 8px 0 0; padding-left: 20px; }
+  .explain details li { margin: 0 0 6px; }
+  dl.terms { margin: 0; }
+  dl.terms dt { font-weight: 700; margin-top: 10px; }
+  dl.terms dt:first-child { margin-top: 0; }
+  dl.terms dd { margin: 0; color: var(--muted); }
+  .behaviour { margin-top: 20px; }
+  .behaviour .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+  .behaviour h3 { margin: 0 0 6px; font-size: 16px; }
+  .behaviour ul { margin: 0; padding-left: 20px; }
+  .behaviour li { margin: 0 0 6px; }
+  .behaviour .fail { background: var(--warn-soft); border-radius: 8px; padding: 12px 16px; }
+  .behaviour .fail h3 { color: var(--warn); }
+  footer { margin-top: 28px; font-size: 13px; color: var(--muted); }
+
+  @media (max-width: 760px) {
+    main { padding: 24px 16px 48px; }
+    .grid, .notes, .behaviour .cols { grid-template-columns: 1fr; }
+  }
+  .tabs { display: flex; gap: 8px; margin: 0 0 24px; border-bottom: 1px solid var(--line); }
+  .tab {
+    appearance: none; border: 0; background: none; cursor: pointer;
+    font: inherit; font-weight: 600; color: var(--muted);
+    padding: 10px 18px; border-bottom: 3px solid transparent; margin-bottom: -1px;
+  }
+  .tab:hover { color: var(--ink); }
+  .tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  .errors { background: var(--warn-soft); border-color: transparent; }
+  .errors h2 { color: var(--warn); }
+  .errors ul { margin: 0; padding-left: 20px; }
+  .errors li { margin: 4px 0; }
+  @media (max-width: 760px) { .tab { padding: 10px 12px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Quản lý môn học (Subjects) trong AI Tutor</h1>
+    <p>Bốn thao tác: tạo, sửa, xoá môn học và xếp tài liệu vào môn học. Môn học chỉ dùng để phân nhóm tài liệu. Sơ đồ chỉ vẽ trường hợp thành công; lỗi được ghi chú riêng.</p>
+  </header>
+
+  <div class="tabs" role="tablist" aria-label="Subject management actions">
+    <button class="tab" role="tab" id="tab-create" aria-controls="panel" data-flow="create">Create Subject</button>
+    <button class="tab" role="tab" id="tab-edit" aria-controls="panel" data-flow="edit">Edit Subject</button>
+    <button class="tab" role="tab" id="tab-delete" aria-controls="panel" data-flow="delete">Delete Subject</button>
+    <button class="tab" role="tab" id="tab-assign" aria-controls="panel" data-flow="assign">Assign Documents</button>
+  </div>
+
+  <section id="panel" role="tabpanel">
+    <div class="grid">
+      <div class="card"><h2>User Story</h2><p class="story" id="story"></p></div>
+      <div class="card"><h2>User Journey</h2><ol class="journey" id="journey"></ol></div>
+    </div>
+
+    <div class="card">
+      <div class="diagram-head">
+        <h2>Sequence Diagram</h2>
+        <div class="legend">
+        <span><svg width="44" height="10"><line x1="2" y1="5" x2="34" y2="5" stroke="#1f2937" stroke-width="1.5"/><path d="M34 0 L44 5 L34 10 Z" fill="#1f2937"/></svg>Request</span>
+        <span><svg width="44" height="10"><line x1="2" y1="5" x2="40" y2="5" stroke="#8a8f99" stroke-width="1.5" stroke-dasharray="5 4"/><path d="M33 0 L43 5 L33 10" fill="none" stroke="#8a8f99" stroke-width="1.5"/></svg>Response</span>
+        <button class="btn" id="export">Export SVG</button>
+      </div>
+      </div>
+      <div class="paper" id="diagram"></div>
+      <p class="diagram-note" id="note"></p>
+    </div>
+
+    <div class="notes">
+      <div class="card explain">
+        <h2>Giải thích</h2>
+        <div id="explain"></div>
+        <details>
+          <summary>Chi tiết kỹ thuật (tuỳ chọn)</summary>
+          <ul id="details"></ul>
+        </details>
+      </div>
+      <div class="card errors"><h2>Trường hợp lỗi (ngoài sơ đồ)</h2><ul id="errors"></ul></div>
+    </div>
+  </section>
+
+  <div class="card behaviour">
+    <h2>Môn học và tài liệu (áp dụng cho cả bốn thao tác)</h2>
+    <div class="cols">
+      <div>
+        <h3>Quan hệ dữ liệu</h3>
+        <ul>
+          <li>Môn học nằm trong bảng <code>subjects</code>: tên và màu, riêng cho từng User.</li>
+          <li>Mỗi tài liệu thuộc <b>tối đa một</b> môn học, qua cột <code>indexed_documents.subject_id</code>. Giá trị <code>NULL</code> nghĩa là Unassigned.</li>
+          <li>Không thao tác nào ở đây đụng tới file, vector, Chat, Summary, Flashcards, Quiz hay Planner của tài liệu, nên không gọi Qwen hay ChromaDB.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Liên quan nhưng không có tab riêng</h3>
+        <ul>
+          <li><b>Chọn môn khi upload:</b> hộp thoại <code>chooseUploadSubject()</code> gửi <code>subject_id</code> hoặc <code>new_subject_name</code> cùng file. Tài liệu đã thuộc một môn thì giữ nguyên môn đó.</li>
+          <li><b>Lọc theo môn</b> ở Home và Planner chỉ chạy ở frontend, không gọi API và không ảnh hưởng lịch học.</li>
+          <li><b>Tiến độ theo môn</b> ở Home được cộng từ tiến độ của từng tài liệu.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Nguồn: <code>frontend/js/subjects.js</code>, <code>frontend/js/api.js</code>, <code>backend/api/subjects.py</code>, <code>backend/subject_store.py</code>, <code>backend/api/documents.py</code>.
+  </footer>
+</main>
+
+<script>
+const PARTICIPANTS = [
+  { name: "User", sub: "End user", w: 130, fill: "#e3edfb", line: "#9db8e3", bar: "#c9dbf6" },
+  { name: "Frontend", sub: "subjects.js", w: 130, fill: "#e4f4ea", line: "#93c7a6", bar: "#c6e6d2" },
+  { name: "FastAPI Backend", sub: "api/subjects.py · subject_store.py", w: 220, fill: "#ece8fb", line: "#aea2dd", bar: "#d8d1f5" },
+  { name: "Storage", sub: "SQLite / PostgreSQL", w: 150, fill: "#fbf4d6", line: "#d9c474", bar: "#f4e8ad" }
+];
+const S = 0, F = 1, B = 2, D = 3;
+
+// Numbered steps. Above each arrow: `label` says what happens and `code` names the verified API/function.
+// A "quiet" row is the plain reply to the step above it: drawn, not numbered.
+const FLOWS = {
+  create: {
+    file: "subject-create-sequence.svg",
+    story: "As a user, I want to create a subject with a name and a color so that I can group my documents by course.",
+    journey: [
+      "Mở Home và tìm mục “My Subjects”.",
+      "Bấm “+ New subject”; hộp thoại “New subject” hiện ra.",
+      "Nhập tên môn học (ví dụ Biology) và chọn màu.",
+      "Bấm “Create”.",
+      "Môn học mới xuất hiện và được chọn làm bộ lọc; thông báo “Subject created” hiện ra."
+    ],
+    note: "<b>Lưu ý:</b> sau khi tạo xong, frontend gửi thêm một request thứ hai (bước 5) để đọc lại danh sách môn học, nên Backend có hai thanh hoạt động riêng.",
+    rows: [
+      { from: S, to: F, type: "req", label: "Enter Subject Details", code: "subjectDialog()" },
+      { from: F, to: B, type: "req", label: "Request New Subject", code: "POST /api/subjects" },
+      { from: B, to: D, type: "req", label: "Insert Subject", code: "create_subject()" },
+      { from: D, to: B, type: "res", label: "Subject record", quiet: true },
+      { from: B, to: F, type: "res", label: "Return Created Subject", code: "201 · SubjectResponse" },
+      { from: F, to: B, type: "req", label: "Refresh Subject List", code: "GET /api/subjects" },
+      { from: B, to: D, type: "req", label: "Read Subjects", code: "list_subjects()" },
+      { from: D, to: B, type: "res", label: "Subjects + document IDs", quiet: true },
+      { from: B, to: F, type: "res", label: "Return Subject List", code: "200 · subjects[]" },
+      { from: F, to: S, type: "res", label: "Show New Subject", code: "renderHomeSubjects()" }
+    ],
+    activations: [{ at: F, start: 0, end: 9 }, { at: B, start: 1, end: 4 }, { at: B, start: 5, end: 8 }],
+    explain: [
+      "<b>Bước 1–2 — yêu cầu.</b> User nhập tên và chọn màu; frontend gửi hai giá trị này tới FastAPI.",
+      "<b>Bước 3–4 — tạo môn học.</b> Backend chuẩn hoá tên, kiểm tra User chưa có môn cùng tên (không phân biệt hoa thường), rồi thêm một dòng vào bảng <code>subjects</code>.",
+      "<b>Bước 5–7 — đọc lại danh sách.</b> Frontend lấy lại toàn bộ môn học để mọi nơi hiển thị đều khớp với server.",
+      "<b>Bước 8 — hiển thị.</b> Môn mới được chọn làm bộ lọc ở Home và danh sách được vẽ lại."
+    ],
+    details: [
+      "Frontend: <code>createSubject()</code> → <code>subjectRequest()</code> → <code>refreshSubjects()</code> → <code>afterSubjectsChange()</code>.",
+      "Tên được cắt khoảng trắng thừa, tối đa 80 ký tự (<code>normalize_subject_name()</code>); cột <code>name_key</code> lưu tên chữ thường và có unique index theo User.",
+      "Màu phải có dạng <code>#rrggbb</code>. Hộp thoại luôn gửi màu; nếu API không nhận được màu, backend chọn màu kế tiếp trong <code>SUBJECT_COLORS</code>.",
+      "Mục “My Subjects” chỉ hiện khi User đã có tài liệu hoặc đã có môn học. Ô chọn môn của tài liệu cũng có lựa chọn “+ New subject…” (xem tab Assign Documents)."
+    ],
+    errors: [
+      "<b>409</b> — đã có môn cùng tên.",
+      "<b>400</b> — tên trống, tên quá dài hoặc màu không hợp lệ.",
+      "<b>422</b> — tên dài hơn 200 ký tự (kiểm tra ở tầng request).",
+      "Bấm Cancel hoặc Escape: không gửi request nào.",
+      "Khi lỗi: frontend hiện thông báo “Subject could not be created” hoặc nội dung lỗi từ backend."
+    ]
+  },
+  edit: {
+    file: "subject-edit-sequence.svg",
+    story: "As a user, I want to rename or recolor a subject so that my course list stays accurate and easy to recognize.",
+    journey: [
+      "Trong “My Subjects”, bấm “Edit” trên thẻ môn học.",
+      "Hộp thoại “Edit subject” hiện sẵn tên và màu hiện tại.",
+      "Đổi tên, đổi màu hoặc cả hai.",
+      "Bấm “Save”.",
+      "Thẻ môn học cập nhật và thông báo “Subject updated” hiện ra."
+    ],
+    note: "<b>Lưu ý:</b> sửa môn học chỉ đổi tên và màu. Các tài liệu vẫn thuộc môn đó, vì chúng liên kết bằng <code>subject_id</code> chứ không phải bằng tên.",
+    rows: [
+      { from: S, to: F, type: "req", label: "Edit Name or Color", code: "renameSubject()" },
+      { from: F, to: B, type: "req", label: "Request Update", code: "PATCH /api/subjects/{subject_id}" },
+      { from: B, to: D, type: "req", label: "Update Subject", code: "update_subject()" },
+      { from: D, to: B, type: "res", label: "Updated record", quiet: true },
+      { from: B, to: F, type: "res", label: "Return Updated Subject", code: "200 · SubjectResponse" },
+      { from: F, to: B, type: "req", label: "Refresh Subject List", code: "GET /api/subjects" },
+      { from: B, to: D, type: "req", label: "Read Subjects", code: "list_subjects()" },
+      { from: D, to: B, type: "res", label: "Subjects + document IDs", quiet: true },
+      { from: B, to: F, type: "res", label: "Return Subject List", code: "200 · subjects[]" },
+      { from: F, to: S, type: "res", label: "Show Updated Subject", code: "afterSubjectsChange()" }
+    ],
+    activations: [{ at: F, start: 0, end: 9 }, { at: B, start: 1, end: 4 }, { at: B, start: 5, end: 8 }],
+    explain: [
+      "<b>Bước 1–2 — yêu cầu.</b> <code>renameSubject()</code> mở hộp thoại; khi User bấm Save, frontend gửi tên và màu mới.",
+      "<b>Bước 3–4 — cập nhật.</b> Backend kiểm tra môn học thuộc về User và tên mới không trùng với môn khác, rồi cập nhật dòng trong bảng <code>subjects</code>.",
+      "<b>Bước 5–8 — hiển thị.</b> Frontend đọc lại danh sách môn học và vẽ lại các nơi đang hiển thị môn học."
+    ],
+    details: [
+      "Frontend: <code>renameSubject()</code> → <code>subjectDialog()</code> → <code>subjectRequest()</code> → <code>refreshSubjects()</code>.",
+      "Trường nào để <code>None</code> trong request thì giữ nguyên giá trị cũ; hộp thoại hiện luôn gửi cả tên và màu.",
+      "<code>afterSubjectsChange()</code> vẽ lại thẻ môn học và danh sách tài liệu ở Home, và vẽ lại Planner nếu đang mở."
+    ],
+    errors: [
+      "<b>404</b> — môn học không tồn tại hoặc thuộc User khác.",
+      "<b>409</b> — trùng tên với một môn khác của User.",
+      "<b>400</b> — tên trống, tên quá dài hoặc màu không hợp lệ.",
+      "Bấm Cancel hoặc Escape: không gửi request nào.",
+      "Khi lỗi: hộp thoại đã đóng; frontend hiện thông báo lỗi."
+    ]
+  },
+  delete: {
+    file: "subject-delete-sequence.svg",
+    story: "As a user, I want to delete a subject I no longer need without losing its documents so that I can tidy my course list safely.",
+    journey: [
+      "Trong “My Subjects”, bấm “Delete” trên thẻ môn học.",
+      "Hộp xác nhận báo rằng tài liệu vẫn được giữ và chuyển sang Unassigned.",
+      "Bấm OK để xác nhận.",
+      "Thẻ môn học biến mất; các tài liệu của nó nằm trong nhóm Unassigned.",
+      "Thông báo “Subject deleted; its documents are now Unassigned” hiện ra."
+    ],
+    note: "<b>Lưu ý:</b> xoá môn học <b>không xoá tài liệu</b>. Bước 3 chạy trong một transaction: bỏ liên kết tài liệu với môn học rồi mới xoá môn học.",
+    rows: [
+      { from: S, to: F, type: "req", label: "Confirm Delete", code: "deleteSubject()" },
+      { from: F, to: B, type: "req", label: "Request Delete", code: "DELETE /api/subjects/{subject_id}" },
+      { from: B, to: D, type: "req", label: "Unassign & Delete", code: "delete_subject()" },
+      { from: D, to: B, type: "res", label: "Unassigned document IDs", quiet: true },
+      { from: B, to: D, type: "req", label: "Read Remaining Subjects", code: "list_subjects()" },
+      { from: D, to: B, type: "res", label: "Subjects + document IDs", quiet: true },
+      { from: B, to: F, type: "res", label: "Return Delete Result", code: "200 · {deleted, subjects}" },
+      { from: F, to: S, type: "res", label: "Update Home View", code: "afterSubjectsChange()" }
+    ],
+    activations: [{ at: F, start: 0, end: 7 }, { at: B, start: 1, end: 6 }],
+    explain: [
+      "<b>Bước 1–2 — xác nhận và yêu cầu.</b> Frontend hỏi xác nhận bằng hộp thoại của trình duyệt; User đồng ý thì mới gửi request.",
+      "<b>Bước 3 — xoá.</b> Backend đặt <code>subject_id = NULL</code> cho các tài liệu của môn này, rồi xoá dòng trong bảng <code>subjects</code>.",
+      "<b>Bước 4–5 — trả kết quả.</b> Backend đọc lại các môn còn lại và trả chúng ngay trong response, nên frontend không cần gọi thêm request.",
+      "<b>Bước 6 — hiển thị.</b> Frontend cập nhật danh sách; nếu đang lọc theo môn vừa xoá thì chuyển về “All materials”."
+    ],
+    details: [
+      "Xác nhận: <code>window.confirm()</code> trong <code>deleteSubject()</code>; bấm Cancel thì không gửi request.",
+      "Transaction dùng <code>begin_immediate()</code> nên không xen kẽ với <code>assign_documents()</code>; không tài liệu nào còn trỏ tới môn đã xoá.",
+      "Response đầy đủ gồm <code>deleted</code>, <code>unassigned_document_ids</code> và <code>subjects</code>."
+    ],
+    errors: [
+      "<b>404</b> — môn học không tồn tại hoặc thuộc User khác.",
+      "Khi lỗi: nút Delete dùng lại được và frontend hiện thông báo lỗi."
+    ]
+  },
+  assign: {
+    file: "subject-assign-sequence.svg",
+    story: "As a user, I want to assign, move or unassign documents so that each document sits under the right subject.",
+    journey: [
+      "Ở danh sách tài liệu trên Home, dùng ô chọn môn của một tài liệu.",
+      "Hoặc tick nhiều tài liệu, chọn môn trong thanh “Move to” rồi bấm “Move”.",
+      "Chọn một môn, “Unassigned”, hoặc “+ New subject…” để tạo môn mới ngay lúc đó.",
+      "Tài liệu chuyển sang môn đã chọn và số tài liệu trên các thẻ môn được cập nhật.",
+      "Thông báo, ví dụ “2 documents moved to Biology”, hiện ra."
+    ],
+    note: "<b>Lưu ý:</b> cùng một API dùng cho cả gán, chuyển môn và bỏ gán (<code>subject_id: null</code>). Khung <b>opt</b>: chỉ chạy khi User chọn “+ New subject…”.",
+    rows: [
+      { from: S, to: F, type: "req", label: "Choose Target Subject", code: "resolveSubjectChoice()" },
+      { from: F, to: B, type: "req", label: "Create New Subject", code: "POST /api/subjects" },
+      { from: B, to: F, type: "res", label: "Created subject", quiet: true },
+      { from: F, to: B, type: "req", label: "Move Documents", code: "POST /api/subjects/assign" },
+      { from: B, to: D, type: "req", label: "Update Document Subjects", code: "assign_documents()" },
+      { from: D, to: B, type: "res", label: "Updated document IDs", quiet: true },
+      { from: B, to: D, type: "req", label: "Read Subjects", code: "list_subjects()" },
+      { from: D, to: B, type: "res", label: "Subjects + document IDs", quiet: true },
+      { from: B, to: F, type: "res", label: "Return Assign Result", code: "200 · {subject_id, document_ids, subjects}" },
+      { from: F, to: S, type: "res", label: "Refresh Home View", code: "afterSubjectsChange()" }
+    ],
+    frames: [
+      { label: "opt", note: "[New subject chosen]", left: F, right: B, inset: 22, pad: 10, start: 1, end: 2 }
+    ],
+    activations: [{ at: F, start: 0, end: 9 }, { at: B, start: 1, end: 2 }, { at: B, start: 3, end: 8 }],
+    explain: [
+      "<b>Bước 1–2 — chọn môn.</b> User chọn môn đích. Nếu chọn “+ New subject…”, hộp thoại hiện ra và môn mới được tạo trước, giống tab Create Subject.",
+      "<b>Bước 3 — yêu cầu.</b> Frontend gửi danh sách mã tài liệu và mã môn đích; một tài liệu hay nhiều tài liệu đều dùng cùng API.",
+      "<b>Bước 4 — cập nhật.</b> Backend kiểm tra môn đích và mọi tài liệu đều thuộc User, rồi ghi <code>subject_id</code> mới. Chỉ cần một mã sai là không có gì thay đổi.",
+      "<b>Bước 5–7 — hiển thị.</b> Backend trả luôn danh sách môn học mới trong response; frontend vẽ lại Home và báo kết quả."
+    ],
+    details: [
+      "Frontend: <code>homeDocumentSubjectControls()</code> (từng tài liệu) hoặc <code>renderHomeBulkBar()</code> (nhiều tài liệu) → <code>moveDocumentsToSubject()</code> → <code>subjectRequest()</code>.",
+      "Mỗi tài liệu chỉ có một môn, nên gán môn mới sẽ thay môn cũ. <code>updated_at</code> của tài liệu không đổi, nên thứ tự danh sách giữ nguyên.",
+      "Khi tạo môn mới ở bước 2, <code>createSubject()</code> còn gọi <code>refreshSubjects()</code> (<code>GET /api/subjects</code>); sơ đồ không vẽ request này.",
+      "Upload dùng cùng hàm với <code>only_unassigned=True</code> và <code>ignore_missing=True</code>, để việc upload lại không chuyển tài liệu sang môn khác."
+    ],
+    errors: [
+      "<b>404</b> — môn đích hoặc một tài liệu không tồn tại hay thuộc User khác; không có gì thay đổi.",
+      "<b>422</b> — danh sách tài liệu rỗng hoặc quá 500 mã.",
+      "Bấm Cancel ở hộp thoại môn mới: ô chọn quay về giá trị cũ, không chuyển tài liệu.",
+      "Khi lỗi: frontend hiện thông báo “Documents could not be moved” hoặc nội dung lỗi từ backend."
+    ]
+  }
+};
+
+const NS = "http://www.w3.org/2000/svg";
+const COL_X = [90, 390, 700, 1030];
+const WIDTH = 1130, TOP = 14, BOX_H = 46;
+// Vertical stack above an arrow, measured from the arrow up.
+const GAP = { code: 11, label: 15, row: 12, quiet: 26, step: 40, self: 20, selfBelow: 26, frameTop: 24 };
+const C = { ink: "#1d1f24", muted: "#5d6270", req: "#1f2937", res: "#8a8f99", life: "#b9b6ab", frame: "#9b9fa8" };
+const STYLE = {
+  "req": { color: C.req, dashed: false, head: "fill" },
+  "res": { color: C.res, dashed: true, head: "open" }
+};
+const MONO = "ui-monospace, Consolas, monospace";
+
+function el(tag, attrs, text) {
+  const node = document.createElementNS(NS, tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+// White halo behind labels so text stays readable where it crosses a lifeline.
+const HALO = { stroke: "#ffffff", "stroke-width": 4, "stroke-linejoin": "round", "paint-order": "stroke" };
+
+function marker(id, color, head) {
+  const node = el("marker", { id, viewBox: "0 0 10 10", refX: 10, refY: 5, markerWidth: 9, markerHeight: 9, markerUnits: "userSpaceOnUse", orient: "auto-start-reverse" });
+  node.append(head === "fill"
+    ? el("path", { d: "M0 0 L10 5 L0 10 Z", fill: color })
+    : el("path", { d: "M0 0 L10 5 L0 10", fill: "none", stroke: color, "stroke-width": 1.5 }));
+  return node;
+}
+
+function participantBox(svg, index, y) {
+  const p = PARTICIPANTS[index];
+  svg.append(el("rect", { x: COL_X[index] - p.w / 2, y, width: p.w, height: BOX_H, rx: 10, fill: p.fill, stroke: p.line, "stroke-width": 1.2 }));
+  svg.append(el("text", { x: COL_X[index], y: y + 20, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: C.ink }, p.name));
+  svg.append(el("text", { x: COL_X[index], y: y + 36, "text-anchor": "middle", "font-size": 11, fill: C.muted }, p.sub));
+}
+
+function badge(svg, x, y, number, color) {
+  svg.append(el("circle", { cx: x, cy: y, r: 9, fill: color }));
+  svg.append(el("text", { x, y: y + 3.5, "text-anchor": "middle", "font-size": 10.5, "font-weight": 700, fill: "#ffffff" }, String(number)));
+}
+
+// Height a row's label stack needs above its arrow.
+function stackHeight(row) {
+  return row.quiet ? GAP.quiet : row.self ? GAP.self : GAP.step;
+}
+
+function drawFrame(svg, frame, { top, bottom }) {
+  const left = COL_X[frame.left] - frame.inset, right = COL_X[frame.right] + frame.inset;
+  svg.append(el("rect", { x: left, y: top, width: right - left, height: bottom - top, fill: "none", stroke: C.frame, "stroke-width": 1 }));
+  svg.append(el("path", { d: `M${left} ${top} H${left + 42} V${top + 12} L${left + 35} ${top + 19} H${left} Z`, fill: "#f0f0ec", stroke: C.frame, "stroke-width": 1 }));
+  svg.append(el("text", { x: left + 8, y: top + 14, "font-size": 11, "font-weight": 700, fill: C.ink }, frame.label));
+  svg.append(el("text", { x: left + 50, y: top + 14, "font-size": 11, fill: C.muted, ...HALO }, frame.note));
+}
+
+function drawSelf(svg, row, y, number) {
+  const x = COL_X[row.from];
+  const style = STYLE[row.type];
+  svg.append(el("path", {
+    d: `M${x + 4} ${y} H${x + 44} V${y + 22} H${x + 5}`,
+    fill: "none", stroke: style.color, "stroke-width": 1.5, "marker-end": `url(#head-${row.type})`
+  }));
+  svg.append(el("text", { x: x + 56, y: y + 6, "font-size": 13.5, "font-weight": 600, fill: C.ink, ...HALO }, row.label));
+  svg.append(el("text", { x: x + 56, y: y + 21, "font-size": 10.5, fill: C.muted, "font-family": MONO, ...HALO }, row.code));
+  badge(svg, x + 18, y, number, style.color);
+}
+
+function renderDiagram({ rows, frames = [], activations, label }) {
+  // Frontend holds the whole exchange; Backend holds it from the request to its reply.
+  const bars = activations || [{ at: F, start: 0, end: rows.length - 1 }, { at: B, start: 1, end: rows.length - 2 }];
+  const boxes = new Map();
+  let y = TOP + BOX_H, after = 0;
+  const positions = rows.map((row, i) => {
+    y += (row.quiet ? 0 : GAP.row) + after;
+    after = 0;
+    frames.forEach((frame) => {
+      if (frame.start === i) { boxes.set(frame, { top: y }); y += GAP.frameTop; }
+    });
+    y += stackHeight(row);
+    if (row.self) after = GAP.selfBelow;
+    frames.forEach((frame) => {
+      if (frame.end === i) { boxes.get(frame).bottom = y + frame.pad; after = Math.max(after, frame.pad + 2); }
+    });
+    return y;
+  });
+  const bottomBox = y + 20;
+  const height = bottomBox + BOX_H + TOP;
+
+  const svg = el("svg", {
+    xmlns: NS, viewBox: `0 0 ${WIDTH} ${height}`, width: WIDTH, height,
+    "font-family": "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+    role: "img", "aria-label": label
+  });
+  const defs = el("defs", {});
+  for (const [key, style] of Object.entries(STYLE)) defs.append(marker(`head-${key}`, style.color, style.head));
+  svg.append(defs);
+  svg.append(el("rect", { x: 0, y: 0, width: WIDTH, height, fill: "#ffffff" }));
+
+  COL_X.forEach((x, i) => {
+    svg.append(el("line", { x1: x, y1: TOP + BOX_H, x2: x, y2: bottomBox, stroke: C.life, "stroke-width": 1, "stroke-dasharray": "4 4" }));
+    participantBox(svg, i, TOP);
+    participantBox(svg, i, bottomBox);
+  });
+
+  bars.forEach(({ at, start, end }) => {
+    svg.append(el("rect", {
+      x: COL_X[at] - 4, y: positions[start], width: 8, height: positions[end] - positions[start],
+      fill: PARTICIPANTS[at].bar, stroke: PARTICIPANTS[at].line, "stroke-width": 1
+    }));
+  });
+
+  frames.forEach((frame) => drawFrame(svg, frame, boxes.get(frame)));
+
+  let number = 0;
+  rows.forEach((row, i) => {
+    const y = positions[i];
+    if (row.self) {
+      number += 1;
+      drawSelf(svg, row, y, number);
+      return;
+    }
+    const style = STYLE[row.type];
+    const x1 = COL_X[row.from], x2 = COL_X[row.to];
+    const dir = Math.sign(x2 - x1);
+    const mid = (x1 + x2) / 2;
+    svg.append(el("line", {
+      x1: x1 + dir * 4, y1: y, x2: x2 - dir * 5, y2: y,
+      stroke: style.color, "stroke-width": 1.5,
+      ...(style.dashed ? { "stroke-dasharray": "6 4" } : {}),
+      "marker-end": `url(#head-${row.type})`
+    }));
+    if (row.quiet) {
+      svg.append(el("text", { x: mid, y: y - 7, "text-anchor": "middle", "font-size": 12, fill: C.muted, ...HALO }, row.label));
+      return;
+    }
+    number += 1;
+    svg.append(el("text", { x: mid, y: y - GAP.code, "text-anchor": "middle", "font-size": 10.5, fill: C.muted, "font-family": MONO, ...HALO }, row.code));
+    svg.append(el("text", { x: mid, y: y - GAP.code - GAP.label, "text-anchor": "middle", "font-size": 13.5, "font-weight": 600, fill: C.ink, ...HALO }, row.label));
+    badge(svg, x1 + dir * 18, y, number, style.color);
+  });
+  return svg;
+}
+
+const tabs = [...document.querySelectorAll(".tab")];
+let current = "create";
+
+function show(key, focus) {
+  current = key;
+  const flow = FLOWS[key];
+  tabs.forEach((tab) => {
+    const active = tab.dataset.flow === key;
+    tab.setAttribute("aria-selected", active);
+    tab.tabIndex = active ? 0 : -1;
+    if (active && focus) tab.focus();
+  });
+  document.getElementById("panel").setAttribute("aria-labelledby", `tab-${key}`);
+  document.getElementById("story").textContent = flow.story;
+  document.getElementById("journey").innerHTML = flow.journey.map((step) => `<li>${step}</li>`).join("");
+  document.getElementById("note").innerHTML = flow.note;
+  document.getElementById("explain").innerHTML = flow.explain.map((p) => `<p>${p}</p>`).join("");
+  document.getElementById("details").innerHTML = flow.details.map((d) => `<li>${d}</li>`).join("");
+  document.getElementById("errors").innerHTML = flow.errors.map((e) => `<li>${e}</li>`).join("");
+  document.getElementById("diagram").replaceChildren(renderDiagram({ rows: flow.rows, frames: flow.frames, activations: flow.activations, label: `Sequence diagram: ${flow.story}` }));
+  history.replaceState(null, "", `#${key}`);
+}
+
+tabs.forEach((tab, index) => {
+  tab.addEventListener("click", () => show(tab.dataset.flow));
+  tab.addEventListener("keydown", (event) => {
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
+    if (!step) return;
+    show(tabs[(index + step + tabs.length) % tabs.length].dataset.flow, true);
+  });
+});
+
+document.getElementById("export").addEventListener("click", () => {
+  const svg = document.querySelector("#diagram svg");
+  const source = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svg);
+  const url = URL.createObjectURL(new Blob([source], { type: "image/svg+xml;charset=utf-8" }));
+  const link = Object.assign(document.createElement("a"), { href: url, download: FLOWS[current].file });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+});
+
+const initial = location.hash.slice(1);
+show(FLOWS[initial] ? initial : "create");
+</script>
+</body>
+</html>
