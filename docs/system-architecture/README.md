@@ -2,8 +2,8 @@
 
 This folder holds two high-level diagrams of the AI Tutor's system architecture. They were traced
 from the current source code and deployment scripts. For request-level detail (routes, services,
-database calls and LLM calls), see the 13 diagrams in
-[`../sequence-diagrams/`](../sequence-diagrams/README.md).
+database calls and LLM calls), see the 27 diagrams in
+[`../simple-flows/`](../simple-flows/).
 
 | Diagram | Source | Export | Purpose |
 | --- | --- | --- | --- |

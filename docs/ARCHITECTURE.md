@@ -7,8 +7,8 @@ code thay đổi, hãy cập nhật tài liệu này cùng lúc.
 
 - [`docs/system-architecture/`](system-architecture/README.md): sơ đồ kiến trúc phân tầng và
   3 cấu hình triển khai (local, Kaggle SQLite mode, Kaggle durable mode).
-- [`docs/sequence-diagrams/`](sequence-diagrams/README.md): 13 sơ đồ tuần tự cho từng luồng
-  nghiệp vụ (auth, upload/index, chat RAG, summary, flashcards, quiz, subjects, planner, phiên học).
+- [`docs/simple-flows/`](simple-flows/): 12 trang HTML gồm 27 sơ đồ tuần tự cho từng luồng
+  nghiệp vụ (auth, upload/index, chat RAG, summary, flashcards, quiz, subjects, planner, phiên học, tiến độ).
 
 ## 1. Cấu trúc thư mục
 
