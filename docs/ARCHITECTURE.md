@@ -5,8 +5,10 @@ code thay đổi, hãy cập nhật tài liệu này cùng lúc.
 
 **Sơ đồ đi kèm** (không lặp lại nội dung ở đây):
 
-- [`docs/system-architecture/`](system-architecture/README.md): sơ đồ kiến trúc phân tầng và
-  3 cấu hình triển khai (local, Kaggle SQLite mode, Kaggle durable mode).
+- [`docs/simple-flows/system-architecture/`](simple-flows/system-architecture/index.html): sơ đồ
+  kiến trúc hệ thống chính, dùng cho luận văn.
+- [`docs/system-architecture/`](system-architecture/README.md): thành phần runtime và 3 cấu hình
+  triển khai (local, Kaggle SQLite mode, Kaggle durable mode).
 - [`docs/simple-flows/`](simple-flows/): 12 trang HTML gồm 27 sơ đồ tuần tự cho từng luồng
   nghiệp vụ (auth, upload/index, chat RAG, summary, flashcards, quiz, subjects, planner, phiên học, tiến độ).
 

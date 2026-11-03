@@ -1,18 +1,17 @@
-# AI Tutor – System Architecture
+# AI Tutor – Runtime and Deployment
 
-This folder holds two high-level diagrams of the AI Tutor's system architecture. They were traced
-from the current source code and deployment scripts. For request-level detail (routes, services,
-database calls and LLM calls), see the 27 diagrams in
-[`../simple-flows/`](../simple-flows/).
+**The system architecture diagram for the thesis is
+[`../simple-flows/system-architecture/index.html`](../simple-flows/system-architecture/index.html).**
+
+This folder keeps the runtime and deployment details that diagram leaves out, traced from the
+current source code and deployment scripts. For request-level detail (routes, services, database
+calls and LLM calls), see the 27 diagrams in [`../simple-flows/`](../simple-flows/).
 
 | Diagram | Source | Export | Purpose |
 | --- | --- | --- | --- |
-| System architecture | [`system-architecture.mmd`](system-architecture.mmd) | [svg](exports/system-architecture.svg) | Layers, components and connections. Use this one in the thesis. |
 | Deployment profiles | [`deployment-profiles.mmd`](deployment-profiles.mmd) | [svg](exports/deployment-profiles.svg) | How the three supported configurations differ at runtime |
 
-Dashed borders and dashed arrows mark optional components and connections.
-
-## 1. System architecture (layers)
+## 1. Runtime components (layers)
 
 | Layer | Component | Facts from the code |
 | --- | --- | --- |
@@ -28,8 +27,7 @@ Dashed borders and dashed arrows mark optional components and connections.
 | | Private Kaggle Dataset | Snapshots of `data/` and `vectorstore/`: restored at notebook start and saved about every 10 min (`deployment/kaggle_persist.py`). Only Kaggle + profile A needs them to keep user data. |
 | | Hugging Face / Ollama library | Model downloads (`ollama pull`) at startup or on first use of a lazy model. |
 
-The diagram stays high-level on purpose. Each service-layer box stands for many modules; the
-sequence diagrams show which modules, tables and models each use case touches.
+The sequence diagrams show which modules, tables and models each use case touches.
 
 ## 2. Deployment profiles
 
@@ -58,19 +56,16 @@ through the Worker.
 
 ## Rendering
 
-Both diagrams render with Mermaid CLI 11.4.2 without errors. Their sizes are about 1790 × 1580 px
-(architecture) and 1855 × 1010 px (profiles). Run this from the repository root:
+The deployment profiles diagram renders with Mermaid CLI 11.4.2 at about 1855 × 1010 px. Run this
+from the repository root:
 
 ```bash
-for f in system-architecture deployment-profiles; do
-  npx -p @mermaid-js/mermaid-cli@11.4.2 mmdc -i docs/system-architecture/$f.mmd \
-    -o docs/system-architecture/exports/$f.svg -b white
-done
+npx -p @mermaid-js/mermaid-cli@11.4.2 mmdc -i docs/system-architecture/deployment-profiles.mmd \
+  -o docs/system-architecture/exports/deployment-profiles.svg -b white
 ```
 
-Both use the same typography as the sequence diagrams: the `neutral` theme and Times New Roman at
-16 px. The architecture diagram fits a portrait page at full text width. The profiles diagram is
-wide and short, so it suits a landscape page or a slide.
+It uses the `neutral` theme and Times New Roman at 16 px. The diagram is wide and short, so it suits
+a landscape page or a slide.
 
 ## Notes
 
@@ -85,4 +80,4 @@ wide and short, so it suits a landscape page or a slide.
   `tests/test_kaggle_startup_perf.py`, which call it.
 - **Optional local storage for originals.** In durable mode, `AI_TUTOR_DOCUMENT_STORAGE=local`
   keeps original uploads on local disk instead of Supabase Storage (`backend/document_storage.py`).
-  The diagram shows the default, Supabase Storage.
+  The deployment profiles diagram shows the default, Supabase Storage.

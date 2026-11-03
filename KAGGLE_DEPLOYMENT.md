@@ -1,6 +1,7 @@
 # Triển khai AI Tutor trên Kaggle
 
-Sơ đồ kiến trúc và các cấu hình triển khai: [`docs/system-architecture/`](docs/system-architecture/README.md).
+Sơ đồ kiến trúc hệ thống: [`docs/simple-flows/system-architecture/`](docs/simple-flows/system-architecture/index.html).
+Các cấu hình triển khai: [`docs/system-architecture/`](docs/system-architecture/README.md).
 Cấu trúc mã nguồn: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Có hai notebook. Cả hai đều gọi cùng script `deployment/start_kaggle.sh`:
