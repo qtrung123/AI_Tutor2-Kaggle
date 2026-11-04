@@ -11,3 +11,5 @@ os.environ.setdefault("AI_TUTOR_DATA_DIR", str(_ROOT / "data"))
 os.environ.setdefault("AI_TUTOR_DATABASE_PATH", str(_ROOT / "data" / "conversations.db"))
 os.environ.setdefault("AI_TUTOR_VECTORSTORE_DIR", str(_ROOT / "vectorstore"))
 os.environ.setdefault("AI_TUTOR_INDEXED_FILES_PATH", str(_ROOT / "indexed_files.json"))
+# No background figure processing in tests, unless a test runs it directly.
+os.environ.setdefault("AI_TUTOR_VISUAL_ENRICHMENT", "0")

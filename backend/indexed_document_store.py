@@ -50,6 +50,8 @@ def _initialize_schema(connection: db.Connection) -> None:
     # Optional subject/course grouping (backend/subject_store.py); NULL = Unassigned, so every
     # legacy row stays valid. Re-indexing never touches it: the upsert below leaves it alone.
     db.add_column(connection, "indexed_documents", "subject_id", "TEXT")
+    # Progress of figure indexing (backend/visual_enrichment.py); NULL = never processed.
+    db.add_column(connection, "indexed_documents", "visual_status", "TEXT")
     # The pre-authentication indexed_files.json registry is a local file: import it into the local
     # SQLite database only. The shared PostgreSQL database never ingests stale local state.
     if connection.backend != db.SQLITE:
@@ -107,7 +109,7 @@ def _row_to_document(row) -> dict:
         "topic_schema_version": row["topic_schema_version"],
         "topics": json.loads(row["topics_json"] or "[]"),
         "object_path": row["object_path"], "object_bucket": row["object_bucket"],
-        "subject_id": row["subject_id"],
+        "subject_id": row["subject_id"], "visual_status": row["visual_status"],
     }
 
 
@@ -139,25 +141,51 @@ def upsert_indexed_document(owner_id: str, document_id: str, info: dict) -> dict
             """
             INSERT INTO indexed_documents (
                 owner_id, document_id, display_name, file_hash, chunk_count, storage_path,
-                topic_schema_version, topics_json, created_at, updated_at, object_path, object_bucket
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                topic_schema_version, topics_json, created_at, updated_at, object_path, object_bucket, visual_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(owner_id, document_id) DO UPDATE SET
                 display_name=excluded.display_name, file_hash=excluded.file_hash,
                 chunk_count=excluded.chunk_count, storage_path=excluded.storage_path,
                 topic_schema_version=excluded.topic_schema_version,
                 topics_json=excluded.topics_json, updated_at=excluded.updated_at,
                 object_path=COALESCE(excluded.object_path, indexed_documents.object_path),
-                object_bucket=COALESCE(excluded.object_bucket, indexed_documents.object_bucket)
+                object_bucket=COALESCE(excluded.object_bucket, indexed_documents.object_bucket),
+                visual_status=COALESCE(excluded.visual_status, indexed_documents.visual_status)
             """,
             (
                 owner_id, document_id, info.get("display_name") or document_id,
                 str(info.get("hash", "")), int(info.get("chunks", 0)), str(info.get("path", "")),
                 int(info.get("topic_schema_version", 0)),
                 json.dumps(info.get("topics") or [], ensure_ascii=False), now, now,
-                info.get("object_path") or None, info.get("object_bucket") or None,
+                info.get("object_path") or None, info.get("object_bucket") or None, info.get("visual_status"),
             ),
         )
     return get_indexed_document(owner_id, document_id)
+
+
+def list_documents_by_visual_status(status: str | None, owner_id: str | None = None) -> list[dict]:
+    """Documents with this figure-indexing status (None = never processed), of every owner by default."""
+    initialize_indexed_document_store()
+    clauses = ["visual_status IS NULL" if status is None else "visual_status = ?"]
+    params = [] if status is None else [status]
+    if owner_id:
+        clauses.append("owner_id = ?")
+        params.append(owner_id)
+    with _connect(autocommit=True) as connection:
+        rows = connection.execute(
+            f"SELECT * FROM indexed_documents WHERE {' AND '.join(clauses)} ORDER BY owner_id, document_id", params,
+        ).fetchall()
+    return [_row_to_document(row) for row in rows]
+
+
+def set_visual_status(owner_id: str, document_id: str, file_hash: str, status: str) -> None:
+    """Update the status, unless the document's content has been replaced in the meantime."""
+    initialize_indexed_document_store()
+    with _connect() as connection:
+        connection.execute(
+            "UPDATE indexed_documents SET visual_status = ? WHERE owner_id = ? AND document_id = ? AND file_hash = ?",
+            (status, owner_id, document_id, file_hash),
+        )
 
 
 def is_object_referenced(owner_id: str, object_path: str) -> bool:

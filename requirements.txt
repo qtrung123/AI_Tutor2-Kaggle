@@ -8,6 +8,10 @@ langchain-ollama
 langchain-chroma
 chromadb
 pypdf>=4
+pypdfium2>=5,<6
+rapidocr>=3.10,<4
+onnxruntime
+pillow
 python-dotenv
 argon2-cffi
 cryptography

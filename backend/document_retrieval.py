@@ -6,7 +6,7 @@ from pathlib import Path
 from backend import vector_store
 from backend.assessment_planner import resolve_topic_evidence
 from backend.auth_store import LEGACY_USER_ID
-from backend.ingest import migrate_legacy_vector_ownership
+from backend.ingest import VISUAL_CONTENT_TYPES, migrate_legacy_vector_ownership
 
 
 def _load_vectorstore():
@@ -35,6 +35,9 @@ def _result_to_chunks(result: dict, document_id: str, filter_source: bool) -> li
     for fallback_index, (raw_id, content, metadata) in enumerate(zip(ids, documents, metadatas)):
         metadata = metadata or {}
         if filter_source and not _source_matches(metadata.get("source", ""), document_id):
+            continue
+        # Figure chunks serve chat retrieval only; these readers work from the document's own text.
+        if metadata.get("content_type") in VISUAL_CONTENT_TYPES:
             continue
 
         chunk_index = _chunk_index_from_id(raw_id, fallback_index)

@@ -5,7 +5,6 @@ Deleting a document also clears every feature's data for it (quiz, summary, flas
 and chat sources) through each feature's own store.
 """
 import shutil
-import threading
 from pathlib import Path
 from typing import BinaryIO, Optional
 
@@ -19,7 +18,7 @@ from backend.api.deps import require_current_user
 from backend.conversation_store import remove_source_from_conversations
 from backend.flashcard_store import delete_document_flashcards
 from backend.indexed_document_store import get_indexed_document
-from backend.ingest import delete_indexed_file, index_files
+from backend.ingest import INDEXING_LOCK, delete_indexed_file, index_files
 from backend.quiz_common import list_indexed_documents
 from backend.quiz_store import delete_document_quiz_data
 from backend.rag_service import list_uploaded_sources
@@ -136,7 +135,7 @@ def source_content(document_id: str, current_user: dict = Depends(require_curren
 # holds a threadpool thread, never the event loop. This is a per-process lock: it relies on the
 # single Uvicorn worker that deployment/start_kaggle.sh starts; several workers would need a
 # cross-process lock (e.g. a PostgreSQL advisory lock) instead.
-_INDEXING_LOCK = threading.Lock()
+_INDEXING_LOCK = INDEXING_LOCK
 
 
 def _store_and_index_uploads(owner_id: str, uploads: list[tuple[str, BinaryIO]], subject: Optional[dict] = None):

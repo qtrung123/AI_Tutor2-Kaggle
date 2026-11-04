@@ -1,4 +1,6 @@
 import os
+import threading
+from contextlib import asynccontextmanager
 from typing import Literal, Optional
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -47,8 +49,24 @@ class ServiceHealthResponse(BaseModel):
     error: Optional[str] = None
 
 
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Finish figure indexing that a restart interrupted, without delaying the server's start.
+    threading.Thread(target=_resume_visual_enrichment, name="visual-resume", daemon=True).start()
+    yield
+
+
+def _resume_visual_enrichment() -> None:
+    try:
+        from backend import visual_enrichment
+
+        visual_enrichment.resume_pending()
+    except Exception as error:
+        print(f"[visual] could not resume pending documents ({type(error).__name__})")
+
+
 # FastAPI application object. Uvicorn imports this as backend.main:app.
-app = FastAPI(title="Tutoring Backend")
+app = FastAPI(title="Tutoring Backend", lifespan=_lifespan)
 print(backend_description())
 
 # CORS allows the frontend dev server on port 3000 to call the backend on 8000.

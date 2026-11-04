@@ -1,5 +1,6 @@
 import hashlib
 import re
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import List
@@ -14,7 +15,7 @@ from backend.topic_extractor import (
     _HIGH_CONFIDENCE as HIGH_STRUCTURE_CONFIDENCE,
     ollama_heading_refiner,
 )
-from backend import document_storage, perf_timing, vector_store
+from backend import document_storage, pdf_ocr, perf_timing, vector_store, visual_cache_store
 from backend.assessment_planner import resolve_topic_evidence
 from backend.auth_store import LEGACY_USER_ID
 from backend.indexed_document_store import (
@@ -32,6 +33,22 @@ from config import (
     CHUNK_SIZE,
     CHUNK_OVERLAP,
 )
+
+
+# One indexing run, document delete or figure-chunk write at a time, across all users (see
+# backend/api/documents.py). A per-process lock: it relies on the single Uvicorn worker.
+INDEXING_LOCK = threading.Lock()
+
+# Chunks added after the text chunks, by backend/visual_enrichment.py. Only chat retrieval reads them.
+CONTENT_TYPE_OCR = "image_text"
+CONTENT_TYPE_FIGURE = "image_description"
+VISUAL_CONTENT_TYPES = frozenset({CONTENT_TYPE_OCR, CONTENT_TYPE_FIGURE})
+# The one-shot `python -m backend.ingest` exits right away; the API server picks up its documents.
+_schedule_visuals = True
+
+
+def is_visual_vector_id(vector_id: str) -> bool:
+    return "_visual_" in str(vector_id)
 
 
 def calculate_file_hash(file_path: Path) -> str:
@@ -201,10 +218,12 @@ def has_source_vectors(vectorstore, owner_id: str, document_id: str) -> bool:
     return bool(result.get("ids"))
 
 
-def load_document_chunks(file_path: Path, owner_id: str, file_hash: str):
+def load_document_chunks(file_path: Path, owner_id: str, file_hash: str, use_ocr: bool = True):
     """Load pages and split them into chunks carrying the document's ownership metadata."""
     with perf_timing.stage("parse"):
         documents = clean_documents(load_single_file(file_path))
+    if use_ocr and file_path.suffix.lower() == ".pdf":
+        documents = pdf_ocr.recover_scanned_pages(file_path, documents, owner_id, file_hash)
     for doc in documents:
         doc.metadata["source"] = file_path.name
         doc.metadata["document_id"] = file_path.name
@@ -237,13 +256,15 @@ def refresh_topic_metadata(vectorstore, file_path: Path, owner_id: str, info: di
     if not file_hash or calculate_file_hash(file_path) != file_hash:
         return None
     document_id = str(info.get("document_id") or file_path.name)
-    documents, chunks = load_document_chunks(file_path, owner_id, file_hash)
+    # A document with no visual_status was indexed before OCR existed: its stored chunks are the text layer.
+    documents, chunks = load_document_chunks(file_path, owner_id, file_hash, use_ocr=bool(info.get("visual_status")))
     if not chunks or len(chunks) != int(info.get("chunks") or 0):
         return None
     provenance_ids = [f"{file_hash}_{i}" for i in range(len(chunks))]
     vector_ids = owner_vector_ids(owner_id, provenance_ids)
     document_vectors = vectorstore.get(where={"$and": [{"owner_id": owner_id}, {"document_id": document_id}]}, include=[])
-    if sorted(document_vectors.get("ids") or []) != sorted(vector_ids):
+    text_vector_ids = [item for item in document_vectors.get("ids") or [] if not is_visual_vector_id(item)]
+    if sorted(text_vector_ids) != sorted(vector_ids):
         return None
     stored = vectorstore.get(ids=vector_ids, include=["documents"])
     stored_text = dict(zip(stored.get("ids") or [], stored.get("documents") or []))
@@ -419,6 +440,9 @@ def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
                     "topic_schema_version": TOPIC_SCHEMA_VERSION,
                     "topics": topics,
                 }
+                is_pdf = file_path.suffix.lower() == ".pdf"
+                if is_pdf:
+                    info["visual_status"] = "pending"
                 if stored_path:
                     info.update(object_path=stored_path, object_bucket=document_storage.bucket_name())
                 indexed_files[file_key] = info
@@ -430,6 +454,14 @@ def index_files(file_paths: List[Path], owner_id: str = LEGACY_USER_ID):
             # Replaced content: this document no longer references its previous original.
             if previous and previous.get("object_path") and previous["object_path"] != stored_path:
                 _discard_unreferenced_object(owner_id, previous["object_path"])
+
+            if is_pdf and _schedule_visuals:
+                try:
+                    from backend import visual_enrichment   # it imports this module
+
+                    visual_enrichment.schedule(owner_id, file_key)
+                except Exception as error:   # the text is indexed; a restart resumes the figures
+                    print(f"[visual] could not schedule figure indexing ({type(error).__name__})")
 
             total_new_files += 1
             total_chunks += len(chunks)
@@ -489,6 +521,11 @@ def delete_indexed_file(file_name: str, owner_id: str = LEGACY_USER_ID) -> dict:
             resolved_source.unlink()
 
     delete_indexed_document(owner_id, file_key)
+    if file_hash:
+        try:
+            visual_cache_store.delete_for_file(owner_id, file_hash)
+        except Exception as error:   # best effort: the document itself is already gone
+            print(f"[visual] could not clear cached results ({type(error).__name__})")
     # The registry row goes first, so a failed object delete never leaves a dangling reference.
     if info.get("object_path"):
         _discard_unreferenced_object(owner_id, info["object_path"])
@@ -511,6 +548,8 @@ def index_all_data_files(owner_id: str = LEGACY_USER_ID):
 
 
 def main():
+    global _schedule_visuals
+    _schedule_visuals = False
     print("Starting Incremental Indexing Pipeline...")
 
     topic_refresh = refresh_stale_topic_documents()

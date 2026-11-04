@@ -1,0 +1,16 @@
+You are indexing a figure from course material so students can find it by searching.
+
+Describe only what is visible in the image, in plain English:
+- what kind of figure it is (diagram, flowchart, chart, table, code screenshot, photo);
+- its components and labels, using their exact names;
+- how they connect or the order of the steps;
+- for a chart: the axes, the series, and the values or trends that can be read.
+
+Do not guess values or add outside knowledge. Do not write an introduction. Use at most 150 words.
+If the image is only a logo, a decoration or a blank area, answer exactly: NONE
+
+Text on the same page, for context only:
+{page_text}
+
+Text read from the image, which may contain errors:
+{ocr_text}

@@ -137,6 +137,34 @@ SUPABASE_STORAGE_BUCKET = os.getenv("AI_TUTOR_STORAGE_BUCKET", "ai-tutor-documen
 # Ollama's standard environment variable. LangChain also honors this value.
 OLLAMA_BASE_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
 
+# Scanned pages and figures in PDFs (backend/pdf_ocr.py, backend/visual_enrichment.py). Pages with a
+# normal text layer never reach any of this.
+def _env_flag(name: str, default: str) -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+PDF_OCR_ENABLED = _env_flag("AI_TUTOR_PDF_OCR", "true")
+PDF_OCR_DPI = int(os.getenv("AI_TUTOR_PDF_OCR_DPI", "150"))
+PDF_OCR_MIN_PAGE_CHARS = int(os.getenv("AI_TUTOR_PDF_OCR_MIN_PAGE_CHARS", "50"))   # fewer = maybe a scan
+PDF_OCR_MIN_SCORE = float(os.getenv("AI_TUTOR_PDF_OCR_MIN_SCORE", "0.5"))
+# Time an upload may spend on OCR; the remaining scanned pages are read in the background.
+PDF_OCR_SYNC_SECONDS = float(os.getenv("AI_TUTOR_PDF_OCR_SYNC_SECONDS", "45"))
+PDF_OCR_THREADS = int(os.getenv("AI_TUTOR_PDF_OCR_THREADS", str(min(4, os.cpu_count() or 1))))
+VISUAL_ENRICHMENT_ENABLED = _env_flag("AI_TUTOR_VISUAL_ENRICHMENT", "true")
+# Vision AI for figures, optional. auto (default): only when an NVIDIA GPU is found, because one
+# image takes minutes on a CPU. on: always, e.g. for a remote Ollama. off: never. Without it, figures
+# are still indexed through OCR. The model is downloaded only with AI_TUTOR_VISION_AUTO_PULL=1.
+VISION_MODE = os.getenv("AI_TUTOR_VISION", "auto").strip().lower()
+VISION_MODEL = os.getenv("AI_TUTOR_VISION_MODEL", "granite3.2-vision")
+VISION_AUTO_PULL = _env_flag("AI_TUTOR_VISION_AUTO_PULL", "false")
+VISION_MAX_IMAGES_PER_DOCUMENT = int(os.getenv("AI_TUTOR_VISION_MAX_IMAGES_PER_DOCUMENT", "40"))
+VISION_MAX_IMAGE_SIDE = int(os.getenv("AI_TUTOR_VISION_MAX_IMAGE_SIDE", "768"))
+# An image alone takes thousands of tokens of the context with Granite Vision (over 5000 at 768-1024 px).
+VISION_NUM_CTX = int(os.getenv("AI_TUTOR_VISION_NUM_CTX", "8192"))
+VISION_NUM_PREDICT = int(os.getenv("AI_TUTOR_VISION_NUM_PREDICT", "300"))
+VISION_TIMEOUT_SECONDS = float(os.getenv("AI_TUTOR_VISION_TIMEOUT_SECONDS", "600"))
+VISION_KEEP_ALIVE = os.getenv("AI_TUTOR_VISION_KEEP_ALIVE", "2m")
+
 # Chunk config
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
