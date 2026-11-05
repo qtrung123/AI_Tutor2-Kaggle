@@ -155,12 +155,13 @@ VISUAL_ENRICHMENT_ENABLED = _env_flag("AI_TUTOR_VISUAL_ENRICHMENT", "true")
 # image takes minutes on a CPU. on: always, e.g. for a remote Ollama. off: never. Without it, figures
 # are still indexed through OCR. The model is downloaded only with AI_TUTOR_VISION_AUTO_PULL=1.
 VISION_MODE = os.getenv("AI_TUTOR_VISION", "auto").strip().lower()
-VISION_MODEL = os.getenv("AI_TUTOR_VISION_MODEL", "granite3.2-vision:2b")
+VISION_MODEL = os.getenv("AI_TUTOR_VISION_MODEL", "qwen2.5vl:3b")
 VISION_AUTO_PULL = _env_flag("AI_TUTOR_VISION_AUTO_PULL", "false")
 VISION_MAX_IMAGES_PER_DOCUMENT = int(os.getenv("AI_TUTOR_VISION_MAX_IMAGES_PER_DOCUMENT", "40"))
 VISION_MAX_IMAGE_SIDE = int(os.getenv("AI_TUTOR_VISION_MAX_IMAGE_SIDE", "768"))
-# An image alone takes thousands of tokens of the context with Granite Vision (over 5000 at 768-1024 px).
-VISION_NUM_CTX = int(os.getenv("AI_TUTOR_VISION_NUM_CTX", "8192"))
+# Qwen2.5-VL: one token per 28x28 px, so at most about 750 for an image of 768 px. With the prompt, page
+# context and answer, one request fits well inside this window, and a smaller one saves GPU memory.
+VISION_NUM_CTX = int(os.getenv("AI_TUTOR_VISION_NUM_CTX", "4096"))
 VISION_NUM_PREDICT = int(os.getenv("AI_TUTOR_VISION_NUM_PREDICT", "300"))
 VISION_TIMEOUT_SECONDS = float(os.getenv("AI_TUTOR_VISION_TIMEOUT_SECONDS", "600"))
 VISION_KEEP_ALIVE = os.getenv("AI_TUTOR_VISION_KEEP_ALIVE", "2m")

@@ -96,7 +96,7 @@ Script lưu PID và dừng các process của lần chạy trước trước khi
 | `PRELOAD_ALL_MODELS` | `False` | `True` chỉ dùng khi benchmark (kéo sẵn mọi model trong danh sách) |
 | `OLLAMA_EMBEDDING_MODEL` | `bge-m3` | Phải giống nhau giữa local và Kaggle |
 | `AI_TUTOR_VISION` | `auto` | Vision AI cho hình trong PDF: `auto` chỉ chạy khi có GPU, `off` chỉ dùng OCR, `on` luôn chạy. Với `LLM_BACKEND=vllm`, `auto` được coi là `off` |
-| `AI_TUTOR_VISION_MODEL` | `granite3.2-vision:2b` | `start_kaggle.sh` kéo model này (khoảng 2,4 GB) trước khi khởi động backend. Kéo lỗi thì chỉ cảnh báo và dùng OCR. Log: `ollama-pull-vision.log` |
+| `AI_TUTOR_VISION_MODEL` | `qwen2.5vl:3b` | `start_kaggle.sh` kéo model này (khoảng 3,2 GB) trước khi khởi động backend. Kéo lỗi thì chỉ cảnh báo và dùng OCR. Log: `ollama-pull-vision.log` |
 | `LLM_BACKEND` | `ollama` | Notebook này không chạy vLLM. `vllm` là tuỳ chọn của `start_kaggle.sh` (`deployment/start_vllm.sh`, :8001) |
 
 Các biến runtime khác do notebook hoặc script đặt: `OLLAMA_HOST=http://127.0.0.1:11434`,

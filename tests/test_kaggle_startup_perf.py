@@ -200,7 +200,7 @@ class VisionModelSetupTests(unittest.TestCase):
                 f'{functions}\nprepare_vision_model\necho reached-the-backend\n', newline="\n")
             env = {**os.environ, "PATH": f"{root}{os.pathsep}/usr/bin{os.pathsep}/bin{os.pathsep}{os.environ['PATH']}" if gpu else f"{root}{os.pathsep}/usr/bin{os.pathsep}/bin",
                    "FAKE_DIR": str(root), "PULL_EXIT": str(pull_exit), "LOG_DIR": str(root),
-                   "AI_TUTOR_VISION": mode, "AI_TUTOR_VISION_MODEL": "granite3.2-vision:2b"}
+                   "AI_TUTOR_VISION": mode, "AI_TUTOR_VISION_MODEL": "qwen2.5vl:3b"}
             for tool in (root / "ollama", root / "nvidia-smi"):
                 if tool.exists():
                     tool.chmod(0o755)
@@ -211,11 +211,11 @@ class VisionModelSetupTests(unittest.TestCase):
     def test_gpu_pulls_the_configured_model_once(self):
         result, pulls = self.run_setup("auto")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(pulls, ["pull granite3.2-vision:2b"])
+        self.assertEqual(pulls, ["pull qwen2.5vl:3b"])
         self.assertIn("reached-the-backend", result.stdout)
 
     def test_a_model_already_there_is_not_pulled_again(self):
-        result, pulls = self.run_setup("auto", installed="granite3.2-vision:2b")
+        result, pulls = self.run_setup("auto", installed="qwen2.5vl:3b")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(pulls, [])
 
@@ -251,15 +251,15 @@ class VisionStartupConfigTests(unittest.TestCase):
     def test_notebook_passes_the_settings_to_the_services(self):
         [config] = [c for c in NOTEBOOK["cells"] if c.get("id") == "9f872e66"]
         source = "".join(config["source"])
-        self.assertIn('AI_TUTOR_VISION_MODEL = "granite3.2-vision:2b"', source)
+        self.assertIn('AI_TUTOR_VISION_MODEL = "qwen2.5vl:3b"', source)
         self.assertIn('"AI_TUTOR_VISION": AI_TUTOR_VISION', source)
         self.assertIn('"AI_TUTOR_VISION_MODEL": AI_TUTOR_VISION_MODEL', source)
 
     def test_backend_default_matches_the_startup_script(self):
         from config import VISION_MODEL
         if not os.environ.get("AI_TUTOR_VISION_MODEL"):
-            self.assertEqual(VISION_MODEL, "granite3.2-vision:2b")
-        self.assertIn("granite3.2-vision:2b", STARTUP)
+            self.assertEqual(VISION_MODEL, "qwen2.5vl:3b")
+        self.assertIn("qwen2.5vl:3b", STARTUP)
 
 
 class StartupScriptOrderTests(unittest.TestCase):

@@ -62,7 +62,7 @@ export AI_TUTOR_GENERATION_KEEP_ALIVE="${AI_TUTOR_GENERATION_KEEP_ALIVE:-30m}"
 export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-$AI_TUTOR_GENERATION_KEEP_ALIVE}"
 # Vision AI for PDF figures (backend/vision_service.py): auto = only with a GPU, on, or off. It is
 # optional: without it, figures are still indexed through OCR. The backend sends one figure at a time
-# and sets a short keep_alive (AI_TUTOR_VISION_KEEP_ALIVE), so on a T4 the ~2.4 GB model only sits next
+# and sets a short keep_alive (AI_TUTOR_VISION_KEEP_ALIVE), so on a T4 the ~3.2 GB model only sits next
 # to Qwen and bge-m3 during a burst of figures. vLLM reserves most of the GPU, so auto means off there.
 AI_TUTOR_VISION="${AI_TUTOR_VISION:-auto}"
 AI_TUTOR_VISION="${AI_TUTOR_VISION,,}"
@@ -70,7 +70,7 @@ if [[ "$LLM_BACKEND" == "vllm" && "$AI_TUTOR_VISION" == "auto" ]]; then
   AI_TUTOR_VISION="off"
 fi
 export AI_TUTOR_VISION
-export AI_TUTOR_VISION_MODEL="${AI_TUTOR_VISION_MODEL:-granite3.2-vision:2b}"
+export AI_TUTOR_VISION_MODEL="${AI_TUTOR_VISION_MODEL:-qwen2.5vl:3b}"
 
 mkdir -p "$LOG_DIR" "$RUNTIME_DIR" "$AI_TUTOR_DATA_DIR" "$AI_TUTOR_VECTORSTORE_DIR"
 
