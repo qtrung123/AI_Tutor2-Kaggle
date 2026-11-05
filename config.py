@@ -155,7 +155,7 @@ VISUAL_ENRICHMENT_ENABLED = _env_flag("AI_TUTOR_VISUAL_ENRICHMENT", "true")
 # image takes minutes on a CPU. on: always, e.g. for a remote Ollama. off: never. Without it, figures
 # are still indexed through OCR. The model is downloaded only with AI_TUTOR_VISION_AUTO_PULL=1.
 VISION_MODE = os.getenv("AI_TUTOR_VISION", "auto").strip().lower()
-VISION_MODEL = os.getenv("AI_TUTOR_VISION_MODEL", "granite3.2-vision")
+VISION_MODEL = os.getenv("AI_TUTOR_VISION_MODEL", "granite3.2-vision:2b")
 VISION_AUTO_PULL = _env_flag("AI_TUTOR_VISION_AUTO_PULL", "false")
 VISION_MAX_IMAGES_PER_DOCUMENT = int(os.getenv("AI_TUTOR_VISION_MAX_IMAGES_PER_DOCUMENT", "40"))
 VISION_MAX_IMAGE_SIDE = int(os.getenv("AI_TUTOR_VISION_MAX_IMAGE_SIDE", "768"))

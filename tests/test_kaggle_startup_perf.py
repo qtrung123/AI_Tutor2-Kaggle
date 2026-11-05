@@ -6,6 +6,8 @@ binaries; the notebook tests execute the real cell sources with faked processes 
 
 import io
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -171,6 +173,93 @@ class OverlappedModelWarmupTests(unittest.TestCase):
         self.assertIn("skipping the Ollama chat warmup", result.stdout)
         self.assertFalse(any(c.startswith("generate-start") for c in self.calls()))
         self.assertEqual(len(self.markers()), 1)
+
+
+@unittest.skipUnless(BASH, "bash is required")
+class VisionModelSetupTests(unittest.TestCase):
+    """prepare_vision_model from the real script, with stand-ins for ollama and nvidia-smi."""
+
+    def run_setup(self, mode, installed="", gpu=True, pull_exit=0):
+        functions = "\n".join(re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", STARTUP, re.S | re.M).group(0)
+                              for name in ("ollama_has_model", "prepare_vision_model"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "ollama").write_text(
+                '#!/usr/bin/env bash\n'
+                'if [[ "$1" == list ]]; then echo NAME; cat "$FAKE_DIR/installed" 2>/dev/null; exit 0; fi\n'
+                'echo "$*" >>"$FAKE_DIR/pulls"\n'
+                '[[ "$PULL_EXIT" == 0 ]] && echo "$2" >>"$FAKE_DIR/installed"\n'
+                'exit "$PULL_EXIT"\n', newline="\n")
+            if gpu:
+                (root / "nvidia-smi").write_text('#!/usr/bin/env bash\necho "GPU 0: Tesla T4"\n', newline="\n")
+            if installed:
+                (root / "installed").write_text(f"{installed}\n", newline="\n")
+            script = root / "run.sh"
+            script.write_text(
+                'set -Eeuo pipefail\nlog() { echo "$*"; }\nnow() { echo 0; }\nlog_timing() { :; }\n'
+                f'{functions}\nprepare_vision_model\necho reached-the-backend\n', newline="\n")
+            env = {**os.environ, "PATH": f"{root}{os.pathsep}/usr/bin{os.pathsep}/bin{os.pathsep}{os.environ['PATH']}" if gpu else f"{root}{os.pathsep}/usr/bin{os.pathsep}/bin",
+                   "FAKE_DIR": str(root), "PULL_EXIT": str(pull_exit), "LOG_DIR": str(root),
+                   "AI_TUTOR_VISION": mode, "AI_TUTOR_VISION_MODEL": "granite3.2-vision:2b"}
+            for tool in (root / "ollama", root / "nvidia-smi"):
+                if tool.exists():
+                    tool.chmod(0o755)
+            result = subprocess.run([BASH, str(script)], capture_output=True, text=True, env=env, timeout=30)
+            pulls = (root / "pulls").read_text().split("\n") if (root / "pulls").exists() else []
+        return result, [line for line in pulls if line]
+
+    def test_gpu_pulls_the_configured_model_once(self):
+        result, pulls = self.run_setup("auto")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(pulls, ["pull granite3.2-vision:2b"])
+        self.assertIn("reached-the-backend", result.stdout)
+
+    def test_a_model_already_there_is_not_pulled_again(self):
+        result, pulls = self.run_setup("auto", installed="granite3.2-vision:2b")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(pulls, [])
+
+    def test_auto_without_a_gpu_never_pulls(self):
+        result, pulls = self.run_setup("auto", gpu=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(pulls, [])
+        self.assertIn("no GPU", result.stdout)
+
+    def test_off_never_pulls(self):
+        result, pulls = self.run_setup("off")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(pulls, [])
+        self.assertIn("OCR only", result.stdout)
+
+    def test_a_failed_pull_warns_and_startup_continues(self):
+        result, pulls = self.run_setup("on", pull_exit=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(pulls), 1)
+        self.assertIn("WARNING", result.stdout)
+        self.assertIn("reached-the-backend", result.stdout)
+
+
+class VisionStartupConfigTests(unittest.TestCase):
+    def test_the_model_is_prepared_before_the_backend_starts(self):
+        call = STARTUP.index("\nprepare_vision_model\n")
+        self.assertLess(call, STARTUP.index("backend.main:app"))
+        self.assertGreater(call, STARTUP.index("ollama serve"))
+
+    def test_vllm_turns_auto_off_because_it_reserves_the_gpu(self):
+        self.assertRegex(STARTUP, r'LLM_BACKEND" == "vllm" && "\$AI_TUTOR_VISION" == "auto".*\n\s+AI_TUTOR_VISION="off"')
+
+    def test_notebook_passes_the_settings_to_the_services(self):
+        [config] = [c for c in NOTEBOOK["cells"] if c.get("id") == "9f872e66"]
+        source = "".join(config["source"])
+        self.assertIn('AI_TUTOR_VISION_MODEL = "granite3.2-vision:2b"', source)
+        self.assertIn('"AI_TUTOR_VISION": AI_TUTOR_VISION', source)
+        self.assertIn('"AI_TUTOR_VISION_MODEL": AI_TUTOR_VISION_MODEL', source)
+
+    def test_backend_default_matches_the_startup_script(self):
+        from config import VISION_MODEL
+        if not os.environ.get("AI_TUTOR_VISION_MODEL"):
+            self.assertEqual(VISION_MODEL, "granite3.2-vision:2b")
+        self.assertIn("granite3.2-vision:2b", STARTUP)
 
 
 class StartupScriptOrderTests(unittest.TestCase):

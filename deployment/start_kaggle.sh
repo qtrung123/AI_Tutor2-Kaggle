@@ -60,6 +60,17 @@ export QUIZ_GENERATION_RETRY_LIMIT="${QUIZ_GENERATION_RETRY_LIMIT:-3}"
 export AI_TUTOR_CHAT_NUM_CTX="${AI_TUTOR_CHAT_NUM_CTX:-16384}"
 export AI_TUTOR_GENERATION_KEEP_ALIVE="${AI_TUTOR_GENERATION_KEEP_ALIVE:-30m}"
 export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-$AI_TUTOR_GENERATION_KEEP_ALIVE}"
+# Vision AI for PDF figures (backend/vision_service.py): auto = only with a GPU, on, or off. It is
+# optional: without it, figures are still indexed through OCR. The backend sends one figure at a time
+# and sets a short keep_alive (AI_TUTOR_VISION_KEEP_ALIVE), so on a T4 the ~2.4 GB model only sits next
+# to Qwen and bge-m3 during a burst of figures. vLLM reserves most of the GPU, so auto means off there.
+AI_TUTOR_VISION="${AI_TUTOR_VISION:-auto}"
+AI_TUTOR_VISION="${AI_TUTOR_VISION,,}"
+if [[ "$LLM_BACKEND" == "vllm" && "$AI_TUTOR_VISION" == "auto" ]]; then
+  AI_TUTOR_VISION="off"
+fi
+export AI_TUTOR_VISION
+export AI_TUTOR_VISION_MODEL="${AI_TUTOR_VISION_MODEL:-granite3.2-vision:2b}"
 
 mkdir -p "$LOG_DIR" "$RUNTIME_DIR" "$AI_TUTOR_DATA_DIR" "$AI_TUTOR_VECTORSTORE_DIR"
 
@@ -200,6 +211,36 @@ pull_model() {
   fi
   ollama_has_model "$model" || fail "Model '$model' is still absent after pulling it." "$pull_log"
   log_timing "pull $model" "$started"
+}
+
+# Make the Vision model available before the backend starts, because the backend looks for it when it
+# resumes unfinished documents. Never fails startup: Vision is optional, and documents stay resumable.
+prepare_vision_model() {
+  local started
+  case "$AI_TUTOR_VISION" in
+    on|1|true|yes) ;;
+    auto)
+      if [[ -z "$(nvidia-smi -L 2>/dev/null)" ]]; then
+        log "Vision: no GPU found, so PDF figures use OCR only"
+        return 0
+      fi
+      ;;
+    *)
+      log "Vision: off (AI_TUTOR_VISION=$AI_TUTOR_VISION), so PDF figures use OCR only"
+      return 0
+      ;;
+  esac
+  if ollama_has_model "$AI_TUTOR_VISION_MODEL"; then
+    log "Vision: model already exists: $AI_TUTOR_VISION_MODEL"
+    return 0
+  fi
+  log "Vision: pulling $AI_TUTOR_VISION_MODEL"
+  started="$(now)"
+  if ollama pull "$AI_TUTOR_VISION_MODEL" >>"$LOG_DIR/ollama-pull-vision.log" 2>&1 && ollama_has_model "$AI_TUTOR_VISION_MODEL"; then
+    log_timing "pull $AI_TUTOR_VISION_MODEL" "$started"
+  else
+    log "WARNING: could not pull $AI_TUTOR_VISION_MODEL (see $LOG_DIR/ollama-pull-vision.log); continuing with OCR only"
+  fi
 }
 
 prepare_kaggle_chroma() {
@@ -419,6 +460,7 @@ if ! ollama_has_model "$OLLAMA_EMBEDDING_MODEL"; then
 else
   log "Embedding model already exists: $OLLAMA_EMBEDDING_MODEL"
 fi
+prepare_vision_model
 log_timing "model pulls (total)" "$models_started"
 
 start_model_warmup
