@@ -429,11 +429,28 @@ function resetQuizAutosave() {
   setQuizPlayerSaveStatus(null);
 }
 
-async function loadQuizHistory(documentId = quizDocumentSelect?.value || activeDocumentId || "") {
-  const requestDocumentId = documentId;
-  quizHistory = [];
+// The Quiz Library is read when its document opens and re-read when the Quiz tab is shown again after
+// QUIZ_LIBRARY_STALE_MS (quizzes may have been taken or made on another device). A background re-read
+// keeps the current list on screen until the new one arrives (no empty flash).
+const QUIZ_LIBRARY_STALE_MS = 30 * 1000;
+let quizLibraryLoadedAt = 0;
+
+function showQuizLibrary() {
   renderQuizHistory();
+  const documentId = quizDocumentSelect?.value || activeDocumentId || "";
+  if (!documentId || quizPlayerOpen || Date.now() - quizLibraryLoadedAt < QUIZ_LIBRARY_STALE_MS) return;
+  quizLibraryLoadedAt = Date.now();
+  Promise.all([loadQuizStatuses(), loadQuizHistory(documentId, { background: true })]).then(() => renderQuizHistory());
+}
+
+async function loadQuizHistory(documentId = quizDocumentSelect?.value || activeDocumentId || "", { background = false } = {}) {
+  const requestDocumentId = typeof documentId === "string" ? documentId : (quizDocumentSelect?.value || activeDocumentId || "");
+  if (!background) {
+    quizHistory = [];
+    renderQuizHistory();
+  }
   if (!requestDocumentId) return;
+  quizLibraryLoadedAt = Date.now();
   try {
     const query = new URLSearchParams({ document_id: requestDocumentId });
     const response = await fetch(`${QUIZ_HISTORY_API_URL}?${query}`);
@@ -526,6 +543,16 @@ function renderQuizHistory() {
     filters.append(difficulty.label);
     quizHistoryList.before(filters);
   }
+  // The Difficulty filter only helps when the library holds more than one difficulty.
+  const libraryDocument = quizDocumentSelect?.value || activeDocumentId;
+  const libraryDifficulties = new Set([
+    ...groups.map((group) => group.latest.difficulty),
+    ...(quizStatuses.find((item) => item.document_id === libraryDocument)?.variants || [])
+      .filter((variant) => variant.quiz_id && variant.topic_id === "document").map((variant) => variant.difficulty),
+    ...[...pendingQuizGenerations.values()].filter((item) => item.documentId === libraryDocument).map((item) => item.difficulty),
+  ].filter(Boolean));
+  filters.hidden = libraryDifficulties.size < 2;
+  if (filters.hidden) quizHistoryDifficultyFilter = "all";
   const filterSelects = filters.querySelectorAll("select");
   filterSelects[0].value = quizHistoryDifficultyFilter;
 
@@ -691,10 +718,8 @@ function createQuizCardMenu(quizId, titleText, isPractice = false) {
     try {
       await fetchJson(`${QUIZZES_API_URL}/${encodeURIComponent(quizId)}`, { method: "DELETE" });
       if (currentQuiz?.quiz_id === quizId) { currentQuiz = null; currentAttempt = null; renderAssessmentQuiz(); }
-      await loadQuizStatuses();
-      await loadQuizHistory();
-      await loadDashboard();
       showToast(isPractice ? "Practice deleted" : "Quiz deleted");
+      await Promise.allSettled([loadQuizStatuses(), loadQuizHistory(), loadDashboard()]);   // a refresh failure is not a delete failure
     } catch (error) { showToast(error.message || "Could not delete quiz"); }
     finally { deletingQuizzes.delete(quizId); remove.disabled = false; }
   });
@@ -1050,9 +1075,8 @@ async function deleteAssessmentQuiz() {
   try {
     await fetchJson(`${QUIZZES_API_URL}/${encodeURIComponent(quizId)}`, { method: "DELETE" });
     backToQuizzes();
-    await loadQuizStatuses();
-    await loadDashboard();
     showToast(`${itemName} deleted`);
+    await Promise.allSettled([loadQuizStatuses(), loadDashboard()]);   // a refresh failure is not a delete failure
   } catch (error) {
     showToast(error.message || "Could not delete quiz");
   } finally {
@@ -2434,24 +2458,37 @@ async function submitQuizPlayer() {
     quizAutosaveDirty = false;
     if (quizAutosaveInFlight) { try { await quizAutosaveInFlight; } catch (error) { /* submit covers it */ } }
     currentAttempt = await requestQuizSubmission({ allowUnanswered: true });
+  } catch (error) {
+    // Local answers are untouched -- the learner can simply press Finish Quiz again.
+    showToast(error.message || "Could not submit quiz");
+    quizSubmitInFlight = false;
+    setQuizPlayerFinishBusy(false);
+    return;
+  }
+  // Submitted. Everything below is follow-up work: a failure there never reports the submission as
+  // failed and never hides the results.
+  try {
     resetQuizAutosave();
     quizQuestionIndex = 0;
     quizAttemptSummary = currentAttempt.attempt_summary;
-    await loadQuizStatuses();
-    updateDifficultyOptions();
-    await loadQuizHistory();
-    await loadDashboard();
-    renderQuizHistory();
+    // The score is in the submission response: show it at once, then refresh the Library, history
+    // and Home figures together (independent reads) behind the results.
     showQuizResults(buildQuizResult(currentAttempt, currentQuiz));
+  } catch (error) {
+    console.error("Quiz results could not be shown", error);
+    showToast("Quiz submitted. Its results are in the Quiz Library.");
+  } finally {
+    quizSubmitInFlight = false;
+    setQuizPlayerFinishBusy(false);
+  }
+  await Promise.allSettled([loadQuizStatuses().then(updateDifficultyOptions), loadQuizHistory(), loadDashboard()]);
+  try { renderQuizHistory(); } catch (error) { console.error("Quiz Library refresh failed after a submission", error); }
+  try {
     await plannerAfterQuizSubmission(currentAttempt.planner_completion);
     // Flashcard written practice is not an assessment: it never re-shapes the plan.
     if (!isPracticeQuiz(currentQuiz)) plannerAdaptAfterQuiz(currentQuiz.document_id);
   } catch (error) {
-    // Local answers are untouched -- the learner can simply press Finish Quiz again.
-    showToast(error.message || "Could not submit quiz");
-  } finally {
-    quizSubmitInFlight = false;
-    setQuizPlayerFinishBusy(false);
+    console.error("Study plan update failed after a quiz submission", error);
   }
 }
 

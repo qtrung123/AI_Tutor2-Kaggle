@@ -108,6 +108,16 @@ const cardText = (card) => card.textContent;
     buttonText: header?.querySelector("button")?.textContent, visible: header && !header.hidden,
   };
 
+  // No manual Refresh (the library re-reads itself); the Difficulty filter shows only for mixed difficulties.
+  const filters = () => document.querySelector(".quiz-history-filters");
+  out.library = {refreshButton: Boolean(document.getElementById("refresh-quiz-history-button")), filterHidden: filters()?.hidden};
+  const savedHistory = quizHistory, savedStatuses = quizStatuses;
+  quizHistory = quizHistory.filter((attempt) => attempt.difficulty === "easy");
+  quizStatuses = quizStatuses.map((status) => ({...status, variants: (status.variants || []).filter((variant) => variant.difficulty === "easy")}));
+  renderQuizHistory();
+  out.library.singleDifficultyFilterHidden = filters()?.hidden;
+  quizHistory = savedHistory; quizStatuses = savedStatuses; renderQuizHistory();
+
   const cards = () => [...document.querySelectorAll("#quiz-history-list .quiz-history-card")];
   out.cardCount = cards().length;
   out.sections = [...document.getElementById("quiz-history-list").children].map((section) => ({
@@ -217,6 +227,9 @@ class QuizLibraryUiTests(unittest.TestCase):
         self.assertEqual(header["heading"], "Quiz")
         self.assertEqual(header["subtitle"], "Test your knowledge and track your progress")
         self.assertEqual(header["buttonText"], "+ New Quiz")
+
+    def test_library_has_no_manual_refresh_and_filters_only_mixed_difficulties(self):
+        self.assertEqual(self.out["library"], {"refreshButton": False, "filterHidden": False, "singleDifficultyFilterHidden": True})
 
     def test_all_quizzes_and_practice_are_listed_by_default(self):
         self.assertEqual(self.out["cardCount"], 5)

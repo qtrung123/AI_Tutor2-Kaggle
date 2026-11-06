@@ -1,15 +1,7 @@
 // Shared client state (loaded after js/planner.js: plannerWeekStart uses plannerMondayOf).
 // Classic script (shared global scope), loaded by index.html before app.js.
 
-const initialState = {
-  page: "overview",
-  confidence: 64,
-  quizIndex: 0,
-  quizScore: 0,
-  answered: false
-};
-
-const state = { ...initialState };
+const state = { page: "overview" };
 
 let uploadedSources = [];
 

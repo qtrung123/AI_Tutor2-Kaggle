@@ -58,7 +58,7 @@ const docked = () => {
   await sleep(1500);
   const noMotion = document.createElement("style"); noMotion.textContent = "*,*::before,*::after{transition:none!important}"; document.head.appendChild(noMotion);
   out.viewport = innerWidth;
-  out.beforeSession = {activeId: activeConversation?.id || null};   // global "last chat" (another document)
+  out.beforeSession = {activeId: activeConversation?.id || null};   // no chat is opened before a session
   await openStudySession("lecture.pdf", "overview");
   await sleep(400);
   out.restored = {active: activeTitle(), activeId: activeConversation?.id, messages: messageTexts()};
@@ -170,7 +170,9 @@ class IntegrationAssertions:
         self.assertEqual(self.out["errors"], [])
 
     def test_reload_reopens_the_documents_last_chat(self):
-        self.assertEqual(self.out["beforeSession"]["activeId"], "c-other")
+        # Start-up loads the chat list only (no chat is shown outside a Study Session); the session
+        # then reopens the chat last used for its document.
+        self.assertIsNone(self.out["beforeSession"]["activeId"])
         restored = self.out["restored"]
         self.assertEqual((restored["active"], restored["activeId"]), ("Timers", "c-timers"))
         self.assertEqual(restored["messages"], ["Explain prescalers", "A prescaler divides the clock."])

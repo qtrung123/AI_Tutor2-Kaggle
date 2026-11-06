@@ -7,16 +7,11 @@ const pageTitles = {
 const navItems = document.querySelectorAll(".nav-item");
 const views = document.querySelectorAll(".view");
 const pageTitle = document.getElementById("page-title");
-const resetButton = document.getElementById("reset-button");
 const toast = document.getElementById("toast");
 const messageList = document.getElementById("message-list");
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
 chatInput.placeholder = "Ask a question...";
-const confidenceLabel = document.getElementById("confidence-label");
-const confidenceBar = document.getElementById("confidence-bar");
-const confidencePill = document.getElementById("confidence-pill");
-const sourceList = document.getElementById("source-list");
 const sourceFileInput = document.getElementById("source-file-input");
 const uploadSourceButton = document.getElementById("upload-source-button");
 const uploadStatus = document.getElementById("upload-status");
@@ -198,8 +193,6 @@ const quizList = document.getElementById("quiz-list");
 const assessmentTitle = document.getElementById("assessment-title");
 const quizHistoryList = document.getElementById("quiz-history-list");
 const quizHistoryDetail = document.getElementById("quiz-history-detail");
-const refreshQuizHistoryButton = document.getElementById("refresh-quiz-history-button");
-const quizPopoverPanels = document.querySelectorAll(".collapsible-panel");
 const conversationList = document.getElementById("conversation-list");
 const newConversationButton = document.getElementById("new-conversation-button");
 const conversationSourceList = document.getElementById("conversation-source-list");
@@ -251,7 +244,7 @@ const summaryContent = document.getElementById("summary-content");
 const regenerateSummaryButton = document.getElementById("regenerate-summary-button");
 const flashcardsPane = document.querySelector('[data-session-pane="flashcards"]');
 flashcardsPane?.classList.remove("placeholder-pane");
-if (flashcardsPane) flashcardsPane.innerHTML = `<article class="panel flashcards-panel"><div class="flashcards-toolbar"><div><p class="eyebrow">Flashcards</p><h2>Study Cards</h2></div><div class="flashcards-actions"><label>Filter Topics<select id="flashcard-topic-filter"><option value="all">All topics</option></select></label><label>Flashcard language<select id="flashcard-language-select"><option value="auto">Auto</option><option value="english">English</option><option value="vietnamese">Vietnamese</option></select></label><button class="secondary-button" id="shuffle-flashcards" type="button">Shuffle</button><button class="secondary-button" id="regenerate-flashcards-button" type="button" hidden>Regenerate</button><button class="secondary-button" id="manage-flashcards" type="button">Manage Cards</button></div></div><div id="flashcards-generate" class="generate-prompt flashcards-empty-state" hidden><div class="flashcards-empty-icon" aria-hidden="true">🗂️</div><h3>No flashcards yet</h3><p>Generate grounded study cards for this document with the selected model and language.</p><p class="generate-model-note">Model: <span class="generate-model-name"></span> (change it in the Model selector above)</p><p class="flashcards-language-note">Language: <span id="flashcards-empty-language"></span></p><button class="primary-button" id="generate-flashcards-button" type="button">Generate Flashcards</button></div><div id="flashcards-loading" class="empty-state flashcards-loading-state" hidden><div class="flashcards-skeleton-card" aria-hidden="true"><span class="flashcards-skeleton-line long"></span><span class="flashcards-skeleton-line short"></span></div><p class="flashcards-loading-label" id="flashcards-loading-label">Preparing model…</p></div><div id="flashcards-error" class="empty-state flashcards-error-state" hidden><div class="flashcards-error-icon" aria-hidden="true">!</div><h3>Couldn't load flashcards</h3><p id="flashcards-error-message"></p><button class="primary-button" id="retry-flashcards-button" type="button">Retry</button><details class="flashcards-error-details"><summary>Technical details</summary><p id="flashcards-error-technical"></p></details></div><div id="flashcards-filter-empty" class="flashcards-filter-empty" hidden>No cards are available for this topic.</div><div id="flashcards-stage" hidden><div class="flashcards-regenerate-status" id="flashcards-regenerate-status" hidden>Regenerating…</div><div class="flashcards-regenerate-error" id="flashcards-regenerate-error" hidden><span id="flashcards-regenerate-error-message"></span><button class="text-button" id="retry-regenerate-flashcards-button" type="button">Retry</button></div><div class="flashcards-stage-meta"><span class="flashcard-topic-title" id="flashcard-topic-title"></span><span class="flashcards-model-note" id="flashcards-model-note"></span></div><button class="flashcard" id="flashcard" type="button" aria-label="Flip flashcard"><span class="flashcard-side-label" id="flashcard-side-label">Front</span><span class="flashcard-copy" id="flashcard-copy"></span><span class="flashcard-flip-hint">Tap to flip</span></button><div class="flashcard-progress-track"><span class="flashcard-progress-bar" id="flashcard-progress-bar"></span></div><div class="flashcard-navigation"><button class="secondary-button" id="previous-flashcard" type="button">Previous</button><span id="flashcard-position">0 / 0</span><button class="secondary-button" id="next-flashcard" type="button">Next</button><button class="favorite-button" id="favorite-flashcard" type="button" aria-label="Favorite card">☆</button></div></div></article>`;
+if (flashcardsPane) flashcardsPane.innerHTML = `<article class="panel flashcards-panel"><div class="flashcards-toolbar"><div><p class="eyebrow">Flashcards</p><h2>Study Cards</h2></div><div class="flashcards-actions"><label>Filter Topics<select id="flashcard-topic-filter"><option value="all">All topics</option></select></label><button class="secondary-button" id="shuffle-flashcards" type="button">Shuffle</button><details class="flashcards-more" id="flashcards-more"><summary class="secondary-button flashcards-more-toggle">More</summary><div class="flashcards-more-menu"><label>Flashcard language<select id="flashcard-language-select"><option value="auto">Auto</option><option value="english">English</option><option value="vietnamese">Vietnamese</option></select></label><button class="secondary-button" id="regenerate-flashcards-button" type="button" hidden>Regenerate</button><button class="secondary-button" id="manage-flashcards" type="button">Manage Cards</button></div></details></div></div><div id="flashcards-generate" class="generate-prompt flashcards-empty-state" hidden><div class="flashcards-empty-icon" aria-hidden="true"></div><h3>No flashcards yet</h3><p>Generate grounded study cards for this document with the selected model and language.</p><p class="generate-model-note">Model: <span class="generate-model-name"></span> (change it in the Model selector above)</p><p class="flashcards-language-note">Language: <span id="flashcards-empty-language"></span></p><button class="primary-button" id="generate-flashcards-button" type="button">Generate Flashcards</button></div><div id="flashcards-loading" class="empty-state flashcards-loading-state" hidden><div class="flashcards-skeleton-card" aria-hidden="true"><span class="flashcards-skeleton-line long"></span><span class="flashcards-skeleton-line short"></span></div><p class="flashcards-loading-label" id="flashcards-loading-label">Preparing model…</p></div><div id="flashcards-error" class="empty-state flashcards-error-state" hidden><div class="flashcards-error-icon" aria-hidden="true">!</div><h3>Couldn't load flashcards</h3><p id="flashcards-error-message"></p><button class="primary-button" id="retry-flashcards-button" type="button">Retry</button><details class="flashcards-error-details"><summary>Technical details</summary><p id="flashcards-error-technical"></p></details></div><div id="flashcards-filter-empty" class="flashcards-filter-empty" hidden>No cards are available for this topic.</div><div id="flashcards-stage" hidden><div class="flashcards-regenerate-status" id="flashcards-regenerate-status" hidden>Regenerating…</div><div class="flashcards-regenerate-error" id="flashcards-regenerate-error" hidden><span id="flashcards-regenerate-error-message"></span><button class="text-button" id="retry-regenerate-flashcards-button" type="button">Retry</button></div><div class="flashcards-stage-meta"><span class="flashcard-topic-title" id="flashcard-topic-title"></span><span class="flashcards-model-note" id="flashcards-model-note"></span></div><button class="flashcard" id="flashcard" type="button" aria-label="Flip flashcard" aria-keyshortcuts="Space"><span class="flashcard-side-label" id="flashcard-side-label">Front</span><span class="flashcard-copy" id="flashcard-copy"></span><span class="flashcard-flip-hint">Tap to flip<span class="flashcard-keys-hint"> · Space to flip, ← → to move</span></span></button><div class="flashcard-progress-track"><span class="flashcard-progress-bar" id="flashcard-progress-bar"></span></div><div class="flashcard-navigation"><button class="secondary-button" id="previous-flashcard" type="button" aria-keyshortcuts="ArrowLeft">Previous</button><span id="flashcard-position">0 / 0</span><button class="secondary-button" id="next-flashcard" type="button" aria-keyshortcuts="ArrowRight">Next</button><button class="favorite-button" id="favorite-flashcard" type="button" aria-label="Favorite card">☆</button></div></div></article>`;
 const flashcardsLoading = document.getElementById("flashcards-loading");
 const flashcardsLoadingLabel = document.getElementById("flashcards-loading-label");
 const flashcardsGenerate = document.getElementById("flashcards-generate");
@@ -772,6 +765,7 @@ function getActiveStudySessionDocument() {
 // empty, unsaved chat instead: the conversation is created by the first question sent.
 async function ensureStudySessionConversation({ create = true } = {}) {
   const documentItem = getActiveStudySessionDocument();
+  if (conversationListReady) await conversationListReady;
   const documentIds = [documentItem.id];
   if (activeConversation?.id && conversationDocumentId(activeConversation) === documentItem.id) {
     renderConversationList();
@@ -1146,25 +1140,6 @@ let quizDetailRequestSeq = 0;
 
 const QUIZ_OPTION_LETTERS = "ABCD";
 
-function resetApp() {
-  state.page = initialState.page;
-  state.confidence = initialState.confidence;
-  state.quizIndex = initialState.quizIndex;
-  state.quizScore = initialState.quizScore;
-  state.answered = initialState.answered;
-  messageList.innerHTML = "";
-  renderConversationMessages();
-  renderSources(uploadedSources, "uploaded");
-  updateConfidence(initialState.confidence);
-  currentQuiz = null;
-  currentAttempt = null;
-  quizAnswers = {};
-  quizQuestionIndex = 0;
-  renderAssessmentQuiz();
-  setPage(initialState.page);
-  showToast("Tutoring reset");
-}
-
 navItems.forEach((item) => {
   item.addEventListener("click", () => {
     if (item.dataset.page) setPage(item.dataset.page);
@@ -1206,22 +1181,41 @@ retryFlashcardsButton?.addEventListener("click", () => loadDocumentFlashcards(fl
 retryRegenerateFlashcardsButton?.addEventListener("click", () => loadDocumentFlashcards(true));
 document.getElementById("shuffle-flashcards")?.addEventListener("click", () => { for (let index = flashcards.length - 1; index > 0; index -= 1) { const swap = Math.floor(Math.random() * (index + 1)); [flashcards[index], flashcards[swap]] = [flashcards[swap], flashcards[index]]; } flashcardIndex = 0; flashcardFlipped = false; renderCurrentFlashcard(); });
 document.getElementById("manage-flashcards")?.addEventListener("click", openFlashcardManager);
+// Flashcards "More" menu (Language, Regenerate, Manage Cards): closes after a choice, on Escape and
+// on a click elsewhere.
+const flashcardsMore = document.getElementById("flashcards-more");
+const closeFlashcardsMore = () => { if (flashcardsMore?.open) flashcardsMore.open = false; };
+flashcardsMore?.querySelectorAll(".flashcards-more-menu button").forEach((button) => button.addEventListener("click", closeFlashcardsMore));
+flashcardLanguageSelect?.addEventListener("change", closeFlashcardsMore);
+document.addEventListener("click", (event) => { if (flashcardsMore?.open && !flashcardsMore.contains(event.target)) closeFlashcardsMore(); });
+flashcardsMore?.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !flashcardsMore.open) return;
+  event.stopPropagation();
+  closeFlashcardsMore();
+  flashcardsMore.querySelector("summary").focus();
+});
+// Keyboard study: Left/Right move between cards, Space flips. Only on the Flashcards tab with the deck
+// shown, never while typing, in a dialog, or when a focused control would handle the key itself.
+document.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+  if (!["ArrowLeft", "ArrowRight", " "].includes(event.key)) return;
+  if (document.body.dataset.page !== "session" || document.body.dataset.sessionTab !== "flashcards" || flashcardsStage?.hidden) return;
+  if (document.querySelector("dialog[open], .flashcard-manager.open") || flashcardsMore?.open) return;
+  const target = event.target;
+  if (target instanceof Element && target.closest("input, textarea, select, [contenteditable], .persistent-tutor")) return;
+  if (event.key === " " && target instanceof Element && target.closest("button, summary, a")) return;   // Space activates the focused control
+  event.preventDefault();
+  if (event.key === "ArrowLeft") document.getElementById("previous-flashcard")?.click();
+  else if (event.key === "ArrowRight") document.getElementById("next-flashcard")?.click();
+  else flashcardElement?.click();
+});
 favoriteFlashcardButton?.addEventListener("click", async () => { const card = visibleFlashcards()[flashcardIndex]; if (!card) return; try { await patchFlashcard(card, { is_favorite: !card.is_favorite }); renderCurrentFlashcard(); } catch (error) { showToast(error.message); } });
 document.querySelectorAll(".session-tab, [data-session-tab]").forEach((button) => {
   button.addEventListener("click", () => setSessionTab(button.dataset.sessionTab));
 });
-document.getElementById("session-tutor-toggle")?.addEventListener("click", () => {
-  const panel = document.getElementById("persistent-tutor");
-  panel.hidden = !panel.hidden;
-  document.getElementById("session-tutor-toggle").setAttribute("aria-expanded", String(!panel.hidden));
-});
 
-document.querySelectorAll("[data-page-target]").forEach((button) => {
-  button.addEventListener("click", () => setPage(button.dataset.pageTarget));
-});
 
 chatForm.addEventListener("submit", handleChatSubmit);
-resetButton.addEventListener("click", resetApp);
 uploadSourceButton.addEventListener("click", () => sourceFileInput.click());
 sourceFileInput.addEventListener("change", () => uploadWithSubjectChoice(sourceFileInput.files));
 sessionSearchInput?.addEventListener("input", applySessionLibraryFilters);
@@ -1307,41 +1301,18 @@ authForm.addEventListener("submit", handleAuthentication);
 authSwitch.addEventListener("click", () => setAuthMode(authMode === "login" ? "signup" : "login"));
 logoutButton.addEventListener("click", signOut);
 quizDifficultySelect.addEventListener("change", handleQuizDifficultyChange);
-refreshQuizHistoryButton.addEventListener("click", loadQuizHistory);
-quizPopoverPanels.forEach((panel) => {
-  panel.addEventListener("toggle", () => {
-    if (!panel.open) {
-      return;
-    }
-    quizPopoverPanels.forEach((otherPanel) => {
-      if (otherPanel !== panel) {
-        otherPanel.removeAttribute("open");
-      }
-    });
-  });
-});
-document.addEventListener("click", (event) => {
-  if (![...quizPopoverPanels].some((panel) => panel.contains(event.target))) {
-    quizPopoverPanels.forEach((panel) => panel.removeAttribute("open"));
-  }
-});
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") {
-    quizPopoverPanels.forEach((panel) => panel.removeAttribute("open"));
-  }
-});
 
 document.body.dataset.page = state.page;
-updateConfidence(state.confidence);
 renderAssessmentQuiz();
+// The start-up chat list. Start-up reads run in parallel, so a Study Session opened before the list
+// arrives waits for it (ensureStudySessionConversation) instead of missing the document's chats.
+let conversationListReady = null;
+
 async function initializeChatWorkspace() {
-  await loadUploadedSources();
-  try {
-    await loadConversations();
-    renderDashboard();
-  } catch (error) {
+  conversationListReady = loadConversations().catch((error) => {
     showToast(error.message || "Could not load conversations");
-  }
+  });
+  await conversationListReady;
 }
 
 // ---------------------------------------------------------------------------
@@ -1617,9 +1588,11 @@ plannerDesktopQuery?.addEventListener?.("change", () => {
   if (plannerIsDesktop()) plannerQueueAutoPreview(0);
 });
 
+// Every start-up read is independent: they run in parallel, so Home's data no longer waits for the
+// sources and chat list to arrive first.
 async function initializeApplication() {
-  await initializeChatWorkspace();
-  await Promise.all([loadIndexedDocuments(), loadQuizHistory(), loadDashboard(), loadKnowledgeGaps(), loadRecommendations(), loadGenerationModels(), loadTodayPlan()]);
+  await Promise.all([loadUploadedSources(), initializeChatWorkspace(), loadIndexedDocuments(), loadQuizHistory(), loadDashboard(),
+    loadKnowledgeGaps(), loadRecommendations(), loadGenerationModels(), loadTodayPlan()]);
 }
 
 async function bootstrapAuthentication() {

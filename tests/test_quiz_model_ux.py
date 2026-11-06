@@ -447,7 +447,9 @@ class WiringTests(unittest.TestCase):
             self.assertIn("registerPendingQuiz(", body)
             self.assertIn("finishPendingQuiz(pendingId)", body)
         self.assertNotIn("No completed quizzes yet", SOURCE)
-        self.assertIn('if (tab === "quiz") renderQuizHistory();', SOURCE)
+        # Opening the Quiz tab renders the library at once (pending quizzes included), then re-reads it when stale.
+        self.assertIn('if (tab === "quiz") showQuizLibrary();', SOURCE)
+        self.assertIn("function showQuizLibrary() {" + chr(10) + "  renderQuizHistory();", SOURCE)
         self.assertIn("createPendingQuizCard", self.body("renderQuizHistory"))
         self.assertIn("createSavedQuizCard", self.body("renderQuizHistory"))
 

@@ -33,13 +33,6 @@ function closeSourcesDrawer() {
   setSourcesDrawerOpen(false);
 }
 
-function updateConfidence(value) {
-  state.confidence = Math.max(0, Math.min(100, value));
-  if (confidenceLabel) confidenceLabel.textContent = `${state.confidence}%`;
-  if (confidenceBar) confidenceBar.style.width = `${state.confidence}%`;
-  confidencePill.textContent = Math.max(1, Math.round(state.confidence / 20));
-}
-
 function addMessage(text, type, isLoading = false) {
   const message = document.createElement("div");
   message.className = `message ${type}-message`;
@@ -126,78 +119,6 @@ function appendMessageMeta(messageElement, status, citations = []) {
   bubble.appendChild(meta);
 }
 
-function renderSources(sources, mode = "uploaded") {
-  if (!sourceList) {
-    return;
-  }
-
-  sourceList.innerHTML = "";
-
-  if (!sources.length) {
-    const empty = document.createElement("button");
-    empty.className = "source-card";
-    empty.type = "button";
-
-    const title = document.createElement("strong");
-    title.textContent = mode === "citations" ? "No retrieved sources" : "No uploaded files";
-
-    const meta = document.createElement("span");
-    meta.textContent = mode === "citations" ? "Ask another question to retrieve context." : "Upload PDF or TXT material to start.";
-
-    empty.append(title, meta);
-    sourceList.appendChild(empty);
-    return;
-  }
-
-  sources.forEach((source, index) => {
-    const card = document.createElement(mode === "citations" ? "button" : "article");
-    card.className = `source-card ${mode === "uploaded" ? "source-item" : ""}`;
-    if (mode === "citations") {
-      card.type = "button";
-    }
-
-    const title = document.createElement("strong");
-    title.textContent = mode === "citations" ? `[${source.sourceId || index + 1}] ${source.title || "Unknown source"}` : source.title;
-
-    const meta = document.createElement("span");
-    meta.textContent = mode === "citations" ? `Page ${source.page || "Unknown page"}` : `${source.chunks} chunks indexed`;
-
-    if (mode === "uploaded") {
-      const header = document.createElement("div");
-      header.className = "source-card-header";
-
-      const titleBlock = document.createElement("div");
-      titleBlock.className = "source-title";
-      titleBlock.append(title, meta);
-
-      const deleteButton = document.createElement("button");
-      deleteButton.className = "delete-source-button";
-      deleteButton.type = "button";
-      deleteButton.textContent = "Delete";
-      deleteButton.addEventListener("click", () => deleteUploadedSource(source, deleteButton));
-
-      header.append(titleBlock, deleteButton);
-      card.appendChild(header);
-    } else {
-      card.append(title, meta);
-    }
-
-    if (mode === "citations") {
-      const detail = document.createElement("div");
-      detail.className = "source-detail";
-      appendFormattedText(detail, source.content || "No retrieved content preview is available for this source.");
-      card.appendChild(detail);
-
-      card.addEventListener("click", () => {
-        sourceList.querySelectorAll(".source-card").forEach((item) => item.classList.remove("active"));
-        card.classList.add("active");
-      });
-    }
-
-    sourceList.appendChild(card);
-  });
-}
-
 // Documents whose delete request is in flight: a repeated click (or the same document's Delete in
 // another list) never sends a second, failing request.
 const deletingDocuments = new Set();
@@ -237,7 +158,6 @@ async function deleteUploadedSource(source, button) {
 
     const data = await response.json();
     uploadedSources = data.sources || [];
-    renderSources(uploadedSources, "uploaded");
     renderConversationSources();
     await Promise.all([loadIndexedDocuments(), loadDashboard()]);
 
@@ -648,18 +568,14 @@ async function deleteChatConversation(conversationId) {
   }
 }
 
+// Only the list is loaded at start-up: the AI Tutor lives inside a Study Session, which opens the
+// chat of its own document (the one last used for it) when the session opens. Opening a chat here
+// would fetch messages that are never shown.
 async function loadConversations() {
   conversations = await fetchJson(CONVERSATIONS_API_URL);
-  if (!conversations.length) {
-    activeConversation = null;
-    renderConversationList();
-    renderConversationMessages();
-    updateConversationHeader();
-    return;
-  }
-  const savedId = currentUser ? localStorage.getItem(`activeConversationId:${currentUser.id}`) : null;
-  const initial = conversations.some((item) => item.id === savedId) ? savedId : conversations[0].id;
-  await openConversation(initial);
+  if (activeConversation && !conversations.some((item) => item.id === activeConversation.id)) activeConversation = null;
+  renderConversationList();
+  if (!activeConversation) { renderConversationMessages(); updateConversationHeader(); }
 }
 
 async function applyConversationSources() {
@@ -820,30 +736,16 @@ async function handleChatSubmit(event) {
 }
 
 async function loadUploadedSources() {
-  if (!sourceList) {
-    return;
-  }
-
   try {
     const response = await fetch(SOURCES_API_URL);
     if (!response.ok) {
       throw new Error(`Sources API returned ${response.status}`);
     }
-
     uploadedSources = await response.json();
-    renderSources(uploadedSources, "uploaded");
-    renderConversationSources();
   } catch (error) {
-    renderSources(
-      [
-        {
-          title: "Sources unavailable",
-          chunks: "Start the FastAPI backend to load uploaded files."
-        }
-      ],
-      "uploaded"
-    );
+    uploadedSources = [];   // the Sources drawer then says there are no materials yet
   }
+  renderConversationSources();
 }
 
 // state: "busy" (request running), "done" or "error"; styled via data-state on #upload-status.
@@ -927,7 +829,6 @@ async function uploadSourceFiles(files, subject = null) {
     const data = await response.json();
     setUploadStatus("Indexed. Updating your library...", "busy");
     uploadedSources = data.sources || [];
-    renderSources(uploadedSources, "uploaded");
     renderConversationSources();
     await Promise.all([loadIndexedDocuments(), loadDashboard()]);
 

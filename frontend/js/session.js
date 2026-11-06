@@ -10,7 +10,7 @@ function setSessionTab(tab) {
   if (tab === "material") loadOriginalContentFrame();
   if (tab === "summary") showSummaryState();
   if (tab === "flashcards") showFlashcardsState();
-  if (tab === "quiz") renderQuizHistory();
+  if (tab === "quiz") showQuizLibrary();
   if (tab === "overview") loadSessionOverview();
   // "Open Summary" only when the step's tool is not the open tab (planner.js may be absent in tests).
   if (typeof plannerRenderSessionStepBar === "function") plannerRenderSessionStepBar();
@@ -132,10 +132,10 @@ function renderSessionOverview() {
     quiz.completedCount ? `${quiz.completedCount} completed` : "",
   ].filter(Boolean);
   const tools = [
-    { tab: "tutor", icon: "💬", name: "AI Tutor", detail: "Ask about this document", state: "neutral" },
-    { tab: "summary", icon: "📄", name: "Summary", detail: summaryText, state: status.summary },
-    { tab: "flashcards", icon: "🗂", name: "Flashcards", detail: flashcardText, state: status.flashcards },
-    { tab: "quiz", icon: "✓", name: "Quiz", detail: quizParts.join(" · "), state: quiz.variants.length ? "generated" : "not_generated" },
+    { tab: "tutor", icon: "", name: "AI Tutor", detail: "Ask about this document", state: "neutral" },
+    { tab: "summary", icon: "", name: "Summary", detail: summaryText, state: status.summary },
+    { tab: "flashcards", icon: "", name: "Flashcards", detail: flashcardText, state: status.flashcards },
+    { tab: "quiz", icon: "", name: "Quiz", detail: quizParts.join(" · "), state: quiz.variants.length ? "generated" : "not_generated" },
   ];
   const toolList = root.querySelector(".overview-tools");
   tools.forEach((tool) => {
