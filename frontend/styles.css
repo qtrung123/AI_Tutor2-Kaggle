@@ -43,7 +43,7 @@
   /* semantic states */
   --ds-success: #1f7a4a; --ds-success-soft: #e9f6ee; --ds-success-border: #b9e0c8;
   --ds-warning: #a35a00; --ds-warning-soft: #fdf3e3; --ds-warning-border: #f0d3a3;
-  --ds-danger: #c2341f;  --ds-danger-soft: #fdecea;  --ds-danger-border: #f3c4bc;
+  --ds-danger: #c2341f;  --ds-danger-soft: #fdecea;  --ds-danger-border: #f3c4bc; --ds-danger-hover: #a92b18;
   /* type: 12 / 13 / 14 (body) / 16 / 20 / 24, plus 11 (dense calendar labels and captions) and
      32 / 40 (score figures). Every font-size in this file uses one of these. */
   --ds-font: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -4449,7 +4449,7 @@ body[data-page="overview"] .home-page .session-library .panel-heading { align-it
 .today-plan-heading .eyebrow { margin: 0 0 2px; }
 .today-plan-view-all { font-size: var(--ds-text-sm); }
 .today-plan-section h3 { font-size: var(--ds-text-xs); font-weight: var(--ds-weight-medium); color: var(--ds-text-3); text-transform: none; letter-spacing: 0; }
-.today-plan-next .planner-session { border-color: var(--ds-border); }
+.today-plan-next .planner-session { border-color: var(--ds-accent-border); background: var(--ds-accent-soft); }   /* Next up: the one thing to study now */
 .today-plan-progress { margin: 0; font-weight: var(--ds-weight-medium); color: var(--ds-text-3); }
 
 @media (max-width: 720px) {
@@ -4783,3 +4783,26 @@ body[data-page="session"] .persistent-tutor .chat-form input:disabled,
 
 /* Study Queue: why an activity has no session yet (server reason after Accept Plan). */
 .pcal-queue-why { margin-top: 2px; font-size: var(--ds-text-2xs); line-height: 1.35; color: var(--ds-text-2); }
+
+/* -- Confirmation dialog (confirmAction in js/utils.js): destructive actions only -- */
+.confirm-dialog { width: min(420px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--ds-border); border-radius: var(--ds-radius-lg);
+  background: var(--ds-surface); color: var(--ds-text); box-shadow: var(--ds-shadow-pop); }
+.confirm-dialog::backdrop { background: rgba(20, 21, 35, 0.4); }
+.confirm-dialog-card { display: grid; gap: var(--ds-space-3); padding: var(--ds-space-5); }
+.confirm-dialog-title { margin: 0; font-size: var(--ds-text-lg); font-weight: var(--ds-weight-semibold); line-height: var(--ds-leading-tight); overflow-wrap: anywhere; }
+.confirm-dialog-message { margin: 0; color: var(--ds-text-2); font-size: var(--ds-text-md); line-height: var(--ds-leading); }
+.confirm-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--ds-space-3); margin-top: var(--ds-space-2); }
+.confirm-dialog-actions button { min-height: var(--ds-control); padding: 0 var(--ds-space-4); border-radius: var(--ds-radius); font-weight: var(--ds-weight-medium); white-space: nowrap; width: auto; }
+.confirm-dialog .confirm-dialog-confirm { background: var(--ds-accent); color: #fff; border: 0; }
+.confirm-dialog .confirm-dialog-confirm--danger { background: var(--ds-danger); }
+.confirm-dialog .confirm-dialog-confirm--danger:hover:not(:disabled) { background: var(--ds-danger-hover); }
+@media (max-width: 480px) { .confirm-dialog-actions button { flex: 1 1 auto; } }
+
+/* The active tab already names the pane: its eyebrow label would only repeat it. */
+.session-overview .overview-header .eyebrow, .summary-panel .summary-heading .eyebrow, .flashcards-panel .flashcards-toolbar .eyebrow { display: none; }
+
+/* Home without upcoming sessions: Today's Study Plan moves below the materials as a compact prompt
+   (Continue learning and the materials come first); with sessions it stays at the top as "Next up". */
+.home-page > .today-plan.today-plan--idle { order: 1; gap: var(--ds-space-2); padding: var(--ds-space-3) var(--ds-space-4); }
+.today-plan--idle .today-plan-heading h2 { font-size: var(--ds-text-md); }
+.today-plan--idle .today-plan-empty { padding: 0; border: 0; text-align: left; font-size: var(--ds-text-sm); }

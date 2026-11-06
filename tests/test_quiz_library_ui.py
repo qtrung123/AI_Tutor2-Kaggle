@@ -94,7 +94,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const out = {errors: []};
 window.addEventListener("error", (e) => out.errors.push(String(e.message)));
 window.addEventListener("unhandledrejection", (e) => out.errors.push("rejection: " + String(e.reason && e.reason.message || e.reason)));
-window.confirm = () => true;   // headless: no real dialog, always confirm destructive actions
+// Destructive actions ask through the app's confirmation dialog: confirm it by clicking its confirm button.
+document.addEventListener("DOMContentLoaded", () => new MutationObserver(() => { const d = document.querySelector("dialog.confirm-dialog[open]:not([data-answered])"); if (!d) return; d.dataset.answered = "1"; (window.__confirmTexts = window.__confirmTexts || []).push(d.textContent); d.querySelector(".confirm-dialog-confirm").click(); }).observe(document.body, {childList: true, subtree: true, attributes: true, attributeFilter: ["open"]}));
 const cardText = (card) => card.textContent;
 (async () => {
   await sleep(1500);

@@ -42,12 +42,12 @@ function plannerFormatDuration(totalMinutes) {
 }
 
 function plannerFormatDateLabel(date) {
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 function plannerDayLabel(dateKey) {
   const [year, month, day] = dateKey.split("-").map(Number);
-  return new Date(year, month - 1, day).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  return new Date(year, month - 1, day).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
 }
 
 function plannerWeekDates(weekStart = plannerWeekStart) {
@@ -358,8 +358,9 @@ async function plannerToggleMaterial(documentId, checkbox) {
 async function plannerToggleMaterialGroup(group, checkbox) {
   const selected = checkbox.checked;
   const changing = group.documents.map((doc) => doc.id).filter((id) => Boolean(plannerMaterialFor(id)) !== selected);
-  if (!selected && changing.length > 1 && !window.confirm(
-    `Remove ${changing.length} documents of ${group.name} from this plan? Their learning goals are removed too.`)) {
+  if (!selected && changing.length > 1 && !(await confirmAction({
+    title: `Remove ${changing.length} documents of ${group.name} from this plan?`,
+    message: "Their learning goals are removed too. The documents themselves are kept.", confirmLabel: "Remove from plan" }))) {
     renderPlannerMaterials();
     return;
   }
@@ -410,7 +411,7 @@ function plannerGoalValues(material) {
 }
 
 function plannerShortDate(key) {
-  return new Date(`${key}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return new Date(`${key}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 function plannerGoalSummary(material) {
@@ -955,7 +956,7 @@ function plannerActivityWord(activity, steps = null) {
 
 function plannerShortWhen(iso) {
   const [year, month, day] = iso.slice(0, 10).split("-").map(Number);
-  return `${new Date(year, month - 1, day).toLocaleDateString(undefined, { weekday: "short" })} ${iso.slice(11, 16)}`;
+  return `${new Date(year, month - 1, day).toLocaleDateString("en-US", { weekday: "short" })} ${iso.slice(11, 16)}`;
 }
 
 function plannerLongWhen(iso) {
@@ -1654,7 +1655,7 @@ function pcalSessionTimes(session) {
 function pcalShortDay(dateKey) {
   const [year, month, day] = dateKey.split("-").map(Number);
   const date = new Date(year, month - 1, day);
-  return `${date.toLocaleDateString(undefined, { weekday: "short" })} ${day}`;
+  return `${date.toLocaleDateString("en-US", { weekday: "short" })} ${day}`;
 }
 
 function pcalActivity(activity, steps = null) {
@@ -2112,8 +2113,8 @@ function pcalRenderToolbar() {
   const dates = pcalWeekDates();
   const first = dates[0], last = dates[6];
   const sameMonth = first.getMonth() === last.getMonth();
-  const startLabel = first.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  const endLabel = last.toLocaleDateString(undefined, sameMonth ? { day: "numeric" } : { month: "short", day: "numeric" });
+  const startLabel = first.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const endLabel = last.toLocaleDateString("en-US", sameMonth ? { day: "numeric" } : { month: "short", day: "numeric" });
   pcal.range.textContent = `${startLabel} – ${endLabel}, ${last.getFullYear()}`;
 
   const live = plannerHasLivePlan();
@@ -2633,7 +2634,7 @@ function pcalPlanFactors() {
   }
   const due = plannerMaterials.filter((material) => material.deadline);
   factors.push(["Deadlines", due.length
-    ? due.map((material) => `${pcalMaterialTitle(material)} ${new Date(`${material.deadline}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`).join(", ")
+    ? due.map((material) => `${pcalMaterialTitle(material)} ${new Date(`${material.deadline}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`).join(", ")
     : "None set — sessions spread over the next two weeks."]);
   const weekMinutes = pcalWeekDates().reduce((sum, date) => sum + pcalAvailabilityFor(plannerDateKey(date), (date.getDay() + 6) % 7)
     .reduce((total, slot) => total + plannerToMinutes(slot.end_at) - plannerToMinutes(slot.start_at), 0), 0);
@@ -2688,7 +2689,7 @@ function pcalOpenSessionPopover(kind, session, block) {
     }
     const deadline = pcalMaterialDeadline(session.document_id);
     if (deadline && !PLANNER_HISTORY_SESSION_STATUSES.includes(session.status)) {
-      content.appendChild(pcalEl("p", "pcal-popover-note", `Due ${new Date(`${deadline}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`));
+      content.appendChild(pcalEl("p", "pcal-popover-note", `Due ${new Date(`${deadline}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`));
     }
     const original = session.rescheduled_from && plannerSessionsById.get(session.rescheduled_from);
     if (original) content.appendChild(pcalEl("p", "pcal-popover-note", `Moved from ${pcalWhen(original.scheduled_start)}`));
@@ -2697,8 +2698,8 @@ function pcalOpenSessionPopover(kind, session, block) {
     }
     if (session.steps?.length) content.appendChild(pcalStepList(session));
     if (kind === "completed" && session.completed_at) {
-      content.appendChild(pcalEl("p", "pcal-popover-note", `Completed ${new Date(session.completed_at).toLocaleString(undefined,
-        { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`));
+      content.appendChild(pcalEl("p", "pcal-popover-note", `Completed ${new Date(session.completed_at).toLocaleString("en-US",
+        { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}`));
     }
     holder.appendChild(content);
     if (kind === "suggested") content.appendChild(pcalEl("p", "pcal-popover-hint", "Suggested. Accept plan to save it."));
@@ -3096,7 +3097,7 @@ function pcalQueueItem(entry, kind) {
   if (subject) item.appendChild(subject);
   if (entry.reason?.message) item.appendChild(pcalEl("small", "pcal-queue-reason", entry.reason.message));
   const due = entry.deadline
-    ? `Due ${new Date(`${entry.deadline}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })} · ` : "";
+    ? `Due ${new Date(`${entry.deadline}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })} · ` : "";
   // After Accept Plan the server says why it has no session yet: held back by the plan's pacing
   // (free time is left: it can be dragged in) or genuinely no free slot before the deadline.
   const why = entry.queue_reason;
@@ -3856,7 +3857,7 @@ function pcalAgendaCard({ kind, session, change = null }) {
   const deadline = pcalMaterialDeadline(session.document_id);
   if (deadline && !PLANNER_HISTORY_SESSION_STATUSES.includes(session.status)) {
     body.appendChild(pcalEl("p", "pcal-agenda-note",
-      `Due ${new Date(`${deadline}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`));
+      `Due ${new Date(`${deadline}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`));
   }
   if (kind === "suggested") body.appendChild(pcalEl("p", "pcal-agenda-note", "Suggested. Accept plan to save it."));
   if (kind === "overdue") body.appendChild(pcalEl("p", "pcal-agenda-note pcal-agenda-note--warn", "Session not completed"));

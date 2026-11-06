@@ -110,7 +110,7 @@ class QuizDeleteFrontendTests(unittest.TestCase):
     def test_frontend_has_confirmed_delete_action_separate_from_regenerate(self):
         script = frontend_script_text()
         self.assertIn("async function deleteAssessmentQuiz()", script)
-        self.assertIn("window.confirm(", script)
+        self.assertIn("await confirmAction(", script)   # the shared confirmation dialog
         self.assertIn('method: "DELETE"', script)
         self.assertIn("QUIZZES_API_URL}/${encodeURIComponent(quizId)}", script)
         self.assertIn('["Delete Quiz", "text-button danger-button", callbacks.remove]', script)

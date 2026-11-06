@@ -130,7 +130,7 @@ class ExplainAssertions:
         first = self.out["railFirst"]
         self.assertEqual(len(first), 1)
         self.assertEqual({k: first[0][k] for k in ("title", "pill", "pack")}, {"title": "Marketing", "pill": "New", "pack": "Summary · 18 cards · Quiz"})
-        self.assertRegex(first[0]["due"], r"^Due \D*1\D")   # Oct 1 in the browser's locale
+        self.assertEqual(first[0]["due"], "Due Oct 1")   # English dates, whatever the browser language
         self.assertEqual(self.out["railAfter"][1], {"title": "Statistics", "pill": "Needs review", "due": "Flexible", "pack": "Summary · Quiz"})
 
     def test_add_materials_shows_learning_state_study_pack_and_quiz_honestly(self):
@@ -146,7 +146,7 @@ class ExplainAssertions:
         factors = self.out["firstFactors"]
         self.assertEqual(factors["Learning state"], "1 new")
         self.assertEqual(factors["Quiz performance"], "No quiz results yet — planning starts from new material.")
-        self.assertRegex(factors["Deadlines"], r"^Marketing \D*1\D")   # Oct 1 in the browser's locale
+        self.assertRegex(factors["Deadlines"], r"^Marketing Oct 1\b")   # English dates, whatever the browser language
         self.assertEqual(factors["Available time"], "Only the time you marked — 12h this week.")
 
     def test_explanation_uses_only_real_factors(self):
@@ -161,14 +161,14 @@ class ExplainAssertions:
     def test_suggested_session_explains_why(self):
         new = self.out["newGhost"]
         self.assertEqual((new["pill"], new["title"], new["activity"]), ("Suggested", "Statistics", "Summary"))
-        self.assertRegex(new["when"], r"28\D.* · 18:55–19:40 · 45m$")
+        self.assertEqual(new["when"], "Mon, Sep 28 · 18:55–19:40 · 45m")
         self.assertEqual(new["reason"], "Why this session? Build understanding of new material.")
         self.assertEqual(new["notes"], [])              # no deadline set for Statistics
         self.assertEqual(new["hint"], "Suggested. Accept plan to save it.")
         deadline = self.out["deadlineGhost"]
         self.assertEqual(deadline["reason"], "Why this session? The deadline is coming up.")
         self.assertEqual(len(deadline["notes"]), 1)
-        self.assertRegex(deadline["notes"][0], r"^Due \D*1\D")
+        self.assertEqual(deadline["notes"][0], "Due Oct 1")
         for popover in (new, deadline):
             self.assertNotRegex(popover["text"], r"new_material|deadline_approaching|priority")
 

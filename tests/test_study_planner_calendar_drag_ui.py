@@ -325,7 +325,7 @@ class CalendarDragAssertions:
         self.assertEqual(rescheduled["moved"], ["2026-09-28T20:00:00", "scheduled"])
         self.assertIn(["2026-09-28", "confirmed", "Marketing", "Summary · 20:00–20:45"], rescheduled["events"])
         self.assertFalse(any(e[0] == "2026-09-30" and e[2] == "Marketing" and e[3].startswith("Summary") for e in rescheduled["events"]))
-        self.assertRegex(rescheduled["range"], r"^28\D")   # updated in place, same week
+        self.assertEqual(rescheduled["range"], "Sep 28 – Oct 4, 2026")   # updated in place, same week
 
     def test_invalid_confirmed_drops_write_nothing(self):
         page = self.out["pageRefused"]

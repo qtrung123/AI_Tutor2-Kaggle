@@ -570,7 +570,7 @@ function renderQuizHistory() {
     // Practice has no real difficulty (the backend stores a fixed placeholder), so it is not shown.
     meta.textContent = isPractice ? "Flashcard practice" : `${scopeName} · ${attempt.difficulty}`;
     const date = document.createElement("small");
-    date.textContent = attempt.completed_at ? `Latest activity ${new Date(attempt.completed_at).toLocaleString()}` : "Activity time unavailable";
+    date.textContent = attempt.completed_at ? `Latest activity ${new Date(attempt.completed_at).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}` : "Activity time unavailable";
     const status = document.createElement("span");
     status.className = "quiz-history-scope";
     status.textContent = "Completed";
@@ -612,7 +612,7 @@ function renderQuizHistory() {
       const row = document.createElement("button");
       row.className = "quiz-attempt-history-row";
       row.type = "button";
-      const activity = pastAttempt.completed_at ? new Date(pastAttempt.completed_at).toLocaleString() : "time unavailable";
+      const activity = pastAttempt.completed_at ? new Date(pastAttempt.completed_at).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }) : "time unavailable";
       row.textContent = `Attempt ${pastAttempt.attempt_number} · ${Math.round(pastAttempt.percentage)}% · ${activity}`;
       row.addEventListener("click", () => openQuizResults(pastAttempt));
       history.appendChild(row);
@@ -622,9 +622,10 @@ function renderQuizHistory() {
   });
   // An empty section is hidden. Practice quizzes made earlier (Flashcards -> Practice as Quiz, the
   // Planner's written quizzes) stay listed; new quizzes are only created with Create Quiz.
-  [quizzesSection, practiceSection].forEach(({ section, list }) => {
-    if (list.children.length) quizHistoryList.appendChild(section);
-  });
+  const shown = [quizzesSection, practiceSection].filter(({ list }) => list.children.length);
+  shown.forEach(({ section }) => quizHistoryList.appendChild(section));
+  // A lone "Quizzes" group under the Quiz Library heading needs no heading of its own.
+  if (shown.length === 1 && shown[0] === quizzesSection) quizzesSection.section.querySelector(".quiz-list-section-heading").hidden = true;
 }
 
 function createQuizListSection(headingText, className) {
@@ -681,7 +682,12 @@ function createQuizCardMenu(quizId, titleText, isPractice = false) {
   remove.textContent = "Delete";
   remove.addEventListener("click", async (event) => {
     event.preventDefault();
-    if (!window.confirm(`Delete "${titleText}"? Its questions, attempts, and answers cannot be recovered.`)) return;
+    if (deletingQuizzes.has(quizId)) return;
+    if (!(await confirmAction({ title: `Delete "${titleText}"?`, message: "Its questions, attempts, and answers cannot be recovered.",
+      confirmLabel: isPractice ? "Delete practice" : "Delete quiz" }))) return;
+    if (deletingQuizzes.has(quizId)) return;
+    deletingQuizzes.add(quizId);
+    remove.disabled = true;
     try {
       await fetchJson(`${QUIZZES_API_URL}/${encodeURIComponent(quizId)}`, { method: "DELETE" });
       if (currentQuiz?.quiz_id === quizId) { currentQuiz = null; currentAttempt = null; renderAssessmentQuiz(); }
@@ -690,6 +696,7 @@ function createQuizCardMenu(quizId, titleText, isPractice = false) {
       await loadDashboard();
       showToast(isPractice ? "Practice deleted" : "Quiz deleted");
     } catch (error) { showToast(error.message || "Could not delete quiz"); }
+    finally { deletingQuizzes.delete(quizId); remove.disabled = false; }
   });
   list.appendChild(remove);
   menu.append(summary, list);
@@ -699,7 +706,7 @@ function createQuizCardMenu(quizId, titleText, isPractice = false) {
 function formatQuizCardTimestamp(iso) {
   if (!iso) return "";
   const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 }
 
 // The Quiz Library card for a quiz with no completed attempt yet -- Not Started or In Progress.
@@ -1029,11 +1036,17 @@ async function regenerateAssessmentQuiz(options = {}) {
   }
 }
 
+// Quizzes whose delete request is in flight (card menu or open quiz): one request per quiz.
+const deletingQuizzes = new Set();
+
 async function deleteAssessmentQuiz() {
   const quizId = currentQuiz?.quiz_id;
-  if (!quizId) return;
+  if (!quizId || deletingQuizzes.has(quizId)) return;
   const itemName = isPracticeQuiz(currentQuiz) ? "Practice" : "Quiz";
-  if (!window.confirm(`Delete this ${itemName.toLowerCase()}? Its questions, attempts, and answers cannot be recovered.`)) return;
+  if (!(await confirmAction({ title: `Delete this ${itemName.toLowerCase()}?`, message: "Its questions, attempts, and answers cannot be recovered.",
+    confirmLabel: `Delete ${itemName.toLowerCase()}` }))) return;
+  if (deletingQuizzes.has(quizId)) return;
+  deletingQuizzes.add(quizId);
   try {
     await fetchJson(`${QUIZZES_API_URL}/${encodeURIComponent(quizId)}`, { method: "DELETE" });
     backToQuizzes();
@@ -1042,6 +1055,8 @@ async function deleteAssessmentQuiz() {
     showToast(`${itemName} deleted`);
   } catch (error) {
     showToast(error.message || "Could not delete quiz");
+  } finally {
+    deletingQuizzes.delete(quizId);
   }
 }
 

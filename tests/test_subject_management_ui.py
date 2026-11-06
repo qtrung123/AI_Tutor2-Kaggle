@@ -126,10 +126,10 @@ const submitDialog = async (fill) => {
   out.afterRename = cards();
 
   // Delete: confirm says the documents are kept.
-  let confirmText = "";
-  window.confirm = (text) => { confirmText = text; return true; };
+  // Confirm the app's confirmation dialog (confirmAction) by clicking its confirm button.
+  new MutationObserver(() => { const d = document.querySelector("dialog.confirm-dialog[open]:not([data-answered])"); if (!d) return; d.dataset.answered = "1"; (window.__confirmTexts = window.__confirmTexts || []).push(d.textContent); d.querySelector(".confirm-dialog-confirm").click(); }).observe(document.body, {childList: true, subtree: true, attributes: true, attributeFilter: ["open"]});
   document.querySelector('.subject-card[data-subject-filter="bio"] .subject-card-delete').click(); await sleep(300);
-  out.afterDelete = {confirmText, cards: cards(), rows: rows()};
+  out.afterDelete = {confirmText: (window.__confirmTexts || []).join(" "), cards: cards(), rows: rows()};
 
   // Upload with a new subject chosen in the dialog.
   const upload = uploadWithSubjectChoice([new File(["%PDF-1.4"], "week3.pdf", {type: "application/pdf"})]);

@@ -182,7 +182,8 @@ class SessionOverviewUiTests(unittest.TestCase):
         self.assertEqual(nav["summary"]["tab"], "summary")
         self.assertEqual(nav["flashcards"]["tab"], "flashcards")
         self.assertEqual(nav["quiz"]["tab"], "quiz")
-        self.assertEqual(nav["tutor"], {"tab": "material", "chatFocused": True})
+        # The AI Tutor opens beside the current tab (like the header's "Ask AI Tutor"): no tab switch.
+        self.assertEqual(nav["tutor"], {"tab": "overview", "chatFocused": True})
 
     def test_overview_never_triggers_generation(self):
         calls = self.out["calls"]

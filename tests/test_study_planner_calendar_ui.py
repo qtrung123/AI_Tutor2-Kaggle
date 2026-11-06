@@ -257,7 +257,7 @@ class CalendarPlannerAssertions:
         self.assertEqual(first["columns"], [f"2026-09-{day}" for day in range(21, 28)])
         self.assertEqual(first["dayHeads"], ["Mon21", "Tue22", "Wed23", "Thu24", "Fri25", "Sat26", "Sun27"])
         self.assertEqual(first["today"], "Mon21")
-        self.assertRegex(first["range"], r"^21\D.*27, 2026$")
+        self.assertEqual(first["range"], "Sep 21 – 27, 2026")
         self.assertEqual((first["nowLine"], first["nowTop"]), (True, "640px"))   # 08:00 on an 80px/hour grid
         self.assertEqual(first["hours"], 23)
         self.assertEqual(first["stickyHead"], "sticky")
@@ -318,7 +318,7 @@ class CalendarPlannerAssertions:
 
     def test_ghost_sessions_render_on_the_right_day_and_time(self):
         next_week = self.out["nextWeek"]
-        self.assertRegex(next_week["range"], r"^28\D.*\b4\b.*2026$")
+        self.assertEqual(next_week["range"], "Sep 28 – Oct 4, 2026")
         ghosts = next_week["events"]
         self.assertEqual([(e["date"], e["kind"], e["title"], e["meta"]) for e in ghosts], [
             ("2026-09-28", "suggested", "Marketing", "Summary · 18:00–18:45"),
@@ -348,7 +348,7 @@ class CalendarPlannerAssertions:
         self.assertEqual(edit["markers"], [["2026-10-01", ["Marketing"]], ["2026-10-02", ["Statistics"]]])
 
     def test_availability_popover_repeat_weekly_and_delete(self):
-        self.assertRegex(self.out["todayButton"], r"^21\D.*27, 2026$")
+        self.assertEqual(self.out["todayButton"], "Sep 21 – 27, 2026")
         popover = self.out["popover"]
         self.assertTrue(popover["open"])
         self.assertIn("09:00–10:00", popover["text"])
@@ -374,7 +374,7 @@ class CalendarPlannerAssertions:
         accepted = self.out["accepted"]
         self.assertEqual(accepted["confirms"], 1)
         self.assertTrue(accepted["workspace"])
-        self.assertRegex(accepted["range"], r"^28\D.*\b4\b.*2026$")   # same screen, same week
+        self.assertEqual(accepted["range"], "Sep 28 – Oct 4, 2026")   # same screen, same week
         self.assertEqual([e["kind"] for e in accepted["events"]], ["confirmed"] * 3)
         self.assertTrue(all(e["border"] != "dashed" for e in accepted["events"]))
         self.assertTrue(accepted["samePositions"])
@@ -387,7 +387,7 @@ class CalendarPlannerAssertions:
     def test_reload_opens_the_confirmed_calendar(self):
         reloaded = self.out["reloaded"]
         self.assertTrue(reloaded["wizardHidden"])
-        self.assertRegex(reloaded["range"], r"^21\D.*27, 2026$")
+        self.assertEqual(reloaded["range"], "Sep 21 – 27, 2026")
         self.assertEqual(reloaded["status"], "No sessions this week")
         self.assertEqual(reloaded["events"], ["confirmed"] * 3)
         self.assertEqual(reloaded["previews"], 0)

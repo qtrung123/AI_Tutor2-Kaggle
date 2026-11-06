@@ -69,7 +69,8 @@ const count = () => document.getElementById("planner-material-count").textConten
     out.expanded = groups(step()).find((g) => g.key === "bio");
     await change(step().querySelector('input[data-document-id="stats.pdf"]'), false);
     out.partial = {bio: groups(step()).find((g) => g.key === "bio"), count: count()};
-    window.confirm = () => true;
+    // Confirm the app's confirmation dialog (confirmAction) by clicking its confirm button.
+    new MutationObserver(() => { const d = document.querySelector("dialog.confirm-dialog[open]:not([data-answered])"); if (!d) return; d.dataset.answered = "1"; (window.__confirmTexts = window.__confirmTexts || []).push(d.textContent); d.querySelector(".confirm-dialog-confirm").click(); }).observe(document.body, {childList: true, subtree: true, attributes: true, attributeFilter: ["open"]});
     await change(group(step(), "bio").querySelector(".planner-subject-group-all input"), false);
     out.cleared = {groups: groups(step()), count: count()};
     out.planMaterials = window.__planner.materials.map((m) => m.document_id);

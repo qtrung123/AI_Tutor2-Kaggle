@@ -117,12 +117,16 @@ function homeContinueTarget(materials) {
   return { ...entries[0], detail: "Not started yet", tab: "overview", action: "Start studying" };
 }
 
+// True while Today's Study Plan features a session under "Next up" (or "Next session · <day>"): that
+// session is the next thing to study, so the Continue card does not show it a second time.
+let homePlanFeaturesSession = false;
+
 function renderHomeContinue(materials) {
   const panel = document.getElementById("home-continue");
   if (!panel) return;
   panel.innerHTML = "";
-  panel.hidden = !materials.length;
-  if (!materials.length) return;
+  panel.hidden = !materials.length || homePlanFeaturesSession;
+  if (panel.hidden) return;
   const target = homeContinueTarget(materials);
   const documentId = target.material.document_id;
   const title = target.material.document_name || target.progress?.title || documentId;
@@ -322,13 +326,15 @@ function renderTodayPlan(sessions, progress = null) {
   if (!todayPlanPanel) return;
   todayPlanPanel.hidden = false;
   todayPlanPanel.innerHTML = "";
+  // Nothing planned: the panel steps aside (below the materials, compact) and Continue learning leads.
+  todayPlanPanel.classList.remove("today-plan--idle");
   const now = plannerNow();
   const heading = document.createElement("div");
   heading.className = "today-plan-heading";
   const titles = document.createElement("div");
   const eyebrow = document.createElement("p");
   eyebrow.className = "eyebrow";
-  eyebrow.textContent = now.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+  eyebrow.textContent = now.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
   const title = document.createElement("h2");
   title.id = "today-plan-title";
   title.textContent = "Today’s Study Plan";
@@ -364,8 +370,14 @@ function renderTodayPlan(sessions, progress = null) {
     todayPlanPanel.appendChild(message);
   };
 
-  if (sessions === null) { empty("Your study plan could not be loaded right now."); return; }
+  const features = (value) => {
+    if (homePlanFeaturesSession === value) return;
+    homePlanFeaturesSession = value;
+    renderHomeContinue(dashboardData?.materials || []);   // show or hide the Continue card to match
+  };
+  if (sessions === null) { features(false); empty("Your study plan could not be loaded right now."); return; }
   const { today, upcoming, overdue } = plannerTodayAgenda(sessions, now);
+  features(Boolean(today.length || upcoming));
   const list = (items) => {
     const element = document.createElement("ol");
     element.className = "planner-session-list";
@@ -380,6 +392,7 @@ function renderTodayPlan(sessions, progress = null) {
     section(`Next session · ${plannerDayLabel(upcoming.scheduled_start.slice(0, 10))}`, "today-plan-upcoming")
       .appendChild(plannerSessionItem(upcoming, "div", { action: true }));
   } else if (!overdue.length) {
+    todayPlanPanel.classList.add("today-plan--idle");
     empty("No upcoming study sessions. Create a plan to see what to study next.");
   }
   if (overdue.length) section("Not completed", "today-plan-overdue").appendChild(list(overdue));

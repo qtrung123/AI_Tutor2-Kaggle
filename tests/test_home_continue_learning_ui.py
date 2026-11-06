@@ -1,8 +1,9 @@
-"""Real-browser tests for Home "Continue learning" (headless Chrome, mocked API reused from the
-Today's Study Plan tests). A planned session goes through the Planner's own Start/Resume lifecycle --
-one start request even on a double click, the full session row (plan, artifact) the Today list holds,
-the tool the backend names -- and then reads Resume. Without a planned session it only opens the
-document: no planner request, nothing generated. Runs at desktop (1280px) and phone (390px).
+"""Real-browser tests for Home's "Next up" and "Continue learning" (headless Chrome, mocked API reused
+from the Today's Study Plan tests). A planned session is shown once, under Today's Study Plan "Next up"
+(the Continue card is hidden then, so the session never appears twice), and goes through the Planner's
+own Start/Resume lifecycle -- one start request even on a double click, the full session row (plan,
+artifact), the tool the backend names -- and then reads Resume. Without a planned session the Continue
+card opens the document: no planner request, nothing generated. Runs at desktop (1280px) and phone (390px).
 Skipped without Chrome.
 """
 
@@ -50,6 +51,18 @@ const button = () => document.querySelector("#home-continue .home-continue-open"
 const state = () => ({hidden: document.getElementById("home-continue").hidden, label: button()?.textContent || null,
   title: document.querySelector("#home-continue .home-continue-title")?.childNodes[0]?.textContent || null,
   detail: document.querySelector("#home-continue .home-continue-detail")?.textContent || null});
+const nextUp = () => document.querySelector("#today-plan .today-plan-next .planner-session");
+const nextUpButton = () => nextUp()?.querySelector(".planner-session-actions button, button");
+const nextUpState = () => ({continueHidden: document.getElementById("home-continue").hidden, label: nextUpButton()?.textContent || null,
+  buttons: [...(nextUp()?.querySelectorAll("button") || [])].map((b) => b.textContent),
+  title: nextUp()?.querySelector(".planner-session-body strong")?.textContent || null,
+  activity: nextUp()?.querySelector(".planner-activity-chip")?.textContent || null,
+  occurrences: [...document.querySelectorAll("#home-continue, #today-plan")].map((el) => el.textContent.split("Marketing").length - 1)
+    .reduce((a, b) => a + b, 0)});
+// Visual order of Home's blocks (top to bottom), by their rendered position.
+const homeOrder = () => [["continue", "#home-continue"], ["plan", "#today-plan"], ["materials", ".session-library"]]
+  .map(([name, selector]) => [name, document.querySelector(selector)])
+  .filter(([, el]) => el && !el.hidden).sort((a, b) => a[1].getBoundingClientRect().top - b[1].getBoundingClientRect().top).map(([name]) => name);
 const opened = () => ({page: document.body.dataset.page, tab: document.body.dataset.sessionTab, document: activeDocumentId});
 const home = async () => { setPage("overview"); await loadDashboard(); await sleep(400); await loadTodayPlan(); await sleep(200); };
 (async () => {
@@ -62,10 +75,11 @@ const home = async () => { setPage("overview"); await loadDashboard(); await sle
   P.sessionsByPlan = {"plan-1": [flash]};
   H.progress = {"mkt.pdf": learning("mkt.pdf", flash), "stats.pdf": learning("stats.pdf", null)};
 
-  // 1) a scheduled session: Start through the Planner lifecycle, once, on the tool it names
+  // 1) a scheduled session: shown once (Next up), Start through the Planner lifecycle, once, on the tool it names
   await home();
-  out.scheduled = state();
-  button().click(); button().click();          // a double click acts once (shared busy guard)
+  out.scheduled = {...nextUpState(), order: homeOrder()};
+  const startButton = nextUpButton();
+  startButton.click(); startButton.click();    // a double click acts once (shared busy guard)
   await sleep(1200);
   out.afterStart = {startCalls: [...P.startCalls], opened: opened(),
     todayRow: homePlanSessions.find((s) => s.session_id === "s-flash")?.status, generateCalls: window.__calls.filter((c) => /generate/.test(c))};
@@ -73,9 +87,10 @@ const home = async () => { setPage("overview"); await loadDashboard(); await sle
   // 2) back on Home the same session is in progress: Resume, still one start per click
   P.startCalls.length = 0;
   H.progress["mkt.pdf"] = learning("mkt.pdf", {...flash, status: "in_progress"});
+  P.sessionsByPlan = {"plan-1": [{...flash, status: "in_progress"}]};
   await home();
-  out.inProgress = state();
-  button().click(); await sleep(1200);
+  out.inProgress = nextUpState();
+  [...nextUp().querySelectorAll("button")].find((b) => b.textContent === "Resume").click(); await sleep(1200);
   out.afterResume = {startCalls: [...P.startCalls], opened: opened()};
 
   // 3) no planned session anywhere: the document opens, nothing touches the Planner
@@ -83,7 +98,8 @@ const home = async () => { setPage("overview"); await loadDashboard(); await sle
   P.sessionsByPlan = {"plan-1": []};
   H.progress = {"mkt.pdf": learning("mkt.pdf", null), "stats.pdf": learning("stats.pdf", null)};
   await home();
-  out.noSession = state();
+  out.noSession = {...state(), order: homeOrder(), planIdle: document.getElementById("today-plan").classList.contains("today-plan--idle"),
+    planDate: document.querySelector("#today-plan .today-plan-heading .eyebrow")?.textContent, browserLanguage: navigator.language};
   const before = P.calls.length;
   button().click(); await sleep(800);
   out.afterOpen = {startCalls: [...P.startCalls], opened: opened(),
@@ -109,10 +125,12 @@ class ContinueLearningAssertions:
         self.assertNotIn("fatal", self.out)
         self.assertEqual(self.out["errors"], [])
 
-    def test_a_scheduled_session_starts_through_the_planner_lifecycle_once(self):
-        self.assertEqual(self.out["scheduled"]["label"], "Start")
-        self.assertEqual(self.out["scheduled"]["title"], "Marketing")
-        self.assertTrue(self.out["scheduled"]["detail"].startswith("Next session · Flashcards"))
+    def test_a_scheduled_session_is_shown_once_and_starts_through_the_planner_lifecycle_once(self):
+        scheduled = self.out["scheduled"]
+        self.assertTrue(scheduled["continueHidden"])   # the Continue card does not repeat the planned session
+        self.assertEqual((scheduled["label"], scheduled["title"], scheduled["activity"]), ("Start", "Marketing", "Flashcards"))
+        self.assertEqual(scheduled["occurrences"], 1)
+        self.assertEqual(scheduled["order"], ["plan", "materials"])   # Next up leads Home
         after = self.out["afterStart"]
         self.assertEqual(after["startCalls"], ["s-flash"])                       # one request for a double click
         self.assertEqual(after["opened"], {"page": "session", "tab": "flashcards", "document": "mkt.pdf"})
@@ -120,12 +138,22 @@ class ContinueLearningAssertions:
         self.assertEqual(after["generateCalls"], [])                             # nothing generated on the way
 
     def test_an_in_progress_session_reads_resume_and_resumes(self):
-        self.assertEqual(self.out["inProgress"]["label"], "Resume")
+        self.assertTrue(self.out["inProgress"]["continueHidden"])
+        self.assertEqual(self.out["inProgress"]["buttons"], ["Complete", "Resume"])
+        self.assertEqual(self.out["inProgress"]["occurrences"], 1)
         self.assertEqual(self.out["afterResume"]["startCalls"], ["s-flash"])
         self.assertEqual(self.out["afterResume"]["opened"]["tab"], "flashcards")
 
     def test_without_a_planned_session_only_the_document_opens(self):
+        self.assertFalse(self.out["noSession"]["hidden"])   # nothing planned: the Continue card fills the gap
         self.assertEqual(self.out["noSession"]["label"], "Start studying")
+        # Nothing planned: Continue learning and the materials come first; the plan prompt is compact, below.
+        self.assertEqual(self.out["noSession"]["order"], ["continue", "materials", "plan"])
+        self.assertTrue(self.out["noSession"]["planIdle"])
+
+    def test_dates_are_english_whatever_the_browser_language(self):
+        # Thu 24 Sep 2026 (plannerNow): English like the rest of the UI, not the browser's language.
+        self.assertEqual(self.out["noSession"]["planDate"], "Thursday, Sep 24")
         after = self.out["afterOpen"]
         self.assertEqual(after["startCalls"], [])
         self.assertEqual(after["plannerWrites"], [])

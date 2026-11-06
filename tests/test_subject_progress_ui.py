@@ -65,7 +65,8 @@ const rows = () => [...document.querySelectorAll("#home-subject-progress .subjec
 
   await moveDocumentsToSubject(["pbi.pdf"], "bio"); await sleep(300);
   out.afterMove = rows();
-  window.confirm = () => true;
+  // Confirm the app's confirmation dialog (confirmAction) by clicking its confirm button.
+  new MutationObserver(() => { const d = document.querySelector("dialog.confirm-dialog[open]:not([data-answered])"); if (!d) return; d.dataset.answered = "1"; (window.__confirmTexts = window.__confirmTexts || []).push(d.textContent); d.querySelector(".confirm-dialog-confirm").click(); }).observe(document.body, {childList: true, subtree: true, attributes: true, attributeFilter: ["open"]});
   await deleteSubject(subjectById("bio")); await sleep(300);
   out.afterDelete = rows();
 

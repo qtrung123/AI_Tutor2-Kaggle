@@ -189,7 +189,7 @@ class PastReadOnlyAssertions:
 
     def test_previous_week_renders_read_only(self):
         previous = self.out["previousWeek"]
-        self.assertRegex(previous["range"], r"^14\D.*20, 2026$")
+        self.assertEqual(previous["range"], "Sep 14 – 20, 2026")
         self.assertTrue(previous["allPast"])
         self.assertEqual(previous["created"], 0)
         # the weekly slots (Fri, plus the Thu/Sat ones created above) show as read-only history

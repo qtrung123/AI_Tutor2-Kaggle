@@ -198,20 +198,26 @@ function renderSources(sources, mode = "uploaded") {
   });
 }
 
+// Documents whose delete request is in flight: a repeated click (or the same document's Delete in
+// another list) never sends a second, failing request.
+const deletingDocuments = new Set();
+
 async function deleteUploadedSource(source, button) {
   const title = source.title || "";
-  if (!title) {
+  if (!title || deletingDocuments.has(title)) {
     return;
   }
-  if (!window.confirm(
-    `Delete "${title}"? This permanently removes the document, its quizzes, attempts, summaries, `
-    + "flashcards, and progress data. This cannot be undone."
-  )) {
+  if (!(await confirmAction({
+    title: `Delete "${title}"?`,
+    message: "This permanently removes the document, its quizzes, attempts, summaries, flashcards, and progress data. This cannot be undone.",
+    confirmLabel: "Delete document",
+  }))) {
     return;
   }
+  if (deletingDocuments.has(title)) return;   // confirmed twice from two places
+  deletingDocuments.add(title);
 
-  button.disabled = true;
-  button.textContent = "Deleting";
+  if (button) { button.disabled = true; button.textContent = "Deleting"; }
 
   try {
     const response = await fetch(`${DELETE_SOURCE_API_URL}/${encodeURIComponent(title)}`, {
@@ -244,9 +250,10 @@ async function deleteUploadedSource(source, button) {
 
     showToast(`Deleted ${data.deleted}`);
   } catch (error) {
-    button.disabled = false;
-    button.textContent = "Delete";
+    if (button) { button.disabled = false; button.textContent = "Delete"; }
     showToast(`Delete failed: ${error.message || "please try again."}`);
+  } finally {
+    deletingDocuments.delete(title);
   }
 }
 
@@ -359,8 +366,8 @@ function formatConversationTime(value) {
   if (Number.isNaN(date.getTime())) return "";
   const today = new Date();
   return date.toDateString() === today.toDateString()
-    ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : date.toLocaleDateString([], { day: "numeric", month: "short" });
+    ? date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+    : date.toLocaleDateString("en-US", { day: "numeric", month: "short" });
 }
 
 function conversationActionButton(className, label, text, onClick) {

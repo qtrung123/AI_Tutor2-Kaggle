@@ -157,9 +157,8 @@ function renderSessionOverview() {
 
 function openOverviewTool(tab) {
   if (tab === "tutor") {
-    // The AI Tutor lives in the persistent side panel next to every tab: land on the material
-    // with the chat focused (same as the Library's AI Tutor quick action).
-    setSessionTab("material");
+    // The AI Tutor lives in the side panel next to every tab: open it with the chat focused and stay
+    // on the current tab (the same as the header's "Ask AI Tutor"; no unexpected tab switch).
     revealTutor();
     chatInput?.focus();
     return;
@@ -698,7 +697,7 @@ function progressLine(parent, text, className = "") {
 
 function progressDate(iso) {
   const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 function renderDocumentProgress(progress) {

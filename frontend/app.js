@@ -562,14 +562,35 @@ function modelLabel(modelId, fallbackName) {
   return generationModels.find((model) => model.id === modelId)?.label || fallbackName || modelId || "";
 }
 
+// Only one model is offered (GET /api/models): there is nothing to choose, so the selector and the
+// "change it in the selector" hints are not shown. The model configuration, the model_id sent with
+// every request and the Preparing/error states are unchanged.
+function singleModelMode() {
+  return generationModels.length <= 1;
+}
+
 // Says which model a Generate button will use (the Generate screens have no selector of their own).
 function updateGenerateModelNotes() {
   document.querySelectorAll(".generate-model-name").forEach((element) => { element.textContent = modelLabel(selectedModelId); });
+  document.querySelectorAll(".generate-model-note, .quiz-sheet-model-hint").forEach((element) => { element.hidden = singleModelMode(); });
 }
 
 function renderModelSelector() {
   const header = document.querySelector(".session-header");
   if (!header || !generationModels.length) return;
+  if (singleModelMode()) {
+    // No selector: only the model's Preparing…/error state (it gates every Generate button).
+    if (!document.getElementById("model-ready-badge")) {
+      const status = document.createElement("span"); status.className = "generation-model-control generation-model-control--single";
+      const badge = document.createElement("span"); badge.id = "model-ready-badge"; badge.className = "model-ready-badge"; badge.hidden = true;
+      badge.setAttribute("role", "status");
+      status.appendChild(badge);
+      header.appendChild(status);
+    }
+    updateGenerateModelNotes();
+    renderModelReadyState();
+    return;
+  }
   let select = document.getElementById("generation-model-select");
   if (!select) {
     const label = document.createElement("label"); label.className = "generation-model-control"; label.textContent = "Model:";
@@ -593,7 +614,8 @@ function renderModelSelector() {
 function renderModelReadyState() {
   const badge = document.getElementById("model-ready-badge");
   if (badge) {
-    badge.hidden = modelReadyState === "unknown";
+    // With a single model "Ready" says nothing new; preparing and errors are still shown.
+    badge.hidden = modelReadyState === "unknown" || (singleModelMode() && modelReadyState === "ready");
     badge.className = `model-ready-badge model-ready-${modelReadyState}`;
     badge.textContent = modelReadyState === "preparing" ? "Preparing…"
       : modelReadyState === "ready" ? "Ready"
@@ -614,6 +636,10 @@ function renderModelReadyState() {
 function renderQuizSheetModelSummary() {
   const badge = document.getElementById("quiz-sheet-model-badge");
   if (!badge) return;
+  // A single, ready model needs no Model row in the sheet; preparing and errors still explain a
+  // disabled Generate button.
+  const summary = badge.closest(".quiz-sheet-model-summary");
+  if (summary) summary.hidden = singleModelMode() && !["preparing", "error"].includes(modelReadyState);
   badge.hidden = modelReadyState === "unknown";
   badge.className = `quiz-sheet-model-badge quiz-sheet-model-badge--${modelReadyState}`;
   badge.textContent = modelReadyState === "preparing" ? "Preparing…"

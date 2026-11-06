@@ -8,6 +8,69 @@ function showToast(message) {
   showToast.timer = window.setTimeout(() => toast.classList.remove("show"), 2400);
 }
 
+// The one confirmation dialog for destructive, irreversible actions (replaces window.confirm, which is
+// unstyled and blocks the page). A native modal <dialog>: focus stays inside it, Escape and a click
+// on the backdrop cancel, Cancel has focus first (the safe choice), and focus returns to the control
+// that opened it. Resolves true only when the action is confirmed.
+let confirmDialogCount = 0;
+
+function confirmAction({ title, message = "", confirmLabel = "Delete", cancelLabel = "Cancel", danger = true }) {
+  return new Promise((resolve) => {
+    const opener = document.activeElement;
+    const id = `confirm-dialog-${++confirmDialogCount}`;
+    const dialog = document.createElement("dialog");
+    dialog.className = "confirm-dialog";
+    dialog.setAttribute("aria-labelledby", `${id}-title`);
+    if (message) dialog.setAttribute("aria-describedby", `${id}-message`);
+    const card = document.createElement("div");   // fills the dialog: a click outside it is on the backdrop
+    card.className = "confirm-dialog-card";
+    dialog.appendChild(card);
+    const heading = document.createElement("h2");
+    heading.className = "confirm-dialog-title";
+    heading.id = `${id}-title`;
+    heading.textContent = title;
+    card.appendChild(heading);
+    if (message) {
+      const text = document.createElement("p");
+      text.className = "confirm-dialog-message";
+      text.id = `${id}-message`;
+      text.textContent = message;
+      card.appendChild(text);
+    }
+    const actions = document.createElement("div");
+    actions.className = "confirm-dialog-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "secondary-button confirm-dialog-cancel";
+    cancel.textContent = cancelLabel;
+    cancel.autofocus = true;
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.className = `primary-button confirm-dialog-confirm${danger ? " confirm-dialog-confirm--danger" : ""}`;
+    confirm.textContent = confirmLabel;
+    actions.append(cancel, confirm);
+    card.appendChild(actions);
+
+    let done = false;
+    const finish = (confirmed) => {
+      if (done) return;
+      done = true;
+      if (dialog.open) dialog.close();
+      dialog.remove();
+      if (opener?.isConnected && typeof opener.focus === "function") opener.focus({ preventScroll: true });
+      resolve(confirmed);
+    };
+    cancel.addEventListener("click", () => finish(false));
+    confirm.addEventListener("click", () => finish(true));
+    dialog.addEventListener("cancel", (event) => { event.preventDefault(); finish(false); });   // Escape
+    dialog.addEventListener("click", (event) => { if (event.target === dialog) finish(false); });   // backdrop
+    document.body.appendChild(dialog);
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+    cancel.focus();
+  });
+}
+
 function appendInlineMarkdown(parent, text) {
   text.split(/(\*\*[^*]+\*\*)/g).forEach((part) => {
     if (!part) {

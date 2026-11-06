@@ -89,10 +89,17 @@ async function renameSubject(subject) {
   }
 }
 
+// Subjects whose delete request is in flight: one request per subject.
+const deletingSubjects = new Set();
+
 async function deleteSubject(subject, button) {
+  if (deletingSubjects.has(subject.subject_id)) return;
   const count = subject.document_count || 0;
-  if (!window.confirm(`Delete subject "${subject.name}"? Its documents will be kept and moved to Unassigned`
-    + `${count ? ` (${subjectCountText(count)})` : ""}. Nothing else is deleted.`)) return;
+  if (!(await confirmAction({ title: `Delete subject "${subject.name}"?`,
+    message: `Its documents will be kept and moved to Unassigned${count ? ` (${subjectCountText(count)})` : ""}. Nothing else is deleted.`,
+    confirmLabel: "Delete subject" }))) return;
+  if (deletingSubjects.has(subject.subject_id)) return;
+  deletingSubjects.add(subject.subject_id);
   if (button) button.disabled = true;
   try {
     const result = await subjectRequest(`${SUBJECTS_API_URL}/${encodeURIComponent(subject.subject_id)}`, "DELETE");
@@ -102,6 +109,8 @@ async function deleteSubject(subject, button) {
   } catch (error) {
     if (button) button.disabled = false;
     showToast(error.message || "Subject could not be deleted");
+  } finally {
+    deletingSubjects.delete(subject.subject_id);
   }
 }
 
