@@ -7,12 +7,18 @@ function setSessionTab(tab) {
   document.querySelectorAll(".session-tab").forEach((button) => button.classList.toggle("active", button.dataset.sessionTab === tab));
   document.querySelectorAll(".session-pane").forEach((pane) => pane.classList.toggle("active", pane.dataset.sessionPane === tab));
   document.getElementById("persistent-tutor").hidden = false;
+  if (tab === "material") loadOriginalContentFrame();
   if (tab === "summary") showSummaryState();
   if (tab === "flashcards") showFlashcardsState();
   if (tab === "quiz") renderQuizHistory();
   if (tab === "overview") loadSessionOverview();
   // "Open Summary" only when the step's tool is not the open tab (planner.js may be absent in tests).
   if (typeof plannerRenderSessionStepBar === "function") plannerRenderSessionStepBar();
+}
+
+function loadOriginalContentFrame() {
+  const source = originalContentFrame?.dataset.src;
+  if (source && originalContentFrame.getAttribute("src") !== source) originalContentFrame.src = source;
 }
 
 // ---- Study Session Overview ---------------------------------------------------------------------
@@ -32,12 +38,28 @@ async function loadSessionOverview() {
     fetchJson(flashcardsUrl("&cache_only=true")),
   ]);
   if (sessionOverviewKey() !== key) return;   // switched document/model meanwhile
+  // The tabs opened next reuse these saved reads once instead of asking again (see takeOverviewPrefetch).
+  overviewPrefetch = {
+    summaryKey: `${documentId}:${selectedModelId}`, summary: summary.status === "fulfilled" ? summary.value : undefined,
+    flashcardsKey: key, flashcards: cards.status === "fulfilled" ? cards.value : undefined,
+  };
   sessionOverviewStatus.summary = summary.status === "rejected" ? "error"
     : (summary.value?.status !== "not_generated" && summary.value?.final_summary ? "generated" : "not_generated");
   const cardCount = cards.status === "fulfilled" && cards.value?.status !== "not_generated" ? (cards.value?.cards || []).length : 0;
   sessionOverviewStatus.flashcards = cards.status === "rejected" ? "error" : (cardCount ? "generated" : "not_generated");
   sessionOverviewStatus.flashcardCount = cardCount;
   renderSessionOverview();
+}
+
+// One-shot reuse of the Overview's cache_only reads: the first Summary/Flashcards visit right after
+// the Overview loaded skips its identical request; later visits read again as before.
+let overviewPrefetch = null;
+
+function takeOverviewPrefetch(kind, key) {
+  if (!overviewPrefetch || overviewPrefetch[`${kind}Key`] !== key || overviewPrefetch[kind] === undefined) return undefined;
+  const value = overviewPrefetch[kind];
+  overviewPrefetch[kind] = undefined;
+  return value;
 }
 
 function sessionOverviewQuizState(documentId) {
@@ -64,7 +86,7 @@ function renderSessionOverview() {
     <header class="overview-header">
       <p class="eyebrow">Overview</p>
       <h2 class="overview-title"></h2>
-      <p class="overview-context">
+      <p class="overview-context" hidden>
         <span class="overview-model"></span>
         <span class="overview-model-state overview-model-state--${modelReadyState}"${readiness ? "" : " hidden"}>${readiness}</span>
         <span class="overview-topics">${topicCount} topic${topicCount === 1 ? "" : "s"}</span>
@@ -244,8 +266,10 @@ async function showFlashcardsState() {
   if (flashcardsRegenerateStatus) flashcardsRegenerateStatus.hidden = true;
   if (flashcardsInFlightKey === key) { flashcardsError.hidden = true; flashcardsStage.hidden = true; flashcardsFilterEmpty.hidden = true; flashcardsGenerate.hidden = true; return; }
   flashcardsError.hidden = true; flashcardsStage.hidden = true; flashcardsFilterEmpty.hidden = true; flashcardsGenerate.hidden = true;
-  let saved = null;
-  try { saved = await fetchJson(flashcardsUrl("&cache_only=true")); } catch (error) { saved = null; }
+  let saved = (typeof takeOverviewPrefetch === "function" ? takeOverviewPrefetch("flashcards", key) : undefined) ?? null;
+  if (!saved) {
+    try { saved = await fetchJson(flashcardsUrl("&cache_only=true")); } catch (error) { saved = null; }
+  }
   if (activeDocumentId !== requestDocumentId || key !== flashcardsKey()) return;
   if (saved && saved.status !== "not_generated" && (saved.cards || []).length) applyFlashcardSet(saved, key);
   else flashcardsGenerate.hidden = false;
@@ -449,8 +473,9 @@ async function showSummaryState() {
   if (summaryInFlightKey === key) { summaryContent.innerHTML = ""; summaryGenerate.hidden = true; regenerateSummaryButton.hidden = true; return; }
   summaryContent.innerHTML = ""; loadedSummaryKey = ""; summaryGenerate.hidden = true; regenerateSummaryButton.hidden = true;
   const query = `model_id=${encodeURIComponent(selectedModelId)}`;
+  const prefetched = typeof takeOverviewPrefetch === "function" ? takeOverviewPrefetch("summary", key) : undefined;
   const [saved, active] = (await Promise.allSettled([
-    fetchJson(`${SUMMARY_API_BASE_URL}/${encodeURIComponent(requestDocumentId)}?${query}&cache_only=true`),
+    prefetched ?? fetchJson(`${SUMMARY_API_BASE_URL}/${encodeURIComponent(requestDocumentId)}?${query}&cache_only=true`),
     fetchJson(`${SUMMARY_API_BASE_URL}/jobs?document_id=${encodeURIComponent(requestDocumentId)}&${query}`),
   ])).map((result) => (result.status === "fulfilled" ? result.value : null));
   if (activeDocumentId !== requestDocumentId || key !== `${activeDocumentId}:${selectedModelId}`) return;
@@ -561,32 +586,38 @@ async function openStudySession(documentId, tab = "overview", topicId = "", { qu
   loadedFlashcardKey = ""; flashcardSet = null; flashcards = []; flashcardIndex = 0; flashcardTopicFilter = "all";
   if (summaryContent) summaryContent.innerHTML = "";
   const sessionBreadcrumb = document.getElementById("session-home-button");
-  if (sessionBreadcrumb) sessionBreadcrumb.textContent = `Home > ${documentItem.title}`;
-  try {
-    await ensureStudySessionConversation();
-  } catch (error) {
-    console.error("Could not prepare the Study Session conversation", error);
-    showToast(error.message || "Could not scope the tutor to this document");
-  }
-  if (activeDocumentId !== documentId) return;
+  if (sessionBreadcrumb) sessionBreadcrumb.textContent = "← Home";
   sessionDocumentName.textContent = documentItem.title;
   const matchingMaterial = (dashboardData?.materials || []).find((item) => item.document_id === documentId);
   const assessed = matchingMaterial?.assessed_topic_count || 0;
-  sessionDocumentStatus.textContent = `${documentItem.topics?.length || 0} extracted topics · ${assessed} assessed`;
+  const topicCount = documentItem.topics?.length || 0;
+  sessionDocumentStatus.textContent = `${topicCount} extracted topic${topicCount === 1 ? "" : "s"} · ${assessed} assessed`;
   const contentUrl = apiUrl(`/api/sources/${encodeURIComponent(documentId)}/content`);
   originalContentFileName.textContent = documentItem.title;
   originalContentOpen.href = contentUrl;
-  originalContentFrame.src = `${contentUrl}#view=FitH`;
+  // The original file is only downloaded when its tab is opened (see loadOriginalContentFrame).
+  originalContentFrame.dataset.src = `${contentUrl}#view=FitH`;
+  originalContentFrame.removeAttribute("src");
   originalContentFrame.hidden = false;
   originalContentEmpty.hidden = true;
   if (quizDocumentSelect) quizDocumentSelect.value = documentId;
   quizScopeSelect.value = "document";   // a quiz always covers the whole document
   flashcardTopicFilter = topicId && topicId !== "document" ? topicId : "all";
   const toQuizPlayer = quizTarget !== undefined;
-  await Promise.all([toQuizPlayer ? null : loadSelectedQuiz(), loadQuizHistory(documentId)]);
+  // The session is shown at once; its chat and quiz data load behind it (each part shows its own
+  // loading state). Opening a session never creates a conversation -- the first question does.
   renderSessionProgress(documentId);
   setPage("session");
   setSessionTab(tab);
+  const conversationReady = ensureStudySessionConversation({ create: false }).catch((error) => {
+    console.error("Could not prepare the Study Session conversation", error);
+    showToast(error.message || "Could not scope the tutor to this document");
+  });
+  sessionConversationPending = conversationReady;
+  conversationReady.then(() => { if (sessionConversationPending === conversationReady) sessionConversationPending = null; });
+  await Promise.all([toQuizPlayer ? null : loadSelectedQuiz(), loadQuizHistory(documentId), conversationReady]);
+  if (activeDocumentId !== documentId) return;
+  if (document.body.dataset.sessionTab === "overview") renderSessionOverview();   // quiz history is known now
   if (toQuizPlayer && quizTarget) {
     try {
       await openQuizPlayer(quizTarget);
@@ -635,16 +666,22 @@ function quizCoverageText(mastery) {
 async function loadDocumentProgress(documentId) {
   if (!sessionProgressState) return;
   const request = ++documentProgressRequest;
-  if (sessionProgressPlanPanel) sessionProgressPlanPanel.hidden = true;
-  [sessionProgressState, sessionProgressQuiz, sessionProgressPlan].forEach((element) => {
-    element.innerHTML = '<p class="empty-state">Loading…</p>';
-  });
+  // Home already holds this document's progress: show it at once, then refresh it below.
+  const cached = typeof homeDocStates !== "undefined" ? homeDocStates.get(documentId) : null;
+  if (cached) renderDocumentProgress(cached);
+  else {
+    if (sessionProgressPlanPanel) sessionProgressPlanPanel.hidden = true;
+    [sessionProgressState, sessionProgressQuiz, sessionProgressPlan].forEach((element) => {
+      element.innerHTML = '<p class="empty-state">Loading…</p>';
+    });
+  }
   try {
     const progress = await plannerRequest(`${PROGRESS_API_BASE_URL}/${encodeURIComponent(documentId)}?utc_offset_minutes=${plannerUtcOffsetMinutes()}`);
     if (request !== documentProgressRequest || activeDocumentId !== documentId) return;   // switched document meanwhile
+    if (progress?.learning && typeof homeDocStates !== "undefined") homeDocStates.set(documentId, progress);
     renderDocumentProgress(progress);
   } catch (error) {
-    if (request !== documentProgressRequest) return;
+    if (request !== documentProgressRequest || cached) return;   // keep the shown (cached) progress
     [sessionProgressState, sessionProgressQuiz].forEach((element) => {
       element.innerHTML = '<p class="empty-state">Progress could not be loaded right now.</p>';
     });

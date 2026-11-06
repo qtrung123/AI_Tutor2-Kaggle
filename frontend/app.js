@@ -1,5 +1,5 @@
 const pageTitles = {
-  overview: "Study sessions",
+  overview: "Home",
   session: "Study Session",
   planner: "Study Planner"
 };
@@ -29,7 +29,7 @@ const uploadStatus = document.getElementById("upload-status");
   if (!panel) return;
   panel.innerHTML = `<div class="assessment-form quiz-sheet-form">
     <label class="quiz-sheet-field quiz-sheet-field--name"><span>Quiz name</span><input id="quiz-name-input" type="text" maxlength="200" placeholder="e.g. Midterm Embedded Systems"></label>
-    <label class="quiz-sheet-field quiz-sheet-field--scope"><span>Scope</span><select id="quiz-scope-select" class="quiz-sheet-scope-select" disabled><option value="document" selected>Entire document</option></select></label>
+    <label class="quiz-sheet-field quiz-sheet-field--scope" hidden><span>Scope</span><select id="quiz-scope-select" class="quiz-sheet-scope-select" disabled><option value="document" selected>Entire document</option></select></label>
     <label class="quiz-sheet-field quiz-sheet-field--difficulty"><span>Difficulty</span><select id="quiz-difficulty-select" class="visually-hidden"><option value="easy">Easy</option><option value="medium">Medium</option><option value="difficult">Difficult</option></select><div class="quiz-segmented" id="quiz-difficulty-segmented" role="radiogroup" aria-label="Difficulty"></div></label>
     <select id="quiz-document-select" class="visually-hidden"></select>
     <div class="quiz-sheet-model-summary"><div class="quiz-sheet-model-row"><span class="quiz-sheet-model-label">Model</span><span class="generate-model-name quiz-sheet-model-name"></span><span class="quiz-sheet-model-badge" id="quiz-sheet-model-badge" hidden></span></div><p class="quiz-sheet-model-hint">Change the model using the Study Session selector above.</p></div>
@@ -517,6 +517,8 @@ async function signOut() {
   dashboardData = null;
   knowledgeGaps = [];
   recommendations = [];
+  const uploadBanner = document.getElementById("home-upload-banner");
+  if (uploadBanner) uploadBanner.hidden = true;
   showAuthentication();
 }
 
@@ -532,11 +534,12 @@ function setPage(page) {
   syncSidebarRecentActive();
   views.forEach((view) => view.classList.toggle("active", view.id === `${page}-view`));
   pageTitle.textContent = pageTitles[page];
-  if (pageTitles[page]) showToast(`Opened ${pageTitles[page]}`);
   if (page === "planner") plannerOpen();   // the current layout at once, never the bare step-by-step markup
   if (page === "overview") {
+    // Re-read on every visit (sessions may have been completed or re-planned elsewhere): the
+    // per-document progress is one batch request, not one request per document.
     loadTodayPlan();
-    refreshHomeDocumentStates();   // sessions may have been completed or re-planned elsewhere
+    refreshHomeDocumentStates();
   }
 }
 
@@ -739,7 +742,9 @@ function getActiveStudySessionDocument() {
 
 // Keeps the open chat when it belongs to this document; otherwise reopens the chat last used for the
 // document (then its most recent one), and only creates a conversation when the document has none.
-async function ensureStudySessionConversation() {
+// With create: false (opening a session, deleting its last chat) a document without chats shows an
+// empty, unsaved chat instead: the conversation is created by the first question sent.
+async function ensureStudySessionConversation({ create = true } = {}) {
   const documentItem = getActiveStudySessionDocument();
   const documentIds = [documentItem.id];
   if (activeConversation?.id && conversationDocumentId(activeConversation) === documentItem.id) {
@@ -755,14 +760,31 @@ async function ensureStudySessionConversation() {
     return activeConversation;
   }
 
+  if (!create) {
+    openConversationSeq += 1;   // a slower open of another document's chat must not land here
+    activeConversation = null;
+    renderConversationList();
+    renderConversationSources();
+    renderConversationMessages();
+    updateConversationHeader();
+    return null;
+  }
+
   if (!activeConversation?.id || activeConversation.document_id !== documentItem.id) {
     const created = await fetchJson(CONVERSATIONS_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: "New conversation", document_ids: documentIds })
     });
-    conversations.unshift(created);
-    await openConversation(created.id);
+    // Created by the first question being sent: the response already is the conversation, and the
+    // message list (the question and its loading row) must not be re-rendered under the learner.
+    conversations = [created, ...conversations.filter((item) => item.id !== created.id)];
+    openConversationSeq += 1;
+    activeConversation = created;
+    rememberConversation(activeConversation);
+    renderConversationList();
+    renderConversationSources();
+    updateConversationHeader();
     return activeConversation;
   }
   return activeConversation;
@@ -1177,6 +1199,13 @@ resetButton.addEventListener("click", resetApp);
 uploadSourceButton.addEventListener("click", () => sourceFileInput.click());
 sourceFileInput.addEventListener("change", () => uploadWithSubjectChoice(sourceFileInput.files));
 sessionSearchInput?.addEventListener("input", applySessionLibraryFilters);
+document.getElementById("home-upload-open")?.addEventListener("click", (event) => {
+  document.getElementById("home-upload-banner").hidden = true;
+  openStudySession(event.currentTarget.dataset.documentId);
+});
+document.getElementById("home-upload-dismiss")?.addEventListener("click", () => {
+  document.getElementById("home-upload-banner").hidden = true;
+});
 newConversationButton.addEventListener("click", createChatConversation);
 document.getElementById("tutor-conversations-toggle")?.addEventListener("click", () => {
   setConversationListCollapsed(!document.getElementById("tutor-conversations").classList.contains("is-collapsed"));

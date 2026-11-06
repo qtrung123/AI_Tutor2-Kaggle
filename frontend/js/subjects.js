@@ -321,6 +321,12 @@ function chooseUploadSubject(files) {
 async function uploadWithSubjectChoice(files) {
   const list = Array.from(files || []);
   if (!list.length) return;
+  // Without any subject there is nothing to choose: upload at once (subjects can still be created
+  // on Home and documents moved into them later).
+  if (!userSubjects.length) {
+    await uploadSourceFiles(list, null);
+    return;
+  }
   const choice = await chooseUploadSubject(list);
   if (choice === null) {   // cancelled: nothing is uploaded
     sourceFileInput.value = "";

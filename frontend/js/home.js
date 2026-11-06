@@ -21,17 +21,43 @@ function refreshHomeDocumentStates() {
   if (dashboardData) loadHomeDocumentStates((dashboardData.materials || []).map((material) => material.document_id));
 }
 
-async function loadHomeDocumentStates(documentIds) {
-  const load = ++homeDocStatesLoad;
+const PROGRESS_BATCH_SIZE = 40;
+
+// Every document's progress in one request (GET /api/progress/documents?document_ids=...). A backend
+// without the batch route (or a failed batch) falls back to one request per document.
+async function fetchDocumentProgressMap(documentIds) {
   const states = new Map();
+  if (!documentIds.length) return states;
+  const offset = `utc_offset_minutes=${plannerUtcOffsetMinutes()}`;
+  try {
+    // Chunks keep each URL short enough for proxies (nginx / Cloudflare in the Kaggle deployment).
+    const chunks = [];
+    for (let index = 0; index < documentIds.length; index += PROGRESS_BATCH_SIZE) chunks.push(documentIds.slice(index, index + PROGRESS_BATCH_SIZE));
+    const batches = await Promise.all(chunks.map((chunk) => plannerRequest(
+      `${PROGRESS_API_BASE_URL}?${offset}&${chunk.map((id) => `document_ids=${encodeURIComponent(id)}`).join("&")}`)));
+    if (batches.every((batch) => batch?.documents && typeof batch.documents === "object")) {
+      batches.forEach((batch) => Object.entries(batch.documents).forEach(([id, progress]) => {
+        if (progress?.learning) states.set(id, progress);
+      }));
+      return states;
+    }
+  } catch (error) {
+    // older backend: per-document requests below
+  }
   await Promise.all(documentIds.map(async (id) => {
     try {
-      const progress = await plannerRequest(`${PROGRESS_API_BASE_URL}/${encodeURIComponent(id)}?utc_offset_minutes=${plannerUtcOffsetMinutes()}`);
+      const progress = await plannerRequest(`${PROGRESS_API_BASE_URL}/${encodeURIComponent(id)}?${offset}`);
       if (progress?.learning) states.set(id, progress);
     } catch (error) {
       // no state for this document: its card simply shows fewer details
     }
   }));
+  return states;
+}
+
+async function loadHomeDocumentStates(documentIds) {
+  const load = ++homeDocStatesLoad;
+  const states = await fetchDocumentProgressMap(documentIds);
   if (load !== homeDocStatesLoad) return;
   homeDocStates = states;
   homeDocStatesReady = true;

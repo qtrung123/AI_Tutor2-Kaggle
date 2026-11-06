@@ -805,6 +805,21 @@ def document_progress(owner_id: str, document_id: str, utc_offset_minutes: int, 
     return progress
 
 
+def document_progress_many(owner_id: str, document_ids: list[str], utc_offset_minutes: int,
+                           local_now: str | None = None) -> dict[str, dict]:
+    """document_progress for several owned documents in one call (Home lists every document).
+
+    Documents that are not found (deleted meanwhile, or not owned) are simply left out.
+    """
+    now = _parse_local_now(local_now, _validate_utc_offset(utc_offset_minutes))
+    result = {}
+    for document_id in dict.fromkeys(document_ids):   # de-duplicated, order kept
+        progress = study_progress.document_progress(owner_id, document_id, now)
+        if progress is not None:
+            result[document_id] = progress
+    return result
+
+
 def plan_progress(owner_id: str, plan_id: str, utc_offset_minutes: int, local_now: str | None = None) -> dict:
     """Read-only aggregate progress for one owned plan (Phase 6A)."""
     now = _parse_local_now(local_now, _validate_utc_offset(utc_offset_minutes))

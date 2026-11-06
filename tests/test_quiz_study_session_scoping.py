@@ -110,7 +110,10 @@ class QuizStudySessionScopingTests(unittest.TestCase):
         """openStudySession's own stale-response guard (unrelated to quiz generation) is unchanged."""
         session_body = function_body("openStudySession")
         self.assertIn("if (activeDocumentId !== documentId) return", session_body)
-        self.assertLess(session_body.index("activeDocumentId !== documentId"), session_body.index("quizDocumentSelect.value = documentId"))
+        # The session is shown synchronously (no await before the selectors are set); the one await
+        # (chat, quiz library, history) is followed by the stale-response guard before anything else.
+        self.assertLess(session_body.index("quizDocumentSelect.value = documentId"), session_body.index("await "))
+        self.assertLess(session_body.index("await Promise.all"), session_body.index("activeDocumentId !== documentId"))
 
     def test_an_explicit_generate_never_auto_loads_the_new_quiz_into_the_player(self):
         """Create Quiz sheet requirement: success closes the sheet and refreshes the Library: it

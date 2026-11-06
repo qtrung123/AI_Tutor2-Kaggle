@@ -15,7 +15,9 @@ const mimeTypes = {
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".svg": "image/svg+xml",
-  ".ico": "image/x-icon"
+  ".ico": "image/x-icon",
+  ".woff2": "font/woff2",
+  ".txt": "text/plain; charset=utf-8"
 };
 
 function sendFile(response, filePath) {
@@ -32,8 +34,9 @@ function sendFile(response, filePath) {
     response.writeHead(200, {
       "Content-Type": mimeTypes[extension] || "application/octet-stream",
       // This server is used for the local development workspace. Do not let a
-      // browser keep an old app.js / js/*.js after a frontend fix has been made.
-      "Cache-Control": "no-store, max-age=0"
+      // browser keep an old app.js / js/*.js after a frontend fix has been made. Font files never
+      // change under the same name, so they may be cached (a new font version gets a new file name).
+      "Cache-Control": extension === ".woff2" ? "public, max-age=604800" : "no-store, max-age=0"
     });
     response.end(content);
   });

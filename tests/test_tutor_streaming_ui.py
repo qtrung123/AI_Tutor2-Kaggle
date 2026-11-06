@@ -159,7 +159,7 @@ const done = (answer) => frame({type: "done", answer, grounding_status: "support
   const words = Array.from({length: 30}, (_, i) => (i === 0 ? "**Paging** " : `w${i} `));
   const answer = words.join("").trim();
   window.__streams.push({frames: [[200, frame({type: "start"})], ...words.map((w) => [10, frame({type: "delta", text: w})]), [10, done(answer)]]});
-  const messagesBefore = (activeConversation.messages || []).length;
+  const messagesBefore = (activeConversation?.messages || []).length;
   const sending = sendTutorMessage("What is paging?");
   await sleep(100); out.beforeFirstText = snapshot();
   await sleep(200); out.midStream = snapshot();

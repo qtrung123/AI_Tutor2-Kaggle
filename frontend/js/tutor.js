@@ -233,8 +233,7 @@ async function deleteUploadedSource(source, button) {
     uploadedSources = data.sources || [];
     renderSources(uploadedSources, "uploaded");
     renderConversationSources();
-    await loadIndexedDocuments();
-    await loadDashboard();
+    await Promise.all([loadIndexedDocuments(), loadDashboard()]);
 
     if (currentQuiz?.document_id === data.deleted) {
       currentQuiz = null;
@@ -243,13 +242,11 @@ async function deleteUploadedSource(source, button) {
       renderAssessmentQuiz();
     }
 
-    setUploadStatus(`Deleted ${data.deleted}`, "done");
-    showToast("Document deleted");
+    showToast(`Deleted ${data.deleted}`);
   } catch (error) {
     button.disabled = false;
     button.textContent = "Delete";
-    setUploadStatus(error.message || "Delete failed.", "error");
-    showToast("Delete failed");
+    showToast(`Delete failed: ${error.message || "please try again."}`);
   }
 }
 
@@ -525,10 +522,15 @@ function renderConversationMessages() {
 }
 
 function updateConversationHeader() {
-  chatConversationTitle.textContent = activeConversation?.title || "Current session";
-  const count = activeConversation?.document_ids?.length || 0;
+  // No conversation yet in a Study Session: an unsaved new chat grounded to the open document.
+  const draft = !activeConversation && Boolean(activeDocumentId);
+  chatConversationTitle.textContent = activeConversation?.title || (draft ? "New chat" : "Current session");
+  const count = activeConversation?.document_ids?.length || (draft ? 1 : 0);
   chatSourceSummary.textContent = count ? "Grounded to selected material" : "Select material to ground answers";
   toggleConversationSourcesButton.textContent = `Sources (${count})`;
+  // Sources belong to a saved conversation: they can be changed once the first question is sent.
+  toggleConversationSourcesButton.disabled = !activeConversation;
+  toggleConversationSourcesButton.title = activeConversation ? "" : "Available after your first question";
 }
 
 function rememberConversation(conversation) {
@@ -541,6 +543,10 @@ function rememberConversation(conversation) {
 // Only the most recent open wins: a slower earlier response (quick chat or document switches) must
 // not replace the chat the learner picked last.
 let openConversationSeq = 0;
+
+// The open Study Session's chat while it is still being loaded (openStudySession shows the session
+// before its chat arrives). Sending waits for it, so a late chat render never replaces the question.
+let sessionConversationPending = null;
 
 async function openConversation(conversationId) {
   const seq = ++openConversationSeq;
@@ -624,7 +630,7 @@ async function deleteChatConversation(conversationId) {
       activeConversation = null;
       const next = sessionConversations()[0];
       if (next) await openConversation(next.id);
-      else if (activeDocumentId) await ensureStudySessionConversation();
+      else if (activeDocumentId) await ensureStudySessionConversation({ create: false });
       else { renderConversationMessages(); updateConversationHeader(); }
     }
     renderConversationList();
@@ -682,6 +688,7 @@ function tutorScrolledToEnd() {
 }
 
 async function sendTutorMessage(userText, { restoreOnError = false } = {}) {
+  if (sessionConversationPending) await sessionConversationPending;
   messageList.querySelector(".conversation-empty-hint")?.remove();
   addMessage(userText, "user");
   chatInput.value = "";
@@ -833,9 +840,29 @@ async function loadUploadedSources() {
 }
 
 // state: "busy" (request running), "done" or "error"; styled via data-state on #upload-status.
-function setUploadStatus(text, state) {
+// The sidebar line is the live region; Home mirrors the same text in a banner (the sidebar is an
+// off-canvas drawer on phones) and, once a new document is ready, offers to open it directly.
+function setUploadStatus(text, state, openDocumentId = "") {
   uploadStatus.textContent = text;
   uploadStatus.dataset.state = state;
+  const banner = document.getElementById("home-upload-banner");
+  if (!banner) return;
+  banner.hidden = false;
+  banner.dataset.state = state;
+  document.getElementById("home-upload-banner-text").textContent = text;
+  const open = document.getElementById("home-upload-open");
+  open.hidden = !openDocumentId;
+  open.dataset.documentId = openDocumentId;
+  open.setAttribute("aria-label", openDocumentId ? `Open ${openDocumentId}` : "Open");
+  document.getElementById("home-upload-dismiss").hidden = state === "busy";
+}
+
+// The first uploaded file that is now an indexed document (skipped duplicates excluded).
+function uploadedDocumentToOpen(files, data) {
+  if (!data.new_files) return "";
+  const skipped = new Set(data.skipped_files || []);
+  const name = Array.from(files, (file) => file.name).find((fileName) => !skipped.has(fileName));
+  return indexedDocuments.find((item) => item.id === name || item.title === name)?.id || "";
 }
 
 // Built only from the upload response: files newly indexed, their chunks, and files skipped
@@ -895,10 +922,9 @@ async function uploadSourceFiles(files, subject = null) {
     uploadedSources = data.sources || [];
     renderSources(uploadedSources, "uploaded");
     renderConversationSources();
-    await loadIndexedDocuments();
-    await loadDashboard();
+    await Promise.all([loadIndexedDocuments(), loadDashboard()]);
 
-    setUploadStatus(uploadResultText(data), "done");
+    setUploadStatus(uploadResultText(data), "done", uploadedDocumentToOpen(files, data));
     // An upload never changes the Study Planner: materials join a plan only through Add Material.
     showToast(data.skipped_files?.length ? "Some files were already indexed" : "Material uploaded");
   } catch (error) {

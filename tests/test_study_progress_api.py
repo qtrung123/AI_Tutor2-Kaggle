@@ -165,6 +165,23 @@ class StudyProgressApiTests(PlannerDatabaseMixin, unittest.TestCase):
         self.assertEqual(bob.get(f"/api/planner/plans/{self.plan['plan_id']}/progress{QUERY}").status_code, 404)
         self.assertEqual(self.document("bob-doc").status_code, 404)
 
+    def test_batch_progress_matches_the_per_document_payloads_and_skips_unowned(self):
+        self.quiz("mkt", "q1", 7, "2026-09-23T10:00:00+00:00")
+        response = self.client.get(f"/api/progress/documents{QUERY}&document_ids=mkt&document_ids=stats"
+                                   "&document_ids=bob-doc&document_ids=missing&document_ids=mkt")
+        self.assertEqual(response.status_code, 200, response.text)
+        documents = response.json()["documents"]
+        self.assertEqual(list(documents), ["mkt", "stats"])   # Bob's and unknown documents left out
+        self.assertEqual(documents["mkt"], self.document("mkt").json())
+        self.assertEqual(documents["stats"], self.document("stats").json())
+        self.assertEqual(self.client.get(f"/api/progress/documents{QUERY}").json(), {"documents": {}})
+
+    def test_batch_progress_validates_the_offset_and_the_batch_size(self):
+        self.assertEqual(self.client.get("/api/progress/documents?document_ids=mkt").status_code, 422)
+        self.assertEqual(self.client.get("/api/progress/documents?utc_offset_minutes=9999&document_ids=mkt").status_code, 400)
+        many = "&".join(f"document_ids=d{index}" for index in range(201))
+        self.assertEqual(self.client.get(f"/api/progress/documents{QUERY}&{many}").status_code, 422)
+
     def test_the_learner_offset_is_required(self):
         self.assertEqual(self.client.get("/api/progress/documents/mkt").status_code, 422)
         self.assertEqual(self.client.get("/api/progress/documents/mkt?utc_offset_minutes=9999").status_code, 400)

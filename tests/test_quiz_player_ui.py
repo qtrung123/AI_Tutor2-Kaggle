@@ -205,19 +205,11 @@ const clickAnswer = (letter) => answerCards().find((b) => b.querySelector(".quiz
   await sleep(100);
   out.afterPrevious = { position: document.getElementById("quiz-player-position").textContent, stillSelected: answerCards()[0].classList.contains("selected") };
 
-  // 4) Exit with progress shows a confirmation; Continue Quiz keeps the player open.
+  // 4) Exit with saved progress leaves at once (no confirmation) and says what was kept; the
+  // Library card now shows In Progress / Resume.
   document.getElementById("quiz-player-exit").click();
-  await sleep(100);
-  out.exitConfirm = { visible: !document.getElementById("quiz-exit-confirm").hidden, detail: document.getElementById("quiz-exit-confirm-detail").textContent };
-  document.getElementById("quiz-exit-confirm-continue").click();
-  await sleep(100);
-  out.afterContinue = { playerOpen: playerOpen(), confirmHidden: document.getElementById("quiz-exit-confirm").hidden };
-
-  // Exit for real returns to the Library; the card now shows In Progress / Resume.
-  document.getElementById("quiz-player-exit").click();
-  await sleep(100);
-  document.getElementById("quiz-exit-confirm-exit").click();
   await sleep(300);
+  out.exitSaved = { confirmHidden: document.getElementById("quiz-exit-confirm").hidden, toast: document.getElementById("toast").textContent };
   const quizACard = cardFor("Quiz A");
   out.afterExit = {
     playerOpen: playerOpen(), isLanding: pane().classList.contains("quiz-landing"),
@@ -244,8 +236,8 @@ const clickAnswer = (letter) => answerCards().find((b) => b.querySelector(".quiz
   document.getElementById("quiz-player-next").click();
   await sleep(100);
   out.afterFailureNext = { position: document.getElementById("quiz-player-position").textContent };
-  document.getElementById("quiz-player-exit").click(); await sleep(50);
-  document.getElementById("quiz-exit-confirm-exit").click(); await sleep(300);
+  document.getElementById("quiz-player-exit").click(); await sleep(300);
+  if (!document.getElementById("quiz-exit-confirm").hidden) { document.getElementById("quiz-exit-confirm-exit").click(); await sleep(300); }
   const attemptSnapshot = (quizId) => ({ answers: {...window.__attempts[quizId].answers}, index: window.__attempts[quizId].current_question_index });
   // Exit flushed the failed answer + new position: the server now has C's local state.
   out.quizCAfterExit = attemptSnapshot("quiz-c");
@@ -266,8 +258,8 @@ const clickAnswer = (letter) => answerCards().find((b) => b.querySelector(".quiz
   out.afterFailedSaveContinue = { position: document.getElementById("quiz-player-position").textContent, answered: document.getElementById("quiz-player-answered-count").textContent };
   document.getElementById("quiz-player-exit").click();
   await sleep(150);
-  out.exitAfterRetry = { title: document.getElementById("quiz-exit-confirm-title").textContent };
-  document.getElementById("quiz-exit-confirm-exit").click(); await sleep(300);
+  await sleep(150);
+  out.exitAfterRetry = { playerOpen: playerOpen(), confirmHidden: document.getElementById("quiz-exit-confirm").hidden };
   out.quizCFinal = attemptSnapshot("quiz-c");
 
   // 5) Progress is isolated: open Quiz B, answer differently, exit -- must never affect Quiz A.
@@ -277,8 +269,6 @@ const clickAnswer = (letter) => answerCards().find((b) => b.querySelector(".quiz
   clickAnswer("B");
   await sleep(700);
   document.getElementById("quiz-player-exit").click();
-  await sleep(100);
-  document.getElementById("quiz-exit-confirm-exit").click();
   await sleep(300);
 
   // 6) Resume A restores only A's answer/position; Resume B restores only B's.
@@ -290,8 +280,6 @@ const clickAnswer = (letter) => answerCards().find((b) => b.querySelector(".quiz
     answeredCount: document.getElementById("quiz-player-answered-count").textContent,
     q1Selected: answerCards()[0].classList.contains("selected"),
   };
-  document.getElementById("quiz-player-exit").click(); await sleep(50);
-  document.getElementById("quiz-exit-confirm-continue").click(); await sleep(50);
 
   // 7) Finish with unanswered questions shows a confirmation; Review Unanswered jumps to the first one.
   document.getElementById("quiz-player-next").click(); await sleep(50);   // Q2
@@ -445,13 +433,10 @@ class QuizPlayerUiTests(unittest.TestCase):
         self.assertEqual(after_previous["position"], "Question 1 of 3")
         self.assertTrue(after_previous["stillSelected"])
 
-    def test_exit_with_progress_shows_a_confirmation_and_continue_keeps_the_player_open(self):
-        confirm = self.out["exitConfirm"]
-        self.assertTrue(confirm["visible"])
-        self.assertIn("1 of 3 answered", confirm["detail"])
-        after_continue = self.out["afterContinue"]
-        self.assertTrue(after_continue["playerOpen"])
-        self.assertTrue(after_continue["confirmHidden"])
+    def test_exit_with_saved_progress_leaves_without_a_confirmation_and_says_what_was_kept(self):
+        saved = self.out["exitSaved"]
+        self.assertTrue(saved["confirmHidden"])
+        self.assertEqual(saved["toast"], "Progress saved · 1 of 3 answered")
 
     def test_exit_returns_to_the_library_which_shows_in_progress_and_resume(self):
         after_exit = self.out["afterExit"]
@@ -482,7 +467,9 @@ class QuizPlayerUiTests(unittest.TestCase):
         kept = self.out["afterFailedSaveContinue"]
         self.assertEqual(kept["position"], "Question 3 of 3")
         self.assertEqual(kept["answered"], "2 answered")
-        self.assertEqual(self.out["exitAfterRetry"]["title"], "Your progress is saved")
+        # Once the retry saves, Exit leaves without asking again.
+        self.assertFalse(self.out["exitAfterRetry"]["playerOpen"])
+        self.assertTrue(self.out["exitAfterRetry"]["confirmHidden"])
 
     def test_an_answer_made_just_before_navigating_is_never_dropped_by_the_debounce(self):
         self.assertEqual(self.out["quizCFinal"], {"answers": {"1": "B", "2": "D"}, "index": 2})

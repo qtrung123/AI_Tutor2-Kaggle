@@ -108,6 +108,17 @@ const docked = () => {
   await openConversation("c-timers"); await sleep(150);
   out.lateReplyInItsChat = messageTexts().slice(-2);
 
+  // A question sent while the session's chat is still loading (the session is shown before its chat
+  // arrives) stays on screen in that chat: the late chat render must not replace it.
+  await openStudySession("notes.pdf", "overview"); await sleep(200);
+  window.__delays["/api/conversations/c-timers"] = 500;
+  const opening = openStudySession("lecture.pdf", "overview");
+  await sleep(30);
+  const asking = sendTutorMessage("Asked while the chat loads");
+  await opening; await asking; await sleep(300);
+  window.__delays = {};
+  out.askWhileLoading = {activeId: activeConversation?.id, messages: messageTexts()};
+
   if (!desktop) {
     // Re-rendering the chat list (opening a session, sending) never scrolls the page.
     document.scrollingElement.scrollTop = 0; await sleep(50);
@@ -177,6 +188,12 @@ class IntegrationAssertions:
         self.assertTrue(late["activeId"] and late["formEnabled"])
         self.assertFalse(any("Late question" in text for text in late["messages"]))
         self.assertEqual(self.out["lateReplyInItsChat"], ["Late question about timers", "Answer about: Late question about timers"])
+
+    def test_a_question_sent_while_the_sessions_chat_loads_stays_on_screen(self):
+        asked = self.out["askWhileLoading"]
+        self.assertEqual(asked["activeId"], "c-timers")
+        self.assertEqual(asked["messages"][-2:], ["Asked while the chat loads", "Answer about: Asked while the chat loads"])
+        self.assertIn("Explain prescalers", asked["messages"])   # the chat's earlier messages are shown too
 
 
 @unittest.skipUnless(find_chrome(), "Chrome is not installed")

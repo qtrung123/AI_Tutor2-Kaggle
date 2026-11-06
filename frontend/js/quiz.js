@@ -2379,12 +2379,15 @@ async function handleQuizPlayerExit() {
   let saveFailed = false;
   try { await flushQuizAutosave(); } catch (error) { saveFailed = true; }
   const answeredCount = Object.keys(quizAnswers).length;
-  if (answeredCount === 0 && !saveFailed) {
+  // Saved progress needs no confirmation: leave at once and say what was kept. Only an unsaved
+  // state asks first, so local answers are never lost silently.
+  if (!saveFailed) {
+    const total = currentQuiz.questions.length;
     closeQuizPlayerToLibrary();
+    if (answeredCount) showToast(`Progress saved · ${answeredCount} of ${total} answered`);
     return;
   }
-  document.getElementById("quiz-exit-confirm-title").textContent =
-    saveFailed ? "Your latest answers are not saved yet" : "Your progress is saved";
+  document.getElementById("quiz-exit-confirm-title").textContent = "Your latest answers are not saved yet";
   document.getElementById("quiz-exit-confirm-detail").textContent =
     `${answeredCount} of ${currentQuiz.questions.length} answered`;
   document.getElementById("quiz-exit-confirm").hidden = false;
@@ -2830,7 +2833,7 @@ function openQuizCreateDialog() {
   if (!quizCreateDialog) {
     quizCreateDialog = document.createElement("div");
     quizCreateDialog.className = "quiz-create-dialog";
-    quizCreateDialog.innerHTML = '<div class="quiz-create-dialog-card" role="dialog" aria-modal="true" aria-labelledby="quiz-create-title"><div class="quiz-dialog-heading"><div><h2 id="quiz-create-title">Create a Quiz</h2><p>Each quiz automatically mixes Multiple Choice, Fill in the Blanks and Matching questions from this document.</p></div><button class="text-button quiz-dialog-cancel" type="button">Cancel</button></div><div class="quiz-dialog-fields"></div></div>';
+    quizCreateDialog.innerHTML = '<div class="quiz-create-dialog-card" role="dialog" aria-modal="true" aria-labelledby="quiz-create-title"><div class="quiz-dialog-heading"><div><h2 id="quiz-create-title">Create a Quiz</h2><p>Each quiz covers the whole document and mixes Multiple Choice, Fill in the Blanks and Matching questions.</p></div><button class="text-button quiz-dialog-cancel" type="button">Cancel</button></div><div class="quiz-dialog-fields"></div></div>';
     quizCreateDialog.querySelector(".quiz-dialog-cancel").addEventListener("click", () => closeQuizCreateDialog());
     quizCreateDialog.addEventListener("click", (event) => { if (event.target === quizCreateDialog) closeQuizCreateDialog(); });
     document.body.appendChild(quizCreateDialog);

@@ -6,7 +6,7 @@ backend/api/planner_legacy.py); both go through the same study_planner_store/stu
 """
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend import study_plan_api_service, study_planner_store, study_preferences
@@ -327,6 +327,28 @@ def planner_v2_place_candidate(plan_id: str, request: CandidatePlaceRequest,
     return _session_action(study_plan_api_service.place_live_candidate, current_user["id"], plan_id,
                            request.candidate_key, request.scheduled_start, request.utc_offset_minutes,
                            request.local_now)
+
+
+MAX_PROGRESS_BATCH_DOCUMENTS = 200
+
+
+@router.get("/api/progress/documents")
+def progress_documents(utc_offset_minutes: int, document_ids: list[str] = Query(default=[]),
+                       local_now: Optional[str] = None,
+                       current_user: dict = Depends(require_current_user)) -> dict:
+    """Learner progress for several documents at once: {"documents": {document_id: progress}}.
+
+    The same payload as /api/progress/documents/{document_id} per document; unknown or unowned
+    documents are left out instead of failing the whole request.
+    """
+    if len(document_ids) > MAX_PROGRESS_BATCH_DOCUMENTS:
+        raise HTTPException(status_code=422, detail=f"At most {MAX_PROGRESS_BATCH_DOCUMENTS} documents per request.")
+    try:
+        documents = study_plan_api_service.document_progress_many(current_user["id"], document_ids,
+                                                                  utc_offset_minutes, local_now)
+    except _PLAN_V2_ERRORS as error:
+        raise _plan_v2_error(error) from error
+    return {"documents": documents}
 
 
 @router.get("/api/progress/documents/{document_id}")
