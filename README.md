@@ -1,387 +1,188 @@
-# TutorFlow — Local RAG Study Tutor
+# AI Tutor
 
-TutorFlow is a local learning application for studying from personal course materials. Users can upload documents, ask grounded questions through a RAG chatbot, and generate multiple-choice quizzes for practice.
+AI Tutor is a self-hosted study assistant that turns a learner's own course materials into a grounded
+tutor and a personalized study plan. Learners upload PDF or TXT files, ask questions answered only
+from those files (with citations), study with generated summaries, flashcards and quizzes, and follow
+a schedule that adapts to their deadlines, availability and quiz results.
 
-Documents, vectors, conversations, quizzes, answers, and learning history are stored locally. Chat and quiz generation use models served by Ollama and do not require a cloud AI service.
+The language, embedding and vision models are open models served by [Ollama](https://ollama.com),
+locally or on a Kaggle GPU. No cloud AI API is required.
 
-## Features
+## Key features
 
-### Course Materials
+### RAG chatbot
 
-- Upload multiple PDF or TXT files from the dedicated **Materials** page.
-- Split documents into chunks and create embeddings with Ollama.
-- Store vectors in Chroma.
-- Skip unchanged files by comparing content hashes.
-- Display each indexed document and its chunk count.
-- Delete documents from `data/`, Chroma, and the indexed-document registry.
-- Remove deleted documents from conversation scopes and delete their quiz data.
+- Answers are based on passages retrieved from the selected documents, with document and page
+  citations.
+- Each chat is scoped to its own set of sources, and conversations are saved per user.
+- Answers stream in as they are generated, and follow-up questions use the recent conversation.
+- When no relevant passage is found, the tutor reports insufficient context instead of answering.
 
-### Grounded Chat
+### Personalized study planner
 
-- Keep every chat in an independent conversation/thread.
-- Assign a separate set of source documents to each conversation.
-- Upload new documents without changing existing conversation scopes.
-- Reopen old conversations and continue chatting after a page reload.
-- Save user messages, assistant messages, grounding status, and citations in SQLite.
-- Use recent conversation history to understand follow-up questions.
-- Retrieve context only from the documents selected for the active conversation.
-- Show grounding status and document/page citations below answers.
-- Return an insufficient-context response when the selected materials do not support an answer.
+- Study plans built from the learner's materials, deadlines and goals.
+- A schedule generated from weekly availability, a daily study target and session lengths, with
+  three strategies: balanced, finish early, or deadline priority.
+- A preview of the proposed schedule before it is confirmed.
+- Sessions can be started, completed step by step, skipped or rescheduled.
+- The plan adapts after a quiz, a missed session or a deadline change. For example, a low score
+  leads to a weak-topic review and a quiz retry. The learner previews the proposed changes before
+  applying them.
+- Optional Google Calendar sync avoids busy times and adds study sessions as calendar events.
 
-### Quiz Practice
+### Study tools
 
-- Generate a multiple-choice quiz from one indexed document.
-- Select 5, 10, 15, 20, 30, or 40 questions from the UI.
-- Support between 1 and 40 questions at the backend level.
-- Support exactly three difficulty levels:
-  - `easy`
-  - `medium`
-  - `difficult`
-- Store a separate quiz for each document and difficulty.
-- Use `document_id::difficulty` as the persistent quiz key.
-- Use all document chunks during generation and generate at most eight questions per batch.
-- Extract, normalize, and validate the JSON returned by the model.
-- Retry a failed or incomplete batch up to three times.
-- Check an answer immediately after the learner selects it.
-- Save progress after every answered question without requiring a Submit button.
-- Complete and archive an attempt when every question has been answered.
-- Save scores, answers, and per-question results.
-- Review previously completed attempts in Quiz History.
-- Generate explanations only when the learner selects **Explain**.
-- Explain only why the correct answer is correct.
-- Cache generated explanations for later use.
+- **Document processing:** PDF and TXT uploads are chunked and embedded, and the topics of each
+  document are detected. Scanned pages are read with OCR. A vision model can optionally describe
+  figures when a GPU is available.
+- **Summaries:** topic-by-topic document summaries, generated as background jobs.
+- **Flashcards:** generated from the document, with practice quizzes built from the cards (short
+  answer, fill in the blank, matching).
+- **Quizzes:** built from a document and its flashcards. The model writes multiple choice
+  questions, and the flashcards add word-bank fill-in-the-blank and matching activities. Quizzes
+  have three difficulty levels, an automatic size or a custom 5–40 questions, and an explanation
+  for any question on request.
+- **Progress:** topic mastery from quiz results, per-document progress, and a "next up" view on
+  the home page.
+- **Accounts and subjects:** each user's data is private, and documents can be grouped into subjects.
 
-## Technology Stack
+## Tech stack
 
-- **Backend:** FastAPI and Python
-- **Frontend:** HTML, CSS, and vanilla JavaScript
-- **LLM runtime:** Ollama
-- **Chat model:** `hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M`
-- **Embedding model:** `bge-m3`
-- **Vector database:** Chroma
-- **RAG integration:** LangChain
-- **Chat history:** SQLite
-- **Application database:** SQLite
+| Layer | Technology |
+| --- | --- |
+| Backend | Python, FastAPI, Uvicorn, LangChain |
+| Frontend | HTML, CSS, vanilla JavaScript (no framework or bundler), served by a small Node.js server |
+| LLM runtime | Ollama, default chat model Qwen2.5-7B-Instruct (Q4_K_M), embeddings BGE-M3 |
+| Vector store | ChromaDB (local), or pgvector on PostgreSQL |
+| Database | SQLite (default), or PostgreSQL/Supabase in durable mode |
+| Document processing | pypdf, pypdfium2, RapidOCR |
+| Deployment | Kaggle notebook, nginx, Cloudflare Worker and Quick Tunnel |
 
 ## Architecture
 
-```text
-Browser (localhost:3000)
-        |
-        | HTTP/JSON
-        v
-FastAPI (127.0.0.1:8000)
-        |
-        +-- Materials and ingestion
-        |     +-- data/
-        |     +-- Chroma vectorstore/
-        |
-        +-- Chat RAG
-        |     +-- Chroma retrieval filtered by conversation sources
-        |     +-- prompts/chat/rag_answer.txt
-        |     +-- Ollama chat model
-        |     +-- data/conversations.db (SQLite)
-        |
-        +-- Quiz RAG
-              +-- all chunks from the selected document
-              +-- prompts/quiz/*.txt
-              +-- Ollama chat model
-              +-- data/conversations.db (SQLite)
+```mermaid
+flowchart LR
+    Browser["Browser<br/>(vanilla JS UI)"] --> Frontend["Node.js static server<br/>:3000"]
+    Browser -- "/api" --> Backend["FastAPI backend<br/>:8000"]
+    Backend --> Ollama["Ollama<br/>Qwen2.5-7B + BGE-M3"]
+    Backend --> DB[("SQLite or PostgreSQL<br/>users, chats, quizzes, plans")]
+    Backend --> Vectors[("Chroma or pgvector<br/>document chunks")]
+    Backend -. optional .-> Calendar["Google Calendar API"]
 ```
 
-## Project Structure
+The backend is organized by feature. `backend/api/` holds the HTTP routers, `*_service.py` files
+hold the business logic (RAG chat, ingestion, summaries, flashcards, quizzes, mastery, planner), and
+`*_store.py` files handle persistence. Setting `DATABASE_URL` switches storage from local
+SQLite/Chroma to PostgreSQL with pgvector and private Supabase Storage.
 
-```text
-python-ollama-rag/
-├── backend/
-│   ├── main.py                 # FastAPI app: CORS, system/admin routes, router includes
-│   ├── api/                    # HTTP routers per feature (auth, documents, quiz, planner, ...)
-│   ├── *_service.py            # Feature business logic (quiz, summary, flashcards, planner, ...)
-│   ├── *_store.py              # SQLite persistence per feature
-│   ├── ingest.py               # Document loading, chunking, indexing, and deletion
-│   ├── rag_service.py          # Chat RAG and quiz explanation RAG
-│   └── __init__.py
-├── frontend/
-│   ├── index.html              # Application layout
-│   ├── styles.css              # Styling and responsive layout
-│   ├── js/                     # Feature scripts (api, state, quiz, planner, ...), loaded before app.js
-│   ├── app.js                  # DOM wiring, event listeners and startup
-│   ├── server.js               # Static development server
-│   └── package.json
-├── deployment/                 # Kaggle startup, nginx and persistence scripts
-├── docs/ARCHITECTURE.md        # Architecture guide (Vietnamese)
-├── prompts/                    # LLM prompt texts, loaded by backend/prompt_loader.py
-│   ├── chat/                   # Grounded chat instructions (rag_answer.txt)
-│   ├── quiz/                   # Quiz generation, repair, validation and explanation prompts
-│   ├── summary/                # Topic notes and document synthesis prompts
-│   ├── flashcards/             # Flashcard generation prompts
-│   └── topics/                 # Heading classification prompt
-├── data/                       # Uploaded documents and persistent application data
-├── vectorstore/                # Chroma database
-├── config.py                   # Paths, models, and retrieval settings
-├── requirements.txt
-└── README.md
-```
+More detail is available in [docs/system-architecture](docs/system-architecture/README.md) and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (in Vietnamese).
 
-## Local Data
+## Getting started (local)
 
-| Data | Storage |
-| --- | --- |
-| Uploaded PDF/TXT files | `data/` |
-| Document vectors and chunk metadata | `vectorstore/` |
-| Indexed-document registry | `data/conversations.db` (legacy `indexed_files.json` is migrated once, if present) |
-| Conversations, messages, sources, and citations | `data/conversations.db` |
-| Generated quizzes and questions | `data/conversations.db` |
-| Current quiz progress and completed attempts | `data/conversations.db` |
-| Generated quiz explanations | `data/conversations.db` |
+### Prerequisites
 
-## Requirements
+- Python 3.10+ (developed and tested on 3.13)
+- Node.js (only used to serve the frontend; there are no npm dependencies)
+- [Ollama](https://ollama.com), running locally
 
-- Python 3.10 or newer
-- Node.js and npm
-- Ollama running locally
-- The models configured in `config.py`
-
-## Installation
-
-### 1. Create a virtual environment
-
-PowerShell:
+### 1. Install
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-### 2. Install Python dependencies
-
-```powershell
+.\.venv\Scripts\Activate.ps1      # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Install frontend dependencies
-
-```powershell
-cd frontend
-npm install
-cd ..
-```
-
-### 4. Pull the Ollama models
+### 2. Pull the models
 
 ```powershell
 ollama pull bge-m3
 ollama pull "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"
 ```
 
-The installed model names must match `CHAT_MODEL` and `EMBEDDING_MODEL` in `config.py`.
+### 3. Configure (optional)
 
-## Running the Application
-
-### 1. Start Ollama
-
-If Ollama is not already running as a background service:
+Settings live in `config.py` and can be overridden with environment variables or a git-ignored
+`.env.local` file in the project root. Real environment variables take precedence.
 
 ```powershell
-ollama serve
+Copy-Item .env.example .env.local
 ```
 
-### 2. Start the backend
+| Variable | Purpose |
+| --- | --- |
+| `OLLAMA_CHAT_MODEL` | Chat and generation model (default `hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M`) |
+| `OLLAMA_EMBEDDING_MODEL` | Embedding model (default `bge-m3`). Re-index documents after changing it. |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALENDAR_REDIRECT_URI`, `GOOGLE_CALENDAR_TOKEN_ENCRYPTION_KEY` | Optional Google Calendar integration |
+| `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Optional durable mode (PostgreSQL + pgvector + Supabase Storage) |
+| `AI_TUTOR_VISION` | Vision descriptions of PDF figures: `auto` (only with a GPU), `on` or `off` |
 
-Run this command from the project root:
+Without any configuration, the app uses SQLite (`data/`) and Chroma (`vectorstore/`) on the
+local disk.
+
+### 4. Run
+
+Start Ollama if it is not already running (`ollama serve`), then start the backend from the
+project root:
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Backend URL:
-
-```text
-http://127.0.0.1:8000
-```
-
-FastAPI documentation:
-
-```text
-http://127.0.0.1:8000/docs
-```
-
-### 3. Start the frontend
-
-Open another terminal:
+In a second terminal, start the frontend:
 
 ```powershell
 cd frontend
 npm start
 ```
 
-Open the application at:
+Open http://localhost:3000 and create an account. The API documentation is at
+http://127.0.0.1:8000/docs.
+
+### Run the tests
+
+```powershell
+pip install pytest
+.\.venv\Scripts\python.exe -m pytest tests
+```
+
+Some frontend tests run JavaScript with Node.js. Tests use temporary data directories and never
+read `.env.local`.
+
+## Kaggle deployment
+
+The full stack (Ollama on a GPU, backend, frontend and nginx) can run inside a Kaggle notebook
+behind a permanent Cloudflare Worker URL. App data is saved as snapshots to a private Kaggle
+Dataset. See [KAGGLE_DEPLOYMENT.md](KAGGLE_DEPLOYMENT.md) (in Vietnamese) for setup, secrets and
+troubleshooting.
+
+## Project structure
 
 ```text
-http://localhost:3000
+backend/
+  api/                  HTTP routers per feature (auth, documents, chat, quiz, planner, ...)
+  *_service.py          Business logic (RAG, ingestion, summaries, flashcards, quizzes, planner)
+  *_store.py            Persistence (SQLite or PostgreSQL through db.py)
+  main.py               FastAPI application
+frontend/
+  index.html, styles.css, app.js
+  js/                   Feature scripts (chat, quiz, planner, session, ...)
+  server.js             Static file server
+prompts/                LLM prompts by feature (chat, quiz, summary, flashcards, topics, vision)
+deployment/             Kaggle startup, nginx and persistence scripts
+docs/                   Architecture and flow diagrams
+tests/                  pytest suite
+config.py               Paths, models and settings
+kaggle_run_ollama_cloudflare.ipynb   Kaggle notebook (current)
 ```
-
-## Usage
-
-### Upload Materials
-
-1. Open **Materials**.
-2. Select **Upload materials**.
-3. Choose one or more PDF/TXT files.
-4. Wait for indexing to finish.
-5. Confirm that each document appears with a chunk count.
-
-### Chat with Documents
-
-1. Open **AI Tutor**.
-2. Create a conversation or select an existing one.
-3. Select **Sources (n)** in the chat header.
-4. Choose the documents available to that conversation.
-5. Select **Apply sources**.
-6. Enter a question in the `Ask` field.
-7. Review the answer, grounding status, and citations.
-
-A new conversation initially selects all documents available at the time it is created. Uploading another document later does not modify that conversation.
-
-### Generate and Complete a Quiz
-
-1. Open **Practice**.
-2. Select an indexed document.
-3. Select the question count.
-4. Select `easy`, `medium`, or `difficult`.
-5. Select **Generate Quiz**.
-6. Choose an answer to receive immediate feedback.
-7. Select **Explain** when an explanation is needed.
-8. Answer every question to complete the attempt and add it to Quiz History.
-
-## Chat Flow
-
-```text
-User sends a question
-    -> POST /api/conversations/{conversation_id}/messages
-    -> answer_conversation_message()
-    -> load the conversation, messages, and document IDs from SQLite
-    -> save the user message
-    -> combine recent user questions into a retrieval query
-    -> retrieve TOP_K chunks from the selected conversation sources
-    -> combine system prompt, history, context, and current question
-    -> call ChatOllama
-    -> save the assistant message, grounding status, and citations
-    -> return the response to the frontend
-```
-
-Conversation history is used only to understand follow-up references. It is not treated as supporting evidence. The answer must be grounded in retrieved document context.
-
-If a conversation has no selected source or retrieval finds no matching document chunks, the backend returns `insufficient_context`.
-
-## Quiz Generation Flow
-
-```text
-Select document, question count, and difficulty
-    -> POST /api/quiz/generate
-    -> generate_quiz()
-    -> check persistent storage with document_id::difficulty
-    -> cache HIT: return the saved quiz
-    -> cache MISS: load all chunks for the selected document
-    -> split the requested count into batches of up to eight questions
-    -> build a difficulty-specific prompt
-    -> call Ollama
-    -> extract, parse, normalize, and validate JSON
-    -> retry a failed batch up to three times
-    -> save the versioned quiz in SQLite
-    -> return the quiz to the frontend
-```
-
-If a quiz already exists for the same `document_id::difficulty`, the generate endpoint returns the saved quiz. Use **Regenerate Quiz** to replace it or change its question count.
-
-On first startup after this storage upgrade, existing quiz JSON files are imported into SQLite once. The original JSON files are retained only as migration backups and are no longer updated.
-
-## API Overview
-
-### System and Materials
-
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| `GET` | `/` | Check that the backend is running |
-| `GET` | `/api/model/health` | Return the configured chat model |
-| `GET` | `/api/sources` | List indexed materials |
-| `POST` | `/api/sources/upload` | Upload and index PDF/TXT files |
-| `DELETE` | `/api/sources/{document_id}` | Delete a document and related data |
-| `GET` | `/api/documents` | List indexed documents for Practice |
-
-### Conversations
-
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| `POST` | `/api/conversations` | Create a conversation |
-| `GET` | `/api/conversations` | List conversations |
-| `GET` | `/api/conversations/{conversation_id}` | Load a conversation and its messages |
-| `PATCH` | `/api/conversations/{conversation_id}` | Rename a conversation |
-| `DELETE` | `/api/conversations/{conversation_id}` | Delete a conversation |
-| `PUT` | `/api/conversations/{conversation_id}/sources` | Replace the conversation source scope |
-| `POST` | `/api/conversations/{conversation_id}/messages` | Send a question and receive a RAG answer |
-
-### Quiz
-
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| `GET` | `/api/quizzes` | List quiz availability by document and difficulty |
-| `GET` | `/api/quiz/{document_id}?difficulty=easy` | Load a quiz and its latest progress |
-| `POST` | `/api/quiz/generate` | Generate or load a saved quiz |
-| `POST` | `/api/quiz/{document_id}/regenerate` | Replace a saved quiz |
-| `PATCH` | `/api/quiz/{document_id}/progress` | Check and save one answer |
-| `DELETE` | `/api/quiz/{document_id}/progress?difficulty=easy` | Reset current progress |
-| `POST` | `/api/quiz/{document_id}/questions/{question_id}/explain` | Generate or load an explanation |
-| `GET` | `/api/quiz-history` | List completed attempts |
-| `GET` | `/api/quiz-history/{attempt_id}` | Load one completed attempt |
-
-## Configuration
-
-The main settings are defined in `config.py`:
-
-```python
-CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M")
-EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "bge-m3")
-
-CHUNK_SIZE = 800
-CHUNK_OVERLAP = 150
-TOP_K = 4
-```
-
-If `EMBEDDING_MODEL` changes, existing documents must be indexed again because their vectors were created with the previous model.
-
-## Kaggle Deployment
-
-`kaggle_run_ollama_cloudflare.ipynb` (the notebook in use) runs the full stack (Ollama, backend,
-frontend, nginx) inside a Kaggle notebook behind a Cloudflare Worker and Quick Tunnel, with
-snapshots of chat/quiz data saved to a private Kaggle Dataset. The older `kaggle_run.ipynb`
-(ngrok) is kept for reference. Both notebooks call `deployment/start_kaggle.sh`; none of this
-affects running the backend and frontend locally. See
-[KAGGLE_DEPLOYMENT.md](KAGGLE_DEPLOYMENT.md) for the full setup and troubleshooting guide.
 
 ## Troubleshooting
 
-### The backend cannot connect to Ollama
-
-Check the locally installed models:
-
-```powershell
-ollama list
-```
-
-Confirm that the model names match `config.py` and that Ollama is running.
-
-### Chat returns insufficient context
-
-1. Open **Sources** in the active conversation.
-2. Select at least one indexed document.
-3. Select **Apply sources**.
-4. Confirm that the selected document contains indexed chunks.
-
-### Retrieval becomes incorrect after changing the embedding model
-
-Rebuild `vectorstore/` and index the documents again with the new embedding model.
-
-### The frontend still shows an older UI
-
-Reload the browser with `Ctrl + F5` and confirm that the frontend is running on port 3000.
+- **The backend cannot reach a model:** run `ollama list` and check that the model names match
+  `OLLAMA_CHAT_MODEL` and `OLLAMA_EMBEDDING_MODEL`.
+- **Chat answers that there is not enough context:** open **Sources** in the chat and select at
+  least one indexed document.
+- **Retrieval is wrong after changing the embedding model:** rebuild `vectorstore/` and index the
+  documents again with the new model.
+- **The UI looks outdated:** hard-reload the browser (`Ctrl + F5`).
