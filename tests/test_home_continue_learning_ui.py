@@ -59,10 +59,14 @@ const nextUpState = () => ({continueHidden: document.getElementById("home-contin
   activity: nextUp()?.querySelector(".planner-activity-chip")?.textContent || null,
   occurrences: [...document.querySelectorAll("#home-continue, #today-plan")].map((el) => el.textContent.split("Marketing").length - 1)
     .reduce((a, b) => a + b, 0)});
-// Visual order of Home's blocks (top to bottom), by their rendered position.
-const homeOrder = () => [["continue", "#home-continue"], ["plan", "#today-plan"], ["materials", ".session-library"]]
+// Visual order of Home's blocks (top to bottom, then left to right), by their rendered position; only
+// blocks actually rendered count (the library's document list lives on another page).
+const homeOrder = () => [["continue", "#home-continue"], ["plan", "#today-plan"], ["upcoming", "#home-upcoming"],
+  ["progress", "#home-progress"], ["materials", ".session-library"]]
   .map(([name, selector]) => [name, document.querySelector(selector)])
-  .filter(([, el]) => el && !el.hidden).sort((a, b) => a[1].getBoundingClientRect().top - b[1].getBoundingClientRect().top).map(([name]) => name);
+  .filter(([, el]) => el && el.getClientRects().length)
+  .sort((a, b) => (a[1].getBoundingClientRect().top - b[1].getBoundingClientRect().top) || (a[1].getBoundingClientRect().left - b[1].getBoundingClientRect().left))
+  .map(([name]) => name);
 const opened = () => ({page: document.body.dataset.page, tab: document.body.dataset.sessionTab, document: activeDocumentId});
 const home = async () => { setPage("overview"); await loadDashboard(); await sleep(400); await loadTodayPlan(); await sleep(200); };
 (async () => {
@@ -130,7 +134,7 @@ class ContinueLearningAssertions:
         self.assertTrue(scheduled["continueHidden"])   # the Continue card does not repeat the planned session
         self.assertEqual((scheduled["label"], scheduled["title"], scheduled["activity"]), ("Start", "Marketing", "Flashcards"))
         self.assertEqual(scheduled["occurrences"], 1)
-        self.assertEqual(scheduled["order"], ["plan", "materials"])   # Next up leads Home
+        self.assertEqual(scheduled["order"], ["plan", "progress"])   # Next up leads Home; no document list
         after = self.out["afterStart"]
         self.assertEqual(after["startCalls"], ["s-flash"])                       # one request for a double click
         self.assertEqual(after["opened"], {"page": "session", "tab": "flashcards", "document": "mkt.pdf"})
@@ -147,8 +151,8 @@ class ContinueLearningAssertions:
     def test_without_a_planned_session_only_the_document_opens(self):
         self.assertFalse(self.out["noSession"]["hidden"])   # nothing planned: the Continue card fills the gap
         self.assertEqual(self.out["noSession"]["label"], "Start studying")
-        # Nothing planned: Continue learning and the materials come first; the plan prompt is compact, below.
-        self.assertEqual(self.out["noSession"]["order"], ["continue", "materials", "plan"])
+        # Nothing planned: Continue learning leads; the plan prompt is compact; no document list on Home.
+        self.assertEqual(self.out["noSession"]["order"], ["continue", "plan", "progress"])
         self.assertTrue(self.out["noSession"]["planIdle"])
 
     def test_dates_are_english_whatever_the_browser_language(self):

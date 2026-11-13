@@ -1,4 +1,6 @@
-// Home: Continue learning, My Subjects (js/subjects.js), the materials list and Today's Study Plan.
+// Home is a learning dashboard: Quick actions, Continue learning, Today's Schedule, Upcoming study
+// sessions and Study progress. The document list itself lives in the library view (All Documents and
+// each subject's view, js/subjects.js); its rows are still built here (renderHomeDocumentCards).
 // Classic script (shared global scope), loaded by index.html before app.js.
 
 function renderDashboard() {
@@ -8,8 +10,10 @@ function renderDashboard() {
   renderSidebarRecentDocuments(materials);
   // Search helps once the library is large, or once it is organized into subjects (it matches subject names too).
   if (homeMaterialSearch) homeMaterialSearch.hidden = materials.length < HOME_SEARCH_MIN_MATERIALS && !userSubjects.length;
-  renderHomeSubjects();
-  renderHomeDocumentCards();
+  renderSidebarSubjects();
+  renderLibrary();
+  renderHomeContinue(materials);
+  renderHomeProgress();
   // Subjects can arrive after the desktop calendar first rendered (a reload on the Planner page).
   if (document.body.dataset.page === "planner" && plannerIsDesktop()) renderPlannerWorkspace();
   loadHomeDocumentStates(materials.map((material) => material.document_id));
@@ -61,8 +65,10 @@ async function loadHomeDocumentStates(documentIds) {
   if (load !== homeDocStatesLoad) return;
   homeDocStates = states;
   homeDocStatesReady = true;
+  renderHomeContinue(dashboardData?.materials || []);
   renderHomeDocumentCards();
-  renderHomeSubjectProgress();
+  renderHomeProgress();
+  renderLibraryActivity();
 }
 
 // What a document's Study Pack holds right now; missing parts are said plainly, never assumed.
@@ -170,10 +176,7 @@ function renderHomeContinue(materials) {
 function renderHomeDocumentCards() {
   const allMaterials = dashboardData?.materials || [];
   overviewMaterialsList.innerHTML = "";
-  renderHomeContinue(allMaterials);
-  const heading = document.getElementById("home-materials-title");
-  if (heading) heading.textContent = homeMaterialsHeading();
-  // Home's subject filter (My Subjects): All, one subject, or Unassigned.
+  // The library's view: All Documents, one subject, or Unassigned.
   const materials = allMaterials.filter((material) => subjectFilterMatches(homeSubjectFilter, material.document_id));
   renderHomeBulkBar();
   if (allMaterials.length && !materials.length) {
@@ -188,11 +191,11 @@ function renderHomeDocumentCards() {
   if (!materials.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "No study materials yet. Upload a PDF or TXT file to start.";
+    empty.textContent = "No documents yet. Upload a PDF or TXT file to start.";
     const upload = document.createElement("button");
     upload.type = "button";
     upload.className = "secondary-button empty-state-action";
-    upload.textContent = "Upload material";
+    upload.textContent = "Upload document";
     upload.addEventListener("click", () => document.getElementById("upload-source-button")?.click());
     empty.appendChild(upload);
     overviewMaterialsList.appendChild(empty);
@@ -268,7 +271,7 @@ async function loadDashboard() {
     dashboardData = null;
     const continuePanel = document.getElementById("home-continue");
     if (continuePanel) continuePanel.hidden = true;
-    overviewMaterialsList.innerHTML = '<div class="empty-state">Your materials could not be loaded right now.</div>';
+    overviewMaterialsList.innerHTML = '<div class="empty-state">Your documents could not be loaded right now.</div>';
   }
 }
 
@@ -287,7 +290,7 @@ async function loadRecommendations() {
   if (activeDocumentId) renderSessionProgress(activeDocumentId);
 }
 
-// ---- Home: Today's Study Plan (read-only) ------------------------------------
+// ---- Home: Today's Schedule and Upcoming study sessions ------------------------------------
 
 async function loadTodayPlan() {
   if (!todayPlanPanel) return;
@@ -315,18 +318,20 @@ function plannerTodayAgenda(sessions, now = plannerNow()) {
     .filter((session) => session.status === "in_progress" || session.scheduled_end > nowIso)
     .sort((left, right) => left.scheduled_start.localeCompare(right.scheduled_start));
   const today = remaining.filter((session) => session.scheduled_start.slice(0, 10) === todayKey);
-  const upcoming = today.length ? null : remaining.find((session) => session.scheduled_start.slice(0, 10) > todayKey) || null;
+  // After today: listed under Upcoming study sessions (the first one is "the next session" once today is done).
+  const later = remaining.filter((session) => session.scheduled_start.slice(0, 10) > todayKey);
+  const upcoming = today.length ? null : later[0] || null;
   // Scheduled sessions whose time has passed: offered Reschedule / Skip, never silently dropped.
   const overdue = sessions.filter((session) => plannerIsOverdue(session, now))
     .sort((left, right) => left.scheduled_start.localeCompare(right.scheduled_start));
-  return { today, upcoming, overdue };
+  return { today, upcoming, later, overdue };
 }
 
 function renderTodayPlan(sessions, progress = null) {
   if (!todayPlanPanel) return;
   todayPlanPanel.hidden = false;
   todayPlanPanel.innerHTML = "";
-  // Nothing planned: the panel steps aside (below the materials, compact) and Continue learning leads.
+  // Nothing planned: the panel becomes a compact prompt and Continue learning leads.
   todayPlanPanel.classList.remove("today-plan--idle");
   const now = plannerNow();
   const heading = document.createElement("div");
@@ -337,7 +342,7 @@ function renderTodayPlan(sessions, progress = null) {
   eyebrow.textContent = now.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
   const title = document.createElement("h2");
   title.id = "today-plan-title";
-  title.textContent = "Today’s Study Plan";
+  title.textContent = "Today’s Schedule";
   titles.append(eyebrow, title);
   const viewAll = document.createElement("button");
   viewAll.type = "button";
@@ -375,6 +380,8 @@ function renderTodayPlan(sessions, progress = null) {
     homePlanFeaturesSession = value;
     renderHomeContinue(dashboardData?.materials || []);   // show or hide the Continue card to match
   };
+  renderHomeUpcoming(sessions, now);
+  renderLibraryActivity();   // a subject's view lists its next sessions from the same rows
   if (sessions === null) { features(false); empty("Your study plan could not be loaded right now."); return; }
   const { today, upcoming, overdue } = plannerTodayAgenda(sessions, now);
   features(Boolean(today.length || upcoming));
@@ -388,12 +395,120 @@ function renderTodayPlan(sessions, progress = null) {
     section("Next up", "today-plan-next").appendChild(plannerSessionItem(today[0], "div", { action: true }));
     if (today.length > 1) section("Later today", "today-plan-later").appendChild(list(today.slice(1)));
   } else if (upcoming) {
-    empty("Nothing left for today.");
-    section(`Next session · ${plannerDayLabel(upcoming.scheduled_start.slice(0, 10))}`, "today-plan-upcoming")
-      .appendChild(plannerSessionItem(upcoming, "div", { action: true }));
+    empty("Nothing left for today.");   // the next session leads Upcoming study sessions below
   } else if (!overdue.length) {
     todayPlanPanel.classList.add("today-plan--idle");
     empty("No upcoming study sessions. Create a plan to see what to study next.");
   }
   if (overdue.length) section("Not completed", "today-plan-overdue").appendChild(list(overdue));
+}
+
+// The plan's remaining work, soonest first: sessions in progress or not yet over (local clock).
+function homeRemainingSessions(now = plannerNow()) {
+  const nowIso = plannerLocalIso(now);
+  return homePlanSessions.filter(plannerIsActiveSession)
+    .filter((session) => session.status === "in_progress" || session.scheduled_end > nowIso)
+    .sort((left, right) => left.scheduled_start.localeCompare(right.scheduled_start));
+}
+
+function homeDayHeading(dateKey, now = plannerNow()) {
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  if (dateKey === plannerDateKey(now)) return "Today";
+  if (dateKey === plannerDateKey(tomorrow)) return `Tomorrow · ${plannerDayLabel(dateKey)}`;
+  return plannerDayLabel(dateKey);
+}
+
+// Sessions grouped under their day, each row with the Planner's own Start/Resume/Reschedule actions.
+function homeSessionDayList(sessions, now = plannerNow()) {
+  const days = document.createElement("ol");
+  days.className = "home-session-days";
+  const byDay = new Map();
+  sessions.forEach((session) => {
+    const key = session.scheduled_start.slice(0, 10);
+    if (!byDay.has(key)) byDay.set(key, []);
+    byDay.get(key).push(session);
+  });
+  byDay.forEach((items, key) => {
+    const day = document.createElement("li");
+    day.className = "home-session-day";
+    day.dataset.day = key;
+    const heading = document.createElement("h3");
+    heading.textContent = homeDayHeading(key, now);
+    const list = document.createElement("ol");
+    list.className = "planner-session-list";
+    items.forEach((session) => list.appendChild(plannerSessionItem(session, "li", { action: true })));
+    day.append(heading, list);
+    days.appendChild(day);
+  });
+  return days;
+}
+
+// Upcoming study sessions: the planned sessions after today (Today's Schedule holds today's), so no
+// session is listed twice on Home. Hidden when nothing is planned after today.
+const HOME_UPCOMING_LIMIT = 6;
+
+function renderHomeUpcoming(sessions, now = plannerNow()) {
+  const panel = document.getElementById("home-upcoming");
+  if (!panel) return;
+  panel.innerHTML = "";
+  const later = sessions ? plannerTodayAgenda(sessions, now).later : [];
+  panel.hidden = !later.length;
+  if (panel.hidden) return;
+  const heading = document.createElement("div");
+  heading.className = "today-plan-heading";
+  const title = document.createElement("h2");
+  title.id = "home-upcoming-title";
+  title.textContent = "Upcoming study sessions";
+  heading.appendChild(title);
+  panel.append(heading, homeSessionDayList(later.slice(0, HOME_UPCOMING_LIMIT), now));
+  if (later.length > HOME_UPCOMING_LIMIT) {
+    const more = document.createElement("p");
+    more.className = "home-upcoming-more";
+    more.textContent = `+${later.length - HOME_UPCOMING_LIMIT} more in the Study Planner`;
+    panel.appendChild(more);
+  }
+}
+
+// ---- Home: Study progress -------------------------------------------------------------------------
+// Where the documents stand (their learning state, from /api/progress/documents) and the active plan's
+// sessions per subject (js/subjects.js renderHomeSubjectProgress). Nothing is estimated or invented.
+
+const LEARNING_STATE_ORDER = ["learning", "needs_review", "on_track", "completed", "new"];
+
+// [[state, label, count]] for the given documents whose progress is known, in a fixed order.
+function learningStateCounts(documentIds) {
+  const counts = new Map();
+  documentIds.forEach((id) => {
+    const learning = homeDocStates.get(id)?.learning;
+    if (!learning) return;
+    const entry = counts.get(learning.state) || [learning.state, learning.label, 0];
+    entry[2] += 1;
+    counts.set(learning.state, entry);
+  });
+  const rank = (state) => (LEARNING_STATE_ORDER.indexOf(state) + 1) || LEARNING_STATE_ORDER.length + 1;
+  return [...counts.values()].sort((left, right) => rank(left[0]) - rank(right[0]));
+}
+
+function renderHomeProgress() {
+  const states = document.getElementById("home-progress-states");
+  const empty = document.getElementById("home-progress-empty");
+  if (!states || !empty) return;
+  const materials = dashboardData?.materials || [];
+  states.innerHTML = "";
+  if (homeDocStatesReady) {
+    learningStateCounts(materials.map((material) => material.document_id)).forEach(([state, label, count]) => {
+      const chip = document.createElement("span");
+      chip.className = `home-progress-state home-progress-state--${state}`;
+      chip.dataset.state = state;
+      const number = document.createElement("strong");
+      number.textContent = String(count);
+      chip.append(number, document.createTextNode(` ${label}`));
+      states.appendChild(chip);
+    });
+  }
+  renderHomeSubjectProgress();
+  empty.hidden = !document.getElementById("home-subject-progress")?.hidden;
+  empty.textContent = !materials.length ? "Upload a document to start tracking your progress."
+    : !homeDocStatesReady ? "Loading progress…"
+    : "No study plan yet. Plan study sessions to see your progress by subject.";
 }

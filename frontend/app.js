@@ -1,5 +1,6 @@
 const pageTitles = {
   overview: "Home",
+  documents: "All Documents",
   session: "Study Session",
   planner: "Study Planner"
 };
@@ -515,19 +516,36 @@ async function signOut() {
   showAuthentication();
 }
 
+// Sidebar highlight and page title for the current page. All Documents is active only for the
+// unfiltered library; a subject's (or Unassigned's) view highlights that entry under Subjects.
+function syncNavActive() {
+  const page = state.page;
+  const navActive = (item, index) => item.dataset.page === page && (page !== "overview" || index === 0)
+    && (page !== "documents" || homeSubjectFilter === SUBJECT_ALL);
+  navItems.forEach((item, index) => {
+    const active = navActive(item, index);
+    item.classList.toggle("active", active);
+    if (active) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  });
+  syncSidebarRecentActive();
+  syncSidebarSubjectsActive();
+  pageTitle.textContent = page === "documents" ? homeMaterialsHeading() : pageTitles[page];
+}
+
 function setPage(page) {
   if (page !== "session") closeSourcesDrawer();
   state.page = page;
   document.body.dataset.page = page;
-  navItems.forEach((item, index) => item.classList.toggle("active", item.dataset.page === page && (page !== "overview" || index === 0)));
-  navItems.forEach((item) => {
-    if (item.classList.contains("active")) item.setAttribute("aria-current", "page");
-    else item.removeAttribute("aria-current");
-  });
-  syncSidebarRecentActive();
+  syncNavActive();
   views.forEach((view) => view.classList.toggle("active", view.id === `${page}-view`));
-  pageTitle.textContent = pageTitles[page];
   if (page === "planner") plannerOpen();   // the current layout at once, never the bare step-by-step markup
+  if (page === "documents") {
+    renderLibrary();
+    applySessionLibraryFilters();
+    refreshHomeDocumentStates();   // the rows' learning state and the subject's progress
+    if (subjectById(homeSubjectFilter)) loadTodayPlan();   // the subject's next sessions
+  }
   if (page === "overview") {
     // Re-read on every visit (sessions may have been completed or re-planned elsewhere): the
     // per-document progress is one batch request, not one request per document.
@@ -1142,7 +1160,8 @@ const QUIZ_OPTION_LETTERS = "ABCD";
 
 navItems.forEach((item) => {
   item.addEventListener("click", () => {
-    if (item.dataset.page) setPage(item.dataset.page);
+    if (item.dataset.page === "documents") openLibrary(SUBJECT_ALL);
+    else if (item.dataset.page) setPage(item.dataset.page);
   });
 });
 
@@ -1150,7 +1169,7 @@ sidebarMenuButton?.addEventListener("click", () => setSidebarOpen(!document.body
 sidebarBackdrop?.addEventListener("click", () => setSidebarOpen(false));
 document.getElementById("sidebar-close-button")?.addEventListener("click", () => setSidebarOpen(false));
 document.getElementById("app-sidebar")?.addEventListener("click", (event) => {
-  if (event.target.closest("button.nav-item, .sidebar-recent-item, #upload-source-button, #logout-button")) setSidebarOpen(false);
+  if (event.target.closest("button.nav-item, .sidebar-recent-item, .sidebar-subject-item, #upload-source-button, #logout-button")) setSidebarOpen(false);
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && document.body.classList.contains("sidebar-open")) setSidebarOpen(false);
@@ -1219,6 +1238,24 @@ chatForm.addEventListener("submit", handleChatSubmit);
 uploadSourceButton.addEventListener("click", () => sourceFileInput.click());
 sourceFileInput.addEventListener("change", () => uploadWithSubjectChoice(sourceFileInput.files));
 sessionSearchInput?.addEventListener("input", applySessionLibraryFilters);
+// Home's Quick actions, the sidebar's Add subject and the library header (All Documents / a subject).
+document.getElementById("home-action-plan")?.addEventListener("click", () => setPage("planner"));
+document.getElementById("home-action-upload")?.addEventListener("click", () => uploadSourceButton.click());
+document.getElementById("home-action-subject")?.addEventListener("click", () => promptNewSubject());
+document.getElementById("sidebar-subject-add")?.addEventListener("click", () => { setSidebarOpen(false); promptNewSubject(); });
+document.getElementById("library-upload")?.addEventListener("click", () => uploadSourceButton.click());   // a subject's view preselects it
+document.getElementById("library-subject-edit")?.addEventListener("click", () => {
+  const subject = subjectById(homeSubjectFilter);
+  if (subject) renameSubject(subject);
+});
+document.getElementById("library-subject-delete")?.addEventListener("click", (event) => {
+  const subject = subjectById(homeSubjectFilter);
+  if (subject) deleteSubject(subject, event.currentTarget);
+});
+document.getElementById("library-subject-plan")?.addEventListener("click", () => {
+  if (subjectById(homeSubjectFilter)) plannerSubjectFilter = homeSubjectFilter;   // display-only Planner filter
+  setPage("planner");
+});
 document.getElementById("home-upload-open")?.addEventListener("click", (event) => {
   document.getElementById("home-upload-banner").hidden = true;
   openStudySession(event.currentTarget.dataset.documentId);

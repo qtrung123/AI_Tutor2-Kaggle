@@ -71,7 +71,8 @@ const describe = () => {
   dialog().querySelector(".confirm-dialog-confirm").click();
   out.confirm = {result: await pending, gone: !dialog()};
 
-  // A real call site: Delete on a Home document card asks first; Cancel sends no request.
+  // A real call site: Delete on a document card (All Documents) asks first; Cancel sends no request.
+  openLibrary(); await sleep(200);
   const remove = document.querySelector('.home-doc-card[data-document-id="mkt.pdf"] .home-doc-delete');
   remove.focus(); remove.click(); await sleep(150);
   out.documentDelete = describe();

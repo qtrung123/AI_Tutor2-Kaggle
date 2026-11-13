@@ -64,7 +64,8 @@ const recent = () => [...document.querySelectorAll(".sidebar-recent-item")];
     menuButtonVisible: visible($("sidebar-menu-button")), sidebarVisible: visible(sidebar()),
     recent: recent().map((b) => b.textContent), overflow: overflow(),
     brandColor: getComputedStyle(sidebar().querySelector(".brand span")).color,
-    libraryItemVisible: visible(document.querySelector(".nav-menu .library-item")),
+    libraryItemPresent: Boolean(document.querySelector(".nav-menu .library-item")),
+    navLabels: [...document.querySelectorAll(".nav-menu .nav-item")].map((item) => item.title),
     newSessionReachable: Boolean($("upload-source-button")), logoutReachable: Boolean($("logout-button")),
   };
   if (innerWidth <= 720) {
@@ -138,6 +139,7 @@ const recent = () => [...document.querySelectorAll(".sidebar-recent-item")];
       expanded: collapseButton.getAttribute("aria-expanded"), label: collapseButton.getAttribute("aria-label"),
       navVisible, newSessionVisible: visible($("upload-source-button")), logoutVisible: visible($("logout-button")),
       collapseVisible: visible(collapseButton), resizerVisible: visible(resizer), recentVisible: visible(document.querySelector(".recent-documents")),
+      subjectsVisible: visible(document.querySelector(".sidebar-subjects")),
       brandTextVisible: visible(sidebar().querySelector(".brand > span")), overflow: overflow() };
     // Navigation still works from the icon rail.
     document.querySelector('.nav-item[data-page="planner"]').click(); await sleep(400);
@@ -214,7 +216,8 @@ class SidebarDesktopTests(unittest.TestCase):
         self.assertFalse(home["menuButtonVisible"])
         self.assertFalse(home["overflow"])
         self.assertTrue(home["newSessionReachable"] and home["logoutReachable"])
-        self.assertFalse(home["libraryItemVisible"])   # non-interactive duplicate of Home is hidden
+        self.assertFalse(home["libraryItemPresent"])   # the non-interactive "Study Sessions" item is gone
+        self.assertEqual(home["navLabels"], ["Home", "Study Planner", "All Documents"])   # every entry navigates
         self.assertNotEqual(home["brandColor"], "rgb(244, 255, 247)")   # readable on the white sidebar
 
     def test_active_nav_state_follows_the_page(self):
@@ -268,9 +271,10 @@ class SidebarCollapseResizeDesktopTests(unittest.TestCase):
         self.assertEqual((collapsed["width"], collapsed["mainLeft"]), (68, 68))
         self.assertEqual(collapsed["stored"], "1")
         self.assertEqual((collapsed["expanded"], collapsed["label"]), ("false", "Expand sidebar"))
-        self.assertEqual(collapsed["navVisible"], [True, True])
+        self.assertEqual(collapsed["navVisible"], [True, True, True])   # Home, Study Planner, All Documents
         self.assertTrue(collapsed["newSessionVisible"] and collapsed["logoutVisible"] and collapsed["collapseVisible"])
         self.assertFalse(collapsed["resizerVisible"] or collapsed["recentVisible"] or collapsed["brandTextVisible"])
+        self.assertFalse(collapsed["subjectsVisible"])   # the Subjects list folds away like Recent
         self.assertFalse(collapsed["overflow"])
         self.assertEqual(self.out["collapsedNav"], {"page": "planner", "activeNav": ["planner"]})
         self.assertEqual(self.out["reexpanded"], {"collapsed": False, "width": 250, "stored": "0", "expanded": "true", "label": "Collapse sidebar"})

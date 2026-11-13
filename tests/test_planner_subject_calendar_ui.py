@@ -231,6 +231,8 @@ window.__planner.availability = [{availability_id: "a0", is_recurring: true, day
 
     def test_add_all_adds_each_document_with_its_own_goal(self):
         self.assertIn(["bio", "Add all 2"], self.out["buttons"])   # only groups with more than one document
+        keys = [key for key, _text in self.out["buttons"]]
+        self.assertEqual(len(keys), len(set(keys)))   # exactly one "Add all" per subject group, never duplicated
         self.assertTrue(all(int(text.split()[-1]) > 1 for _key, text in self.out["buttons"]))
         bodies = {body["document_id"]: body for body in self.out["bodies"]}
         self.assertEqual(sorted(bodies), ["mkt.pdf", "stats.pdf"])

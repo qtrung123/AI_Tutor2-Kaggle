@@ -783,7 +783,7 @@ function uploadResultText(data) {
   if (skipped.length) parts.push(`already in your library: ${skipped.join(", ")}`);
   // A re-uploaded file that already has a subject is never moved by an upload.
   const kept = data.subject_kept_document_ids || [];
-  if (kept.length) parts.push(`kept in their current subject: ${kept.join(", ")} (use its Subject menu on Home to move it)`);
+  if (kept.length) parts.push(`kept in their current subject: ${kept.join(", ")} (use its Subject menu in All Documents to move it)`);
   const text = parts.join("; ") || "No new content was indexed";
   return text.charAt(0).toUpperCase() + text.slice(1) + ".";
 }

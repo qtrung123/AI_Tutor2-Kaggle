@@ -1,5 +1,5 @@
 """Real-browser tests for the read-only Study Planner daily experience (headless Chrome, mocked
-v2 API): Home "Today's Study Plan" (Next up / Later today / next upcoming / empty), the
+v2 API): Home "Today's Schedule" (Next up / Later today / empty) and "Upcoming study sessions", the
 confirmed plan's week (desktop: the calendar workspace; phone: the week list) with previous/next navigation, Start/Resume (Phase 4B): one start
 request per click burst, then the session's document opens on the mapped tool, and Complete /
 "Session not completed" -> Reschedule / Skip (Phase 4C) with Home + week refreshed afterwards. "Now" is pinned to Thu 2026-09-24 12:00
@@ -99,6 +99,11 @@ const today = () => ({
   upcoming: card(panel().querySelector(".today-plan-upcoming .planner-session")),
   empty: panel().querySelector(".today-plan-empty")?.textContent || null,
   buttons: [...panel().querySelectorAll("button")].map((b) => b.textContent),
+  // Home's Upcoming study sessions: the sessions after today, under their day.
+  upcomingPanel: document.getElementById("home-upcoming").hidden ? null : {
+    days: [...document.querySelectorAll("#home-upcoming .home-session-day h3")].map((h) => h.textContent),
+    sessions: [...document.querySelectorAll("#home-upcoming .planner-session")].map(card),
+    buttons: [...document.querySelectorAll("#home-upcoming button")].map((b) => b.textContent)},
 });
 const noOverflow = () => document.documentElement.scrollWidth <= window.innerWidth + 1;
 const view = () => document.getElementById("planner-view");
@@ -287,7 +292,8 @@ const startButton = (title, activity) => [...document.querySelectorAll(".planner
   // Reschedule the overdue session: the learner's offset is sent; Home refreshes.
   press("Marketing", "Summary", "Reschedule").click(); await sleep(1300);
   out.rescheduled = {call: P.actionCalls[P.actionCalls.length - 1], toast: toast.textContent, oldStatus: overdue.status,
-    sections: today().sections, overdueListed: !!item("Marketing", "Summary")};
+    sections: today().sections,
+    overdueListed: [...panel().querySelectorAll(".planner-session--overdue strong")].some((el) => el.textContent === "Marketing")};
 
   // No slot -> clear message, nothing changes; then Skip it.
   P.noSlot = true;
@@ -329,7 +335,7 @@ class TodayAndWeekAssertions:
     def test_today_with_multiple_sessions(self):
         multiple = self.out["multiple"]
         self.assertFalse(multiple["hidden"])
-        self.assertEqual(multiple["title"], "Today’s Study Plan")
+        self.assertEqual(multiple["title"], "Today’s Schedule")
         self.assertEqual(multiple["sections"], ["Next up", "Later today", "Not completed"])
         # Earliest remaining: the in-progress session (the 09:00 one is over, the skipped one is not work).
         self.assertEqual(multiple["next"], {"time": "11:30–12:15", "title": "Statistics", "activity": "Summary",
@@ -337,6 +343,11 @@ class TodayAndWeekAssertions:
         self.assertEqual([(s["time"], s["title"], s["activity"]) for s in multiple["later"]],
                          [("14:00–14:30", "Marketing", "Quiz"), ("20:00–20:20", "Statistics", "Flashcards")])
         self.assertIsNone(multiple["upcoming"])
+        # After today: Upcoming study sessions, grouped by day (Mon 28, Tue 29), never repeated in Today.
+        self.assertEqual([(s["time"], s["title"], s["activity"]) for s in multiple["upcomingPanel"]["sessions"]],
+                         [("18:00–18:30", "Statistics", "Quiz"), ("19:00–19:20", "Marketing", "Flashcards")])
+        self.assertEqual(len(multiple["upcomingPanel"]["days"]), 2)
+        self.assertRegex(multiple["upcomingPanel"]["days"][0], r"28")
 
     def test_archived_plan_sessions_are_not_current_work(self):
         self.assertNotIn("PowerBI", [s["title"] for s in self.out["multiple"]["later"]])
@@ -347,21 +358,24 @@ class TodayAndWeekAssertions:
         upcoming = self.out["upcoming"]
         self.assertIsNone(upcoming["next"])
         self.assertEqual(upcoming["empty"], "Nothing left for today.")
-        self.assertEqual(len(upcoming["sections"]), 2)
-        self.assertRegex(upcoming["sections"][0], r"^Next session · .*28")
-        self.assertEqual(upcoming["sections"][1], "Not completed")   # this morning's 09:00 session
-        self.assertEqual((upcoming["upcoming"]["time"], upcoming["upcoming"]["title"], upcoming["upcoming"]["activity"]),
+        self.assertEqual(upcoming["sections"], ["Not completed"])   # this morning's 09:00 session
+        self.assertIsNone(upcoming["upcoming"])   # the next session is not repeated inside Today's Schedule
+        panel = upcoming["upcomingPanel"]
+        self.assertRegex(panel["days"][0], r"28")
+        self.assertEqual((panel["sessions"][0]["time"], panel["sessions"][0]["title"], panel["sessions"][0]["activity"]),
                          ("18:00–18:30", "Statistics", "Quiz"))
 
     def test_no_future_sessions_shows_empty_state(self):
         none = self.out["none"]
         self.assertEqual(none["sections"], [])
         self.assertEqual(none["empty"], "No upcoming study sessions. Create a plan to see what to study next.")
+        self.assertIsNone(none["upcomingPanel"])   # nothing after today: no empty Upcoming panel
 
     def test_actions_are_start_or_resume_only(self):
         self.assertEqual(self.out["multiple"]["buttons"],
                          ["View full schedule", "Complete", "Resume", "Start", "Start", "Reschedule", "Skip"])
-        self.assertEqual(self.out["upcoming"]["buttons"], ["View full schedule", "Start", "Reschedule", "Skip"])
+        self.assertEqual(self.out["upcoming"]["buttons"], ["View full schedule", "Reschedule", "Skip"])
+        self.assertEqual(self.out["upcoming"]["upcomingPanel"]["buttons"], ["Start", "Start"])
         self.assertEqual(self.out["none"]["buttons"], ["View full schedule"])
 
     def test_start_from_week_opens_the_mapped_tool(self):

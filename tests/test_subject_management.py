@@ -488,12 +488,13 @@ class SubjectFrontendTests(unittest.TestCase):
         self.assertIn('SUBJECTS_API_URL = apiUrl("/api/subjects")', self.source)
         self.assertIn("/assign", self.source)
 
-    def test_home_shows_my_subjects_unassigned_search_and_management(self):
-        self.assertIn('id="home-subjects"', self.html)
-        for needle in ("function renderHomeSubjects", "Unassigned", "My Subjects", "function renameSubject",
+    def test_sidebar_subjects_library_search_and_management(self):
+        self.assertIn('id="sidebar-subjects"', self.html)
+        self.assertIn('id="documents-view"', self.html)
+        for needle in ("function renderSidebarSubjects", "function openLibrary", "Unassigned", "function renameSubject",
                        "function deleteSubject", "function moveDocumentsToSubject", "homeSubjectFilter"):
             self.assertIn(needle, self.source)
-        self.assertIn("subjects-grid", self.styles)
+        self.assertIn(".sidebar-subject-item", self.styles)
         # Search still filters the document cards, now by title and subject name.
         self.assertIn("row.dataset.subject", self.source)
 

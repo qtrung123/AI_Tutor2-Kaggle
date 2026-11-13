@@ -1,5 +1,5 @@
-// Subjects: the user's own subject/course groups for documents -- Home's My Subjects, the optional
-// subject of an upload and the Planner's subject filter. Organizational only: a document belongs to
+// Subjects: the user's own subject/course groups for documents -- the sidebar's Subjects list and each
+// subject's view of the library, the optional subject of an upload and the Planner's subject filter. Organizational only: a document belongs to
 // at most one subject, and deleting a subject only moves its documents to Unassigned.
 // Classic script (shared global scope), loaded by index.html before home.js and app.js.
 
@@ -10,8 +10,8 @@ const SUBJECT_UNASSIGNED = "unassigned";
 const SUBJECT_ALL = "all";
 
 let userSubjects = [];                       // [{subject_id, name, color, document_ids, document_count}]
-let homeSubjectFilter = SUBJECT_ALL;         // Home: "all" | "unassigned" | a subject_id
-let homeSelectedDocuments = new Set();       // Home: documents picked for a bulk move
+let homeSubjectFilter = SUBJECT_ALL;         // Library view: "all" (All Documents) | "unassigned" | a subject_id
+let homeSelectedDocuments = new Set();       // Library: documents picked for a bulk move
 let plannerSubjectFilter = SUBJECT_ALL;      // Planner: display-only filter, never sent to the scheduler
 
 function setUserSubjects(subjects) {
@@ -61,8 +61,10 @@ async function subjectRequest(url, method, body) {
 function afterSubjectsChange(subjects) {
   setUserSubjects(subjects);
   homeSelectedDocuments = new Set([...homeSelectedDocuments].filter((id) => (dashboardData?.materials || []).some((m) => m.document_id === id)));
-  renderHomeSubjects();
-  renderHomeDocumentCards();
+  renderSidebarSubjects();
+  renderLibrary();
+  renderHomeProgress();
+  if (document.body.dataset.page === "documents") syncNavActive();   // e.g. the open subject was deleted
   if (document.body.dataset.page === "planner") renderPlanner();
 }
 
@@ -298,7 +300,8 @@ function chooseUploadSubject(files) {
     field.className = "subject-dialog-field";
     const caption = document.createElement("span");
     caption.textContent = "Subject (optional)";
-    const preset = subjectById(homeSubjectFilter) ? homeSubjectFilter : "";
+    // Uploading from a subject's view preselects that subject; anywhere else nothing is preselected.
+    const preset = document.body.dataset.page === "documents" && subjectById(homeSubjectFilter) ? homeSubjectFilter : "";
     const select = subjectSelect({ value: preset, label: "Subject for the uploaded files", noneLabel: "No subject (Unassigned)" });
     field.append(caption, select);
     form.appendChild(field);
@@ -344,122 +347,204 @@ async function uploadWithSubjectChoice(files) {
   await uploadSourceFiles(list, choice);
 }
 
-// ---- Home: My Subjects ----------------------------------------------------------------------------
+// ---- Sidebar: Subjects ------------------------------------------------------------------------------
+// The user's subjects live in the sidebar (with Add subject). Each one opens its own view of the
+// document library (page "documents" with homeSubjectFilter = that subject); "Unassigned" appears once
+// documents sit outside every subject. Rename/recolor and delete are on the subject's view.
 
-function homeSubjectCard({ key, name, count, color = null, subject = null }) {
-  const card = document.createElement("div");
-  card.className = "subject-card";
-  card.dataset.subjectFilter = key;
-  if (color) card.style.setProperty("--subject-color", color);
-  if (key === SUBJECT_ALL) card.classList.add("subject-card--all");
-  if (key === SUBJECT_UNASSIGNED) card.classList.add("subject-card--unassigned");
-  const active = homeSubjectFilter === key;
-  card.classList.toggle("is-active", active);
-  const main = document.createElement("button");
-  main.type = "button";
-  main.className = "subject-card-main";
-  main.setAttribute("aria-pressed", String(active));
-  main.setAttribute("aria-label", `Show ${name}: ${subjectCountText(count)}`);
+function libraryMaterials() {
+  return dashboardData?.materials || [];
+}
+
+function subjectDocumentCount(subject) {
+  const known = new Set(libraryMaterials().map((material) => material.document_id));
+  return (subject?.document_ids || []).filter((id) => known.has(id)).length;
+}
+
+function unassignedDocumentCount() {
+  return libraryMaterials().filter((material) => !subjectOfDocument(material.document_id)).length;
+}
+
+function sidebarSubjectItem({ key, name, count, color = null }) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "sidebar-subject-item";
+  button.dataset.subjectFilter = key;
+  if (color) button.style.setProperty("--subject-color", color);
+  if (key === SUBJECT_UNASSIGNED) button.classList.add("sidebar-subject-item--unassigned");
+  button.title = name;
+  button.setAttribute("aria-label", `${name}: ${subjectCountText(count)}`);
   const dot = document.createElement("span");
   dot.className = "subject-card-dot";
   dot.setAttribute("aria-hidden", "true");
-  const title = document.createElement("strong");
-  title.className = "subject-card-name";
-  title.textContent = name;
+  const label = document.createElement("span");
+  label.className = "sidebar-subject-name";
+  label.textContent = name;
   const meta = document.createElement("span");
-  meta.className = "subject-card-count";
-  meta.textContent = subjectCountText(count);
-  main.append(dot, title, meta);
-  main.addEventListener("click", () => {
-    homeSubjectFilter = key;
-    homeSelectedDocuments.clear();
-    renderHomeSubjects();
-    renderHomeDocumentCards();
-  });
-  card.appendChild(main);
-  if (subject) {
-    const actions = document.createElement("div");
-    actions.className = "subject-card-actions";
-    const rename = document.createElement("button");
-    rename.type = "button";
-    rename.className = "text-button subject-card-rename";
-    rename.textContent = "Edit";
-    rename.setAttribute("aria-label", `Rename or recolor ${subject.name}`);
-    rename.addEventListener("click", () => renameSubject(subject));
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "text-button danger-button subject-card-delete";
-    remove.textContent = "Delete";
-    remove.setAttribute("aria-label", `Delete subject ${subject.name}`);
-    remove.addEventListener("click", () => deleteSubject(subject, remove));
-    actions.append(rename, remove);
-    card.appendChild(actions);
-  }
-  return card;
+  meta.className = "sidebar-subject-count";
+  meta.setAttribute("aria-hidden", "true");
+  meta.textContent = String(count);
+  button.append(dot, label, meta);
+  button.addEventListener("click", () => openLibrary(key));
+  return button;
 }
 
-function renderHomeSubjects() {
-  const panel = document.getElementById("home-subjects");
-  if (!panel) return;
-  const materials = dashboardData?.materials || [];
-  panel.innerHTML = "";
-  panel.hidden = !materials.length && !userSubjects.length;
-  if (panel.hidden) return;
-
-  const heading = document.createElement("div");
-  heading.className = "home-subjects-heading";
-  const title = document.createElement("h2");
-  title.id = "home-subjects-title";
-  title.textContent = "My Subjects";
-  const add = document.createElement("button");
-  add.type = "button";
-  add.className = "text-button home-subjects-add";
-  add.textContent = "+ New subject";
-  add.addEventListener("click", async () => {
-    const values = await subjectDialog({ title: "New subject", confirmLabel: "Create" });
-    if (!values) return;
-    try {
-      const subject = await createSubject(values.name, values.color);
-      homeSubjectFilter = subject.subject_id;
-      renderHomeSubjects();
-      renderHomeDocumentCards();
-      showToast("Subject created");
-    } catch (error) {
-      showToast(error.message || "Subject could not be created");
-    }
-  });
-  heading.append(title, add);
-  panel.appendChild(heading);
-
+function renderSidebarSubjects() {
+  const list = document.getElementById("sidebar-subject-list");
+  if (!list) return;
+  list.innerHTML = "";
   if (!userSubjects.length) {
-    const hint = document.createElement("p");
-    hint.className = "home-subjects-hint";
-    hint.textContent = "Group your documents by course, e.g. Biology or Physics.";
-    panel.appendChild(hint);
-    return;
+    const hint = document.createElement("span");
+    hint.className = "sidebar-empty";
+    hint.textContent = "No subjects yet";
+    list.appendChild(hint);
   }
-  const known = new Set(materials.map((material) => material.document_id));
-  const unassigned = materials.filter((material) => !subjectOfDocument(material.document_id)).length;
-  const grid = document.createElement("div");
-  grid.className = "subjects-grid";
-  grid.setAttribute("role", "group");
-  grid.setAttribute("aria-label", "Filter materials by subject");
-  grid.appendChild(homeSubjectCard({ key: SUBJECT_ALL, name: "All materials", count: materials.length }));
-  userSubjects.forEach((subject) => grid.appendChild(homeSubjectCard({
-    key: subject.subject_id, name: subject.name, color: subject.color, subject,
-    count: (subject.document_ids || []).filter((id) => known.has(id)).length,
+  userSubjects.forEach((subject) => list.appendChild(sidebarSubjectItem({
+    key: subject.subject_id, name: subject.name, color: subject.color, count: subjectDocumentCount(subject),
   })));
-  grid.appendChild(homeSubjectCard({ key: SUBJECT_UNASSIGNED, name: "Unassigned", count: unassigned }));
-  panel.appendChild(grid);
-  const progress = document.createElement("section");
-  progress.className = "subject-progress";
-  progress.id = "home-subject-progress";
-  progress.setAttribute("aria-labelledby", "home-subject-progress-title");
-  panel.appendChild(progress);
-  renderHomeSubjectProgress();
+  const unassigned = unassignedDocumentCount();
+  if (userSubjects.length && unassigned) list.appendChild(sidebarSubjectItem({ key: SUBJECT_UNASSIGNED, name: "Unassigned", count: unassigned }));
+  syncSidebarSubjectsActive();
 }
 
-// ---- Home: study progress per subject ---------------------------------------------------------------
+// The subject (or Unassigned) whose view is open is highlighted, as Recent highlights the open session.
+function syncSidebarSubjectsActive() {
+  document.querySelectorAll(".sidebar-subject-item").forEach((button) => {
+    const active = document.body?.dataset?.page === "documents" && button.dataset.subjectFilter === homeSubjectFilter;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+}
+
+// Opens the document library: every document (SUBJECT_ALL), one subject's view, or Unassigned.
+function openLibrary(filter = SUBJECT_ALL) {
+  const target = filter === SUBJECT_ALL || filter === SUBJECT_UNASSIGNED || subjectById(filter) ? filter : SUBJECT_ALL;
+  if (target !== homeSubjectFilter) {
+    homeSelectedDocuments.clear();
+    if (sessionSearchInput) sessionSearchInput.value = "";   // a search belongs to the view it was typed in
+  }
+  homeSubjectFilter = target;
+  setPage("documents");
+}
+
+// "+" in the sidebar and Home's "New subject": creates the subject, then opens its (empty) view.
+async function promptNewSubject() {
+  const values = await subjectDialog({ title: "New subject", confirmLabel: "Create" });
+  if (!values) return null;
+  try {
+    const subject = await createSubject(values.name, values.color);
+    showToast("Subject created");
+    openLibrary(subject.subject_id);
+    return subject;
+  } catch (error) {
+    showToast(error.message || "Subject could not be created");
+    return null;
+  }
+}
+
+// ---- All Documents / a subject's view ------------------------------------------------------------------
+// One library view for every document (the former Home list, unchanged: search, subject menu, bulk
+// move, Open, Delete, upload). A subject's view adds its header actions and its learning activity.
+
+function renderLibrary() {
+  renderLibraryHeader();
+  renderLibrarySubjectFilter();
+  renderLibraryActivity();
+  renderHomeDocumentCards();
+  syncSidebarSubjectsActive();
+}
+
+function renderLibraryHeader() {
+  const header = document.getElementById("library-header");
+  if (!header) return;
+  const subject = subjectById(homeSubjectFilter);
+  const count = homeSubjectFilter === SUBJECT_ALL ? libraryMaterials().length
+    : homeSubjectFilter === SUBJECT_UNASSIGNED ? unassignedDocumentCount() : subjectDocumentCount(subject);
+  header.classList.toggle("library-header--subject", Boolean(subject));
+  if (subject) header.style.setProperty("--subject-color", subject.color);
+  else header.style.removeProperty("--subject-color");
+  document.getElementById("library-eyebrow").textContent = subject ? "Subject" : "Library";
+  document.getElementById("home-materials-title").textContent = homeMaterialsHeading();
+  document.getElementById("library-count").textContent = subjectCountText(count);
+  ["library-subject-plan", "library-subject-edit", "library-subject-delete"].forEach((id) => {
+    const button = document.getElementById(id);
+    if (button) button.hidden = !subject;
+  });
+  const remove = document.getElementById("library-subject-delete");
+  if (remove && subject) {
+    remove.disabled = deletingSubjects.has(subject.subject_id);
+    remove.setAttribute("aria-label", `Delete subject ${subject.name}`);
+    document.getElementById("library-subject-edit").setAttribute("aria-label", `Rename or recolor ${subject.name}`);
+  }
+}
+
+// The library's own Subject filter (All subjects, each subject, Unassigned): the same views the
+// sidebar opens, reachable without the drawer on phones. Shown once the user has subjects.
+function renderLibrarySubjectFilter() {
+  const holder = document.getElementById("library-subject-filter");
+  if (!holder) return;
+  holder.innerHTML = "";
+  holder.hidden = !userSubjects.length;
+  if (holder.hidden) return;
+  const select = subjectSelect({ value: subjectById(homeSubjectFilter) ? homeSubjectFilter : "", label: "Filter documents by subject", includeNew: false, noneLabel: "All subjects" });
+  const unassigned = document.createElement("option");
+  unassigned.value = SUBJECT_UNASSIGNED;
+  unassigned.textContent = "Unassigned";
+  select.appendChild(unassigned);
+  if (homeSubjectFilter === SUBJECT_UNASSIGNED) select.value = SUBJECT_UNASSIGNED;
+  select.classList.add("library-subject-select");
+  select.addEventListener("change", () => openLibrary(select.value || SUBJECT_ALL));
+  holder.append(subjectFilterCaption(), select);
+}
+
+// A subject's learning activity: its plan progress (the same figures as Home's Study progress) and its
+// next planned sessions (the same rows and Start/Resume lifecycle as Today's Schedule).
+const LIBRARY_SUBJECT_SESSION_LIMIT = 4;
+
+function renderLibraryActivity() {
+  const panel = document.getElementById("library-activity");
+  if (!panel) return;
+  panel.innerHTML = "";
+  const subject = subjectById(homeSubjectFilter);
+  panel.hidden = !subject;
+  if (!subject) return;
+  const card = (title) => {
+    const element = document.createElement("section");
+    element.className = "library-activity-card";
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    element.appendChild(heading);
+    panel.appendChild(element);
+    return element;
+  };
+  const text = (parent, value) => parent.appendChild(Object.assign(document.createElement("p"), { className: "library-activity-text", textContent: value }));
+
+  const progress = card("Progress");
+  progress.classList.add("library-activity-progress");
+  const subjectMaterials = libraryMaterials().filter((material) => subjectOfDocument(material.document_id)?.subject_id === subject.subject_id);
+  if (!subjectMaterials.length) text(progress, "No documents in this subject yet.");
+  else if (!homeDocStatesReady) text(progress, "Loading progress…");
+  else {
+    const group = homeSubjectProgressGroups(subjectMaterials).find((item) => item.key === subject.subject_id);
+    const summary = subjectGroupProgressText(group);
+    progress.appendChild(subjectProgressBar(group.completed, group.planned, `${subject.name}: ${summary}`));
+    text(progress, summary);
+    const states = learningStateCounts(subjectMaterials.map((material) => material.document_id));
+    if (states.length) text(progress, states.map(([, label, count]) => `${count} ${label.toLowerCase()}`).join(" · "));
+  }
+
+  const upcoming = card("Upcoming sessions");
+  upcoming.classList.add("library-activity-sessions");
+  const sessions = homeRemainingSessions().filter((session) => subjectFilterMatches(subject.subject_id, session.document_id));
+  if (!sessions.length) text(upcoming, "No sessions planned for this subject.");
+  else {
+    upcoming.appendChild(homeSessionDayList(sessions.slice(0, LIBRARY_SUBJECT_SESSION_LIMIT)));
+    if (sessions.length > LIBRARY_SUBJECT_SESSION_LIMIT) text(upcoming, `+${sessions.length - LIBRARY_SUBJECT_SESSION_LIMIT} more in the Study Planner`);
+  }
+}
+
+// ---- Home: Study progress per subject ---------------------------------------------------------------
 // Derived only from each document's saved Planner sessions, as /api/progress/documents/{id} already
 // reports them (homeDocStates: the document's active plan, counted by backend/study_progress.py):
 // one saved session row = one session, a combined session included; superseded ("rescheduled") and
@@ -559,7 +644,8 @@ function renderHomeSubjectProgress() {
     dot.setAttribute("aria-hidden", "true");
     const name = document.createElement("span");
     name.className = "subject-progress-name";
-    name.textContent = group.name;
+    // Without any subject, the one (Unassigned) group simply is every document.
+    name.textContent = !userSubjects.length && !group.subject ? "All documents" : group.name;
     const count = document.createElement("span");
     count.className = "subject-progress-count";
     count.textContent = subjectGroupProgressText(group);
@@ -601,7 +687,7 @@ function renderHomeSubjectProgress() {
 
 function homeMaterialsHeading() {
   if (homeSubjectFilter === SUBJECT_UNASSIGNED) return "Unassigned";
-  return subjectById(homeSubjectFilter)?.name || "Your materials";
+  return subjectById(homeSubjectFilter)?.name || "All Documents";
 }
 
 // The bulk bar: with documents ticked, move them all to a subject (or Unassigned) at once.
@@ -822,15 +908,6 @@ function plannerSubjectGroup(group, { idPrefix, countText, rows, tag = "section"
     text.textContent = "Select all";
     label.append(box, text);
     head.appendChild(label);
-  }
-  if (action) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "pcal-button pcal-secondary planner-subject-group-action";
-    button.textContent = action.label;
-    button.setAttribute("aria-label", action.ariaLabel);
-    button.addEventListener("click", () => action.onClick(button));
-    head.appendChild(button);
   }
   if (action) {
     const button = document.createElement("button");
