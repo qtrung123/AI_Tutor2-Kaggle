@@ -56,24 +56,32 @@ const uploadStatus = document.getElementById("upload-status");
             <p class="quiz-player-types" id="quiz-player-types"></p>
           </div>
         </header>
-        <div class="quiz-player-progress">
-          <div class="quiz-player-progress-row">
-            <span id="quiz-player-position"></span>
-            <span id="quiz-player-answered-count"></span>
+        <div class="quiz-player-body">
+          <div class="quiz-player-progress">
+            <div class="quiz-player-progress-row">
+              <span id="quiz-player-position"></span>
+              <span id="quiz-player-answered-count"></span>
+            </div>
+            <div class="quiz-player-progress-track"><span id="quiz-player-progress-bar"></span></div>
+            <span class="quiz-player-save-status" id="quiz-player-save-status" hidden></span>
           </div>
-          <div class="quiz-player-progress-track"><span id="quiz-player-progress-bar"></span></div>
-          <nav class="quiz-player-nav" id="quiz-player-nav" aria-label="Jump to question"></nav>
-          <span class="quiz-player-save-status" id="quiz-player-save-status" hidden></span>
+          <article class="quiz-player-card" id="quiz-player-card">
+            <p class="quiz-player-question" id="quiz-player-question"></p>
+            <p class="quiz-player-select-hint" id="quiz-player-select-hint" hidden>Select all that apply</p>
+            <div class="quiz-player-answers" id="quiz-player-answers"></div>
+          </article>
+          <footer class="quiz-player-footer">
+            <button class="secondary-button quiz-player-prev" id="quiz-player-previous" type="button">Previous</button>
+            <button class="primary-button quiz-player-next" id="quiz-player-next" type="button">Next</button>
+          </footer>
+          <aside class="quiz-player-nav-panel" aria-labelledby="quiz-player-nav-title">
+            <h3 class="quiz-player-nav-title" id="quiz-player-nav-title">Questions</h3>
+            <nav class="quiz-player-nav" id="quiz-player-nav" aria-label="Jump to question"></nav>
+            <ul class="quiz-player-nav-legend" aria-hidden="true">
+              <li class="is-current">Current</li><li class="is-answered">Answered</li><li>Unanswered</li>
+            </ul>
+          </aside>
         </div>
-        <article class="quiz-player-card" id="quiz-player-card">
-          <p class="quiz-player-question" id="quiz-player-question"></p>
-          <p class="quiz-player-select-hint" id="quiz-player-select-hint" hidden>Select all that apply</p>
-          <div class="quiz-player-answers" id="quiz-player-answers"></div>
-        </article>
-        <footer class="quiz-player-footer">
-          <button class="secondary-button quiz-player-prev" id="quiz-player-previous" type="button">Previous</button>
-          <button class="primary-button quiz-player-next" id="quiz-player-next" type="button">Next</button>
-        </footer>
       </div>
       <div class="quiz-player-loading" id="quiz-results-loading" hidden>Loading results…</div>
       <div class="quiz-results-view" id="quiz-results-view" hidden>

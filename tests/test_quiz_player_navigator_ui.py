@@ -2,7 +2,9 @@
 Chrome against the Quiz Player mock from tests/test_quiz_player_ui.py, with 12- and 20-question
 quizzes). Covers: one item per question, distinct current/answered/unanswered states, jumping to an
 exact question without submitting, answers kept across jumps, autosaved position + Resume, Previous/
-Next still correct, Finish/Results unchanged, and a compact layout at desktop and phone widths.
+Next still correct, Finish/Results unchanged, and the layout: on desktop a compact side panel right of
+the question (a 5-column grid that scrolls on its own for long quizzes); on phones a wrapping grid below
+Previous/Next -- never a sideways-scrolling strip or page overflow.
 
 Skipped when Chrome is not installed (set CHROME_PATH to point at it). No backend, no network.
 """
@@ -23,7 +25,8 @@ const navQuestions = (count) => Array.from({length: count}, (_, i) => ({
   id: i + 1, question: "N" + (i + 1) + "?", options: ["A. a", "B. b", "C. c", "D. d"], correct_answer: "A",
   question_type: "single_choice", topic_id: "document", topic_name: "", difficulty: "easy", explanation: "e", source_chunk_ids: []}));
 const navQuiz = (quizId, title, count) => ({...makeQuiz(quizId, title, "qwen-2.5-7b"), questions: navQuestions(count)});
-window.__quizzes = {"nav-12": navQuiz("nav-12", "Nav 12", 12), "nav-20": navQuiz("nav-20", "Nav 20", 20)};
+window.__quizzes = {"nav-12": navQuiz("nav-12", "Nav 12", 12), "nav-20": navQuiz("nav-20", "Nav 20", 20),
+  "nav-80": navQuiz("nav-80", "Nav 80", 80)};
 """
 
 DRIVER = r"""
@@ -44,8 +47,13 @@ const selectedLetter = () => answerCards().find((b) => b.classList.contains("sel
 const layout = () => {
   const n = $("quiz-player-nav"), r = n.getBoundingClientRect();
   const current = n.querySelector(".is-current").getBoundingClientRect();
+  const panel = document.querySelector(".quiz-player-nav-panel").getBoundingClientRect();
+  const card = $("quiz-player-card").getBoundingClientRect(), footer = document.querySelector(".quiz-player-footer").getBoundingClientRect();
   return {height: Math.round(r.height), itemHeight: Math.round(items()[0].getBoundingClientRect().height),
-    scrolls: n.scrollWidth > n.clientWidth, currentVisible: current.left >= r.left - 1 && current.right <= r.right + 1,
+    columns: new Set(items().map((b) => Math.round(b.getBoundingClientRect().left))).size,
+    besideQuestion: panel.left >= card.right - 1 && panel.top < card.bottom, belowButtons: panel.top >= footer.bottom - 1,
+    scrollsX: n.scrollWidth > n.clientWidth + 1, scrollsY: n.scrollHeight > n.clientHeight + 1,
+    currentVisible: current.left >= r.left - 1 && current.right <= r.right + 1 && current.top >= r.top - 1 && current.bottom <= r.bottom + 1,
     pageOverflow: document.documentElement.scrollWidth > window.innerWidth};
 };
 (async () => {
@@ -114,6 +122,16 @@ const layout = () => {
   out.twenty = {count: items().length, layout: layout()};
   jump(20); await sleep(50);
   out.twentyLast = {position: $("quiz-player-position").textContent, layout: layout()};
+  $("quiz-player-exit").click(); await sleep(200);
+  if (!$("quiz-exit-confirm").hidden) { $("quiz-exit-confirm-exit").click(); await sleep(300); }
+
+  // 80-question quiz: the grid scrolls on its own and keeps the current question in view.
+  startButtonFor("Nav 80").click();
+  await sleep(300);
+  const pageScroll = document.querySelector(".session-content").scrollTop;
+  jump(80); await sleep(50);
+  out.eighty = {count: items().length, position: $("quiz-player-position").textContent, layout: layout(),
+    pageScrollUnchanged: document.querySelector(".session-content").scrollTop === pageScroll};
 
   const pre = document.createElement("pre"); pre.id = "harness-out"; pre.textContent = JSON.stringify(out); document.body.appendChild(pre);
 })().catch((error) => { out.fatal = String(error && error.stack || error); const pre = document.createElement("pre"); pre.id = "harness-out"; pre.textContent = JSON.stringify(out); document.body.appendChild(pre); });
@@ -217,9 +235,19 @@ class QuizPlayerNavigatorDesktopTests(unittest.TestCase):
         self.assertEqual(self.out["twenty"]["count"], 20)
         for state in (self.out["opened"]["layout"], self.out["twenty"]["layout"], self.out["twentyLast"]["layout"]):
             self.assertFalse(state["pageOverflow"])
-            self.assertLessEqual(state["height"], state["itemHeight"] * 2 + 12)   # at most two compact rows
+            self.assertTrue(state["besideQuestion"])   # a side panel, not a strip across the top
+            self.assertEqual(state["columns"], 5)
+            self.assertFalse(state["scrollsX"])
             self.assertTrue(state["currentVisible"])
         self.assertEqual(self.out["twentyLast"]["position"], "Question 20 of 20")
+
+    def test_long_quiz_navigator_scrolls_on_its_own(self):
+        eighty = self.out["eighty"]
+        self.assertEqual((eighty["count"], eighty["position"]), (80, "Question 80 of 80"))
+        self.assertTrue(eighty["layout"]["scrollsY"])   # the grid scrolls inside its panel
+        self.assertTrue(eighty["layout"]["currentVisible"])   # jumping to 80 keeps it in view
+        self.assertTrue(eighty["pageScrollUnchanged"])
+        self.assertFalse(eighty["layout"]["pageOverflow"])
 
 
 class QuizPlayerNavigatorPhoneTests(QuizPlayerNavigatorDesktopTests):
@@ -230,9 +258,18 @@ class QuizPlayerNavigatorPhoneTests(QuizPlayerNavigatorDesktopTests):
         self.assertEqual(self.out["twenty"]["count"], 20)
         for state in (self.out["twenty"]["layout"], self.out["twentyLast"]["layout"]):
             self.assertFalse(state["pageOverflow"])
-            self.assertLess(state["height"], state["itemHeight"] * 2)   # one row (plus scrollbar) that scrolls sideways
-            self.assertTrue(state["scrolls"])
+            self.assertTrue(state["belowButtons"])   # under Previous/Next, the question stays first
+            self.assertFalse(state["scrollsX"])   # a wrapping grid, never a sideways strip
+            self.assertLessEqual(state["height"], state["itemHeight"] * 4)   # compact: at most ~3 rows tall
             self.assertTrue(state["currentVisible"])   # jumping to 20 keeps it in view
+
+    def test_long_quiz_navigator_scrolls_on_its_own(self):
+        eighty = self.out["eighty"]
+        self.assertEqual((eighty["count"], eighty["position"]), (80, "Question 80 of 80"))
+        self.assertTrue(eighty["layout"]["scrollsY"])
+        self.assertFalse(eighty["layout"]["scrollsX"])
+        self.assertTrue(eighty["layout"]["currentVisible"])
+        self.assertFalse(eighty["layout"]["pageOverflow"])
 
 
 if __name__ == "__main__":

@@ -109,6 +109,14 @@ const recent = () => [...document.querySelectorAll(".sidebar-recent-item")];
   const stored = () => ({width: localStorage.getItem("aiTutorSidebarWidth"), collapsed: localStorage.getItem("aiTutorSidebarCollapsed")});
   out.controls = { collapseVisible: visible(collapseButton), resizerVisible: visible(resizer) };
   if (innerWidth > 720) {
+    // A long Home scrolled far down: the sidebar still spans the whole viewport, profile at its bottom.
+    const spacer = document.createElement("div"); spacer.style.height = "3000px";
+    $("overview-view").appendChild(spacer);
+    window.scrollTo(0, 2000); await sleep(100);
+    const rect = sidebar().getBoundingClientRect(), profile = sidebar().querySelector(".profile").getBoundingClientRect();
+    out.scrolled = { scrollY: Math.round(window.scrollY), top: Math.round(rect.top), bottom: Math.round(rect.bottom),
+      viewport: window.innerHeight, profileBottomGap: Math.round(rect.bottom - profile.bottom) };
+    window.scrollTo(0, 0); spacer.remove(); await sleep(50);
     out.initial = { width: sidebarWidth(), collapsed: document.body.classList.contains("sidebar-collapsed"), stored: stored(),
       resizerRole: resizer.getAttribute("role"), resizerValue: resizer.getAttribute("aria-valuenow") };
     if (out.initial.collapsed) {   // restored collapsed: expanding brings back the saved width
@@ -209,6 +217,12 @@ class SidebarDesktopTests(unittest.TestCase):
     def test_no_script_errors(self):
         self.assertNotIn("fatal", self.out)
         self.assertEqual(self.out["errors"], [])
+
+    def test_sidebar_fills_the_viewport_while_the_page_scrolls(self):
+        scrolled = self.out["scrolled"]
+        self.assertGreater(scrolled["scrollY"], 0)   # the page really scrolled
+        self.assertEqual((scrolled["top"], scrolled["bottom"]), (0, scrolled["viewport"]))   # no gap above or below
+        self.assertLess(scrolled["profileBottomGap"], 40)   # Profile / Sign out stays at the bottom of the sidebar
 
     def test_sidebar_is_in_place_without_a_menu_button(self):
         home = self.out["home"]

@@ -1585,12 +1585,14 @@ function renderQuizPlayerNav() {
     nav.appendChild(button);
   });
   if (!currentButton) return;
-  // Keep keyboard focus on the navigator across the re-render, and keep the current item visible
-  // when the row scrolls horizontally (narrow screens) -- without scrolling the page itself.
+  // Keep keyboard focus on the navigator across the re-render, and keep the current item visible when
+  // the grid scrolls (long quizzes: the side panel / the compact grid) -- without scrolling the page.
   if (hadFocus) currentButton.focus({ preventScroll: true });
-  const left = currentButton.offsetLeft - nav.offsetLeft;
-  if (left < nav.scrollLeft) nav.scrollLeft = left;
-  else if (left + currentButton.offsetWidth > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = left + currentButton.offsetWidth - nav.clientWidth;
+  const box = nav.getBoundingClientRect(), item = currentButton.getBoundingClientRect();
+  if (item.top < box.top) nav.scrollTop -= box.top - item.top;
+  else if (item.bottom > box.bottom) nav.scrollTop += item.bottom - box.bottom;
+  if (item.left < box.left) nav.scrollLeft -= box.left - item.left;
+  else if (item.right > box.right) nav.scrollLeft += item.right - box.right;
 }
 
 // ---- Quiz Results + Review Answers ------------------------------------------------------------------

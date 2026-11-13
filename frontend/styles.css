@@ -1775,6 +1775,10 @@ body[data-page="session"] .assessment-shell { padding-bottom:20px; }
 
 /* Study Session overflow and panel-fit safeguards */
 html, body { max-width: 100%; overflow-x: hidden; }
+/* "clip" cuts horizontal overflow without making body a scroll container: with "hidden", body's
+   overflow-y computes to auto and becomes the sticky sidebar's scroll container, which never scrolls,
+   so the sidebar scrolled away with the page and left a gap below it. */
+@supports (overflow-x: clip) { html, body { overflow-x: clip; } }
 .session-shell.app-shell, .session-shell .main-content, .session-shell .sidebar { min-width: 0; max-width: 100%; }
 .session-shell .profile { min-width: 0; overflow: hidden; }
 .session-shell .profile > div:nth-child(2) { min-width: 0; overflow: hidden; }
@@ -2351,9 +2355,34 @@ body[data-page="session"] [data-session-pane="quiz"].quiz-player-open #quiz-play
   display: block; height: 100%; width: 0; background: var(--session-accent, var(--ds-accent));
   border-radius: 999px; transition: width .25s ease;
 }
-.quiz-player-nav { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+/* Question navigator: a compact panel of numbered questions (js/quiz.js renderQuizPlayerNav). Wide
+   players put it in a sticky right-hand column whose grid scrolls on its own; narrow ones list it under
+   Previous/Next as a wrapping grid (never a sideways-scrolling strip). */
+.quiz-player-body { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-areas: "progress" "card" "footer" "nav"; min-width: 0; }
+.quiz-player-body > .quiz-player-progress { grid-area: progress; }
+.quiz-player-body > .quiz-player-card { grid-area: card; min-width: 0; }
+.quiz-player-body > .quiz-player-footer { grid-area: footer; }
+.quiz-player-nav-panel { grid-area: nav; display: flex; flex-direction: column; gap: 10px; min-width: 0; margin-top: 20px; padding: 14px;
+  border: 1px solid var(--session-line, var(--ds-border)); border-radius: var(--ds-radius-lg); background: var(--ds-surface); }
+.quiz-player-nav-title { margin: 0; font-size: var(--ds-text-sm); font-weight: var(--ds-weight-semibold); color: var(--ds-text-2); }
+.quiz-player-nav { display: grid; grid-template-columns: repeat(auto-fill, minmax(40px, 1fr)); gap: 6px; align-content: start;
+  max-height: 136px; overflow-y: auto; overscroll-behavior: contain; padding: 2px; margin: -2px; scrollbar-width: thin; }
+.quiz-player-nav-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 0; padding: 0; list-style: none; font-size: var(--ds-text-2xs); color: var(--ds-text-3); }
+.quiz-player-nav-legend li { display: inline-flex; align-items: center; gap: 5px; }
+.quiz-player-nav-legend li::before { content: ""; width: 10px; height: 10px; border-radius: 3px; border: 1px solid var(--session-line, var(--ds-border)); }
+.quiz-player-nav-legend li.is-answered::before { background: var(--session-wash, var(--ds-accent-soft)); border-color: rgba(104, 118, 245, .35); }
+.quiz-player-nav-legend li.is-current::before { background: var(--session-accent, var(--ds-accent)); border-color: var(--session-accent, var(--ds-accent)); }
+/* The question view gets room for the side panel; results and review keep their focused width. */
+body[data-page="session"] [data-session-pane="quiz"].quiz-player-open #quiz-player:has(> .quiz-player-question-view:not([hidden])) { max-width: 920px; }
+.quiz-player-question-view { container-type: inline-size; }
+@container (min-width: 760px) {
+  .quiz-player-body { grid-template-columns: minmax(0, 1fr) 232px; grid-template-rows: auto auto 1fr; column-gap: 24px;
+    grid-template-areas: "progress nav" "card nav" "footer nav"; }
+  .quiz-player-nav-panel { align-self: start; position: sticky; top: 8px; margin-top: 20px; max-height: calc(100vh - 220px); }
+  .quiz-player-nav { grid-template-columns: repeat(5, minmax(0, 1fr)); max-height: none; flex: 1 1 auto; min-height: 0; }
+}
 .quiz-player-nav-item {
-  flex: 0 0 auto; min-width: 30px; height: 30px; padding: 0 6px; border-radius: var(--ds-radius);
+  width: 100%; min-width: 0; height: 36px; padding: 0 6px; border-radius: var(--ds-radius);
   border: 1px solid var(--session-line, var(--ds-border)); background: transparent; color: var(--muted);
   font: inherit; font-size: var(--ds-text-xs); font-weight: var(--ds-weight-semibold); font-variant-numeric: tabular-nums; cursor: pointer;
   transition: background .15s ease, border-color .15s ease, color .15s ease;
@@ -2365,10 +2394,6 @@ body[data-page="session"] [data-session-pane="quiz"].quiz-player-open #quiz-play
   background: var(--session-accent, var(--ds-accent)); border-color: var(--session-accent, var(--ds-accent)); color: #fff;
 }
 .quiz-player-nav-item.is-current.is-answered { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .45); }
-@media (max-width: 720px) {
-  /* one compact row that scrolls sideways instead of wrapping into a tall block */
-  .quiz-player-nav { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; scrollbar-width: thin; }
-}
 .quiz-player-save-status { display: inline-block; margin-top: 7px; font-size: var(--ds-text-2xs); font-weight: var(--ds-weight-semibold); color: var(--muted); }
 .quiz-player-save-status.is-saved { color: var(--ds-success); }
 .quiz-player-save-status.is-error { color: var(--ds-danger); }
@@ -3793,9 +3818,19 @@ body[data-page="documents"] .library-page .session-library .panel-heading { alig
 .tutor-launch-button { border-radius: var(--ds-radius); }
 body[data-page="session"] .quiz-landing-header h2 { font-size: var(--ds-text-xl); font-weight: var(--ds-weight-semibold); }
 body[data-page="session"] .quiz-landing-header p { color: var(--ds-text-3); }
-/* Summary: a comfortable reading measure inside the full-width panel. */
-#summary-content { max-width: var(--ds-reading-width); }
-.summary-overview { font-size: var(--ds-text-lg); line-height: 1.65; color: var(--ds-text); }
+/* Summary: the column fills the panel (sections, dividers, tables and the takeaways box span its width);
+   running text keeps a readable measure, and on wide panels subsections sit side by side (at most two
+   columns) instead of leaving an empty band on the right. */
+#summary-content { --summary-measure: 75ch; max-width: none; }
+.summary-overview { max-width: var(--summary-measure); font-size: clamp(16px, 0.9rem + 0.2vw, 17px); line-height: 1.65; color: var(--ds-text); }
+.summary-topic-overview { max-width: var(--summary-measure); }
+.summary-topic { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, max(400px, calc((100% - 40px) / 2))), 1fr));
+  column-gap: 40px; align-items: start; }
+.summary-topic > h3, .summary-topic > .summary-topic-overview,
+.summary-topic > .summary-subsection:has(.summary-table-wrap) { grid-column: 1 / -1; }   /* tables use the full width */
+.summary-subsection > p, .summary-subsection-bullets { max-width: var(--summary-measure); }
+.summary-takeaways { columns: 2 320px; column-gap: 40px; margin: 0; }
+.summary-takeaways li { break-inside: avoid; margin-bottom: 6px; }
 .summary-topic h3 { font-size: var(--ds-text-lg); }
 .summary-topic-overview, .summary-subsection { line-height: 1.65; color: var(--ds-text-2); }
 .summary-final-takeaways { border: 1px solid var(--ds-border); background: var(--ds-surface-2); }
@@ -4157,6 +4192,19 @@ body[data-page="session"] .persistent-tutor .chat-form.is-sending .primary-butto
 /* Keyboard hints only where there is a keyboard-like pointer. */
 @media (hover: none) { .flashcard-keys-hint { display: none; } }
 .flashcards-more:not([open]) .flashcards-more-menu { display: none; }
+/* Toolbar row: "Filter Topics" is a caption stacked above its select, so the controls align to the row's
+   bottom edge (centering put Shuffle against caption + select, above the select) and share one height. */
+.flashcards-actions { align-items: flex-end; }
+.flashcards-actions > label > select, .flashcards-actions > #shuffle-flashcards, .flashcards-actions > .flashcards-more > summary {
+  box-sizing: border-box; height: var(--ds-control); min-height: var(--ds-control); }
+.flashcards-actions > #shuffle-flashcards, .flashcards-actions > .flashcards-more > summary {
+  display: inline-flex; align-items: center; padding-top: 0; padding-bottom: 0; }
+@media (max-width: 720px) {
+  /* Phone: one row; the Filter select takes the remaining width instead of pushing More onto a new line. */
+  .flashcards-actions { flex-wrap: nowrap; width: 100%; }
+  .flashcards-actions > label { flex: 1 1 auto; }
+  .flashcards-actions > label > select { width: 100%; min-width: 0; }
+}
 
 /* -- Sidebar: Subjects (js/subjects.js renderSidebarSubjects). Each subject opens its own view of the
    library; the list scrolls on its own so Recent and the profile stay reachable. -- */
@@ -4190,7 +4238,12 @@ body:not([data-page="overview"]):not([data-page="documents"]) .main-content > .h
 .home-quick-action::before { content: "+ "; color: var(--ds-accent-text); font-weight: var(--ds-weight-semibold); }
 .home-dashboard { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--ds-space-5); align-items: start; min-width: 0; }
 .home-dashboard-main { display: grid; gap: var(--ds-space-5); min-width: 0; }
-@media (min-width: 1200px) { .home-dashboard { grid-template-columns: minmax(0, 1.65fr) minmax(280px, 1fr); } }
+/* Home is a fluid dashboard: it starts right after the sidebar (the main column's 28px padding) and grows
+   with the viewport, instead of a 1120px column centered between two empty bands. The cap only matters on
+   very wide screens. Two columns (schedule ~63% / Study progress ~37%) follow the dashboard's own width. */
+.home-page { max-width: 1760px; margin: 0; container-type: inline-size; }
+body[data-page="overview"] .main-content > .home-upload-banner { max-width: 1760px; margin-left: 0; }
+@container (min-width: 880px) { .home-dashboard { grid-template-columns: minmax(0, 63fr) minmax(300px, 37fr); } }
 .home-upcoming, .home-progress { display: grid; gap: var(--ds-space-3); margin: 0; padding: var(--ds-space-4) var(--ds-space-5); min-width: 0; }
 .home-upcoming[hidden] { display: none; }
 .home-upcoming h2, .home-progress h2 { margin: 0; font-size: var(--ds-text-lg); font-weight: var(--ds-weight-semibold); letter-spacing: -0.01em; }

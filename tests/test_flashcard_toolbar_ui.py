@@ -36,6 +36,9 @@ const press = (key, target = document.body) => {
   await openStudySession("lecture.pdf", "flashcards");
   await loadDocumentFlashcards(); await sleep(300);
 
+  // Filter Topics' select, Shuffle and More sit on one line: same vertical center, same height.
+  out.alignment = ["flashcard-topic-filter", "shuffle-flashcards"].map((id) => $(id)).concat(more().querySelector("summary"))
+    .map((el) => { const r = el.getBoundingClientRect(); return {center: Math.round(r.top + r.height / 2), height: Math.round(r.height)}; });
   out.closed = {filter: shown($("flashcard-topic-filter")), shuffle: shown($("shuffle-flashcards")), more: shown(more().querySelector("summary")),
     language: shown($("flashcard-language-select")), regenerate: shown($("regenerate-flashcards-button")), manage: shown($("manage-flashcards"))};
   more().querySelector("summary").click(); await sleep(50);
@@ -103,6 +106,12 @@ class FlashcardToolbarTests(unittest.TestCase):
     def test_no_script_errors(self):
         self.assertNotIn("fatal", self.out)
         self.assertEqual(self.out["errors"], [])
+
+    def test_filter_shuffle_and_more_are_aligned(self):
+        centers = {item["center"] for item in self.out["alignment"]}
+        heights = {item["height"] for item in self.out["alignment"]}
+        self.assertLessEqual(max(centers) - min(centers), 1)   # Shuffle no longer sits above the select
+        self.assertEqual(len(heights), 1)   # one control height for the select and both buttons
 
     def test_secondary_actions_are_grouped_under_more(self):
         self.assertEqual(self.out["closed"], {"filter": True, "shuffle": True, "more": True,
