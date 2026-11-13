@@ -26,6 +26,7 @@ from backend.quiz_legacy_v2 import (
     _validate_v2_question,
 )
 from frontend_source import frontend_script_text
+from test_quiz_model_ux import run_node
 
 
 DOCUMENT = {"id": "lecture.pdf", "title": "Lecture", "hash": "hash", "topic_schema_version": 2}
@@ -817,22 +818,36 @@ class NoRawMultiSelectFallbackJunkTests(unittest.TestCase):
 
 
 class FrontendDocumentBlueprintTests(unittest.TestCase):
-    def test_frontend_lets_document_scope_choose_twelve_to_twenty(self):
+    def test_frontend_document_quiz_is_ai_auto_by_default_or_a_custom_total(self):
+        # The fixed 12/15/18/20 sizes were replaced by AI Auto (null: the backend sizes the quiz)
+        # or a Custom total clamped to the same 5-40 range the API enforces.
         script = frontend_script_text()
         self.assertNotIn("DOCUMENT_QUIZ_QUESTION_COUNT", script)
-        self.assertIn(
-            "function selectedQuestionCount() {\n"
-            "  const value = Number(quizQuestionCountSelect?.value || 12);\n"
-            "  return [12, 15, 18, 20].includes(value) ? value : 12;\n"
-            "}",
-            script,
-        )
+        self.assertNotIn("[12, 15, 18, 20]", script)
+        self.assertIn("const QUIZ_CUSTOM_MIN_QUESTIONS = 5;", script)
+        self.assertIn("const QUIZ_CUSTOM_MAX_QUESTIONS = 40;", script)
+        self.assertIn('option.selected = value === "auto";', script)
+        sizes = run_node(["selectedQuestionCount"], """
+            var QUIZ_CUSTOM_MIN_QUESTIONS = 5, QUIZ_CUSTOM_MAX_QUESTIONS = 40;
+            var quizQuestionCountSelect = { value: "auto" }, quizQuestionCountInput = { value: "20" };
+        """, """
+            const out = { auto: selectedQuestionCount() };
+            quizQuestionCountSelect.value = ""; out.unset = selectedQuestionCount();
+            quizQuestionCountSelect.value = "custom";
+            for (const value of ["12", "5", "40", "4", "41", "17.6", "not a number"]) {
+              quizQuestionCountInput.value = value; out[value] = selectedQuestionCount();
+            }
+            return out;
+        """)
+        self.assertEqual(sizes, {"auto": None, "unset": None, "12": 12, "5": 5, "40": 40, "4": 5, "41": 40,
+                                 "17.6": 18, "not a number": 5})
         self.assertNotIn("quizQuestionCountField.hidden = !topicMode;", script)
         self.assertIn("function documentQuizTypeBreakdown(quiz)", script)
         self.assertIn('`${quizName} · ${quiz.questions.length} questions · ${parts.join(" · ")}`', script)
         self.assertIn("Multiple Choice", script)
-        # Delete/Regenerate/Retake actions must remain available.
-        self.assertIn('["Delete Quiz", "text-button danger-button", callbacks.remove]', script)
+        # Delete/Regenerate/Retake actions must remain available (Delete for both quizzes and practice).
+        self.assertIn('[callbacks.practice ? "Delete Practice" : "Delete Quiz", "text-button danger-button", callbacks.remove]',
+                      script)
         self.assertIn("regenerate: regenerateAssessmentQuiz", script)
         self.assertIn("retake: resetAssessmentQuiz", script)
         self.assertIn('id="delete-quiz-button"', (Path("frontend") / "index.html").read_text(encoding="utf-8"))

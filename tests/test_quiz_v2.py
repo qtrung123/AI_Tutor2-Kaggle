@@ -163,20 +163,28 @@ class QuizV2Tests(unittest.TestCase):
             difficulty="easy", model_id="qwen-2.5-3b", quiz_name="Sample Quiz",
         )
         self.assertEqual(request.model_id, "qwen-2.5-3b")
-        self.assertEqual(request.question_count, 12)
-        for count in (12, 15, 18, 20):
+        # Both fields are optional: omitted model_id = the configured default, omitted
+        # question_count = AI Auto (the backend sizes the quiz); a custom total is 5-40.
+        self.assertIsNone(QuizGenerateRequest(
+            document_id="lecture.pdf", assessment_scope="topic", topic_id="topic_001",
+            difficulty="easy", quiz_name="Sample Quiz",
+        ).model_id)
+        self.assertIsNone(request.question_count)
+        for count in (5, 12, 15, 18, 20, 40):
             self.assertEqual(QuizGenerateRequest(
                 document_id="lecture.pdf", assessment_scope="topic", topic_id="topic_001",
                 difficulty="easy", question_count=count, quiz_name="Sample Quiz",
             ).question_count, count)
-        with self.assertRaises(ValueError):
-            QuizGenerateRequest(
-                document_id="lecture.pdf", assessment_scope="topic", topic_id="topic_001",
-                difficulty="easy", question_count=5, quiz_name="Sample Quiz",
-            )
+        for count in (4, 41):
+            with self.assertRaises(ValueError):
+                QuizGenerateRequest(
+                    document_id="lecture.pdf", assessment_scope="topic", topic_id="topic_001",
+                    difficulty="easy", question_count=count, quiz_name="Sample Quiz",
+                )
+        self.assertIsNone(QuizRegenerateRequest(difficulty="easy", assessment_scope="document").question_count)
         frontend = frontend_script_text()
-        self.assertIn("[12, 15, 18, 20].includes(value)", frontend)
-        self.assertIn("[12, 15, 18, 20].forEach((count)", frontend)
+        self.assertIn('if ((quizQuestionCountSelect?.value || "auto") !== "custom") return null;', frontend)
+        self.assertNotIn("[12, 15, 18, 20]", frontend)
         self.assertNotIn("[10, 15, 20, 25]", frontend)
 
     def test_all_supported_question_types_validate_with_normalized_answers(self):

@@ -427,7 +427,15 @@ class QuizNameFrontendWiringTests(unittest.TestCase):
         self.assertIn('const quizName = (quiz.title || "").trim() || "Untitled Quiz";', self.script)
 
     def test_quiz_history_card_title_uses_the_custom_name(self):
-        self.assertIn('title.textContent = (attempt.title || "").trim() || "Untitled Quiz";', self.script)
+        # History and saved-quiz cards show the custom name; only an unnamed one falls back, and a
+        # flashcard practice falls back to "Untitled Practice" instead of "Untitled Quiz".
+        self.assertIn('const titleText = (attempt.title || "").trim() || (isPractice ? "Untitled Practice" : "Untitled Quiz");',
+                      self.script)
+        self.assertIn('const titleText = (variant.title || "").trim() || (variant.practice ? "Untitled Practice" : "Untitled Quiz");',
+                      self.script)
+        history_card = self.script[self.script.index("const isPractice = group.attempts.some("):]
+        history_card = history_card[:history_card.index('card.className = "quiz-history-card";') + 400]
+        self.assertIn("title.textContent = titleText;", history_card)
 
 
 if __name__ == "__main__":

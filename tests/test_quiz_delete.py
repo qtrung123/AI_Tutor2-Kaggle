@@ -113,7 +113,11 @@ class QuizDeleteFrontendTests(unittest.TestCase):
         self.assertIn("await confirmAction(", script)   # the shared confirmation dialog
         self.assertIn('method: "DELETE"', script)
         self.assertIn("QUIZZES_API_URL}/${encodeURIComponent(quizId)}", script)
-        self.assertIn('["Delete Quiz", "text-button danger-button", callbacks.remove]', script)
+        # One Delete action for both a quiz and a flashcard practice (only its label differs); it is
+        # never hidden for practice, unlike Regenerate.
+        self.assertIn('[callbacks.practice ? "Delete Practice" : "Delete Quiz", "text-button danger-button", callbacks.remove]',
+                      script)
+        self.assertIn('...(callbacks.practice ? [] : [["Regenerate Quiz", "text-button", callbacks.regenerate]]),', script)
         self.assertIn("remove: deleteAssessmentQuiz", script)
         self.assertNotIn("regenerate: deleteAssessmentQuiz", script)
 

@@ -19,10 +19,10 @@ from unittest.mock import patch
 
 from backend import (auth_store, conversation_store, durable_setup, flashcard_store, google_calendar_store,
                      indexed_document_store, quiz_store, study_planner_store, study_preferences, summary_jobs,
-                     summary_store)
+                     summary_store, visual_cache_store)
 
 STORES = (auth_store, conversation_store, indexed_document_store, summary_store, summary_jobs, flashcard_store,
-          quiz_store, study_planner_store, google_calendar_store)
+          quiz_store, study_planner_store, google_calendar_store, visual_cache_store)
 # Created only on PostgreSQL (pgvector), so absent from a SQLite initialization.
 POSTGRES_ONLY_TABLES = {"document_chunks"}
 
@@ -77,6 +77,33 @@ class AppTablesCoverageTests(unittest.TestCase):
                          re.findall(r"CREATE TABLE IF NOT EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)", source.read_text(encoding="utf-8"))}
         # Temporary tables of a SQLite-only rebuild (e.g. schedule_runs_v2) are renamed in place.
         self.assertEqual(sorted(declared - set(durable_setup.APP_TABLES)), [])
+
+    def test_visual_extraction_cache_is_created_at_startup_and_locked_down(self):
+        """Regression: OCR/Vision text of private uploads was created lazily and missing from APP_TABLES,
+        so on Supabase anon/authenticated could reach it through the Data API."""
+        self.assertIn("visual_extraction_cache", durable_setup.APP_TABLES)
+        durable_setup.initialize_all_stores()   # a fresh database: no upload has touched the cache yet
+        created = self.database.tables()
+        self.assertIn("visual_extraction_cache", created)
+        with closing(sqlite3.connect(self.database.path)) as connection:   # owner_id references users(id)
+            foreign_keys = connection.execute("PRAGMA foreign_key_list(visual_extraction_cache)").fetchall()
+        self.assertEqual([(row[2], row[3], row[4]) for row in foreign_keys], [("users", "owner_id", "id")])
+        connection = RecordingConnection(created)
+        locked, roles = durable_setup.lock_down_api_roles(connection)
+        self.assertEqual(roles, ["anon", "authenticated"])
+        self.assertIn("ALTER TABLE visual_extraction_cache ENABLE ROW LEVEL SECURITY", connection.statements)
+        self.assertIn("REVOKE ALL ON TABLE visual_extraction_cache FROM anon, authenticated", connection.statements)
+
+    def test_every_table_created_at_startup_is_locked_and_revoked(self):
+        durable_setup.initialize_all_stores()
+        created = self.database.tables()
+        connection = RecordingConnection(created)
+        locked, _ = durable_setup.lock_down_api_roles(connection)
+        rls = {m.group(1) for s in connection.statements
+               if (m := re.fullmatch(r"ALTER TABLE (\w+) ENABLE ROW LEVEL SECURITY", s))}
+        revoked = {m.group(1) for s in connection.statements
+                   if (m := re.fullmatch(r"REVOKE ALL ON TABLE (\w+) FROM anon, authenticated", s))}
+        self.assertEqual((rls, revoked, locked), (created, created, len(created)))
 
     def test_reinitializing_keeps_existing_rows(self):
         durable_setup.initialize_all_stores()
@@ -134,6 +161,26 @@ class LockDownStatementTests(unittest.TestCase):
                 or re.fullmatch(r"REVOKE ALL ON TABLE \w+ FROM anon, authenticated", statement), statement)
             self.assertNotRegex(statement.upper(), r"\b(DELETE|UPDATE|INSERT|DROP|TRUNCATE)\b")
         self.assertFalse(any("someone_elses_table" in statement for statement in first.statements))
+
+    def test_startup_creates_every_store_before_locking_down(self):
+        """lock_down_api_roles only sees tables that exist, so every store must be created first."""
+        order = []
+
+        class FakeConnection:
+            def __enter__(self): return self
+            def __exit__(self, *exc): return False
+
+        with patch.object(durable_setup.db, "selected_backend", return_value=durable_setup.db.POSTGRES), \
+             patch.object(durable_setup.db, "verify_connection"), \
+             patch.object(durable_setup.db, "connect", return_value=FakeConnection()), \
+             patch.object(durable_setup.document_storage, "durable_storage_enabled", return_value=False), \
+             patch.object(durable_setup.vector_store, "_vector_schema", return_value="public"), \
+             patch.object(durable_setup, "initialize_all_stores", side_effect=lambda: order.append("create")), \
+             patch.object(durable_setup, "lock_down_api_roles",
+                          side_effect=lambda connection: order.append("lock") or (0, [])), \
+             patch("builtins.print"):
+            durable_setup.run()
+        self.assertEqual(order, ["create", "lock"])
 
     def test_without_api_roles_only_row_level_security_is_enabled(self):
         connection = RecordingConnection(["users", "study_preferences"], roles=())

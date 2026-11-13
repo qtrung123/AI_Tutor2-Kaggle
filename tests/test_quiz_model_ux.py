@@ -214,24 +214,44 @@ class QuizzesScreenStateTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("node"), "node is not installed")
 class SummaryAndFlashcardsWaitForGenerateTests(unittest.TestCase):
-    SUMMARY_FUNCTIONS = ["updateSummaryChrome", "showSummaryState", "loadDocumentSummary"] + MODEL_READY_FUNCTIONS
+    # Summary runs as a background job (frontend/js/session.js): opening the tab reads the saved
+    # summary AND looks for a running job (both read-only GETs); only Generate POSTs /generate.
+    SUMMARY_FUNCTIONS = ["updateSummaryChrome", "showSummaryState", "showSummaryGenerating", "finishSummaryGeneration",
+                         "stopSummaryPolling", "pollSummaryJob", "loadDocumentSummary"] + MODEL_READY_FUNCTIONS
     SUMMARY_SETUP = MODELS + MODEL_READY_DOM_STUBS + """
+        document.body = { dataset: { sessionTab: "summary" } };
         var activeDocumentId = "doc.pdf", selectedModelId = "qwen-2.5-7b", loadedSummaryKey = "", summaryInFlightKey = "";
-        var SUMMARY_API_BASE_URL = "/api/summary";
+        var SUMMARY_API_BASE_URL = "/api/summary", SUMMARY_JOB_POLL_MS = 2000, SUMMARY_JOB_MAX_POLL_ERRORS = 5;
+        var summaryPollTimer = null, summaryPollJobId = "", timers = [], requests = [], jobs = {}, generateReply = null;
+        function setTimeout(callback) { timers.push(callback); return timers.length; }
+        function clearTimeout() {}
+        async function runTimers() { while (timers.length) await timers.shift()(); }
         var summaryContent = new El(), summaryLoading = new El(true), summaryGenerate = new El(true), summaryError = new El(true);
         var regenerateSummaryButton = new El(true), saved = {}, rendered = [];
         function renderDocumentSummary(summary) { summaryContent.children.push(summary); rendered.push(summary.model_id); }
-        async function fetchJson(url) { calls.push(url); return url.includes("cache_only=true") ? (saved[selectedModelId] || { status: "not_generated" }) : { final_summary: { overview: "x" }, model_id: selectedModelId }; }
+        async function fetchJson(url, options) {
+          calls.push(url); requests.push({ url, method: options?.method || "GET", body: options?.body ? JSON.parse(options.body) : null });
+          if (url.includes("cache_only=true")) return saved[selectedModelId] || { status: "not_generated" };
+          if (url.startsWith("/api/summary/jobs?")) return jobs.active || { status: "none" };
+          if (url.startsWith("/api/summary/jobs/")) return jobs[url.split("/").pop()];
+          if (url === "/api/summary/generate") return generateReply || { final_summary: { overview: "x" }, model_id: selectedModelId };
+          throw new Error("unexpected request " + url);
+        }
     """
+    OPEN_READS = ["/api/summary/doc.pdf?model_id=qwen-2.5-7b&cache_only=true",
+                  "/api/summary/jobs?document_id=doc.pdf&model_id=qwen-2.5-7b"]
 
     def test_opening_summary_only_looks_for_a_saved_one_and_shows_the_generate_prompt(self):
         result = run_node(self.SUMMARY_FUNCTIONS, self.SUMMARY_SETUP, """
             await showSummaryState();
-            return { calls, prompt: !summaryGenerate.hidden, regenerate: !regenerateSummaryButton.hidden, rendered };
+            return { calls, requests, prompt: !summaryGenerate.hidden, regenerate: !regenerateSummaryButton.hidden, rendered,
+                     loading: !summaryLoading.hidden };
         """)
-        self.assertEqual(result["calls"], ["/api/summary/doc.pdf?model_id=qwen-2.5-7b&cache_only=true"])
+        self.assertEqual(result["calls"], self.OPEN_READS)   # the saved summary + a running job: nothing else
+        self.assertEqual({request["method"] for request in result["requests"]}, {"GET"})   # never a generating request
         self.assertTrue(result["prompt"])
         self.assertFalse(result["regenerate"])
+        self.assertFalse(result["loading"])
         self.assertEqual(result["rendered"], [])
 
     def test_generating_starts_only_when_the_user_presses_generate(self):
@@ -239,22 +259,45 @@ class SummaryAndFlashcardsWaitForGenerateTests(unittest.TestCase):
             await showSummaryState();
             const before = calls.length;
             await loadDocumentSummary();                   // what the Generate button calls
-            return { before, calls, prompt: !summaryGenerate.hidden, regenerate: !regenerateSummaryButton.hidden, rendered, key: loadedSummaryKey };
+            return { before, requests, prompt: !summaryGenerate.hidden, regenerate: !regenerateSummaryButton.hidden, rendered,
+                     key: loadedSummaryKey, inFlight: summaryInFlightKey };
         """)
-        self.assertEqual(result["before"], 1)
-        self.assertEqual(result["calls"][1], "/api/summary/doc.pdf?model_id=qwen-2.5-7b")   # the one generating request
+        self.assertEqual(result["before"], 2)
+        generating = [request for request in result["requests"] if request["method"] != "GET"]
+        self.assertEqual(generating, [{"url": "/api/summary/generate", "method": "POST",   # the one generating request
+                                       "body": {"document_id": "doc.pdf", "model_id": "qwen-2.5-7b", "regenerate": False}}])
+        self.assertEqual(result["requests"][-1]["url"], "/api/summary/generate")
         self.assertFalse(result["prompt"])
         self.assertTrue(result["regenerate"])
         self.assertEqual(result["rendered"], ["qwen-2.5-7b"])
-        self.assertEqual(result["key"], "doc.pdf:qwen-2.5-7b")
+        self.assertEqual((result["key"], result["inFlight"]), ("doc.pdf:qwen-2.5-7b", ""))
+
+    def test_a_started_job_is_polled_until_complete_and_never_started_twice(self):
+        result = run_node(self.SUMMARY_FUNCTIONS, self.SUMMARY_SETUP, """
+            generateReply = { status: "processing", job_id: "job-1" };
+            jobs["job-1"] = { status: "complete", summary: { final_summary: { overview: "done" }, model_id: "qwen-2.5-7b" } };
+            await showSummaryState();
+            await loadDocumentSummary();
+            const whileRunning = { loading: !summaryLoading.hidden, rendered: [...rendered] };
+            await loadDocumentSummary();                   // a second click while the job runs
+            await runTimers();
+            return { whileRunning, posts: requests.filter((r) => r.method === "POST").length,
+                     polled: calls.includes("/api/summary/jobs/job-1"), rendered, loading: !summaryLoading.hidden,
+                     key: loadedSummaryKey };
+        """)
+        self.assertEqual(result["whileRunning"], {"loading": True, "rendered": []})
+        self.assertEqual(result["posts"], 1)
+        self.assertTrue(result["polled"])
+        self.assertEqual((result["rendered"], result["loading"], result["key"]), (["qwen-2.5-7b"], False, "doc.pdf:qwen-2.5-7b"))
 
     def test_a_saved_summary_is_shown_without_generating(self):
         result = run_node(self.SUMMARY_FUNCTIONS, self.SUMMARY_SETUP, """
             saved["qwen-2.5-7b"] = { final_summary: { overview: "kept" }, model_id: "qwen-2.5-7b" };
             await showSummaryState();
-            return { calls, prompt: !summaryGenerate.hidden, regenerate: !regenerateSummaryButton.hidden, rendered };
+            return { calls, requests, prompt: !summaryGenerate.hidden, regenerate: !regenerateSummaryButton.hidden, rendered };
         """)
-        self.assertEqual(result["calls"], ["/api/summary/doc.pdf?model_id=qwen-2.5-7b&cache_only=true"])
+        self.assertEqual(result["calls"], self.OPEN_READS)
+        self.assertEqual({request["method"] for request in result["requests"]}, {"GET"})
         self.assertEqual((result["prompt"], result["regenerate"], result["rendered"]), (False, True, ["qwen-2.5-7b"]))
 
     def test_changing_the_model_shows_the_generate_prompt_for_that_model_and_generates_nothing(self):
@@ -266,10 +309,12 @@ class SummaryAndFlashcardsWaitForGenerateTests(unittest.TestCase):
             const afterSwitch = { prompt: !summaryGenerate.hidden, shown: summaryContent.children.length };
             selectedModelId = "qwen-2.5-7b";
             await showSummaryState();                       // back: Qwen's saved summary again
-            return { calls, afterSwitch, back: { prompt: !summaryGenerate.hidden, shown: summaryContent.children.length } };
+            return { calls, requests, afterSwitch, back: { prompt: !summaryGenerate.hidden, shown: summaryContent.children.length } };
         """)
-        self.assertTrue(all("cache_only=true" in url for url in result["calls"]), result["calls"])   # never a generating request
-        self.assertIn("model_id=deepseek-r1-14b&cache_only=true", result["calls"][1])
+        self.assertEqual({request["method"] for request in result["requests"]}, {"GET"})   # never a generating request
+        self.assertTrue(all("cache_only=true" in url or url.startswith("/api/summary/jobs?") for url in result["calls"]),
+                        result["calls"])
+        self.assertIn("/api/summary/doc.pdf?model_id=deepseek-r1-14b&cache_only=true", result["calls"])
         self.assertEqual(result["afterSwitch"], {"prompt": True, "shown": 0})
         self.assertEqual(result["back"], {"prompt": False, "shown": 1})
 
@@ -452,12 +497,34 @@ class WiringTests(unittest.TestCase):
         self.assertIn("createPendingQuizCard", self.body("renderQuizHistory"))
         self.assertIn("createSavedQuizCard", self.body("renderQuizHistory"))
 
-    def test_the_old_progress_ui_is_gone_but_the_new_progress_tab_remains(self):
+    def test_the_old_progress_ui_is_gone_and_progress_now_lives_in_overview(self):
         for removed in ("View Progress", "Progress &amp; Mastery", "quiz-progress-drawer", "Mastery evidence is not available"):
             self.assertNotIn(removed, SOURCE)
-        self.assertNotIn("practice-mastery", (FRONTEND / "index.html").read_text(encoding="utf-8"))
-        self.assertIn('data-session-pane="progress"', (FRONTEND / "index.html").read_text(encoding="utf-8"))
-        self.assertIn("renderSessionProgress", SOURCE)
+        html = (FRONTEND / "index.html").read_text(encoding="utf-8")
+        self.assertNotIn("practice-mastery", html)
+        # Document progress was consolidated into the Overview pane: no separate Progress tab or pane,
+        # and every progress element renderSessionProgress fills sits inside Overview.
+        self.assertNotIn('data-session-pane="progress"', html)
+        self.assertNotIn('data-session-tab="progress"', html)
+        overview = html[html.index('data-session-pane="overview"'):html.index('data-session-pane="material"')]
+        for element_id in ("session-progress-state", "session-progress-quiz", "session-progress-plan",
+                           "session-mastery-list", "session-coverage-list"):
+            self.assertIn(f'id="{element_id}"', overview)
+        self.assertIn("function renderSessionProgress(documentId)", SOURCE)
+        # Older links to the Progress tab open Overview (and load it) instead of an empty pane.
+        result = run_node(["setSessionTab"], """
+            var loaded = [], tutor = { hidden: true };
+            var document = { body: { dataset: {} }, querySelectorAll: () => [], getElementById: () => tutor };
+            function loadSessionOverview() { loaded.push("overview"); }
+            function loadOriginalContentFrame() { loaded.push("material"); }
+            function showSummaryState() { loaded.push("summary"); }
+            function showFlashcardsState() { loaded.push("flashcards"); }
+            function showQuizLibrary() { loaded.push("quiz"); }
+        """, """
+            setSessionTab("progress");
+            return { tab: document.body.dataset.sessionTab, loaded, tutorShown: !tutor.hidden };
+        """)
+        self.assertEqual(result, {"tab": "overview", "loaded": ["overview"], "tutorShown": True})
 
 
 if __name__ == "__main__":

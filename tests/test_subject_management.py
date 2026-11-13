@@ -211,21 +211,31 @@ class LegacyDatabaseMigrationTests(unittest.TestCase):
                 connection.close()
                 conversation_store.create_conversation(owner, "Old chat", ["old.pdf"])   # feature data next to the registry
 
-                def snapshot():   # every row of every table, minus what the migration adds
+                def snapshot():   # every row of every pre-existing table, column by column
                     db_connection = sqlite3.connect(path)
                     db_connection.row_factory = sqlite3.Row
                     try:
                         tables = [row[0] for row in db_connection.execute(
                             "SELECT name FROM sqlite_master WHERE type = 'table' "
                             "AND name NOT IN ('subjects', 'sqlite_sequence', 'index_registry_migrations')")]
-                        return {table: sorted(tuple((key, row[key]) for key in row.keys() if key != "subject_id")
-                                              for row in db_connection.execute(f"SELECT * FROM {table}")) for table in tables}
+                        return {table: [dict(row) for row in db_connection.execute(f"SELECT * FROM {table} ORDER BY rowid")]
+                                for table in tables}
                     finally:
                         db_connection.close()
 
                 before = snapshot()
                 self.assertEqual(subject_store.list_subjects(owner), [])
-                self.assertEqual(snapshot(), before)   # documents, ownership and chat rows unchanged
+                after = snapshot()
+                # The migration only ADDS columns (subject_id, and any later ones such as visual_status):
+                # every value that existed before is unchanged, and every added column is NULL on old rows.
+                self.assertEqual(set(after), set(before))
+                for table, rows in before.items():
+                    self.assertEqual(len(after[table]), len(rows), table)
+                    for old, new in zip(rows, after[table]):
+                        self.assertEqual({key: new[key] for key in old}, old, table)   # documents, ownership, chat rows
+                        self.assertEqual({key: value for key, value in new.items() if key not in old},
+                                         {key: None for key in new if key not in old}, table)
+                self.assertIn("subject_id", after["indexed_documents"][0])
                 document = indexed_document_store.get_indexed_document(owner, "old.pdf")
                 self.assertIsNone(document["subject_id"])
                 self.assertEqual((document["chunks"], document["hash"]), (4, "h"))

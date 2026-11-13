@@ -28,9 +28,14 @@ def _initialize_schema(connection: db.Connection) -> None:
     )
 
 
-def _initialize() -> None:
+def initialize_visual_cache_store() -> None:
+    """Create the table (idempotent). Called at startup by durable_setup.initialize_all_stores, so the
+    table exists before lock_down_api_roles runs; get/put/delete_for_file still create it on demand."""
     initialize_auth_store()
     db.ensure_schema("visual_extraction_cache", DATABASE_PATH, _initialize_schema)
+
+
+_initialize = initialize_visual_cache_store
 
 
 def get(owner_id: str, cache_key: str) -> str | None:

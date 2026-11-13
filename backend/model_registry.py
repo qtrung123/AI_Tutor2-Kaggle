@@ -153,14 +153,15 @@ def describe_generation_model(ollama_model: str) -> dict:
     returned), so the name comes from the model used, never from anything the client typed. The
     runtime reference itself stays private: "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"
     becomes {"model_id": "qwen-2.5-7b", "name": "Qwen2.5-7B-Instruct", "quantization": "Q4_K_M"}.
-    `model_id` is None for a runtime reference that has no registry entry.
+    `model_id` is None for a runtime reference that has no registry entry. When several ids share the
+    reference (OLLAMA_CHAT_MODEL also rebinds qwen-2.5-7b), a configured id wins, so a local Qwen 2.5 3B
+    setup records "qwen-2.5-3b"; otherwise the first registry match, as before.
     """
     reference = str(ollama_model or "").strip()
     name, quantization = _parse_reference(reference)
-    public_id = next(
-        (spec.model_id for spec in _registry().values() if spec.ollama_model and spec.ollama_model == reference),
-        None,
-    )
+    matches = [spec.model_id for spec in _registry().values() if spec.ollama_model and spec.ollama_model == reference]
+    configured = set(_configured_ids()) if len(matches) > 1 else set()
+    public_id = next((model_id for model_id in matches if model_id in configured), matches[0] if matches else None)
     return {"model_id": public_id, "name": name or reference, "quantization": quantization}
 
 

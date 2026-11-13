@@ -78,6 +78,28 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertEqual(model_registry.describe_generation_model("glm4:9b-chat-q4_K_M")["model_id"], "glm4-9b")
         self.assertEqual(model_registry.describe_generation_model("glm4:9b-chat-q4_K_M")["name"], "glm4")
 
+    def test_a_chat_model_shared_with_another_built_in_is_described_as_the_configured_id(self):
+        """Regression: OLLAMA_CHAT_MODEL set to Qwen 2.5 3B (a local "3B only" setup) also rebinds the
+        default qwen-2.5-7b id, so a 3B generation was recorded as model_id "qwen-2.5-7b"."""
+        qwen_3b = model_registry.QWEN_3B_OLLAMA_MODEL
+        with patch.object(model_registry, "CHAT_MODEL", qwen_3b), \
+             patch.object(model_registry, "GENERATION_MODELS", ("qwen-2.5-3b",)):
+            self.assertEqual(model_registry.resolve_generation_model("qwen-2.5-3b"), qwen_3b)
+            self.assertEqual(model_registry.describe_generation_model(qwen_3b),
+                             {"model_id": "qwen-2.5-3b", "name": "Qwen2.5-3B-Instruct", "quantization": "Q4_K_M"})
+        # Unchanged when only one id has the reference, configured or not (historical quizzes).
+        qwen_7b = model_registry.QWEN_OLLAMA_MODEL
+        with patch.object(model_registry, "CHAT_MODEL", qwen_7b), \
+             patch.object(model_registry, "GENERATION_MODELS", ("qwen-2.5-7b", "gemma3-12b")):
+            self.assertEqual(model_registry.describe_generation_model(qwen_7b)["model_id"], "qwen-2.5-7b")
+            self.assertEqual(model_registry.describe_generation_model(qwen_3b)["model_id"], "qwen-2.5-3b")
+            self.assertEqual(model_registry.describe_generation_model(DEEPSEEK_REF)["model_id"], "deepseek-r1-14b")
+        # A custom OLLAMA_CHAT_MODEL also listed as a raw reference keeps the default public id.
+        with patch.object(model_registry, "CHAT_MODEL", "hf.co/someone/Custom-GGUF:Q4_K_M"), \
+             patch.object(model_registry, "GENERATION_MODELS", ("qwen-2.5-7b", "hf.co/someone/Custom-GGUF:Q4_K_M")):
+            self.assertEqual(model_registry.describe_generation_model("hf.co/someone/Custom-GGUF:Q4_K_M")["model_id"],
+                             "qwen-2.5-7b")
+
     def test_gemma3_public_id_resolves_to_exact_official_ollama_reference(self):
         self.assertEqual(model_registry.resolve_generation_model("gemma3-12b"), "gemma3:12b-it-q4_K_M")
 
