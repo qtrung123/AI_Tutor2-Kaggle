@@ -56,7 +56,7 @@ Documents, vectors, conversations, quizzes, answers, and learning history are st
 - **Backend:** FastAPI and Python
 - **Frontend:** HTML, CSS, and vanilla JavaScript
 - **LLM runtime:** Ollama
-- **Chat model:** `hf.co/Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M`
+- **Chat model:** `hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M`
 - **Embedding model:** `bge-m3`
 - **Vector database:** Chroma
 - **RAG integration:** LangChain
@@ -171,7 +171,7 @@ cd ..
 
 ```powershell
 ollama pull bge-m3
-ollama pull "hf.co/Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"
+ollama pull "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"
 ```
 
 The installed model names must match `CHAT_MODEL` and `EMBEDDING_MODEL` in `config.py`.
@@ -340,8 +340,8 @@ On first startup after this storage upgrade, existing quiz JSON files are import
 The main settings are defined in `config.py`:
 
 ```python
-CHAT_MODEL = "hf.co/Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"
-EMBEDDING_MODEL = "bge-m3"
+CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M")
+EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "bge-m3")
 
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
@@ -352,10 +352,11 @@ If `EMBEDDING_MODEL` changes, existing documents must be indexed again because t
 
 ## Kaggle Deployment
 
-`kaggle_run.ipynb` runs the full stack (Ollama, backend, frontend, nginx, ngrok tunnel) inside a
-Kaggle notebook, including optional persistence of chat/quiz data and the model/package cache
-across sessions via private Kaggle Datasets. This only affects the notebook and `deployment/`; it
-has no effect on running the backend and frontend locally. See
+`kaggle_run_ollama_cloudflare.ipynb` (the notebook in use) runs the full stack (Ollama, backend,
+frontend, nginx) inside a Kaggle notebook behind a Cloudflare Worker and Quick Tunnel, with
+snapshots of chat/quiz data saved to a private Kaggle Dataset. The older `kaggle_run.ipynb`
+(ngrok) is kept for reference. Both notebooks call `deployment/start_kaggle.sh`; none of this
+affects running the backend and frontend locally. See
 [KAGGLE_DEPLOYMENT.md](KAGGLE_DEPLOYMENT.md) for the full setup and troubleshooting guide.
 
 ## Troubleshooting

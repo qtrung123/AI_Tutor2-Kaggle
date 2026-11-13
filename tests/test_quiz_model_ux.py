@@ -12,7 +12,6 @@ import shutil
 import subprocess
 import textwrap
 import unittest
-from pathlib import Path
 from frontend_source import FRONTEND, frontend_script_paths, frontend_script_text
 
 # app.js and its classic-script modules (frontend/js/), in index.html load order.

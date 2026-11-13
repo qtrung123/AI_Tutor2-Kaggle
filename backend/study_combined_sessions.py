@@ -29,8 +29,6 @@ weak (the first, learning part gets the extra minutes). Always within 30-40.
 COMBINED_PAIRS = (("summary", "flashcards"), ("summary", "quiz"), ("flashcards", "quiz"))
 # (first part, second part) minutes of the default 35-minute session.
 COMBINED_SPLITS = {("summary", "flashcards"): (20, 15), ("summary", "quiz"): (15, 20), ("flashcards", "quiz"): (15, 20)}
-COMBINED_MIN_MINUTES = 30
-COMBINED_MAX_MINUTES = 40
 COMBINED_SHORT_DAILY_TARGET = 60      # a daily target at or below this keeps combined sessions at 30 minutes
 COMBINED_WEAK_SCORE_BELOW = 60.0      # latest quiz below this: 40 minutes, the extra on the learning part
 COMBINED_STRONG_SCORE_FROM = 80.0     # latest quiz at least this: a lighter 30 minutes

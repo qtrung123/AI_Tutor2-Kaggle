@@ -12,7 +12,7 @@ from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from backend import google_calendar_service, google_calendar_store, google_calendar_sync
 from backend.api.deps import require_current_user

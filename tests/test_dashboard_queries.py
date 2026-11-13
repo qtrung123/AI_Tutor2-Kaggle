@@ -7,7 +7,6 @@ the number of documents, topics or completed attempts.
 """
 
 import io
-import sqlite3
 import tempfile
 import unittest
 from contextlib import ExitStack

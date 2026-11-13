@@ -20,7 +20,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from planner_fixtures import PlannerDatabaseMixin
 from test_study_scheduler import (
-    DEFAULT_CONFIG, MONDAY, ScheduleAssertions, context, day_of, make_state, material, weekly,
+    MONDAY, ScheduleAssertions, context, day_of, make_state, material, weekly,
 )
 
 from backend import quiz_store, study_plan_api_service, study_planner_store

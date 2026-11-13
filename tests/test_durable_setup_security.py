@@ -17,7 +17,7 @@ from contextlib import ExitStack, closing
 from pathlib import Path
 from unittest.mock import patch
 
-from backend import (auth_store, conversation_store, db, durable_setup, flashcard_store, google_calendar_store,
+from backend import (auth_store, conversation_store, durable_setup, flashcard_store, google_calendar_store,
                      indexed_document_store, quiz_store, study_planner_store, study_preferences, summary_jobs,
                      summary_store)
 

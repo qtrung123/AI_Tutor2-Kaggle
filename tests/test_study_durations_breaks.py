@@ -10,7 +10,7 @@ window too short for it; what does not fit is reported. Existing sessions keep t
 import unittest
 from collections import Counter, defaultdict
 from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient

@@ -10,9 +10,9 @@
 """
 
 import unittest
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -21,7 +21,7 @@ from test_study_scheduler import make_state, material, minute_of, weekly
 
 from backend import google_calendar_sync, study_plan_api_service, study_planner_store, study_preferences
 from backend.main import app
-from backend.study_adaptation import AdaptationConfig, AdaptationContext, AdaptationTrigger, propose_adaptation
+from backend.study_adaptation import AdaptationContext, AdaptationTrigger, propose_adaptation
 from backend.study_scheduler import DEFAULT_CONFIG
 
 UTC_NOW = datetime(2026, 9, 28, 1, 0, tzinfo=timezone.utc)

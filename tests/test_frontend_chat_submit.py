@@ -2,7 +2,6 @@
 
 import re
 import unittest
-from pathlib import Path
 from frontend_source import frontend_script_text
 
 
